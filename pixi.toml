@@ -64,9 +64,14 @@ pycolmap = { version = ">=4.0.3,<5", build = "cuda*" }
 [feature.cuda.system-requirements]
 cuda = "12.9"
 
+[feature.experiments.dependencies]
+scikit-learn = ">=1.9.0,<2"
+matplotlib = ">=3.10.9,<4"
+
 [environments]
 default = {solve-group = "default"}
 cuda = {features = ["cuda"], solve-group = "cuda"}
 test = {features = ["test"], solve-group = "default"}
 dev = {features = ["dev"], solve-group = "default"}
 docs = {features = ["docs"], solve-group = "default"}
+experiments = {features = ["experiments"], solve-group = "default"}

@@ -51,3 +51,6 @@ site/
 # Workspaces
 /*_ws/
 /tmp/
+
+# Experiment generated artefacts
+/experiments/out/
