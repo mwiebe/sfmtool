@@ -54,6 +54,17 @@ def derive_threshold(d1: np.ndarray, method: str) -> float:
     return float(method)
 
 
+def cliff_threshold(dst: np.ndarray, pct: float = 50.0) -> float:
+    """Per-point radius-estimate view (spec §2b): T = the ``pct`` percentile of
+    the first-excluded distance d_(r+1) — the neighbour just past each point's
+    cliff (the largest relative jump in its sorted neighbours). Reads the shared
+    k-NN distance table, not a separate query. Default pct=50 (the median)."""
+    dn = dst[:, 1:8]
+    g = (dn[:, 1:] / np.maximum(dn[:, :-1], 1e-6)).argmax(1)
+    outer = dst[np.arange(len(dst)), 2 + g]
+    return float(np.percentile(outer, pct))
+
+
 def build_pairs(bank, idx, dst, T, active, max_pairs_per_cluster):
     """Cluster the descriptors and emit cross-image pair lists per image pair.
 
@@ -66,18 +77,10 @@ def build_pairs(bank, idx, dst, T, active, max_pairs_per_cluster):
     i_rep = np.repeat(np.arange(n), K)
     j = idx.ravel().astype(np.int64)
     dd = dst.ravel()
-    keep = (
-        (dd <= T)
-        & (i_rep != j)
-        & active[i_rep]
-        & active[j]
-        & (img[i_rep] != img[j])
-    )
+    keep = (dd <= T) & (i_rep != j) & active[i_rep] & active[j] & (img[i_rep] != img[j])
     rows = i_rep[keep]
     cols = j[keep]
-    g = csr_matrix(
-        (np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n)
-    )
+    g = csr_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
     _, comp = connected_components(g, directed=False)
     sizes = np.bincount(comp, minlength=n)
     # mark inactive/singleton descriptors as -1 so we don't emit pairs from them
@@ -145,13 +148,7 @@ def build_pairs_neighbors(bank, idx, dst, T, active):
     i_rep = np.repeat(np.arange(n), K)
     j = idx.ravel().astype(np.int64)
     dd = dst.ravel()
-    keep = (
-        (dd <= T)
-        & (i_rep != j)
-        & active[i_rep]
-        & active[j]
-        & (img[i_rep] != img[j])
-    )
+    keep = (dd <= T) & (i_rep != j) & active[i_rep] & active[j] & (img[i_rep] != img[j])
     src = i_rep[keep]
     dstn = j[keep]
     dval = dd[keep]
@@ -166,9 +163,7 @@ def build_pairs_neighbors(bank, idx, dst, T, active):
 
     pair_map: dict[tuple[int, int], list[tuple[int, int, float]]] = {}
     for il, ih, fl, fh, d in zip(img_lo, img_hi, feat_lo, feat_hi, dval):
-        pair_map.setdefault((int(il), int(ih)), []).append(
-            (int(fl), int(fh), float(d))
-        )
+        pair_map.setdefault((int(il), int(ih)), []).append((int(fl), int(fh), float(d)))
     return pair_map
 
 
@@ -222,13 +217,7 @@ def build_neighbor_matches_arrays(bank, idx, dst, T, active):
     i_rep = np.repeat(np.arange(n), K)
     j = idx.ravel().astype(np.int64)
     dd = dst.ravel().astype(np.float32)
-    keep = (
-        (dd <= T)
-        & (i_rep != j)
-        & active[i_rep]
-        & active[j]
-        & (img[i_rep] != img[j])
-    )
+    keep = (dd <= T) & (i_rep != j) & active[i_rep] & active[j] & (img[i_rep] != img[j])
     src, dstn, dval = i_rep[keep], j[keep], dd[keep]
     ai, aj = img[src], img[dstn]
     lo_is_src = ai < aj
@@ -245,11 +234,17 @@ def build_neighbor_matches_arrays(bank, idx, dst, T, active):
     # per (pair, target feat).
     m1 = keep_min_by_key(pair_key * maxf + feat_lo, dval)
     pair_key, feat_lo, feat_hi, dval = (
-        pair_key[m1], feat_lo[m1], feat_hi[m1], dval[m1],
+        pair_key[m1],
+        feat_lo[m1],
+        feat_hi[m1],
+        dval[m1],
     )
     m2 = keep_min_by_key(pair_key * maxf + feat_hi, dval)
     pair_key, feat_lo, feat_hi, dval = (
-        pair_key[m2], feat_lo[m2], feat_hi[m2], dval[m2],
+        pair_key[m2],
+        feat_lo[m2],
+        feat_hi[m2],
+        dval[m2],
     )
 
     # Group by pair_key into the parallel output arrays.
@@ -262,9 +257,9 @@ def build_neighbor_matches_arrays(bank, idx, dst, T, active):
         bounds = np.r_[0, np.flatnonzero(np.diff(pk)) + 1]
         upk = pk[bounds]
         counts = np.diff(np.r_[bounds, len(pk)])
-        image_index_pairs = np.stack(
-            [upk // n_images, upk % n_images], axis=1
-        ).astype(np.uint32)
+        image_index_pairs = np.stack([upk // n_images, upk % n_images], axis=1).astype(
+            np.uint32
+        )
     else:
         image_index_pairs = np.zeros((0, 2), dtype=np.uint32)
         counts = np.zeros(0, dtype=np.uint32)
@@ -283,9 +278,13 @@ def build_cluster_matches_arrays(
     ``refine_iters>0`` mean-shift refines each cluster (needs ``forest``).
     """
     labels = seed_claim_clusters(
-        idx, dst, bank.image_label,
-        T, descriptors=bank.descriptors if refine_iters else None,
-        refine_iters=refine_iters, forest=forest,
+        idx,
+        dst,
+        bank.image_label,
+        T,
+        descriptors=bank.descriptors if refine_iters else None,
+        refine_iters=refine_iters,
+        forest=forest,
     )
     img = bank.image_label
     feat = bank.feature_label
@@ -324,7 +323,8 @@ def pairmap_to_arrays(pair_map):
     sorted_pairs = sorted(pair_map.keys())
     image_index_pairs = (
         np.array(sorted_pairs, dtype=np.uint32)
-        if sorted_pairs else np.zeros((0, 2), dtype=np.uint32)
+        if sorted_pairs
+        else np.zeros((0, 2), dtype=np.uint32)
     )
     match_counts = np.array([len(pair_map[p]) for p in sorted_pairs], dtype=np.uint32)
     total = int(match_counts.sum())
@@ -334,7 +334,9 @@ def pairmap_to_arrays(pair_map):
     for p in sorted_pairs:
         rows = pair_map[p]
         m = len(rows)
-        feat_idx[off : off + m] = np.array([(a, b) for a, b, _ in rows], dtype=np.uint32)
+        feat_idx[off : off + m] = np.array(
+            [(a, b) for a, b, _ in rows], dtype=np.uint32
+        )
         dists[off : off + m] = np.array([d for _, _, d in rows], dtype=np.float32)
         off += m
     return image_index_pairs, match_counts, feat_idx, dists
@@ -380,6 +382,7 @@ def assemble_matches_dict(
     # feature_options, feature_prefix_dir) so `sfm solve -i` resolves .sift
     # files at the same path the workspace stores them.
     import json
+
     ws_cfg = json.loads((workspace_dir / ".sfm-workspace.json").read_text())
     return {
         "metadata": {
@@ -422,29 +425,60 @@ def main() -> None:
     ap.add_argument("sfmr")
     ap.add_argument("--out", required=True, help="output .matches path")
     ap.add_argument("--cache", default=None, help="17-NN cache .npz")
-    ap.add_argument("--threshold", default="otsu",
-                    help="otsu / gmm / a float value; default otsu")
     ap.add_argument(
-        "--t-scale", type=float, default=1.25,
-        help="multiply derived T by this factor (recall-first; downstream"
-        " RANSAC is the precision filter). Default 1.25.",
+        "--threshold",
+        default="cliff",
+        help="cliff (p50 of first-excluded; default) / otsu / gmm / float",
     )
-    ap.add_argument("--prefilter", action="store_true",
-                    help="drop isolated points (d1>antimode or ratio>0.85)")
+    ap.add_argument(
+        "--cliff-pct",
+        type=float,
+        default=50.0,
+        help="percentile for the cliff threshold (--threshold cliff). Default 50.",
+    )
+    ap.add_argument(
+        "--t-scale",
+        type=float,
+        default=1.0,
+        help="multiply derived T by this factor (recall-first; downstream RANSAC"
+        " is the precision filter). Default 1.0; ~1.25 pairs well with otsu/gmm.",
+    )
+    ap.add_argument(
+        "--prefilter",
+        action="store_true",
+        help="drop isolated points (d1>antimode or ratio>0.85)",
+    )
     ap.add_argument("--max-pairs-per-cluster", type=int, default=64)
-    ap.add_argument("--mode", choices=["components", "neighbors", "clusters"],
-                    default="neighbors",
-                    help="components: connected-component clusters; "
-                    "neighbors: per-descriptor 16-NN neighbourhoods (no merging); "
-                    "clusters: materialized density-seeded clusters")
-    ap.add_argument("--exact", action="store_true",
-                    help="use exact NN (oracle) instead of the KdForest index")
-    ap.add_argument("--preset", default="accurate",
-                    help="KdForest preset: accurate / balanced / fast")
-    ap.add_argument("--min-cluster-size", type=int, default=2,
-                    help="clusters mode: keep clusters spanning >= this many images")
-    ap.add_argument("--refine", type=int, default=0,
-                    help="clusters mode: mean-shift refinement iterations")
+    ap.add_argument(
+        "--mode",
+        choices=["components", "neighbors", "clusters"],
+        default="neighbors",
+        help="components: connected-component clusters; "
+        "neighbors: per-descriptor 16-NN neighbourhoods (no merging); "
+        "clusters: materialized density-seeded clusters",
+    )
+    ap.add_argument(
+        "--exact",
+        action="store_true",
+        help="use exact NN (oracle) instead of the KdForest index",
+    )
+    ap.add_argument(
+        "--preset",
+        default="accurate",
+        help="KdForest preset: accurate / balanced / fast",
+    )
+    ap.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=2,
+        help="clusters mode: keep clusters spanning >= this many images",
+    )
+    ap.add_argument(
+        "--refine",
+        type=int,
+        default=0,
+        help="clusters mode: mean-shift refinement iterations",
+    )
     args = ap.parse_args()
 
     path = sorted(glob.glob(args.sfmr))[0]
@@ -475,10 +509,17 @@ def main() -> None:
 
     d1 = dst[:, 1]
     d5 = dst[:, 5]
-    T_base = derive_threshold(d1, args.threshold)
+    if args.threshold == "cliff":
+        T_base = cliff_threshold(dst, args.cliff_pct)
+        method = f"cliff p{args.cliff_pct:g}"
+    else:
+        T_base = derive_threshold(d1, args.threshold)
+        method = args.threshold
     T = T_base * args.t_scale
-    print(f"threshold T_base={T_base:.1f}  -> T={T:.1f} "
-          f"(scale {args.t_scale})  via {args.threshold}")
+    print(
+        f"threshold T_base={T_base:.1f}  -> T={T:.1f} "
+        f"(scale {args.t_scale})  via {method}"
+    )
 
     if args.prefilter:
         active = ~((d1 / np.maximum(d5, 1e-6) > 0.85) | (d1 > T_base))
@@ -495,11 +536,17 @@ def main() -> None:
         ii_pairs, m_counts, feat_idx, dists = pairmap_to_arrays(pair_map)
     elif args.mode == "clusters":
         if args.refine and forest is None:
-            print("warning: --refine needs the index; --exact has none, "
-                  "falling back to seed-only")
+            print(
+                "warning: --refine needs the index; --exact has none, "
+                "falling back to seed-only"
+            )
         ii_pairs, m_counts, feat_idx, dists = build_cluster_matches_arrays(
-            bank, idx, dst, T,
-            min_size=args.min_cluster_size, refine_iters=args.refine,
+            bank,
+            idx,
+            dst,
+            T,
+            min_size=args.min_cluster_size,
+            refine_iters=args.refine,
             forest=forest,
         )
     else:
@@ -507,8 +554,10 @@ def main() -> None:
         ii_pairs, m_counts, feat_idx, dists = build_neighbor_matches_arrays(
             bank, idx, dst, T, active
         )
-    print(f"after one-per-image: {int(m_counts.sum())} matches across "
-          f"{len(ii_pairs)} image pairs")
+    print(
+        f"after one-per-image: {int(m_counts.sum())} matches across "
+        f"{len(ii_pairs)} image pairs"
+    )
 
     # Resolve image names -> .sift paths in the workspace.
     from sfmtool.sift.file import get_sift_path_for_image
@@ -520,15 +569,18 @@ def main() -> None:
     out = Path(args.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     data = assemble_matches_dict(
-        bank, ii_pairs, m_counts, feat_idx, dists,
-        image_names, sift_paths, ws, out
+        bank, ii_pairs, m_counts, feat_idx, dists, image_names, sift_paths, ws, out
     )
     write_matches(str(out), data)
-    print(f"\nwrote {out}: {data['metadata']['image_pair_count']} pairs, "
-          f"{data['metadata']['match_count']} matches "
-          f"(has_two_view_geometries=False)")
-    print("next: `pixi run sfm solve -i <matches>` will run COLMAP "
-          "verification on these pairs.")
+    print(
+        f"\nwrote {out}: {data['metadata']['image_pair_count']} pairs, "
+        f"{data['metadata']['match_count']} matches "
+        f"(has_two_view_geometries=False)"
+    )
+    print(
+        "next: `pixi run sfm solve -i <matches>` will run COLMAP "
+        "verification on these pairs."
+    )
 
 
 if __name__ == "__main__":
