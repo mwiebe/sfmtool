@@ -22,7 +22,7 @@ import glob
 import numpy as np
 
 from exp03_radius_clusters import score
-from exp05_cluster_match import K, derive_threshold
+from exp05_cluster_match import K, cliff_threshold, derive_threshold
 from seed_cluster import seed_claim_clusters
 from sfm_descriptors import load_descriptor_bank
 
@@ -34,7 +34,7 @@ DATASETS = [
 ]
 
 
-def run_one(ws: str, t_scale: float, preset: str, refine: int):
+def run_one(ws: str, threshold: str, t_scale: float, preset: str, refine: int):
     from sfmtool import KdForest
 
     path = sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0]
@@ -44,7 +44,10 @@ def run_one(ws: str, t_scale: float, preset: str, refine: int):
     idx, dst = forest.query(desc, k=K)
     idx = idx.astype(np.int64)
 
-    T = derive_threshold(dst[:, 1], "otsu") * t_scale
+    if threshold == "cliff":
+        T = cliff_threshold(dst) * t_scale
+    else:
+        T = derive_threshold(dst[:, 1], threshold) * t_scale
     labels = seed_claim_clusters(
         idx, dst, bank.image_label, T, descriptors=desc,
         refine_iters=refine, forest=forest,
@@ -67,6 +70,8 @@ def run_one(ws: str, t_scale: float, preset: str, refine: int):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--threshold", default="cliff",
+                    help="radius: cliff (p50; default) / otsu / gmm / float")
     ap.add_argument("--t-scale", type=float, default=1.0)
     ap.add_argument("--preset", default="accurate")
     ap.add_argument("--refine", type=int, default=0,
@@ -77,9 +82,11 @@ def main() -> None:
     rows = []
     for ws in args.datasets:
         print(f"clustering {ws} (refine={args.refine}) ...", flush=True)
-        rows.append(run_one(ws, args.t_scale, args.preset, args.refine))
+        rows.append(
+            run_one(ws, args.threshold, args.t_scale, args.preset, args.refine)
+        )
 
-    print(f"\nClusters vs solve tracks (Otsu T × {args.t_scale}, "
+    print(f"\nClusters vs solve tracks ({args.threshold} T × {args.t_scale}, "
           f"refine={args.refine}):\n")
     hdr = (f"  {'dataset':<16} {'T':>5} {'clusters':>8} {'tracks':>6} "
            f"{'purity':>7} {'falseM':>7} {'1/img':>6} {'recov':>6} "
