@@ -69,6 +69,16 @@ def run_one(ws: str, preset: str) -> dict:
     bg_r = ratio[src][bg[src]]  # cross-image background distances (×d2)
     d2d1 = (d2 / np.maximum(d1, 1e-6))[src]
 
+    # Original 7-NN cliff: largest jump among the first 7, first-excluded distance.
+    rows = np.arange(bank.n)
+    dn7 = dst[:, 1:8]
+    g7 = (dn7[:, 1:] / np.maximum(dn7[:, :-1], 1e-6)).argmax(1)
+    outer7 = dst[rows, 2 + g7]
+    within = nb_dist < outer7[:, None]  # cluster members under the cliff radius
+    cliff_r = (outer7 / np.maximum(d2, 1e-6))[src]  # where the cut lands, ×d2
+    co_keep = float((cotrack & within)[src].sum() / cotrack[src].sum())
+    bg_adm = float((bg & within)[src].sum() / max(bg[src].sum(), 1))
+
     return dict(
         name=ws.replace("_ws", ""),
         n=bank.n,
@@ -76,6 +86,9 @@ def run_one(ws: str, preset: str) -> dict:
         d2d1=d2d1,
         co_r=co_r,
         bg_r=bg_r,
+        cliff_r=cliff_r,
+        co_keep=co_keep,
+        bg_adm=bg_adm,
     )
 
 
@@ -97,6 +110,16 @@ def print_table(r: dict) -> None:
     print(f"  {'c (=radius/d2)':>14} {'co-obs kept':>12} {'bg admitted':>12}")
     for c in CS:
         print(f"  {c:>14.2f} {(co <= c).mean():>11.1%} {(bg <= c).mean():>12.1%}")
+    cr = r["cliff_r"]
+    print(
+        f"  7-NN cliff cut as ×d2:  median={np.median(cr):.2f}  "
+        f"p25={np.percentile(cr, 25):.2f}  p75={np.percentile(cr, 75):.2f}  "
+        f"p90={np.percentile(cr, 90):.2f}"
+    )
+    print(
+        f"  7-NN cliff (per-point radius): co-obs kept {r['co_keep']:.1%}  "
+        f"bg admitted {r['bg_adm']:.1%}"
+    )
 
 
 def plot(results, outpath):
