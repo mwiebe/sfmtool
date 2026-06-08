@@ -54,15 +54,30 @@ def derive_threshold(d1: np.ndarray, method: str) -> float:
     return float(method)
 
 
+CLIFF_MIN_JUMP = 1.3  # a cliff must out-jump the d2/d1 step by at least this
+
+
+def cliff_outer(dst: np.ndarray, min_jump: float = CLIFF_MIN_JUMP) -> np.ndarray:
+    """Per-point "just past the cliff" distance, scanning all k-NN neighbours.
+
+    The cliff is the largest jump between consecutive sorted neighbour distances.
+    It only counts if that jump is at least ``min_jump``x the initial d2/d1 step;
+    otherwise the distances grow smoothly with no real edge and the whole
+    neighbour set is taken (radius = the farthest neighbour). Reads the shared
+    k-NN distance table, not a separate query.
+    """
+    dn = dst[:, 1:]  # the k nearest others, ascending (col 0 is self)
+    rows = np.arange(len(dst))
+    ratios = dn[:, 1:] / np.maximum(dn[:, :-1], 1e-6)  # consecutive jumps
+    g = ratios.argmax(1)
+    has_cliff = ratios[rows, g] >= min_jump * ratios[:, 0]  # vs the d2/d1 step
+    return np.where(has_cliff, dn[rows, g + 1], dn[:, -1])
+
+
 def cliff_threshold(dst: np.ndarray, pct: float = 50.0) -> float:
-    """Per-point radius-estimate view (spec §2b): T = the ``pct`` percentile of
-    the first-excluded distance d_(r+1) — the neighbour just past each point's
-    cliff (the largest relative jump in its sorted neighbours). Reads the shared
-    k-NN distance table, not a separate query. Default pct=50 (the median)."""
-    dn = dst[:, 1:8]
-    g = (dn[:, 1:] / np.maximum(dn[:, :-1], 1e-6)).argmax(1)
-    outer = dst[np.arange(len(dst)), 2 + g]
-    return float(np.percentile(outer, pct))
+    """Per-point radius-estimate view (spec §2a): T = the ``pct`` percentile of
+    the just-past-the-cliff distance over all descriptors. Default pct=50."""
+    return float(np.percentile(cliff_outer(dst), pct))
 
 
 def build_pairs(bank, idx, dst, T, active, max_pairs_per_cluster):

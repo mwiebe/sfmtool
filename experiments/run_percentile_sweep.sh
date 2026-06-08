@@ -22,23 +22,20 @@ cd "$(dirname "$0")"
 echo "============================== $WS =============================="
 echo "baseline=$(basename "$BASE")  percentiles=$PCTS"
 
-# Percentile -> absolute radius T, computed once from d_(r+1) over all points.
+# Percentile -> absolute radius T, computed once via the cliff rule (exp05).
 mapfile -t SPECS < <(pixi run -e experiments python - "$ROOT" "$PCTS" <<'PY' 2>/dev/null
 import sys, glob, numpy as np
 from exp03_radius_clusters import K
-from exp05_cluster_match import derive_threshold
+from exp05_cluster_match import cliff_threshold, derive_threshold
 from sfm_descriptors import load_descriptor_bank
 from sfmtool import KdForest
 root, pcts = sys.argv[1], [float(x) for x in sys.argv[2].split(",")]
 bank = load_descriptor_bank(sorted(glob.glob(f"{root}/sfmr/*solve*.sfmr"))[0])
 desc = np.ascontiguousarray(bank.descriptors)
 _, dst = KdForest(desc, preset="accurate").query(desc, k=K)
-dn = dst[:, 1:8]
-g = (dn[:, 1:] / np.maximum(dn[:, :-1], 1e-6)).argmax(1)
-outer = dst[np.arange(len(dst)), 2 + g]
 print(f"otsu125 {derive_threshold(dst[:, 1], 'otsu') * 1.25:.1f}")
 for p in pcts:
-    print(f"p{int(p)} {np.percentile(outer, p):.1f}")
+    print(f"p{int(p)} {cliff_threshold(dst, p):.1f}")
 PY
 )
 
