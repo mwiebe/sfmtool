@@ -173,8 +173,8 @@ def main() -> None:
         draw_idea2(ax2.ravel()[d], g, lbl)
         for c, ts in enumerate(SIZES):
             got = draw_idea3_cell(ax3[d][c], g, ts)
-            if d == 0 and got:
-                ax3[d][c].set_title(f"track size {got}", fontsize=9)
+            if got:
+                ax3[d][c].set_title(f"size {got}", fontsize=8)
         ax3[d][0].set_ylabel(lbl, fontsize=8)
         del g
 
