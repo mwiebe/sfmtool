@@ -2,29 +2,31 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 #
-# Global SfM from the purely-local background-floor matcher. Reuses the verified
-# bgf.db that run_bgfloor.sh already built, runs COLMAP's global mapper (seeded),
-# and compares to the workspace's baseline solve. Distinct bgf_global output so it
-# never clobbers the incremental bgf_inc / bgf_incremental.sfmr results.
+# Global SfM from the background-floor matcher. Reuses the verified per-mode db
+# that run_bgfloor.sh already built (bgf = edges, bgc = materialized clusters),
+# runs COLMAP's global mapper (seeded), and compares to the workspace's baseline
+# solve. Distinct <pfx>_global output so it never clobbers the incremental
+# <pfx>_inc / <pfx>_incremental.sfmr results.
 #
-# Usage:  bash experiments/run_bgfloor_global.sh <workspace>
+# Usage:  bash experiments/run_bgfloor_global.sh <workspace> [pfx]   (pfx: bgf|bgc)
 set -e
 export PATH="$HOME/.pixi/bin:$PATH"
 
 WS="$1"
+PFX="${2:-bgf}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)/$WS"
 BASE=$(ls "$ROOT"/sfmr/*solve*.sfmr | head -1)
-echo "============================== $WS (bgfloor global) =============================="
+echo "============================== $WS ($PFX global) =============================="
 
 cd "$ROOT/.."
-OUT="$ROOT/bgf_global"; rm -rf "$OUT" "$ROOT/sfmr/bgf_global.sfmr"
-REC=$(pixi run python - "$ROOT" "$OUT" <<'PY' 2>&1 | grep -vE "WARN" | grep -E "^recon:"
+OUT="$ROOT/${PFX}_global"; rm -rf "$OUT" "$ROOT/sfmr/${PFX}_global.sfmr"
+REC=$(pixi run python - "$ROOT" "$PFX" "$OUT" <<'PY' 2>&1 | grep -vE "WARN" | grep -E "^recon:"
 import os, sys, pycolmap
-root, out = sys.argv[1], sys.argv[2]
+root, pfx, out = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(out, exist_ok=True)
 pycolmap.set_random_seed(42)
 o = pycolmap.GlobalPipelineOptions()
-recs = pycolmap.global_mapping(f"{root}/bgf.db", root, out, o)
+recs = pycolmap.global_mapping(f"{root}/{pfx}.db", root, out, o)
 best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
 if best is None:
     print("recon: FAILED 0 0 0")
@@ -38,8 +40,8 @@ read -r _ ok reg pts reproj <<<"$REC"
 verdict="-"
 if [ "$ok" = "OK" ]; then
     pixi run sfm from-colmap-bin "$OUT/best" --image-dir "$ROOT" \
-        -o "$ROOT/sfmr/bgf_global.sfmr" --tool-name colmap >/dev/null 2>&1
-    verdict=$(pixi run sfm compare "$BASE" "$ROOT/sfmr/bgf_global.sfmr" 2>&1 \
+        -o "$ROOT/sfmr/${PFX}_global.sfmr" --tool-name colmap >/dev/null 2>&1
+    verdict=$(pixi run sfm compare "$BASE" "$ROOT/sfmr/${PFX}_global.sfmr" 2>&1 \
         | grep -vE "WARN" | grep -oE "VERY SIMILAR|SIGNIFICANT DIFFERENCES" | head -1)
 fi
-printf "  bgfloor-global  reg=%s points=%s reproj=%s  %s\n" "$reg" "$pts" "$reproj" "$verdict"
+printf "  %s-global  reg=%s points=%s reproj=%s  %s\n" "$PFX" "$reg" "$pts" "$reproj" "$verdict"

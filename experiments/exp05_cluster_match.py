@@ -473,12 +473,14 @@ def main() -> None:
     ap.add_argument("--max-pairs-per-cluster", type=int, default=64)
     ap.add_argument(
         "--mode",
-        choices=["components", "neighbors", "clusters", "bgfloor"],
+        choices=["components", "neighbors", "clusters", "bgfloor", "bgclusters"],
         default="neighbors",
         help="components: connected-component clusters; "
         "neighbors: per-descriptor 16-NN neighbourhoods (no merging); "
-        "clusters: materialized density-seeded clusters; "
-        "bgfloor: purely-local per-descriptor background-floor radius",
+        "clusters: materialized density-seeded clusters (global T); "
+        "bgfloor: purely-local per-descriptor background-floor radius (edges); "
+        "bgclusters: materialized density-seeded clusters with the per-point "
+        "background-floor radius",
     )
     ap.add_argument(
         "--bg-alpha",
@@ -521,7 +523,7 @@ def main() -> None:
     print(f"loaded {path}: n={bank.n}")
 
     forest = None
-    query_k = BG_K if args.mode == "bgfloor" else K
+    query_k = BG_K if args.mode in ("bgfloor", "bgclusters") else K
     if args.exact:
         # Oracle path: exact NN, cached.
         cache = Path(
@@ -591,6 +593,17 @@ def main() -> None:
         print(f"mode=bgfloor (per-point radius, alpha={args.bg_alpha} b0={args.bg_b0})")
         ii_pairs, m_counts, feat_idx, dists = build_bgfloor_matches_arrays(
             bank, idx, dst, alpha=args.bg_alpha, b0=args.bg_b0
+        )
+    elif args.mode == "bgclusters":
+        # Materialized clusters under the per-point background-floor radius:
+        # density-seeded claim with each seed's own radius, then C(m,2) pairs.
+        print(
+            f"mode=bgclusters (per-point radius clusters, "
+            f"alpha={args.bg_alpha} b0={args.bg_b0})"
+        )
+        radius = (args.bg_alpha * np.median(dst[:, args.bg_b0 :], axis=1))[:, None]
+        ii_pairs, m_counts, feat_idx, dists = build_cluster_matches_arrays(
+            bank, idx, dst, radius, min_size=args.min_cluster_size
         )
     else:
         print("mode=neighbors (no transitive merging, vectorised)")
