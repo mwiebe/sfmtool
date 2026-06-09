@@ -40,10 +40,9 @@ DATASETS = [
 ]
 
 
-def run_one(ws: str, preset: str) -> dict:
+def run_one(path: str, name: str, preset: str) -> dict:
     from sfmtool import KdForest
 
-    path = sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0]
     bank = load_descriptor_bank(path)
     desc = np.ascontiguousarray(bank.descriptors)
     idx, dst = KdForest(desc, preset=preset).query(desc, k=K)
@@ -74,7 +73,7 @@ def run_one(ws: str, preset: str) -> dict:
     co_lost_at_mbg = (co & (nd >= m_bg[:, None]))[src].sum(1)
 
     return dict(
-        name=ws.replace("_ws", ""),
+        name=name,
         n_src=int(src.sum()),
         ratio=ratio,
         separable=separable,
@@ -134,13 +133,31 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--preset", default="accurate")
     ap.add_argument("--datasets", nargs="*", default=DATASETS)
+    ap.add_argument(
+        "--sfmr",
+        default=None,
+        help="explicit .sfmr file(s) to score instead of the default "
+        "baseline solve (use with one or more paths)",
+    )
+    ap.add_argument("--sfmr-paths", nargs="*", default=None)
     ap.add_argument("--outdir", default="out")
     args = ap.parse_args()
     print(
         "Separability ceiling: is every co-observation nearer than every "
         "background neighbour?"
     )
-    results = [run_one(ws, args.preset) for ws in args.datasets]
+    explicit = args.sfmr_paths or ([args.sfmr] if args.sfmr else None)
+    if explicit:
+        results = [run_one(p, Path(p).stem, args.preset) for p in explicit]
+    else:
+        results = [
+            run_one(
+                sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0],
+                ws.replace("_ws", ""),
+                args.preset,
+            )
+            for ws in args.datasets
+        ]
     for r in results:
         print_table(r)
     if len(results) == len(DATASETS):
