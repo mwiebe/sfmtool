@@ -21,27 +21,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 from pathlib import Path
 
 import numpy as np
 
 from exp03_radius_clusters import K
-from sfm_descriptors import load_descriptor_bank
+from sfm_descriptors import SOLVES, load_descriptor_bank, resolve_solve
 
-DATASETS = [
-    "seoul_bull_ws",
-    "seattle_backyard_ws",
-    "kerry_park_ws",
-    "dino_dog_toy_ws",
-]
 CS = [1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
 
 
-def run_one(ws: str, preset: str) -> dict:
+def run_one(path: str, name: str, preset: str) -> dict:
     from sfmtool import KdForest
 
-    path = sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0]
     bank = load_descriptor_bank(path)
     desc = np.ascontiguousarray(bank.descriptors)
     idx, dst = KdForest(desc, preset=preset).query(desc, k=K)
@@ -80,7 +72,7 @@ def run_one(ws: str, preset: str) -> dict:
     bg_adm = float((bg & within)[src].sum() / max(bg[src].sum(), 1))
 
     return dict(
-        name=ws.replace("_ws", ""),
+        name=name,
         n=bank.n,
         n_src=int(src.sum()),
         d2d1=d2d1,
@@ -128,8 +120,12 @@ def plot(results, outpath):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-    for ax, r in zip(axes.ravel(), results):
+    nrows = (len(results) + 1) // 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(11, 4 * nrows))
+    axflat = axes.ravel()
+    for ax in axflat[len(results) :]:
+        ax.axis("off")
+    for ax, r in zip(axflat, results):
         bins = np.linspace(0, 5, 60)
         ax.hist(
             r["co_r"],
@@ -166,17 +162,26 @@ def plot(results, outpath):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--preset", default="accurate")
-    ap.add_argument("--datasets", nargs="*", default=DATASETS)
+    ap.add_argument(
+        "--datasets",
+        nargs="*",
+        default=[n for n, _ in SOLVES],
+        help="subset of solve labels from SOLVES to score",
+    )
     ap.add_argument("--outdir", default="out")
     args = ap.parse_args()
     print(
         "Where do true co-observations sit, as a multiple of d2?\n"
         "radius = c·d2 keeps a neighbour iff its distance ≤ c·d2."
     )
-    results = [run_one(ws, args.preset) for ws in args.datasets]
+    results = [
+        run_one(resolve_solve(path), name, args.preset)
+        for name, path in SOLVES
+        if name in args.datasets
+    ]
     for r in results:
         print_table(r)
-    if len(results) == len(DATASETS):
+    if len(results) >= 2:
         out = Path(args.outdir)
         out.mkdir(parents=True, exist_ok=True)
         plot(results, str(out / "exp15_track_ratios.png"))

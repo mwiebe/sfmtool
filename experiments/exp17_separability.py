@@ -24,20 +24,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 from pathlib import Path
 
 import numpy as np
 
 from exp03_radius_clusters import K
-from sfm_descriptors import load_descriptor_bank
-
-DATASETS = [
-    "seoul_bull_ws",
-    "seattle_backyard_ws",
-    "kerry_park_ws",
-    "dino_dog_toy_ws",
-]
+from sfm_descriptors import SOLVES, load_descriptor_bank, resolve_solve
 
 
 def run_one(path: str, name: str, preset: str) -> dict:
@@ -112,8 +104,12 @@ def plot(results, outpath):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-    for ax, r in zip(axes.ravel(), results):
+    nrows = (len(results) + 1) // 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(11, 4 * nrows))
+    axflat = axes.ravel()
+    for ax in axflat[len(results) :]:
+        ax.axis("off")
+    for ax, r in zip(axflat, results):
         lr = np.log2(np.clip(r["ratio"], 1e-3, 1e3))
         bins = np.linspace(-3, 3, 60)
         ax.hist(lr, bins=bins, color="C0", alpha=0.8)
@@ -132,35 +128,35 @@ def plot(results, outpath):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--preset", default="accurate")
-    ap.add_argument("--datasets", nargs="*", default=DATASETS)
     ap.add_argument(
-        "--sfmr",
-        default=None,
-        help="explicit .sfmr file(s) to score instead of the default "
-        "baseline solve (use with one or more paths)",
+        "--datasets",
+        nargs="*",
+        default=[n for n, _ in SOLVES],
+        help="subset of solve labels from SOLVES to score",
     )
-    ap.add_argument("--sfmr-paths", nargs="*", default=None)
+    ap.add_argument(
+        "--sfmr-paths",
+        nargs="*",
+        default=None,
+        help="explicit .sfmr file(s) to score instead of SOLVES",
+    )
     ap.add_argument("--outdir", default="out")
     args = ap.parse_args()
     print(
         "Separability ceiling: is every co-observation nearer than every "
         "background neighbour?"
     )
-    explicit = args.sfmr_paths or ([args.sfmr] if args.sfmr else None)
-    if explicit:
-        results = [run_one(p, Path(p).stem, args.preset) for p in explicit]
+    if args.sfmr_paths:
+        results = [run_one(p, Path(p).stem, args.preset) for p in args.sfmr_paths]
     else:
         results = [
-            run_one(
-                sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0],
-                ws.replace("_ws", ""),
-                args.preset,
-            )
-            for ws in args.datasets
+            run_one(resolve_solve(path), name, args.preset)
+            for name, path in SOLVES
+            if name in args.datasets
         ]
     for r in results:
         print_table(r)
-    if len(results) == len(DATASETS):
+    if len(results) >= 2:
         out = Path(args.outdir)
         out.mkdir(parents=True, exist_ok=True)
         plot(results, str(out / "exp17_separability.png"))

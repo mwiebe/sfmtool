@@ -108,3 +108,27 @@ def load_descriptor_bank(sfmr_path: str | Path) -> DescriptorBank:
         image_names=names,
         workspace_dir=ws,
     )
+
+
+# Standard solves the analysis experiments report on, as (label, path-or-glob)
+# relative to the experiments/ directory. `dino_large` is the cluster matcher's
+# own incremental dino reconstruction (29,217 points, rated VERY SIMILAR to the
+# reference, recovering 93% of its points plus ~24k more) — a real, denser solve
+# kept beside the lean reference so stats aren't judged only against it.
+SOLVES = [
+    ("seoul_bull", "../seoul_bull_ws/sfmr/*solve*.sfmr"),
+    ("seattle_backyard", "../seattle_backyard_ws/sfmr/*solve*.sfmr"),
+    ("kerry_park", "../kerry_park_ws/sfmr/*solve*.sfmr"),
+    ("dino_dog_toy", "../dino_dog_toy_ws/sfmr/*solve*.sfmr"),
+    ("dino_large", "../dino_dog_toy_ws/sfmr/nbr_incremental.sfmr"),
+]
+
+
+def resolve_solve(path_or_glob: str) -> str:
+    """First match for a SOLVES path/glob (relative to experiments/)."""
+    import glob as _glob
+
+    matches = sorted(_glob.glob(path_or_glob))
+    if not matches:
+        raise FileNotFoundError(path_or_glob)
+    return matches[0]
