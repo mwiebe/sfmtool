@@ -55,6 +55,7 @@ def derive_threshold(d1: np.ndarray, method: str) -> float:
 
 
 CLIFF_MIN_JUMP = 1.3  # a cliff must out-jump the d2/d1 step by at least this
+BG_K = 49  # wider neighbourhood (48 + self) for the background-floor matcher
 
 
 def cliff_outer(dst: np.ndarray, min_jump: float = CLIFF_MIN_JUMP) -> np.ndarray:
@@ -221,48 +222,22 @@ def keep_min_by_key(keys: np.ndarray, vals: np.ndarray) -> np.ndarray:
     return mask
 
 
-def build_neighbor_matches_arrays(bank, idx, dst, T, active):
-    """Vectorised neighbours-mode matcher: each descriptor's within-radius
-    cross-image 16-NN edges, deduped one-to-one per image pair (two-pass
-    mutual-best), returned as the parallel arrays write_matches wants.
-    """
-    n = bank.n
-    img = bank.image_label.astype(np.int64)
-    feat = bank.feature_label.astype(np.int64)
-    i_rep = np.repeat(np.arange(n), K)
-    j = idx.ravel().astype(np.int64)
-    dd = dst.ravel().astype(np.float32)
-    keep = (dd <= T) & (i_rep != j) & active[i_rep] & active[j] & (img[i_rep] != img[j])
-    src, dstn, dval = i_rep[keep], j[keep], dd[keep]
+def _edges_to_pair_arrays(img, feat, src, dstn, dval):
+    """One-to-one-per-image-pair dedup (two-pass mutual-best) of directed edges
+    -> the parallel arrays write_matches wants."""
     ai, aj = img[src], img[dstn]
     lo_is_src = ai < aj
     img_lo = np.where(lo_is_src, ai, aj)
     img_hi = np.where(lo_is_src, aj, ai)
     feat_lo = np.where(lo_is_src, feat[src], feat[dstn])
     feat_hi = np.where(lo_is_src, feat[dstn], feat[src])
-
     n_images = int(img.max()) + 1
     maxf = int(max(feat_lo.max(initial=0), feat_hi.max(initial=0))) + 1
     pair_key = img_lo * n_images + img_hi
-
-    # One-to-one per pair: best target per (pair, source feat), then best source
-    # per (pair, target feat).
     m1 = keep_min_by_key(pair_key * maxf + feat_lo, dval)
-    pair_key, feat_lo, feat_hi, dval = (
-        pair_key[m1],
-        feat_lo[m1],
-        feat_hi[m1],
-        dval[m1],
-    )
+    pair_key, feat_lo, feat_hi, dval = pair_key[m1], feat_lo[m1], feat_hi[m1], dval[m1]
     m2 = keep_min_by_key(pair_key * maxf + feat_hi, dval)
-    pair_key, feat_lo, feat_hi, dval = (
-        pair_key[m2],
-        feat_lo[m2],
-        feat_hi[m2],
-        dval[m2],
-    )
-
-    # Group by pair_key into the parallel output arrays.
+    pair_key, feat_lo, feat_hi, dval = pair_key[m2], feat_lo[m2], feat_hi[m2], dval[m2]
     order = np.argsort(pair_key, kind="stable")
     pk = pair_key[order]
     fl = feat_lo[order].astype(np.uint32)
@@ -278,9 +253,41 @@ def build_neighbor_matches_arrays(bank, idx, dst, T, active):
     else:
         image_index_pairs = np.zeros((0, 2), dtype=np.uint32)
         counts = np.zeros(0, dtype=np.uint32)
-    match_counts = counts.astype(np.uint32)
-    feat_idx = np.stack([fl, fh], axis=1)
-    return image_index_pairs, match_counts, feat_idx, dv
+    return image_index_pairs, counts.astype(np.uint32), np.stack([fl, fh], axis=1), dv
+
+
+def build_neighbor_matches_arrays(bank, idx, dst, T, active):
+    """Vectorised neighbours-mode matcher: each descriptor's within-radius
+    cross-image neighbours, deduped one-to-one per image pair (two-pass
+    mutual-best), returned as the parallel arrays write_matches wants.
+    """
+    n = bank.n
+    img = bank.image_label.astype(np.int64)
+    feat = bank.feature_label.astype(np.int64)
+    kw = idx.shape[1]
+    i_rep = np.repeat(np.arange(n), kw)
+    j = idx.ravel().astype(np.int64)
+    dd = dst.ravel().astype(np.float32)
+    keep = (dd <= T) & (i_rep != j) & active[i_rep] & active[j] & (img[i_rep] != img[j])
+    return _edges_to_pair_arrays(img, feat, i_rep[keep], j[keep], dd[keep])
+
+
+def build_bgfloor_matches_arrays(bank, idx, dst, alpha=0.8, b0=8):
+    """Purely-local matcher: each descriptor keeps its cross-image neighbours
+    within its *own* background-floor radius — ``alpha`` × the median distance of
+    its neighbours from rank ``b0`` on (the background scale; exp21/exp23) — then
+    deduped one-to-one per image pair. No global threshold.
+    """
+    n = bank.n
+    img = bank.image_label.astype(np.int64)
+    feat = bank.feature_label.astype(np.int64)
+    radius = alpha * np.median(dst[:, b0:], axis=1)  # (n,) per-descriptor radius
+    kw = idx.shape[1]
+    i_rep = np.repeat(np.arange(n), kw)
+    j = idx.ravel().astype(np.int64)
+    dd = dst.ravel().astype(np.float32)
+    keep = (dd <= radius[i_rep]) & (i_rep != j) & (img[i_rep] != img[j])
+    return _edges_to_pair_arrays(img, feat, i_rep[keep], j[keep], dd[keep])
 
 
 def build_cluster_matches_arrays(
@@ -466,11 +473,24 @@ def main() -> None:
     ap.add_argument("--max-pairs-per-cluster", type=int, default=64)
     ap.add_argument(
         "--mode",
-        choices=["components", "neighbors", "clusters"],
+        choices=["components", "neighbors", "clusters", "bgfloor"],
         default="neighbors",
         help="components: connected-component clusters; "
         "neighbors: per-descriptor 16-NN neighbourhoods (no merging); "
-        "clusters: materialized density-seeded clusters",
+        "clusters: materialized density-seeded clusters; "
+        "bgfloor: purely-local per-descriptor background-floor radius",
+    )
+    ap.add_argument(
+        "--bg-alpha",
+        type=float,
+        default=0.8,
+        help="bgfloor mode: keep neighbours within alpha x background scale",
+    )
+    ap.add_argument(
+        "--bg-b0",
+        type=int,
+        default=8,
+        help="bgfloor mode: background scale = median of neighbours from rank b0",
     )
     ap.add_argument(
         "--exact",
@@ -501,16 +521,19 @@ def main() -> None:
     print(f"loaded {path}: n={bank.n}")
 
     forest = None
+    query_k = BG_K if args.mode == "bgfloor" else K
     if args.exact:
         # Oracle path: exact NN, cached.
-        cache = Path(args.cache or f"out/{Path(bank.workspace_dir).name}_knn17.npz")
+        cache = Path(
+            args.cache or f"out/{Path(bank.workspace_dir).name}_knn{query_k}.npz"
+        )
         if cache.exists():
             z = np.load(cache)
             idx, dst = z["idx"], z["dst"]
             print(f"exact NN (oracle), cached: {cache}")
         else:
-            print(f"computing exact {K}-NN over {bank.n} (one-time) -> {cache}")
-            idx, dst = knn_all(bank.descriptors, K)
+            print(f"computing exact {query_k}-NN over {bank.n} (one-time) -> {cache}")
+            idx, dst = knn_all(bank.descriptors, query_k)
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.savez(cache, idx=idx, dst=dst)
     else:
@@ -519,7 +542,7 @@ def main() -> None:
 
         print(f"building KdForest (preset={args.preset}) over {bank.n} descriptors")
         forest = KdForest(np.ascontiguousarray(bank.descriptors), preset=args.preset)
-        idx, dst = forest.query(np.ascontiguousarray(bank.descriptors), k=K)
+        idx, dst = forest.query(np.ascontiguousarray(bank.descriptors), k=query_k)
         idx = idx.astype(np.int64)
 
     d1 = dst[:, 1]
@@ -563,6 +586,11 @@ def main() -> None:
             min_size=args.min_cluster_size,
             refine_iters=args.refine,
             forest=forest,
+        )
+    elif args.mode == "bgfloor":
+        print(f"mode=bgfloor (per-point radius, alpha={args.bg_alpha} b0={args.bg_b0})")
+        ii_pairs, m_counts, feat_idx, dists = build_bgfloor_matches_arrays(
+            bank, idx, dst, alpha=args.bg_alpha, b0=args.bg_b0
         )
     else:
         print("mode=neighbors (no transitive merging, vectorised)")
