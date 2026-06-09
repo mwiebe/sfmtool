@@ -3,12 +3,17 @@
 
 """Experiment 07 — how do materialized clusters line up with the solve's tracks?
 
-Builds the in-tree KdForest index, derives the radius `T` from the data (Otsu),
-materialises clusters with density-ordered seeding (no transitive merge),
-optionally mean-shift refined, and scores those clusters against the solve's
-ground-truth tracks — purity,
-false-merge rate, one-feature-per-image rate, track recovery, fragmentation, and
-coverage — for all four datasets.
+Builds the in-tree KdForest index, materialises clusters by density-ordered
+seeding (no transitive merge), and scores those clusters against the solve's
+ground-truth tracks for all four datasets. Two membership rules:
+
+  - ``bgfloor`` (default): each seed keeps neighbours within its own background
+    floor ``alpha * dist[d]`` (d=28, alpha=0.8) — the production rule.
+  - ``global``: a single data-derived radius (cliff p50) for the whole corpus.
+
+Reports, per dataset: the number of solve tracks, the number of clusters we form,
+how many clusters span >1 track (overlap), how many contain no track member
+(non-track), and mean track recovery.
 
 Usage:
     pixi run -e experiments python experiments/exp07_cluster_vs_tracks.py
@@ -22,7 +27,7 @@ import glob
 import numpy as np
 
 from exp03_radius_clusters import score
-from exp05_cluster_match import K, cliff_threshold, derive_threshold
+from exp05_cluster_match import cliff_threshold
 from seed_cluster import seed_claim_clusters
 from sfm_descriptors import load_descriptor_bank
 
@@ -33,74 +38,70 @@ DATASETS = [
     "dino_dog_toy_ws",
 ]
 
+D_RANK = 28  # background rank: B_i = dist[i, 28] (= median(dist[8:49]))
+BG_ALPHA = 0.8
+BG_K = 32  # d + small margin
 
-def run_one(ws: str, threshold: str, t_scale: float, preset: str, refine: int):
+
+def run_one(ws: str, mode: str, preset: str):
     from sfmtool import KdForest
 
     path = sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0]
     bank = load_descriptor_bank(path)
     desc = np.ascontiguousarray(bank.descriptors)
     forest = KdForest(desc, preset=preset)
-    idx, dst = forest.query(desc, k=K)
-    idx = idx.astype(np.int64)
 
-    if threshold == "cliff":
-        T = cliff_threshold(dst) * t_scale
+    if mode == "bgfloor":
+        idx, dst = forest.query(desc, k=BG_K)
+        T = (BG_ALPHA * dst[:, D_RANK])[:, None]  # per-descriptor floor radius
     else:
-        T = derive_threshold(dst[:, 1], threshold) * t_scale
-    labels = seed_claim_clusters(
-        idx, dst, bank.image_label, T, descriptors=desc,
-        refine_iters=refine, forest=forest,
-    )
+        idx, dst = forest.query(desc, k=17)
+        T = cliff_threshold(dst)
+    idx = idx.astype(np.int64)
+    labels = seed_claim_clusters(idx, dst, bank.image_label, T)
 
-    # Reuse exp03's scorer: give every unclustered descriptor its own singleton
-    # label so cluster sizes are correct, then score the multi-member clusters.
-    n = bank.n
+    # Singletons for unclustered descriptors so cluster sizes are correct.
     comp = labels.copy()
     unl = np.flatnonzero(labels < 0)
     next_id = int(labels.max()) + 1 if (labels >= 0).any() else 0
     comp[unl] = np.arange(len(unl), dtype=np.int64) + next_id
-    sizes = np.bincount(comp, minlength=n)
-    res = score(bank, comp, sizes, np.ones(n, dtype=bool), T)
+    sizes = np.bincount(comp, minlength=bank.n)
+    res = score(bank, comp, sizes, np.ones(bank.n, dtype=bool), 0.0)
 
+    n_clusters = int(labels.max()) + 1 if (labels >= 0).any() else 0
     n_tracks = len(np.unique(bank.point_label[bank.point_label >= 0]))
-    res.update(name=ws.replace("_ws", ""), n=n, T=T, tracks=n_tracks)
-    return res
+    return {
+        "name": ws.replace("_ws", ""),
+        "tracks": n_tracks,
+        "clusters": n_clusters,
+        "overlaps": res.get("false_merge_comps", 0),
+        "non_track": n_clusters - res.get("components", 0),
+        "recovery": res.get("recovery", 0.0),
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--threshold", default="cliff",
-                    help="radius: cliff (p50; default) / otsu / gmm / float")
-    ap.add_argument("--t-scale", type=float, default=1.0)
+    ap.add_argument("--mode", choices=["bgfloor", "global"], default="bgfloor")
     ap.add_argument("--preset", default="accurate")
-    ap.add_argument("--refine", type=int, default=0,
-                    help="mean-shift re-query iterations (0 = seed only)")
     ap.add_argument("--datasets", nargs="*", default=DATASETS)
     args = ap.parse_args()
 
     rows = []
     for ws in args.datasets:
-        print(f"clustering {ws} (refine={args.refine}) ...", flush=True)
-        rows.append(
-            run_one(ws, args.threshold, args.t_scale, args.preset, args.refine)
-        )
+        print(f"clustering {ws} (mode={args.mode}) ...", flush=True)
+        rows.append(run_one(ws, args.mode, args.preset))
 
-    print(f"\nClusters vs solve tracks ({args.threshold} T × {args.t_scale}, "
-          f"refine={args.refine}):\n")
-    hdr = (f"  {'dataset':<16} {'T':>5} {'clusters':>8} {'tracks':>6} "
-           f"{'purity':>7} {'falseM':>7} {'1/img':>6} {'recov':>6} "
-           f"{'frags':>6} {'cover':>6}")
-    print(hdr)
+    print(f"\nClusters vs solve tracks (mode={args.mode}):\n")
+    print(
+        f"  {'dataset':<16} {'tracks':>7} {'clusters':>8} {'overlaps':>8} "
+        f"{'non-track':>9} {'recovery':>8}"
+    )
     for r in rows:
-        print(f"  {r['name']:<16} {r['T']:>5.0f} {r['components']:>8} "
-              f"{r['tracks']:>6} {r['dom_cov']:>7.3f} {r['false_merge_frac']:>7.1%} "
-              f"{r['img_unique_frac']:>6.1%} {r['recovery']:>6.3f} "
-              f"{r['fragments_per_track']:>6.2f} {r['in_track_coverage']:>6.1%}")
-    print("\npurity = in-track members in their cluster's dominant track; "
-          "1/img = clusters with ≤1 feature per image;\nrecov = mean track "
-          "completeness; frags = clusters a track spans; cover = in-track "
-          "descriptors landed in a cluster.")
+        print(
+            f"  {r['name']:<16} {r['tracks']:>7} {r['clusters']:>8} "
+            f"{r['overlaps']:>8} {r['non_track']:>9} {r['recovery']:>8.2f}"
+        )
 
 
 if __name__ == "__main__":
