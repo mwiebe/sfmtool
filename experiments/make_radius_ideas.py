@@ -27,6 +27,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 
 from sfm_descriptors import SOLVES, load_descriptor_bank, resolve_solve
 from sfmtool import KdForest
@@ -108,12 +109,8 @@ def draw_idea2(ax, g, title):
     floor = BG_ALPHA * g["B"]
     hi = float(np.percentile(np.r_[g["co_dist"], floor], 99))
     bins = np.linspace(0, hi, 70)
-    ax.hist(
-        np.clip(g["co_dist"], 0, hi), bins=bins, density=True, color=GREEN, alpha=0.55
-    )
-    ax.hist(
-        np.clip(g["bg_dist"], 0, hi), bins=bins, density=True, color=RED, alpha=0.45
-    )
+    ax.hist(g["co_dist"], bins=bins, density=True, color=GREEN, alpha=0.55)
+    ax.hist(g["bg_dist"], bins=bins, density=True, color=RED, alpha=0.45)
     fm = float(np.median(floor))
     ax.axvline(fm, color=DARK, ls="--", lw=1.5)
     ax.set_xlim(0, hi)
@@ -144,14 +141,34 @@ def draw_idea3_cell(ax, g, ts):
     return ts
 
 
+NAMES = {1: "floor-alpha-sweep", 2: "floor-coobs-vs-background", 3: "floor-profiles"}
+SUPS = {
+    1: "Recall (green, left) vs background admitted (red, right) vs α; dashed = α0.8",
+    2: "Co-observation (green) vs background (red) distances; dashed = median floor α·B",
+    3: "Neighbour distance vs rank: co-obs (green), background (grey); α·B dashed, B dotted",
+}
+
+
+def save_png(fig, out):
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp.png")
+    fig.savefig(tmp, dpi=120)
+    plt.close(fig)
+    Image.open(tmp).convert("RGB").quantize(colors=64, method=Image.MAXCOVERAGE).save(
+        out, optimize=True
+    )
+    tmp.unlink()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--solve", help="single dataset (path/glob)")
     ap.add_argument("--all", action="store_true", help="all four reconstructions")
+    ap.add_argument("--ideas", type=int, nargs="*", default=[1, 2, 3])
     ap.add_argument("--outdir", default="/tmp")
     args = ap.parse_args()
     od = Path(args.outdir)
-    od.mkdir(parents=True, exist_ok=True)
+    ideas = set(args.ideas)
 
     datasets = (
         [(lbl, glob) for lbl, glob in SOLVES if lbl != "dino_large"]
@@ -160,51 +177,43 @@ def main() -> None:
     )
     nd = len(datasets)
     rows = (nd + 1) // 2
-    f1, ax1 = plt.subplots(rows, 2, figsize=(8.2, 3.0 * rows), squeeze=False)
-    f2, ax2 = plt.subplots(rows, 2, figsize=(8.2, 3.0 * rows), squeeze=False)
-    f3, ax3 = plt.subplots(
-        nd, len(SIZES), figsize=(2.0 * len(SIZES), 2.0 * nd), squeeze=False
-    )
+    figs = {}
+    if 1 in ideas:
+        figs[1] = plt.subplots(rows, 2, figsize=(8.2, 3.0 * rows), squeeze=False)
+    if 2 in ideas:
+        figs[2] = plt.subplots(rows, 2, figsize=(8.2, 3.0 * rows), squeeze=False)
+    if 3 in ideas:
+        figs[3] = plt.subplots(
+            nd, len(SIZES), figsize=(2.0 * len(SIZES), 2.0 * nd), squeeze=False
+        )
 
     for d, (lbl, glob) in enumerate(datasets):
         print(f"gather {lbl} ...", flush=True)
         g = gather(load_descriptor_bank(resolve_solve(glob)))
-        draw_idea1(ax1.ravel()[d], g, lbl)
-        draw_idea2(ax2.ravel()[d], g, lbl)
-        for c, ts in enumerate(SIZES):
-            got = draw_idea3_cell(ax3[d][c], g, ts)
-            if got:
-                ax3[d][c].set_title(f"size {got}", fontsize=8)
-        ax3[d][0].set_ylabel(lbl, fontsize=8)
+        if 1 in figs:
+            draw_idea1(figs[1][1].ravel()[d], g, lbl)
+        if 2 in figs:
+            draw_idea2(figs[2][1].ravel()[d], g, lbl)
+        if 3 in figs:
+            ax3 = figs[3][1]
+            for c, ts in enumerate(SIZES):
+                got = draw_idea3_cell(ax3[d][c], g, ts)
+                if got:
+                    ax3[d][c].set_title(f"size {got}", fontsize=8)
+            ax3[d][0].set_ylabel(lbl, fontsize=8)
         del g
 
-    for d in range(nd, rows * 2):  # hide unused panels
-        ax1.ravel()[d].set_axis_off()
-        ax2.ravel()[d].set_axis_off()
+    for k in (1, 2):
+        if k in figs:
+            axes = figs[k][1]
+            for d in range(nd, rows * 2):
+                axes.ravel()[d].set_axis_off()
 
-    f1.suptitle(
-        "Recall (green, left) vs background admitted (red, right) vs α; dashed = α0.8",
-        fontsize=10,
-    )
-    f2.suptitle(
-        "Co-observation (green) vs background (red) distances; "
-        "dashed = median floor α·B",
-        fontsize=10,
-    )
-    f3.suptitle(
-        "Neighbour distance vs rank: co-obs (green), background (grey); "
-        "α·B dashed, B dotted",
-        fontsize=10,
-    )
-    for f, name in [
-        (f1, "all-idea1-alpha-sweep"),
-        (f2, "all-idea2-distance-dists"),
-        (f3, "all-idea3-profiles"),
-    ]:
-        f.tight_layout()
-        f.savefig(od / f"{name}.png", dpi=120)
-        plt.close(f)
-    print(f"wrote three figures to {od}")
+    for k, (fig, _axes) in figs.items():
+        fig.suptitle(SUPS[k], fontsize=10)
+        fig.tight_layout()
+        save_png(fig, od / f"{NAMES[k]}.png")
+    print(f"wrote {[NAMES[k] for k in figs]} to {od}")
 
 
 if __name__ == "__main__":
