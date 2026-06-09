@@ -90,11 +90,10 @@ def strat_radius_d1(case, tau=1.5):
     return (case["dist"] <= tau * case["dist"][:, :1]) & _cross(case)
 
 
-def strat_bgfloor(case, alpha=0.7):
-    """Estimate background scale B = median of the far half of the
-    neighbourhood; keep neighbours well below it (≤ alpha·B)."""
-    kb = case["dist"].shape[1]
-    b = np.median(case["dist"][:, kb // 2 :], axis=1, keepdims=True)
+def strat_bgfloor(case, alpha=0.8, b0=8):
+    """Estimate background scale B = median distance of the neighbours from rank
+    b0 onward; keep neighbours within alpha·B. Tuned defaults (exp23)."""
+    b = np.median(case["dist"][:, b0:], axis=1, keepdims=True)
     return (case["dist"] <= alpha * b) & _cross(case)
 
 
@@ -142,7 +141,7 @@ STRATEGIES = {
     "c·d2 (2.0)": strat_radius_cd2,
     "c·d2 (1.5)": partial(strat_radius_cd2, c=1.5),
     "tau·d1 (1.5)": strat_radius_d1,
-    "bgfloor 0.7": strat_bgfloor,
+    "bgfloor": strat_bgfloor,
     "top4": strat_topk,
     "mutual-best": strat_mutual_best,
     "recip R≤4": strat_recip,
