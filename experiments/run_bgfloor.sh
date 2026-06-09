@@ -8,13 +8,13 @@
 # or bgclusters (materialized clusters). Distinct per-mode output names so runs
 # never clobber each other or the nbr_* / pct_* solves.
 #
-# Usage:  bash experiments/run_bgfloor.sh <workspace> [alpha] [b0] [mode]
+# Usage:  bash experiments/run_bgfloor.sh <workspace> [alpha] [d] [mode]
 set -e
 export PATH="$HOME/.pixi/bin:$PATH"
 
 WS="$1"
 ALPHA="${2:-0.8}"
-B0="${3:-8}"
+D="${3:-28}"
 MODE="${4:-bgfloor}"
 case "$MODE" in
   bgfloor) PFX=bgf ;;
@@ -23,11 +23,11 @@ case "$MODE" in
 esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)/$WS"
 BASE=$(ls "$ROOT"/sfmr/*solve*.sfmr | head -1)
-echo "============================== $WS ($MODE a=$ALPHA b0=$B0) =============================="
+echo "============================== $WS ($MODE a=$ALPHA d=$D) =============================="
 
 cd "$(dirname "$0")"
 pixi run -e experiments python -u exp05_cluster_match.py "$ROOT/sfmr/"'*solve*.sfmr' \
-    --out "$ROOT/matches/$PFX.matches" --mode "$MODE" --bg-alpha "$ALPHA" --bg-b0 "$B0" \
+    --out "$ROOT/matches/$PFX.matches" --mode "$MODE" --bg-alpha "$ALPHA" --bg-d "$D" \
     2>&1 | grep -vE "WARN" | grep -E "after one"
 
 cd "$ROOT/.."

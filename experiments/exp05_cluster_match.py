@@ -55,7 +55,8 @@ def derive_threshold(d1: np.ndarray, method: str) -> float:
 
 
 CLIFF_MIN_JUMP = 1.3  # a cliff must out-jump the d2/d1 step by at least this
-BG_K = 49  # wider neighbourhood (48 + self) for the background-floor matcher
+D_RANK = 28  # background rank: the floor is the d-th-nearest distance
+BG_K = D_RANK + 1  # background-floor query width: self + the d nearest others
 
 
 def cliff_outer(dst: np.ndarray, min_jump: float = CLIFF_MIN_JUMP) -> np.ndarray:
@@ -272,16 +273,16 @@ def build_neighbor_matches_arrays(bank, idx, dst, T, active):
     return _edges_to_pair_arrays(img, feat, i_rep[keep], j[keep], dd[keep])
 
 
-def build_bgfloor_matches_arrays(bank, idx, dst, alpha=0.8, b0=8):
+def build_bgfloor_matches_arrays(bank, idx, dst, alpha=0.8, d=D_RANK):
     """Purely-local matcher: each descriptor keeps its cross-image neighbours
-    within its *own* background-floor radius — ``alpha`` × the median distance of
-    its neighbours from rank ``b0`` on (the background scale; exp21/exp23) — then
-    deduped one-to-one per image pair. No global threshold.
+    within its *own* background-floor radius — ``alpha`` × its ``d``-th-nearest
+    distance (the background scale; exp21/exp23) — then deduped one-to-one per
+    image pair. No global threshold.
     """
     n = bank.n
     img = bank.image_label.astype(np.int64)
     feat = bank.feature_label.astype(np.int64)
-    radius = alpha * np.median(dst[:, b0:], axis=1)  # (n,) per-descriptor radius
+    radius = alpha * dst[:, d]  # (n,) per-descriptor radius
     kw = idx.shape[1]
     i_rep = np.repeat(np.arange(n), kw)
     j = idx.ravel().astype(np.int64)
@@ -486,13 +487,14 @@ def main() -> None:
         "--bg-alpha",
         type=float,
         default=0.8,
-        help="bgfloor mode: keep neighbours within alpha x background scale",
+        help="bgfloor/bgclusters: keep neighbours within alpha x background scale",
     )
     ap.add_argument(
-        "--bg-b0",
+        "--bg-d",
         type=int,
-        default=8,
-        help="bgfloor mode: background scale = median of neighbours from rank b0",
+        default=D_RANK,
+        help="bgfloor/bgclusters: background rank; the floor is the d-th-nearest"
+        " distance (query width is d+1)",
     )
     ap.add_argument(
         "--exact",
@@ -523,7 +525,7 @@ def main() -> None:
     print(f"loaded {path}: n={bank.n}")
 
     forest = None
-    query_k = BG_K if args.mode in ("bgfloor", "bgclusters") else K
+    query_k = (args.bg_d + 1) if args.mode in ("bgfloor", "bgclusters") else K
     if args.exact:
         # Oracle path: exact NN, cached.
         cache = Path(
@@ -590,18 +592,18 @@ def main() -> None:
             forest=forest,
         )
     elif args.mode == "bgfloor":
-        print(f"mode=bgfloor (per-point radius, alpha={args.bg_alpha} b0={args.bg_b0})")
+        print(f"mode=bgfloor (per-point radius, alpha={args.bg_alpha} d={args.bg_d})")
         ii_pairs, m_counts, feat_idx, dists = build_bgfloor_matches_arrays(
-            bank, idx, dst, alpha=args.bg_alpha, b0=args.bg_b0
+            bank, idx, dst, alpha=args.bg_alpha, d=args.bg_d
         )
     elif args.mode == "bgclusters":
         # Materialized clusters under the per-point background-floor radius:
         # density-seeded claim with each seed's own radius, then C(m,2) pairs.
         print(
             f"mode=bgclusters (per-point radius clusters, "
-            f"alpha={args.bg_alpha} b0={args.bg_b0})"
+            f"alpha={args.bg_alpha} d={args.bg_d})"
         )
-        radius = (args.bg_alpha * np.median(dst[:, args.bg_b0 :], axis=1))[:, None]
+        radius = (args.bg_alpha * dst[:, args.bg_d])[:, None]
         ii_pairs, m_counts, feat_idx, dists = build_cluster_matches_arrays(
             bank, idx, dst, radius, min_size=args.min_cluster_size
         )
