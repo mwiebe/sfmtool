@@ -345,6 +345,17 @@ Global-threshold alternative (§"Alternatives considered"):
 - **The hard partition is greedy and order-dependent.** A feature claimed by one
   cluster cannot join a better one later; seeding densest-first mitigates this by
   forming the best-defined clusters before the leftovers.
+- **The per-image feature budget matters more than the matcher's parameters.** On
+  our datasets, registration and point density are stable across the solve seed
+  and across `d` (4–40) and `alpha` (0.5–0.9) — the binding constraint is how many
+  features each image carries. As the cap tightens, marginal images drop, and
+  below ~100 features per image incremental reconstruction collapses entirely.
+  This is a scene-and-budget property rather than a clustering one: exhaustive
+  matching loses the same images at the same budgets, and the cluster matcher
+  tracks it closely (occasionally holding one or two more at sparse budgets). Two
+  asides from the same sweep — `alpha = 1.0` over-merges clusters and sheds
+  matches, so keep it below 1; and when matches are sparse, global SfM keeps more
+  images registered than incremental.
 - **Global SfM is less reliable than incremental on these datasets** (its `sfm
   compare` verdicts range from two to four of four across runs, and which pass
   varies with the match set and seed — above), for reasons we don't yet
