@@ -30,6 +30,7 @@ from exp03_radius_clusters import score
 from exp05_cluster_match import cliff_threshold
 from seed_cluster import seed_claim_clusters
 from sfm_descriptors import load_descriptor_bank
+from sfmtool._sfmtool import background_floor_clusters
 
 DATASETS = [
     "seoul_bull_ws",
@@ -38,9 +39,28 @@ DATASETS = [
     "dino_dog_toy_ws",
 ]
 
-D_RANK = 28  # background rank: B_i = dist[i, 28] (= median(dist[8:49]))
+D_RANK = 28  # background rank: B_i = dist[i, 28] (production default in main is 10)
 BG_ALPHA = 0.8
-BG_K = 32  # d + small margin
+
+
+def production_labels(bank, preset: str) -> np.ndarray:
+    """Per-descriptor cluster labels from the production background-floor matcher.
+
+    Runs the shipped ``sfmtool.background_floor_clusters`` (Rust) and scatters its
+    CSR clusters back onto the bank's concatenated rows: ``labels[row] = cluster``
+    for every member, ``-1`` for descriptors no cluster claimed.
+    """
+    corpus = np.ascontiguousarray(bank.descriptors)
+    image_starts = bank.image_starts
+    cluster_starts, member_images, member_features = background_floor_clusters(
+        corpus, image_starts, d=D_RANK, alpha=BG_ALPHA, min_size=2, preset=preset
+    )
+    rows = image_starts[member_images].astype(np.int64) + member_features
+    counts = np.diff(cluster_starts.astype(np.int64))
+    member_cluster = np.repeat(np.arange(len(counts), dtype=np.int64), counts)
+    labels = np.full(bank.n, -1, dtype=np.int64)
+    labels[rows] = member_cluster
+    return labels
 
 
 def run_one(ws: str, mode: str, preset: str):
@@ -48,17 +68,17 @@ def run_one(ws: str, mode: str, preset: str):
 
     path = sorted(glob.glob(f"../{ws}/sfmr/*solve*.sfmr"))[0]
     bank = load_descriptor_bank(path)
-    desc = np.ascontiguousarray(bank.descriptors)
-    forest = KdForest(desc, preset=preset)
 
     if mode == "bgfloor":
-        idx, dst = forest.query(desc, k=BG_K)
-        T = (BG_ALPHA * dst[:, D_RANK])[:, None]  # per-descriptor floor radius
+        # The production rule: cluster with the shipped Rust matcher itself.
+        labels = production_labels(bank, preset)
     else:
+        # The global-threshold alternative we considered (POC numpy clustering).
+        desc = np.ascontiguousarray(bank.descriptors)
+        forest = KdForest(desc, preset=preset)
         idx, dst = forest.query(desc, k=17)
-        T = cliff_threshold(dst)
-    idx = idx.astype(np.int64)
-    labels = seed_claim_clusters(idx, dst, bank.image_label, T)
+        idx = idx.astype(np.int64)
+        labels = seed_claim_clusters(idx, dst, bank.image_label, cliff_threshold(dst))
 
     # Singletons for unclustered descriptors so cluster sizes are correct.
     comp = labels.copy()

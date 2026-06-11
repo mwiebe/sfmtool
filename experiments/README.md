@@ -203,8 +203,14 @@ otherwise capture a whole component.
 - `exp02_ratio_threshold.py` — neighbour-distance structure + plots.
 - `exp03_radius_clusters.py` — bounded-radius clustering, scored vs tracks.
 - `exp04_auto_threshold.py` — data-derived radius (Otsu / GMM) + transfer check.
-- `exp05_cluster_match.py` — the cluster matcher: writes a `.matches` file using
+- `exp05_cluster_match.py` — the cluster matcher: writes a `.matches` file. Its
+  canonical `--mode bgclusters` now calls the shipped production matcher
+  (`sfmtool.background_floor_clusters` + `clusters_to_pair_matches`,
+  `crates/sfmtool-core/src/cluster_match/`); the other exploratory modes still use
   the in-tree `sfmtool.KdForest` ANN index (`--exact` for the brute-force oracle).
+- `exp07_cluster_vs_tracks.py` — scores clusters against the solve's tracks; its
+  default `bgfloor` mode clusters with the production matcher, `global` keeps the
+  POC numpy clustering as the comparison alternative.
 - `exp06_solver_stability.py` — incremental/global solver seed sweep.
 - `run_neighbor_pipeline.sh`, `run_both_solvers.sh` — end-to-end drivers
   (matches → COLMAP verify → solve → `sfm compare`).

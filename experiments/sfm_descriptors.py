@@ -54,6 +54,21 @@ class DescriptorBank:
         """Boolean mask of descriptors the solve actually used in a track."""
         return self.point_label >= 0
 
+    @property
+    def image_starts(self) -> np.ndarray:
+        """CSR offsets ``(n_images + 1,)`` uint32 over the concatenated corpus:
+        image ``i`` owns rows ``image_starts[i]:image_starts[i + 1]``.
+
+        Descriptors are stored image-by-image, so this is just the per-image
+        feature-count prefix sum — the exact layout
+        ``sfmtool.background_floor_clusters`` / ``clusters_to_pair_matches``
+        expect for ``image_starts``.
+        """
+        counts = np.bincount(self.image_label, minlength=len(self.image_names))
+        starts = np.zeros(len(self.image_names) + 1, dtype=np.uint32)
+        starts[1:] = np.cumsum(counts)
+        return starts
+
 
 def load_descriptor_bank(sfmr_path: str | Path) -> DescriptorBank:
     """Load every descriptor in the reconstruction's images, labelled by track.

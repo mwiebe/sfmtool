@@ -42,7 +42,12 @@ from exp03_radius_clusters import K, knn_all
 from seed_cluster import seed_claim_clusters
 from exp04_auto_threshold import gmm_crossover, otsu_threshold
 from sfm_descriptors import load_descriptor_bank
-from sfmtool._sfmtool import read_sift_metadata, write_matches
+from sfmtool._sfmtool import (
+    background_floor_clusters,
+    clusters_to_pair_matches,
+    read_sift_metadata,
+    write_matches,
+)
 
 
 def derive_threshold(d1: np.ndarray, method: str) -> float:
@@ -443,6 +448,68 @@ def assemble_matches_dict(
     }
 
 
+def write_matches_file(bank, ii_pairs, m_counts, feat_idx, dists, out_arg) -> None:
+    """Resolve the workspace .sift paths, assemble the matches dict, and write it.
+
+    Shared tail for every matcher mode: takes the parallel pair arrays and emits
+    the ``.matches`` file ``sfm solve -i`` consumes.
+    """
+    print(
+        f"after one-per-image: {int(m_counts.sum())} matches across "
+        f"{len(ii_pairs)} image pairs"
+    )
+    from sfmtool.sift.file import get_sift_path_for_image
+
+    ws = Path(bank.workspace_dir)
+    image_names = list(bank.image_names)
+    sift_paths = [Path(get_sift_path_for_image(str(ws / nm))) for nm in image_names]
+
+    out = Path(out_arg).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    data = assemble_matches_dict(
+        bank, ii_pairs, m_counts, feat_idx, dists, image_names, sift_paths, ws, out
+    )
+    write_matches(str(out), data)
+    print(
+        f"\nwrote {out}: {data['metadata']['image_pair_count']} pairs, "
+        f"{data['metadata']['match_count']} matches "
+        f"(has_two_view_geometries=False)"
+    )
+    print(
+        "next: `pixi run sfm solve -i <matches>` will run COLMAP "
+        "verification on these pairs."
+    )
+
+
+def run_bgclusters(bank, args) -> None:
+    """Production background-floor matcher: cluster the corpus with the in-tree
+    Rust ``background_floor_clusters`` and expand it with ``clusters_to_pair_matches``
+    (``crates/sfmtool-core/src/cluster_match`` via ``sfmtool._sfmtool``).
+
+    This is the canonical path that shipped to main as ``sfm match --cluster``;
+    the POC just feeds it the loaded descriptor corpus and writes the result.
+    """
+    print(
+        f"mode=bgclusters (production background_floor_clusters, "
+        f"alpha={args.bg_alpha} d={args.bg_d}, preset={args.preset})"
+    )
+    corpus = np.ascontiguousarray(bank.descriptors)
+    image_starts = bank.image_starts
+    cluster_starts, member_images, member_features = background_floor_clusters(
+        corpus,
+        image_starts,
+        d=args.bg_d,
+        alpha=args.bg_alpha,
+        min_size=args.min_cluster_size,
+        preset=args.preset,
+    )
+    print(f"materialized {len(cluster_starts) - 1} clusters")
+    ii_pairs, m_counts, feat_idx, dists = clusters_to_pair_matches(
+        cluster_starts, member_images, member_features, corpus, image_starts
+    )
+    write_matches_file(bank, ii_pairs, m_counts, feat_idx, dists, args.out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("sfmr")
@@ -480,8 +547,8 @@ def main() -> None:
         "neighbors: per-descriptor 16-NN neighbourhoods (no merging); "
         "clusters: materialized density-seeded clusters (global T); "
         "bgfloor: purely-local per-descriptor background-floor radius (edges); "
-        "bgclusters: materialized density-seeded clusters with the per-point "
-        "background-floor radius",
+        "bgclusters: the production matcher (sfmtool.background_floor_clusters + "
+        "clusters_to_pair_matches)",
     )
     ap.add_argument(
         "--bg-alpha",
@@ -524,8 +591,14 @@ def main() -> None:
     bank = load_descriptor_bank(path)
     print(f"loaded {path}: n={bank.n}")
 
+    # bgclusters is the production matcher: it builds its own kd-forest index and
+    # clusters inside Rust, so it skips the POC's own forest/query/threshold work.
+    if args.mode == "bgclusters":
+        run_bgclusters(bank, args)
+        return
+
     forest = None
-    query_k = (args.bg_d + 1) if args.mode in ("bgfloor", "bgclusters") else K
+    query_k = (args.bg_d + 1) if args.mode == "bgfloor" else K
     if args.exact:
         # Oracle path: exact NN, cached.
         cache = Path(
@@ -596,49 +669,13 @@ def main() -> None:
         ii_pairs, m_counts, feat_idx, dists = build_bgfloor_matches_arrays(
             bank, idx, dst, alpha=args.bg_alpha, d=args.bg_d
         )
-    elif args.mode == "bgclusters":
-        # Materialized clusters under the per-point background-floor radius:
-        # density-seeded claim with each seed's own radius, then C(m,2) pairs.
-        print(
-            f"mode=bgclusters (per-point radius clusters, "
-            f"alpha={args.bg_alpha} d={args.bg_d})"
-        )
-        radius = (args.bg_alpha * dst[:, args.bg_d])[:, None]
-        ii_pairs, m_counts, feat_idx, dists = build_cluster_matches_arrays(
-            bank, idx, dst, radius, min_size=args.min_cluster_size
-        )
     else:
         print("mode=neighbors (no transitive merging, vectorised)")
         ii_pairs, m_counts, feat_idx, dists = build_neighbor_matches_arrays(
             bank, idx, dst, T, active
         )
-    print(
-        f"after one-per-image: {int(m_counts.sum())} matches across "
-        f"{len(ii_pairs)} image pairs"
-    )
 
-    # Resolve image names -> .sift paths in the workspace.
-    from sfmtool.sift.file import get_sift_path_for_image
-
-    ws = Path(bank.workspace_dir)
-    image_names = list(bank.image_names)
-    sift_paths = [Path(get_sift_path_for_image(str(ws / nm))) for nm in image_names]
-
-    out = Path(args.out).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    data = assemble_matches_dict(
-        bank, ii_pairs, m_counts, feat_idx, dists, image_names, sift_paths, ws, out
-    )
-    write_matches(str(out), data)
-    print(
-        f"\nwrote {out}: {data['metadata']['image_pair_count']} pairs, "
-        f"{data['metadata']['match_count']} matches "
-        f"(has_two_view_geometries=False)"
-    )
-    print(
-        "next: `pixi run sfm solve -i <matches>` will run COLMAP "
-        "verification on these pairs."
-    )
+    write_matches_file(bank, ii_pairs, m_counts, feat_idx, dists, args.out)
 
 
 if __name__ == "__main__":
