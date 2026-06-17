@@ -9,7 +9,7 @@ experimental "flow" mode, which has some promise for videos.
 ## Command Syntax
 
 ```bash
-sfm match [PATHS...] --exhaustive | --sequential | --flow | --cluster [OPTIONS...]
+sfm match [PATHS...] --exhaustive | --sequential | --flow | --cluster | --mutual-knn [OPTIONS...]
 sfm match --merge FILE1.matches FILE2.matches ... -o OUTPUT.matches
 ```
 
@@ -24,6 +24,7 @@ or `--merge` to combine existing `.matches` files.
 | `--sequential / -s` | Match each image against its nearby neighbors in sequence order |
 | `--flow` | Use dense optical flow to guide feature matching |
 | `--cluster` | Cluster all images' descriptors at once (background-floor track-cluster matching) |
+| `--mutual-knn` | Keep each descriptor's mutual k-nearest cross-image neighbours (higher wide-baseline recall than `--cluster`) |
 | `--merge` | Merge multiple `.matches` files into one |
 
 ## Options
@@ -36,6 +37,9 @@ or `--merge` to combine existing `.matches` files.
 | `--cluster-alpha` | float | 0.8 | Background-floor radius multiplier for cluster matching |
 | `--cluster-d` | int | 10 | Background rank: the d-th-nearest distance sets the floor for cluster matching |
 | `--cluster-preset` | `accurate` \| `balanced` \| `fast` | `accurate` | Kd-tree forest preset for cluster matching |
+| `--mutual-knn-k` | int | 12 | Nearest cross-image neighbours kept per descriptor for mutual-kNN matching |
+| `--mutual-knn-triangle` | int | 0 | Triangle filter for mutual-kNN: keep an edge only if it closes >= this many triangles (0 disables) |
+| `--mutual-knn-preset` | `accurate` \| `balanced` \| `fast` | `accurate` | Kd-tree forest preset for mutual-kNN matching |
 | `--max-features` | int | | Maximum features per image |
 | `--output / -o` | path | auto | Output `.matches` file path (default: timestamped, required for `--merge`) |
 | `--range / -r` | string | | Range expression for file numbers |
@@ -77,6 +81,33 @@ resolves for one of the images (see [Camera Intrinsics](#camera-intrinsics)).
 
 See [`../core/track-cluster-matching.md`](../core/track-cluster-matching.md)
 for the algorithm design, empirical justification, and the production API.
+
+## Mutual-kNN Matching
+
+`--mutual-knn` is a corpus-level matcher like `--cluster`, but it selects
+candidates by **mutual nearest neighbours** instead of a background-floor
+radius. Over the same shared kd-forest k-NN query, it keeps each descriptor's
+`--mutual-knn-k` nearest *cross-image* neighbours and emits the edges that are
+mutual (`b` among `a`'s top-k and `a` among `b`'s). Because this is
+rank-bounded, not radius-bounded, it recovers the wide-baseline matches the
+floor's radius cuts — roughly doubling hard-pair recall and yielding 11–44% more
+reconstructed points across the bundled datasets — at the cost of more candidate
+matches to geometrically verify. Precision comes from that verification (RANSAC
+two-view geometry), so like `--cluster` the output carries two-view geometry and
+is written under `tvg-matches/`.
+
+`--mutual-knn-triangle T` adds an optional precision filter: keep an edge only if
+it closes at least `T` triangles in the mutual graph (a third descriptor
+mutually matched to both endpoints — a >= 3-view mini-track). `T=1`–`2` sheds
+spurious candidates with little recall loss; `0` (the default) disables it.
+
+The recovered wide-baseline points are noisier than the floor's, so treat
+`--mutual-knn` as a **completeness** knob (more points, same cameras) rather than
+an accuracy one. As with `--cluster`, `--camera-model` feeds only the geometric
+verification step and is rejected only when a `camera_config.json` resolves.
+
+See [`../core/mutual-knn-matching.md`](../core/mutual-knn-matching.md) for the
+algorithm design, the recall/precision data, and the production API.
 
 ## Merge
 

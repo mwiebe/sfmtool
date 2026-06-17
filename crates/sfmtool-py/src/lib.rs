@@ -71,6 +71,7 @@ mod py_image;
 mod py_cluster_match;
 mod py_descriptor_match;
 mod py_image_match;
+mod py_mutual_knn;
 mod py_sift;
 mod py_sweep_match;
 
@@ -200,6 +201,9 @@ fn _sfmtool(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_cluster_match::clusters_to_pair_matches,
         m
     )?)?;
+
+    // Mutual-kNN cross-image matching
+    m.add_function(wrap_pyfunction!(py_mutual_knn::mutual_knn_matches, m)?)?;
 
     // SE3 transform acceleration
     m.add_function(wrap_pyfunction!(

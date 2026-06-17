@@ -108,6 +108,38 @@ from .._filenames import expand_paths
     help="Kd-tree forest preset for --cluster. Default: accurate.",
 )
 @click.option(
+    "--mutual-knn",
+    "mutual_knn_match",
+    is_flag=True,
+    help="Use the mutual-kNN matcher: keep each descriptor's mutual k-nearest "
+    "cross-image neighbours. Higher wide-baseline recall than --cluster; relies "
+    "on geometric verification for precision.",
+)
+@click.option(
+    "--mutual-knn-k",
+    "mutual_knn_k",
+    type=click.IntRange(min=1),
+    default=12,
+    help="Neighbours kept per descriptor for --mutual-knn. Larger = more "
+    "wide-baseline recall and more candidates to verify. Default: 12.",
+)
+@click.option(
+    "--mutual-knn-triangle",
+    "mutual_knn_triangle_min",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Triangle filter for --mutual-knn: keep an edge only if it closes at "
+    "least this many triangles (a third mutually-matched descriptor). 0 "
+    "disables. Default: 0.",
+)
+@click.option(
+    "--mutual-knn-preset",
+    "mutual_knn_preset",
+    type=click.Choice(["accurate", "balanced", "fast"]),
+    default="accurate",
+    help="Kd-tree forest preset for --mutual-knn. Default: accurate.",
+)
+@click.option(
     "--camera-model",
     "camera_model",
     type=click.Choice(
@@ -150,6 +182,10 @@ def match(
     cluster_alpha,
     cluster_d,
     cluster_preset,
+    mutual_knn_match,
+    mutual_knn_k,
+    mutual_knn_triangle_min,
+    mutual_knn_preset,
     camera_model,
     merge,
 ):
@@ -171,6 +207,9 @@ def match(
         # Background-floor track-cluster matching
         sfm match --cluster images/
 
+        # Mutual-kNN matching
+        sfm match --mutual-knn images/
+
         # With feature count limit
         sfm match --exhaustive --max-features 4096 images/
 
@@ -191,17 +230,20 @@ def match(
     if not paths:
         raise click.UsageError("Must provide image paths.")
 
-    method_count = sum([exhaustive, sequential, flow_match, cluster_match])
+    method_count = sum(
+        [exhaustive, sequential, flow_match, cluster_match, mutual_knn_match]
+    )
     if method_count > 1:
         raise click.UsageError(
             "Cannot specify more than one matching method. "
             "Choose one of: --exhaustive (-e), --sequential (-s), --flow, "
-            "or --cluster"
+            "--cluster, or --mutual-knn"
         )
     if method_count == 0:
         raise click.UsageError(
             "Must specify a matching method: "
-            "--exhaustive (-e), --sequential (-s), --flow, or --cluster"
+            "--exhaustive (-e), --sequential (-s), --flow, --cluster, "
+            "or --mutual-knn"
         )
 
     numbers = None
@@ -232,6 +274,8 @@ def match(
             matching_method = "flow"
         elif cluster_match:
             matching_method = "cluster"
+        elif mutual_knn_match:
+            matching_method = "mutual-knn"
         elif sequential:
             matching_method = "sequential"
         else:
@@ -249,6 +293,9 @@ def match(
             cluster_d=cluster_d,
             cluster_alpha=cluster_alpha,
             cluster_preset=cluster_preset,
+            mutual_knn_k=mutual_knn_k,
+            mutual_knn_triangle_min=mutual_knn_triangle_min,
+            mutual_knn_preset=mutual_knn_preset,
         )
     except Exception as e:
         raise click.ClickException(str(e))

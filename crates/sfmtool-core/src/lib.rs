@@ -23,6 +23,7 @@ pub mod frustum;
 pub mod image_pair_graph;
 pub mod infinity;
 pub mod kdforest;
+pub mod mutual_knn;
 pub mod optical_flow;
 pub mod patch_cloud;
 pub mod patch_normal_refine;

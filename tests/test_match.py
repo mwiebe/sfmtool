@@ -79,6 +79,38 @@ def test_match_exhaustive(isolated_seoul_bull_17_images: list[Path]):
     assert matches_data["metadata"]["match_count"] > 0
 
 
+def test_match_mutual_knn(isolated_seoul_bull_17_images: list[Path]):
+    """Test mutual-kNN matching on a small set of images."""
+    workspace_dir = isolated_seoul_bull_17_images[0].parent
+
+    result = CliRunner().invoke(main, ["ws", "init", str(workspace_dir)])
+    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(main, ["sift", "--extract", str(workspace_dir)])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(main, ["match", "--mutual-knn", str(workspace_dir)])
+    assert result.exit_code == 0, result.output
+    assert "Mutual-kNN:" in result.output
+
+    tvg_dir = workspace_dir / "tvg-matches"
+    matches_dir = workspace_dir / "matches"
+    matches_files = []
+    if tvg_dir.exists():
+        matches_files.extend(tvg_dir.glob("*.matches"))
+    if matches_dir.exists():
+        matches_files.extend(matches_dir.glob("*.matches"))
+    assert len(matches_files) == 1
+
+    from sfmtool._sfmtool import read_matches
+
+    matches_data = read_matches(str(matches_files[0]))
+    assert matches_data["metadata"]["matching_method"] == "mutual-knn"
+    assert matches_data["metadata"]["matching_tool"] == "sfmtool"
+    assert matches_data["metadata"]["image_count"] == 17
+    assert matches_data["metadata"]["match_count"] > 0
+    assert matches_data["metadata"]["matching_options"]["mode"] == "mutual-knn"
+
+
 def test_match_sequential(isolated_seoul_bull_17_images: list[Path]):
     """Test sequential matching on a small set of images."""
     workspace_dir = isolated_seoul_bull_17_images[0].parent

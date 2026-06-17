@@ -39,6 +39,9 @@ def _run_matching(
     cluster_alpha: float = 0.8,
     cluster_min_size: int = 2,
     cluster_preset: str = "accurate",
+    mutual_knn_k: int = 12,
+    mutual_knn_triangle_min: int = 0,
+    mutual_knn_preset: str = "accurate",
 ):
     """Run matching and produce a .matches file."""
     import pycolmap
@@ -118,6 +121,18 @@ def _run_matching(
                 min_size=cluster_min_size,
                 preset=cluster_preset,
             )
+        elif matching_method == "mutual-knn":
+            _run_mutual_knn_matching(
+                image_paths,
+                sift_paths,
+                workspace_dir,
+                db_path,
+                Path(tmpdir),
+                max_feature_count=max_feature_count,
+                k=mutual_knn_k,
+                triangle_min=mutual_knn_triangle_min,
+                preset=mutual_knn_preset,
+            )
         else:
             raise ValueError(f"Unsupported matching method: {matching_method}")
 
@@ -145,7 +160,7 @@ def _run_matching(
     if matching_method == "flow":
         matches_data["metadata"]["matching_tool"] = "sfmtool-flow"
         matches_data["metadata"]["matching_tool_version"] = ""
-    elif matching_method == "cluster":
+    elif matching_method in ("cluster", "mutual-knn"):
         from importlib.metadata import version as get_version
 
         matches_data["metadata"]["matching_tool"] = "sfmtool"
@@ -171,6 +186,15 @@ def _run_matching(
                 "alpha": cluster_alpha,
                 "min_size": cluster_min_size,
                 "preset": cluster_preset,
+            }
+        )
+    if matching_method == "mutual-knn":
+        matches_data["metadata"]["matching_options"].update(
+            {
+                "mode": "mutual-knn",
+                "k": mutual_knn_k,
+                "triangle_min": mutual_knn_triangle_min,
+                "preset": mutual_knn_preset,
             }
         )
     if matching_method == "sequential":
@@ -364,8 +388,6 @@ def _run_cluster_matching(
     verification via pycolmap. The clusters themselves are the matcher's
     primary artefact; persisting them to disk is a future consumer's job.
     """
-    import pycolmap
-
     from ._cluster_matching import cluster_match
 
     clusters, pairs = cluster_match(
@@ -388,6 +410,71 @@ def _run_cluster_matching(
         click.echo("Warning: Cluster matching produced no matches")
         return
 
+    _write_pairs_and_verify(
+        pairs, image_paths, workspace_dir, db_path, colmap_dir, "cluster_pairs.txt"
+    )
+
+
+def _run_mutual_knn_matching(
+    image_paths: list[Path],
+    sift_paths: list[Path],
+    workspace_dir: Path,
+    db_path: Path,
+    colmap_dir: Path,
+    max_feature_count: int | None = None,
+    k: int = 12,
+    triangle_min: int = 0,
+    preset: str = "accurate",
+) -> None:
+    """Run mutual-kNN matching and write results to the DB.
+
+    Builds one descriptor corpus from every image's SIFT features, keeps each
+    descriptor's ``k`` nearest mutual cross-image neighbours (optionally
+    triangle-filtered), writes the resulting per-image-pair matches to the
+    database, and runs geometric verification via pycolmap.
+    """
+    from ._mutual_knn_matching import mutual_knn_match
+
+    pairs = mutual_knn_match(
+        image_paths,
+        sift_paths,
+        k=k,
+        triangle_min=triangle_min,
+        preset=preset,
+        max_feature_count=max_feature_count,
+    )
+    pair_count = len(pairs.image_index_pairs)
+    click.echo(
+        f"Mutual-kNN: {len(pairs.match_feature_indexes)} candidate matches "
+        f"across {pair_count} image pairs"
+    )
+    if pair_count == 0:
+        click.echo("Warning: Mutual-kNN matching produced no matches")
+        return
+
+    _write_pairs_and_verify(
+        pairs, image_paths, workspace_dir, db_path, colmap_dir, "mutual_knn_pairs.txt"
+    )
+
+
+def _write_pairs_and_verify(
+    pairs,
+    image_paths: list[Path],
+    workspace_dir: Path,
+    db_path: Path,
+    colmap_dir: Path,
+    pairs_filename: str,
+) -> None:
+    """Write per-image-pair matches to the COLMAP DB and run geometric verification.
+
+    Shared by the corpus-level matchers (track-cluster, mutual-kNN): their
+    ``pairs`` arrays (``image_index_pairs``, ``match_counts``,
+    ``match_feature_indexes``) all use the same ``.matches`` parallel-array shape.
+    """
+    import pycolmap
+
+    pair_count = len(pairs.image_index_pairs)
+
     # Map image index (corpus order) -> database image_id
     with pycolmap.Database.open(db_path) as db:
         rel_to_id = {img.name: img.image_id for img in db.read_all_images()}
@@ -396,7 +483,7 @@ def _run_cluster_matching(
     ]
 
     # Write matches to database and build pairs file for geometric verification
-    pairs_path = colmap_dir / "cluster_pairs.txt"
+    pairs_path = colmap_dir / pairs_filename
     match_offset = 0
     with (
         pycolmap.Database.open(db_path) as db,
