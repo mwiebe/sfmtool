@@ -23,6 +23,7 @@
 //! defaults live in `specs/core/mutual-knn-matching.md`.
 
 use std::borrow::Cow;
+use std::time::Instant;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
@@ -129,12 +130,27 @@ pub fn mutual_knn_matches(
         None => Cow::Owned(descriptors.iter().copied().collect()),
     };
 
+    // Phase timing for the perf sweep: set MUTUAL_KNN_PROFILE to log each
+    // phase's wall time to stderr. Off (and free) otherwise.
+    let prof = std::env::var_os("MUTUAL_KNN_PROFILE").is_some();
+    let mark = |label: &str, t: Instant| {
+        if prof {
+            eprintln!(
+                "[mutual-knn] {label:>11}: {:>9.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    };
+
     // The forest returns nearest neighbours over the whole corpus, including
     // self and same-image hits. Over-query so that, after dropping those, we
     // still have `k` genuine cross-image neighbours for most descriptors
     // (repeated texture inside one image can otherwise crowd them out).
-    let forest = KdForestU8::build(&corpus, n, dim, params.forest);
     let query_k = (2 * k + 1).min(n);
+    let t = Instant::now();
+    let forest = KdForestU8::build(&corpus, n, dim, params.forest);
+    mark("build", t);
+    let t = Instant::now();
     let (idx, _dist) = forest.search_batch_with_distances(
         &corpus,
         n,
@@ -142,9 +158,11 @@ pub fn mutual_knn_matches(
         params.forest.max_leaf_checks,
         None,
     );
+    mark("query", t);
 
     // Per-descriptor top-k cross-image neighbour rows (nearest first), packed
     // into a flat n*k array with u32::MAX padding.
+    let t = Instant::now();
     let mut nbr = vec![u32::MAX; n * k];
     nbr.par_chunks_mut(k).enumerate().for_each(|(i, row)| {
         let mut m = 0;
@@ -160,9 +178,11 @@ pub fn mutual_knn_matches(
             m += 1;
         }
     });
+    mark("neighbours", t);
 
     // Mutual edges: a–b kept iff b is in a's row and a is in b's row. Dedup with
     // a < b; membership is a short linear scan of the length-k neighbour row.
+    let t = Instant::now();
     let mut edges: Vec<(u32, u32)> = (0..n)
         .into_par_iter()
         .flat_map_iter(|a| {
@@ -180,9 +200,11 @@ pub fn mutual_knn_matches(
             out
         })
         .collect();
+    mark("mutual", t);
 
     // Optional triangle filter: keep a–b only if it closes at least
     // `triangle_min` triangles (a third descriptor mutually matched to both).
+    let t = Instant::now();
     if params.triangle_min > 0 {
         let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
         for &(a, b) in &edges {
@@ -197,9 +219,11 @@ pub fn mutual_knn_matches(
             })
             .collect();
     }
+    mark("triangle", t);
 
     // Expand to image-pair-bucketed matches. For an edge a < b in different
     // images, image_of[a] < image_of[b], so the pair is already ordered.
+    let t = Instant::now();
     let mut tuples: Vec<(u32, u32, u32, u32, f32)> = edges
         .par_iter()
         .map(|&(a, b)| {
@@ -230,9 +254,15 @@ pub fn mutual_knn_matches(
         match_feature_indexes.extend([feat_lo, feat_hi]);
         match_descriptor_distances.push(dist);
     }
+    mark("expand", t);
 
     let pair_count = match_counts.len();
     let match_count = match_descriptor_distances.len();
+    if prof {
+        eprintln!(
+            "[mutual-knn]      N={n} k={k} query_k={query_k} pairs={pair_count} matches={match_count}"
+        );
+    }
     Ok(PairMatches {
         image_index_pairs: Array2::from_shape_vec((pair_count, 2), image_index_pairs).unwrap(),
         match_counts: Array1::from_vec(match_counts),
