@@ -327,6 +327,61 @@ current binding defaults (R=24, aniso) ≈ **7 min**; with #2+#3 ≈ **2–3 min
 bilinear R=16 today ≈ 60 s. seoul/seattle/kerry full clouds are already
 7–45 s at binding defaults.
 
+## Consensus: structure, value, and the robust weighting (addendum, 2026-06-16)
+
+Follow-up analysis on the denser 56k-point dino solve (the one used for the AVX2
+scoring work), characterizing the consensus the refinement spends ~20% of its
+time in. Throwaway diagnostics only (a 56k re-solve, an `objective="mean"`
+A/B, and a since-reverted `SFMTOOL_NO_CONSENSUS` ablation switch); recorded here.
+
+**View counts — SfM tracks, not dense MVS.** The consensus runs over a track's
+observing views, and for an SfM solve those are few: track length averages
+**4.5** (median 4, capped at 10), and of scored patches **99.1% keep *every*
+observing view** — the back-face/validity gates drop a view only 0.9% of the
+time. **36% consense over exactly 3 views** (the `min_views` floor). This is
+categorically unlike dense MVS (10s–100s of views, best-N selection), with three
+consequences:
+- **Stochastic / best-N view subsampling (§5 item 8) is a no-op here** — there is
+  nothing to subsample. The earlier suspicion is now quantified.
+- The consensus cost is the **number of calls** (~7M = candidates × patches), not
+  the per-call view count — which is why the per-element AVX2 kernels (residual /
+  xbar / znorm, landed as #83/#85/#87) were the productive lever and "fewer views"
+  buys nothing.
+- The robust IRLS operates on the **thinnest possible sets** (mode 3), right at
+  the `MIN_EFFECTIVE_VIEWS = 2` floor.
+
+**The consensus is the objective, and it does the heavy lifting — it cannot be
+removed.** Ablating it (return a constant for every candidate, so the search
+prefers nothing over the seed) reverts each patch to its seed normal, which sits
+**median 30.9° / 88% > 10°** from the consensus-refined normal — *uniform across
+confidence*. The `stored` seed is effectively the mean-viewing direction (a
+geometric placeholder); the photometric consensus is what turns it into a surface
+normal ~30° away. So the consensus is not a polish but the entire refinement.
+This is structural, not incidental: cross-view agreement is the **only**
+normal-dependent signal — a single view renders a valid patch for *any* normal,
+the surface texture is unknown, and ZNCC is brightness-invariant. The closed form
+`Φ ∝ ‖x̄‖²` is exactly the energy of the best-fit common texture ("is there one
+surface texture that explains all views under this normal"); a reference-view
+variant was considered and rejected (see the `Objective` doc).
+
+**The robust weighting *is* the optional, separable part.** The relative IRLS
+weighting (down-weighting occluded / wrong-surface views) is independent of the
+consensus and already switchable via `objective="mean"`. On the 56k dino,
+robust vs mean:
+- normals differ **median 4.2°**, but **47% by > 5°** with a heavy tail (p90 30°,
+  max 72°) — the dino has heavy self-occlusion, so mean-pairwise lets an outlier
+  view pollute the agreement and drag the normal off while robust down-weights it;
+- robust is **more selective** — it scores 6803 vs mean's 7300 of 8000 (the
+  effective-view gate drops ~500 thin / conflicted tracks);
+- mean is **~1.12× faster** (the IRLS reweight — `irls_xbar` + `irls_resid` — is
+  the bulk of consensus cost).
+
+So `mean` is a legitimate speed/robustness knob (~12% faster) but **not a free
+drop** on occlusion-rich data; the §3 agreement-to-reference numbers (robust
+5.0° vs mean 6.6° on dino, 9.4° vs 13.6° on kerry) favor robust, and confirming
+which is *correct* on the differing 47% would need scoring both against an exact
+`cache=off` high-resolution reference.
+
 ## 6. Caveats
 
 - Single 4-core container; wall numbers carry ±5–10% noise (repeats where
