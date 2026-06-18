@@ -43,21 +43,30 @@ def main():
     tracks = [(int(p), np.flatnonzero(pid == p)) for p in np.unique(pid[pid >= 0])]
     tracks = [t for t in tracks if len(t[1]) >= 10]
     tracks.sort(key=lambda t: -len(t[1]))
-    tracks = tracks[:9]
+    tracks = tracks[:5]
+    bg = np.flatnonzero(pid < 0)
+    rng = np.random.default_rng(0)
 
-    fig, axes = plt.subplots(3, 3, figsize=(12, 12))
-    for ax, (p, rows) in zip(axes.ravel(), tracks):
-        Xt = X[rows]
+    def panel(ax, Xt, title):
         order = diameter_order(Xt)
         Xc = Xt - Xt.mean(0)
-        U, s, Vt = np.linalg.svd(Xc, full_matrices=False)
+        _, s, Vt = np.linalg.svd(Xc, full_matrices=False)
         proj = Xc @ Vt[:2].T
         ax.plot(proj[order, 0], proj[order, 1], "-", color="0.6", lw=1, zorder=1)
-        ax.scatter(proj[:, 0], proj[:, 1], c=np.argsort(order), cmap="viridis", s=40, zorder=2)
+        ax.scatter(proj[:, 0], proj[:, 1], c=proj[:, 0], cmap="viridis", s=40, zorder=2)
         var2 = (s[:2] ** 2).sum() / (s ** 2).sum()
-        ax.set_title(f"track {p}: {len(rows)} views, PC1+2={var2:.0%} var")
+        ax.set_title(f"{title}: {len(Xt)} pts, PC1+2={var2:.0%} var", fontsize=9)
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle(f"Longest tracks in descriptor space (PCA-2D, colored by chain order)\n{path}")
+
+    fig, axes = plt.subplots(2, 5, figsize=(18, 7.5))
+    for col, (p, rows) in enumerate(tracks):
+        panel(axes[0, col], X[rows], f"track {p}")
+        ctrl = X[rng.choice(bg, size=len(rows), replace=False)]
+        panel(axes[1, col], ctrl, "random bg")
+    axes[0, 0].set_ylabel("real tracks", fontsize=12)
+    axes[1, 0].set_ylabel("size-matched\nrandom background", fontsize=12)
+    fig.suptitle("Descriptor-space structure: longest tracks (top) vs random background groups (bottom)\n"
+                 "PCA-2D, points colored by MST-diameter order. Higher PC1+2 variance = lower intrinsic dimension.")
     fig.tight_layout()
     fig.savefig(out, dpi=110)
     print(f"wrote {out}")
