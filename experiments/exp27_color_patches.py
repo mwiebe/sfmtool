@@ -70,7 +70,7 @@ def main():
         chans = [map_coordinates(im[..., c], [xy[:, 1], xy[:, 0]], order=1, mode="nearest")
                  for c in range(3)]
         patch = np.stack(chans, -1).reshape(PV, PV, 3)
-        patch = (patch - patch.min()) / (patch.ptp() + 1e-6)  # per-patch contrast stretch
+        patch = (patch - patch.min()) / (np.ptp(patch) + 1e-6)  # per-patch contrast stretch
         return patch
 
     ncol = 16
