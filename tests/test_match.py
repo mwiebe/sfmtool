@@ -108,7 +108,11 @@ def test_match_mutual_knn(isolated_seoul_bull_17_images: list[Path]):
     assert matches_data["metadata"]["matching_tool"] == "sfmtool"
     assert matches_data["metadata"]["image_count"] == 17
     assert matches_data["metadata"]["match_count"] > 0
-    assert matches_data["metadata"]["matching_options"]["mode"] == "mutual-knn"
+    options = matches_data["metadata"]["matching_options"]
+    assert options["mode"] == "mutual-knn"
+    # Default forest tuning (see specs/core/mutual-knn-matching.md).
+    assert options["num_trees"] == 20
+    assert options["max_leaf_checks"] == 1000
 
 
 def test_match_sequential(isolated_seoul_bull_17_images: list[Path]):
