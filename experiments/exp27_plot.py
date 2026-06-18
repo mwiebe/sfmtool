@@ -97,8 +97,8 @@ def main():
             [("dino", "/tmp/dino_ab_ws/exhaustive.sfmr"),
              ("seattle", "/tmp/seattle_backyard_ab_ws/cluster_recon.sfmr")]}
 
-    fig = plt.figure(figsize=(15, 16))
-    gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1.1, 0.5], hspace=0.32, wspace=0.22)
+    fig = plt.figure(figsize=(15, 17))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1.1, 0.7], hspace=0.32, wspace=0.22)
 
     # row 0: intrinsic dim vs length
     for col, name in enumerate(("dino", "seattle")):
@@ -145,14 +145,17 @@ def main():
                      f"pdim={pdim(Xspace):.1f}, PC1+2={var2:.0%} var")
         ax.set_xticks([]); ax.set_yticks([])
 
-    # patch strip in chain order
-    ax = fig.add_subplot(gs[3, :])
-    so = np.argsort(coord)
-    strip = np.concatenate([patch[rows][so][i].reshape(P, P) for i in range(len(rows))], axis=1)
-    ax.imshow(strip, cmap="gray", aspect="auto")
-    ax.set_title(f"track {p}: its actual 8x8 oriented patches, in chain order "
-                 "(appearance morphs across viewpoints)")
-    ax.set_xticks([]); ax.set_yticks([])
+    # patches as individual SQUARE cells, in chain order
+    cap = fig.add_subplot(gs[3, :]); cap.axis("off")
+    cap.set_title(f"track {p}: its actual 8x8 oriented patches, in chain order "
+                  "(appearance morphs across viewpoints)", fontsize=11)
+    po = patch[rows][np.argsort(coord)]
+    n = len(rows); ncol = min(n, 14); nrow = int(np.ceil(n / ncol))
+    sub = gs[3, :].subgridspec(nrow, ncol, wspace=0.08, hspace=0.08)
+    for i in range(n):
+        a = fig.add_subplot(sub[i // ncol, i % ncol])
+        a.imshow(po[i].reshape(P, P), cmap="gray")  # imshow default aspect='equal' => square
+        a.set_xticks([]); a.set_yticks([])
 
     fig.suptitle("Raw oriented patches vs SIFT as a clustering descriptor\n"
                  "SIFT's invariance compresses a track's cross-view variation into a low-D curve; "
