@@ -80,6 +80,39 @@ while admitting little background, leaving the rest to geometric verification.
 ![Co-observation recall (green, left axis) and background neighbours admitted
 (red, right axis) as the floor scale α is swept, with α = 0.8 marked](images/floor-alpha-sweep.png)
 
+### Long tracks may trace a low-dimensional curve, not a ball (tentative)
+
+> **Tentative — one dataset, a single solve.** Measured only on `dino_dog_toy`
+> (exhaustive solve, `experiments/exp24_track_curves.py`); treat as a hypothesis
+> to confirm on more data, not an established result.
+
+A track's co-observations plausibly do not fill a ball in descriptor space:
+as viewpoint changes continuously the descriptor moves along a continuous,
+**low-dimensional curved manifold**. Binning dino's tracks by length and taking
+the PCA participation dimension of each track's member descriptors, the
+intrinsic dimension stays low and **saturates** with track length (≈1.6 at
+3–4 views → ≈3.3 at 21+), while size-matched groups of random background
+descriptors climb roughly linearly (≈2.1 → ≈11.3). Adding a view extends a track
+*along its existing manifold*; adding an unrelated descriptor spends a fresh
+dimension. So long tracks are neither a tight ball nor full-dimensional — they
+look like a curved manifold of ~2–3 effective dimensions (a "1-D curve" is the
+right first-order picture, with curvature spreading into a couple more axes for
+long tracks).
+
+Caveat that shaped the measurement: the tempting evidence — that a track's
+minimum spanning tree is a near-path, and that it elongates with length — is
+**not** track-specific. Random background groups match it, because MST shape and
+elongation are dominated by high-dimensional concentration of measure, not
+structure. Only the *controlled* metrics (intrinsic dimension vs a random
+control; and tracks being modestly straighter than random chains) carry signal.
+
+If it holds up, it reframes the membership problem (and the fragmentation in
+Limitations below): a single Euclidean radius around a seed captures only a
+local *arc* of an extended manifold, so long tracks must fragment — which argues
+for following the manifold (local-tangent / connectivity growth, stopping where
+the neighbourhood turns isotropic) rather than enlarging a ball. Unverified
+beyond dino; not acted on.
+
 ### Iterating on cluster membership rules
 
 The membership rule — which neighbours to keep — is the heart of the method, so we
