@@ -76,8 +76,11 @@ def summarize(label, groups, rng):
         ctrl[met["m"]].append(track_metrics(bg[idx]))
 
     print(f"\n========== {label} ==========")
+    print(f"{'':>9} {'':>5} | {'--- tracks ---':>27} {'straight':>8} {'pdim':>5} "
+          f"| {'--- random control ---':>27} {'straight':>8} {'pdim':>5}")
     print(f"{'len bin':>9} {'n':>5} | {'deg<=2':>6} {'branch':>6} {'cover':>5} "
-          f"{'aspect':>6} {'straight':>8} {'pdim':>5} | {'ctrl aspect':>11} {'ctrl deg<=2':>11}")
+          f"{'aspect':>6} {'straight':>8} {'pdim':>5} | {'deg<=2':>6} {'branch':>6} "
+          f"{'cover':>5} {'aspect':>6} {'straight':>8} {'pdim':>5}")
     for lo, hi in bins:
         sel = [met for mm, lst in rows.items() if lo <= mm <= hi for met in lst]
         csel = [met for mm, lst in ctrl.items() if lo <= mm <= hi for met in lst]
@@ -86,11 +89,11 @@ def summarize(label, groups, rng):
         def mean(key, s):
             return float(np.mean([x[key] for x in s]))
         name = f"{lo}-{hi if hi < 999 else '+'}"
-        print(f"{name:>9} {len(sel):>5} | {mean('frac_deg_le2', sel):>6.2f} "
-              f"{mean('branch', sel):>6.2f} {mean('coverage', sel):>5.2f} "
-              f"{mean('aspect', sel):>6.1f} {mean('straightness', sel):>8.2f} "
-              f"{mean('pdim', sel):>5.1f} | {mean('aspect', csel):>11.1f} "
-              f"{mean('frac_deg_le2', csel):>11.2f}")
+        def block(s):
+            return (f"{mean('frac_deg_le2', s):>6.2f} {mean('branch', s):>6.2f} "
+                    f"{mean('coverage', s):>5.2f} {mean('aspect', s):>6.1f} "
+                    f"{mean('straightness', s):>8.2f} {mean('pdim', s):>5.1f}")
+        print(f"{name:>9} {len(sel):>5} | {block(sel)} | {block(csel)}")
 
 
 def load_groups(path):
