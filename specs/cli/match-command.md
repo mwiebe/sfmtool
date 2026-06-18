@@ -39,7 +39,8 @@ or `--merge` to combine existing `.matches` files.
 | `--cluster-preset` | `accurate` \| `balanced` \| `fast` | `accurate` | Kd-tree forest preset for cluster matching |
 | `--mutual-knn-k` | int | 12 | Nearest cross-image neighbours kept per descriptor for mutual-kNN matching |
 | `--mutual-knn-triangle` | int | 0 | Triangle filter for mutual-kNN: keep an edge only if it closes >= this many triangles (0 disables) |
-| `--mutual-knn-preset` | `accurate` \| `balanced` \| `fast` | `accurate` | Kd-tree forest preset for mutual-kNN matching |
+| `--mutual-knn-trees` | int | 20 | Kd-forest trees for mutual-kNN (one-time build cost; recall gains saturate ~20) |
+| `--mutual-knn-checks` | int | 1000 | Kd-forest per-query search budget for mutual-kNN (raises recall and precision at a per-query cost) |
 | `--max-features` | int | | Maximum features per image |
 | `--output / -o` | path | auto | Output `.matches` file path (default: timestamped, required for `--merge`) |
 | `--range / -r` | string | | Range expression for file numbers |
@@ -100,6 +101,15 @@ is written under `tvg-matches/`.
 it closes at least `T` triangles in the mutual graph (a third descriptor
 mutually matched to both endpoints — a >= 3-view mini-track). `T=1`–`2` sheds
 spurious candidates with little recall loss; `0` (the default) disables it.
+
+`--mutual-knn-trees` and `--mutual-knn-checks` tune the approximate k-NN search,
+which is the matcher's recall lever. Because the k-NN is approximate, too small
+a search budget both misses true mutual edges and manufactures spurious ones;
+the defaults (20 trees, 1000 checks) sit at the recall/cost knee. Trees are a
+one-time build cost, so prefer raising them first; `--mutual-knn-checks` is paid
+per query (the dominant runtime term) — raise it toward 2000–4000 to chase the
+exact-k-NN ceiling when completeness matters more than speed. See
+`specs/core/mutual-knn-matching.md` for the measured frontier.
 
 The recovered wide-baseline points are noisier than the floor's, so treat
 `--mutual-knn` as a **completeness** knob (more points, same cameras) rather than

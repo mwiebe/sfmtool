@@ -41,7 +41,8 @@ def _run_matching(
     cluster_preset: str = "accurate",
     mutual_knn_k: int = 12,
     mutual_knn_triangle_min: int = 0,
-    mutual_knn_preset: str = "accurate",
+    mutual_knn_num_trees: int = 20,
+    mutual_knn_max_leaf_checks: int = 1000,
 ):
     """Run matching and produce a .matches file."""
     import pycolmap
@@ -131,7 +132,8 @@ def _run_matching(
                 max_feature_count=max_feature_count,
                 k=mutual_knn_k,
                 triangle_min=mutual_knn_triangle_min,
-                preset=mutual_knn_preset,
+                num_trees=mutual_knn_num_trees,
+                max_leaf_checks=mutual_knn_max_leaf_checks,
             )
         else:
             raise ValueError(f"Unsupported matching method: {matching_method}")
@@ -194,7 +196,8 @@ def _run_matching(
                 "mode": "mutual-knn",
                 "k": mutual_knn_k,
                 "triangle_min": mutual_knn_triangle_min,
-                "preset": mutual_knn_preset,
+                "num_trees": mutual_knn_num_trees,
+                "max_leaf_checks": mutual_knn_max_leaf_checks,
             }
         )
     if matching_method == "sequential":
@@ -424,7 +427,8 @@ def _run_mutual_knn_matching(
     max_feature_count: int | None = None,
     k: int = 12,
     triangle_min: int = 0,
-    preset: str = "accurate",
+    num_trees: int = 20,
+    max_leaf_checks: int = 1000,
 ) -> None:
     """Run mutual-kNN matching and write results to the DB.
 
@@ -440,7 +444,8 @@ def _run_mutual_knn_matching(
         sift_paths,
         k=k,
         triangle_min=triangle_min,
-        preset=preset,
+        num_trees=num_trees,
+        max_leaf_checks=max_leaf_checks,
         max_feature_count=max_feature_count,
     )
     pair_count = len(pairs.image_index_pairs)

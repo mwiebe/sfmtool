@@ -45,8 +45,11 @@ pub struct MutualKnnParams {
     /// descriptors are mutually matched to *both* endpoints. `0` disables it.
     /// Default 0.
     pub triangle_min: usize,
-    /// kd-forest index build + per-query search budget.
-    /// Default [`KdForestParams::accurate`].
+    /// kd-forest index build + per-query search budget. Defaults to 20 trees /
+    /// 1000 max-leaf-checks — the recall/cost knee for this matcher (trees are a
+    /// one-time build cost, checks are per-query), recovering ~89% of the exact
+    /// mutual edges vs ~75% for the generic `accurate` preset (8 / 512). See
+    /// `specs/core/mutual-knn-matching.md`.
     pub forest: KdForestParams,
 }
 
@@ -55,7 +58,11 @@ impl Default for MutualKnnParams {
         Self {
             k: 12,
             triangle_min: 0,
-            forest: KdForestParams::accurate(),
+            forest: KdForestParams {
+                num_trees: 20,
+                max_leaf_checks: 1000,
+                ..KdForestParams::accurate()
+            },
         }
     }
 }

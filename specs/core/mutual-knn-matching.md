@@ -157,18 +157,63 @@ concatenated image by image) and a CSR `image_starts` array of length
 |---|---|---|
 | `k` | 12 | Nearest cross-image neighbours kept per descriptor. Larger `k` recovers more wide-baseline matches (higher recall) at more candidates to verify. 12–16 is the sweet spot on the bundled datasets; very dense / object-centric collections benefit from higher `k`. |
 | `triangle_min` | 0 | Triangle filter: keep an edge only if it closes >= this many triangles. 0 disables. 1–2 sheds spurious candidates with little recall loss; 3 reaches floor-like verification cost at better recall. |
-| `preset` (forest) | `accurate` | Kd-forest build + per-query budget. `accurate` keeps the k-NN faithful enough that mutuality is meaningful; `fast`/`balanced` trade recall for speed. |
+| `num_trees` (forest) | 20 | Kd-forest randomized trees. More trees raise the approximate k-NN's recall at a **one-time build** cost (gains saturate ~20, per Muja & Lowe). |
+| `max_leaf_checks` (forest) | 1000 | Kd-forest per-query search budget (unique distance computations). Higher raises recall **and precision** at a **per-query** cost — the dominant runtime term. |
+
+### Forest defaults: the recall/cost frontier
+
+The forest config is the matcher's recall lever, and the two knobs hit different
+cost centers — `num_trees` is paid **once at build**, `max_leaf_checks` is paid
+**per query** (and the query is ~95% of runtime). Measured on `dino_dog_toy`
+(`max_features=2000`, N=170k descriptors, k=12) against the **exact** mutual-kNN
+edge set as ground truth:
+
+| trees | checks | edge recall | precision | query cost |
+|---|---|---|---|---|
+| 8 | 512 (old `accurate` preset) | 75.5% | 84.1% | ~35s |
+| 20 | 512 | 82.0% | 85.8% | ~35s |
+| **20** | **1000** (default) | **88.6%** | **91.3%** | ~72s |
+| 8 | 2000 | 90.8% | 93.7% | ~138s |
+| 20 | 2000 | 94.0% | 95.2% | ~138s |
+| 20 | 4000 | 97.4% | 97.7% | ~270s |
+
+Two consequences fix the default at **20 trees / 1000 checks**:
+
+- **Under-searching is the dominant error.** At the old 8/512 (`accurate` preset)
+  the approximate search recovered only ~75% of the true mutual edges — that
+  shortfall *is* lost reconstruction density. Worse, low budget does not merely
+  miss true neighbours, it returns *wrong* ones that form **spurious** mutual
+  edges, so both recall and precision are depressed; raising the budget lifts
+  both together (no precision/recall tradeoff).
+- **Spend the cheap lever first.** Trees buy recall with one-time build cost and
+  near-zero query cost, so `8/2000` (90.8% recall, ~138s query) is dominated by
+  `20/1000` (88.6%, ~72s query) — essentially the same recall at half the query
+  cost. Past ~1500 checks returns diminish sharply (~0.07 recall-pts per
+  query-second). The default sits at the knee; `max_leaf_checks` can be raised
+  toward 2000–4000 when completeness matters more than speed.
 
 ## Cost Analysis
 
 One `KdForest` build and one batched k-NN query, both `O(N log N)` and shared
 across the whole collection — the same cost class as the background-floor
-matcher (which already builds the forest and queries it). The mutual-edge and
-triangle passes are `O(N · k)` and `O(E · k)`. This is **not** the `O(n_images^2)`
-all-pairs descriptor matching of exhaustive: the per-image-pair structure falls
-out of the global k-NN. The extra cost relative to the floor matcher is paid
-**downstream**, in geometric verification, because mutual-kNN hands it more
-candidate matches; the triangle filter exists to bound that.
+matcher (which already builds the forest and queries it). The mutual-edge pass
+is `O(N · k²)` (each descriptor's length-`k` neighbour row scanned against its
+neighbours' rows) and the triangle pass `O(E · k)`. This is **not** the
+`O(n_images^2)` all-pairs descriptor matching of exhaustive: the per-image-pair
+structure falls out of the global k-NN.
+
+**Measured breakdown** (phase timers behind `MUTUAL_KNN_PROFILE`). The k-NN
+query dominates — ~95% of wall time at the kerry_park scale, ~88% at dino's
+696k descriptors (the rest is forest build). Everything after the query is
+negligible: on full dino (N=696k, k=12) the mutual-edge pass is ~245ms and
+expansion ~1.7s against a ~155s query. The `O(N · k²)` term is genuinely
+quadratic in `k` (k=12→245ms, k=24→706ms) but `k` is tiny, so it stays well
+under 1% of runtime; it would only matter at `k` in the hundreds. The query
+cost is governed entirely by `max_leaf_checks` (≈linear in it) and is
+independent of `num_trees` — see the frontier table above. The extra cost
+relative to the floor matcher is paid **downstream**, in geometric verification,
+because mutual-kNN hands it more candidate matches; the triangle filter exists
+to bound that.
 
 ## Relationship to the Existing Pipeline
 
@@ -192,8 +237,10 @@ mutual-kNN optimizes recall/completeness and delegates precision to RANSAC.
   object-centric collections) push true matches past a fixed `k`; recall there is
   `k`-limited.
 - **Approximate k-NN.** The forest is approximate, so the realized neighbour sets
-  (and thus recall) depend on the forest preset; `accurate` is the default for
-  that reason.
+  (and thus recall) depend on `num_trees` and `max_leaf_checks`. The defaults
+  (20 / 1000) sit at the recall/cost knee; raise `max_leaf_checks` toward
+  2000–4000 to chase the exact-k-NN ceiling when completeness matters more than
+  speed (see the frontier table above).
 
 ## Implementation
 
@@ -235,10 +282,11 @@ returns.
   matcher and writes the result to the DB via the shared
   `_write_pairs_and_verify(...)` helper (factored out of the cluster path); the
   `"mutual-knn"` method is wired into `_run_matching` and recorded in the
-  `.matches` metadata (`mode="mutual-knn"`, `k`, `triangle_min`, `preset`).
+  `.matches` metadata (`mode="mutual-knn"`, `k`, `triangle_min`, `num_trees`,
+  `max_leaf_checks`).
 
 ### Layer 4 — CLI
 
 `sfm match --mutual-knn [--mutual-knn-k K] [--mutual-knn-triangle T]
-[--mutual-knn-preset P]` (`src/sfmtool/_commands/match.py`). See
-`specs/cli/match-command.md`.
+[--mutual-knn-trees N] [--mutual-knn-checks L]`
+(`src/sfmtool/_commands/match.py`). See `specs/cli/match-command.md`.

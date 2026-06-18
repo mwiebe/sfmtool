@@ -34,7 +34,8 @@ def mutual_knn_match(
     *,
     k: int = 12,
     triangle_min: int = 0,
-    preset: str = "accurate",
+    num_trees: int = 20,
+    max_leaf_checks: int = 1000,
     max_feature_count: Optional[int] = None,
 ) -> PairArrays:
     """Run the mutual-kNN matcher over every image's SIFT descriptors.
@@ -46,6 +47,13 @@ def mutual_knn_match(
     (``image_index_pairs``, ``match_counts``, ``match_feature_indexes``,
     ``match_descriptor_distances``) the ``.matches`` writer consumes — the same
     shape :func:`._cluster_matching.cluster_match` produces.
+
+    ``num_trees`` and ``max_leaf_checks`` tune the kd-forest approximate k-NN
+    search. The defaults (20 trees, 1000 checks) recover ~89% of the exact
+    mutual edges — far above the generic ``accurate`` preset's 8 trees / 512
+    checks (~75%) — at the cost-efficient knee: trees are a one-time build cost,
+    checks are paid per query, so recall is bought with the cheaper lever first.
+    See ``specs/core/mutual-knn-matching.md``.
     """
     assert len(image_paths) == len(sift_paths)
 
@@ -67,6 +75,7 @@ def mutual_knn_match(
             image_starts,
             k=k,
             triangle_min=triangle_min,
-            preset=preset,
+            num_trees=num_trees,
+            max_leaf_checks=max_leaf_checks,
         )
     )

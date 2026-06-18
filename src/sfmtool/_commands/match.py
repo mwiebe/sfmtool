@@ -133,11 +133,20 @@ from .._filenames import expand_paths
     "disables. Default: 0.",
 )
 @click.option(
-    "--mutual-knn-preset",
-    "mutual_knn_preset",
-    type=click.Choice(["accurate", "balanced", "fast"]),
-    default="accurate",
-    help="Kd-tree forest preset for --mutual-knn. Default: accurate.",
+    "--mutual-knn-trees",
+    "mutual_knn_num_trees",
+    type=click.IntRange(min=1),
+    default=20,
+    help="Kd-forest trees for --mutual-knn. More trees raise recall at a "
+    "one-time build cost (gains saturate ~20). Default: 20.",
+)
+@click.option(
+    "--mutual-knn-checks",
+    "mutual_knn_max_leaf_checks",
+    type=click.IntRange(min=1),
+    default=1000,
+    help="Kd-forest search budget (max leaf checks) per query for --mutual-knn. "
+    "Higher raises recall and precision at a per-query cost. Default: 1000.",
 )
 @click.option(
     "--camera-model",
@@ -185,7 +194,8 @@ def match(
     mutual_knn_match,
     mutual_knn_k,
     mutual_knn_triangle_min,
-    mutual_knn_preset,
+    mutual_knn_num_trees,
+    mutual_knn_max_leaf_checks,
     camera_model,
     merge,
 ):
@@ -295,7 +305,8 @@ def match(
             cluster_preset=cluster_preset,
             mutual_knn_k=mutual_knn_k,
             mutual_knn_triangle_min=mutual_knn_triangle_min,
-            mutual_knn_preset=mutual_knn_preset,
+            mutual_knn_num_trees=mutual_knn_num_trees,
+            mutual_knn_max_leaf_checks=mutual_knn_max_leaf_checks,
         )
     except Exception as e:
         raise click.ClickException(str(e))
