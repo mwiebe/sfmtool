@@ -90,12 +90,20 @@ candidates by **mutual nearest neighbours** instead of a background-floor
 radius. Over the same shared kd-forest k-NN query, it keeps each descriptor's
 `--mutual-knn-k` nearest *cross-image* neighbours and emits the edges that are
 mutual (`b` among `a`'s top-k and `a` among `b`'s). Because this is
-rank-bounded, not radius-bounded, it recovers the wide-baseline matches the
-floor's radius cuts — roughly doubling hard-pair recall and yielding 11–44% more
-reconstructed points across the bundled datasets — at the cost of more candidate
-matches to geometrically verify. Precision comes from that verification (RANSAC
-two-view geometry), so like `--cluster` the output carries two-view geometry and
-is written under `tvg-matches/`.
+rank-bounded, not radius-bounded, it recovers wide-baseline matches the floor's
+radius cuts. Precision comes from downstream verification (RANSAC two-view
+geometry), so like `--cluster` the output carries two-view geometry and is
+written under `tvg-matches/`.
+
+**It is not a default for a reason — and is usually the wrong choice.** A
+multi-seed, four-dataset study found mutual-kNN improves the reconstruction only
+on textured wide-baseline scenes (`seattle_backyard`, +26% points vs `--cluster`);
+it is net-negative on the others (repetitive objects, sparse rigs) and is 8–26×
+slower everywhere, because it emits the *complete* image-pair graph and pays
+two-view RANSAC on every pair (including non-overlapping ones). Prefer `--cluster`
+unless you have measured a gain on your data. See
+`specs/core/mutual-knn-matching.md` ("End-to-end") for the numbers and the
+cost diagnosis.
 
 `--mutual-knn-triangle T` adds an optional precision filter: keep an edge only if
 it closes at least `T` triangles in the mutual graph (a third descriptor

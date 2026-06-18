@@ -52,21 +52,21 @@ harder collections; mutual-kNN roughly **doubles** hard-pair recall everywhere.
 rank-16, so it benefits from a larger `k` — but the *relative* improvement is the
 same on every dataset.
 
-### The recall gain becomes reconstruction density
+### The recall gain only sometimes becomes reconstruction density
 
-End-to-end (mutual-kNN candidates -> geometric verification -> global solve),
-median reconstructed points over repeated solves:
+> **Superseded (2026-06).** An earlier, few-seed solve comparison reported
+> mutual-kNN as the densest reconstruction on *every* bundled dataset (+11–44%
+> vs the floor). A later multi-seed study (see "End-to-end: high recall rarely
+> becomes reconstruction density" below) did not reproduce this: averaged over
+> seeds, mutual-kNN wins decisively only on `seattle_backyard` and is
+> net-negative on the other three. The original numbers fell within GLOMAP's
+> large single-seed point-count variance. Trust the multi-seed table below.
 
-| dataset | exhaustive | cluster (floor) | mutual-kNN (k=12) |
-|---|---|---|---|
-| seoul_bull | 732 | 853 | **948** (+11% vs floor) |
-| kerry_park | 402 | 349 | **420** (+20%) |
-| seattle_backyard | 3205 | 3327 | **4800** (+44%) |
-
-Mutual-kNN produces the densest reconstruction on every dataset, matching or
-beating exhaustive (it beats exhaustive because COLMAP's exhaustive matcher
-applies its own ratio test; mutual-kNN keeps more true matches) at clustering
-cost.
+Where it does win (`seattle_backyard`), it beats even exhaustive matching —
+COLMAP's exhaustive matcher applies Lowe's ratio test and discards ambiguous
+matches that mutual-kNN keeps, some of which are correct wide-baseline
+correspondences. That is the mechanism of the gain, on the scenes that have such
+matches to recover.
 
 ### It is a density / completeness gain, not an accuracy gain
 
@@ -123,6 +123,74 @@ intermediate view — exactly the ones most likely to be real.
 > shared mutual neighbour). That recovers a little more recall but reintroduces
 > the connected-components over-merge — on kerry_park it pushed the candidate
 > count to ~1M at 96% spurious. The triangle step is a *filter* only.
+
+### End-to-end: high recall rarely becomes reconstruction density
+
+The recall numbers above are *offline* candidate recall. A four-dataset,
+multi-seed global-solve study (2026-06; GLOMAP point counts averaged over 5
+seeds, release build) found the offline advantage **mostly does not survive to
+the reconstruction**, and the standalone matcher is dominated on cost:
+
+| dataset | cluster pts | mutual-kNN pts | exhaustive pts | mutual vs cluster | match time (cluster → mutual) |
+|---|---|---|---|---|---|
+| seattle_backyard | 4,675 | **5,892** | 4,584 | **+26%** | 2.0s → 16.5s |
+| seoul_bull | 787 | 748 | 650 | −5% (within seed noise) | 2.9s → 26s |
+| kerry_park | 716 | 619 | 692 | −14% | 4.2s → 109s |
+| dino_dog_toy | 13,129 | ~9,100 | ~9,300 | −31% | 6.3s → 50s |
+
+Findings:
+
+- **The win is real but narrow.** Only `seattle_backyard` gains (+26%, robust
+  across seeds — its worst seed beats cluster's best, and it beats exhaustive,
+  recovering correct correspondences Lowe's ratio test discards). The matcher
+  helps on textured wide-baseline scenes where the ratio test is too aggressive.
+- **It is net-negative elsewhere** — badly on the repetitive object
+  (`dino_dog_toy`, −31%) and the sparse fisheye rig (`kerry_park`, −14%).
+- **It is 8–26× slower everywhere, even where it wins.** The cost is structural:
+  mutual-kNN emits the *complete* image-pair graph (every pair gets some mutual
+  edges), so geometric verification runs two-view RANSAC on **every** pair,
+  including non-overlapping ones whose near-zero inlier ratio drives RANSAC to
+  its iteration cap. The cluster matcher hands verification a *sparse,
+  high-precision* graph (e.g. kerry: 804 pairs at ~95% inliers vs mutual's 1,128
+  pairs at ~66%), which is what makes it cheap. The triangle filter does not fix
+  this — on the repetitive object the spurious edges form spurious triangles, and
+  on the sparse rig it deletes the wanted wide-baseline edges.
+- **GLOMAP point counts are highly seed-sensitive on small datasets**
+  (`seoul_bull` mutual ranged 469–879 across seeds), so single-seed point-count
+  comparisons are unreliable; average over seeds before drawing conclusions.
+
+Consequence: mutual-kNN should **not** be a default matcher. It is an opt-in
+matcher for seattle-like scenes — or, more promisingly, repurposed per the
+opportunity below.
+
+## Opportunity: mutual edges as post-reconstruction track candidates
+
+The expensive part of the standalone matcher is verifying mutual edges *before*
+any geometry is known (blind two-view RANSAC on the complete pair graph). But the
+edges themselves are cheap and information-rich, which suggests a different use —
+**unimplemented, recorded here as a design direction:**
+
+- **Compute them as a byproduct of the cluster matcher, not a separate pass.**
+  Both matchers run the *same* kd-forest k-NN query over the *same* corpus; the
+  background-floor clustering and the mutual-edge extraction are independent
+  post-processing of that one query, and the mutual-edge pass is the negligible
+  `O(N·k²)` term (tens of ms even at N ≈ 700k). So a cluster-matching run can emit
+  the mutual edge set essentially for free, alongside its clusters.
+- **Defer their evaluation until geometry exists.** Once an initial
+  reconstruction exists (e.g. from cluster matches), each mutual edge is a
+  cheap-to-test **track-densification candidate**: with known camera poses and 3D
+  points, a candidate correspondence can be accepted or rejected by direct
+  geometric consistency (epipolar distance from the known relative pose; and,
+  when an endpoint already observes a triangulated point,
+  reprojection/triangulation agreement) instead of RANSAC. This removes the
+  per-pair RANSAC cost, applies a stronger multi-view-consistent test than
+  two-view geometry, and filters the non-overlapping pairs *for free* — their
+  candidates simply fail the pose-based epipolar check.
+
+This reframes mutual-kNN from a standalone matcher (net-negative on most bundled
+datasets) into a cheap track-completion stage layered on a cluster-based
+reconstruction: keep the recall, pay geometry-aware cost instead of RANSAC, and
+gate pairs by the poses already in hand.
 
 ## Algorithm
 
