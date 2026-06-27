@@ -2,10 +2,10 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pipeline comparison: how much do three SfM refinement pipelines diverge from
+"""Pipeline comparison: how much do four SfM refinement pipelines diverge from
 the raw SIFT input, and from each other?
 
-All three pipelines start by running ``recon.to_embedded_patches(...)``, which
+All four pipelines start by running ``recon.to_embedded_patches(...)``, which
 copies the raw SIFT-detection keypoints inline and seeds each point's patch
 frame from the mean-viewing direction. They then differ in what (if anything)
 moves the keypoints, before always re-refining the normals to be consistent
@@ -17,8 +17,14 @@ with the final keypoint locations:
 - **Pipeline B** ("grid"): ``to_embedded_patches`` → ``refine_normals`` →
   ``localize_keypoints`` (the supersampled grid keypoint search) →
   ``refine_normals`` again, with the moved keypoints.
-- **Pipeline C** ("LK"): ``to_embedded_patches`` → ``refine_normals`` →
-  ``refine_keypoints`` (the LK subpixel refiner) → ``refine_normals`` again.
+- **Pipeline C** ("LK-bilinear"): ``to_embedded_patches`` → ``refine_normals`` →
+  ``refine_keypoints`` (the LK subpixel refiner, default ``sampler="bilinear"``)
+  → ``refine_normals`` again.
+- **Pipeline D** ("LK-anisotropic"): identical to C except the LK refiner is
+  invoked with ``sampler="anisotropic"`` — the anti-aliased oblique-view
+  sampler. The decision-gate report already measured that this sampler does
+  not meaningfully change ECC scores; this run answers a different question:
+  how much does it move the persisted keypoints, normals, and bitmaps?
 
 For each (dataset × pipeline), three artifacts are captured:
 
@@ -230,11 +236,19 @@ def _localize_and_recompact(
 
 
 def _refine_keypoints_and_recompact(
-    embedded: SfmrReconstruction, images: list[np.ndarray]
+    embedded: SfmrReconstruction,
+    images: list[np.ndarray],
+    *,
+    sampler: str = "bilinear",
 ) -> SfmrReconstruction:
     """LK counterpart of ``_localize_and_recompact``: build per-point view sets
     + per-view seeds from the recon's stored keypoints, run ``refine_keypoints``
-    seeded there, and compact the result into a new embedded_patches recon."""
+    seeded there, and compact the result into a new embedded_patches recon.
+
+    ``sampler`` is passed straight through to ``refine_keypoints`` —
+    ``"bilinear"`` (default; production ``subpixel="lk"`` path) or
+    ``"anisotropic"`` (anti-aliased oblique-view sampler; pipeline D).
+    """
     cloud = embedded.patches
     if cloud is None:
         raise ValueError("embedded recon has no patch cloud for LK refinement")
@@ -259,6 +273,7 @@ def _refine_keypoints_and_recompact(
         starting_keypoints=seeds,
         point_ids=list(view_sets.keys()),
         resolution=RESOLUTION,
+        sampler=sampler,
         **REFINE_KEYPOINTS_KWARGS,
     )
     # Splice refined keypoints into a localizations-shaped list. The refiner
@@ -321,7 +336,10 @@ def run_pipeline(
         moved = _localize_and_recompact(embedded, images)
         out = _refine_normals_on(moved, images)
     elif pipeline == "C":
-        moved = _refine_keypoints_and_recompact(embedded, images)
+        moved = _refine_keypoints_and_recompact(embedded, images, sampler="bilinear")
+        out = _refine_normals_on(moved, images)
+    elif pipeline == "D":
+        moved = _refine_keypoints_and_recompact(embedded, images, sampler="anisotropic")
         out = _refine_normals_on(moved, images)
     else:
         raise ValueError(f"unknown pipeline {pipeline!r}")
@@ -506,11 +524,12 @@ def bitmap_l1_summary(
 # ---------------------------------------------------------------------------
 
 
-PIPELINES = ("A", "B", "C")
+PIPELINES = ("A", "B", "C", "D")
 PIPELINE_LABELS = {
     "A": "normals-only",
     "B": "grid (localize_keypoints)",
-    "C": "LK (refine_keypoints)",
+    "C": "LK (refine_keypoints, bilinear)",
+    "D": "LK (refine_keypoints, anisotropic)",
 }
 
 
@@ -519,6 +538,7 @@ def measure_dataset(
     sfmr_path: Path,
     *,
     subsample_stride: int = 1,
+    pipelines: tuple[str, ...] = PIPELINES,
 ) -> dict:
     print(f"\n=== {dataset_label} ({sfmr_path.name}) ===", flush=True)
     recon, images = _load_recon_and_images(sfmr_path)
@@ -549,7 +569,7 @@ def measure_dataset(
     )
 
     pipeline_outputs: dict[str, dict] = {}
-    for pipeline in PIPELINES:
+    for pipeline in pipelines:
         print(
             f"  - pipeline {pipeline} ({PIPELINE_LABELS[pipeline]}) ... ",
             end="",
@@ -574,7 +594,9 @@ def measure_dataset(
             flush=True,
         )
 
-    # Build the six (or 5 for bitmaps) comparisons.
+    # Build the pair comparisons. Order kept stable across A/B/C from the
+    # original report; D-vs-* rows appended at the end so JSON readers that
+    # index by position on the legacy rows are unaffected.
     pairs = [
         ("A_vs_SIFT", "A", "_SIFT"),
         ("B_vs_SIFT", "B", "_SIFT"),
@@ -582,6 +604,10 @@ def measure_dataset(
         ("B_vs_A", "B", "A"),
         ("C_vs_A", "C", "A"),
         ("C_vs_B", "C", "B"),
+        ("D_vs_SIFT", "D", "_SIFT"),
+        ("D_vs_A", "D", "A"),
+        ("D_vs_B", "D", "B"),
+        ("D_vs_C", "D", "C"),
     ]
 
     def _pipe_kp(p: str) -> dict[tuple[bytes, int], np.ndarray]:
@@ -686,7 +712,27 @@ def main() -> int:
             f"(default {DEFAULT_DINO_STRIDE}; set to 1 for the full point set)"
         ),
     )
+    p.add_argument(
+        "--pipelines",
+        type=str,
+        default=",".join(PIPELINES),
+        help=(
+            "Comma-separated subset of pipelines to run (default: all four — "
+            f"{','.join(PIPELINES)}). Pairs involving a non-run pipeline are "
+            "still emitted but with NaN summary stats and 0 overlap, since the "
+            "comparison needs both sides' in-memory keypoint/normal/bitmap maps."
+        ),
+    )
     args = p.parse_args()
+
+    pipelines_subset: tuple[str, ...] = tuple(
+        x.strip() for x in args.pipelines.split(",") if x.strip()
+    )
+    unknown = [p for p in pipelines_subset if p not in PIPELINES]
+    if unknown:
+        raise SystemExit(
+            f"unknown pipeline(s) {unknown!r}; choose from {list(PIPELINES)}"
+        )
 
     selected = args.datasets or list(DATASETS.keys())
     results = []
@@ -696,7 +742,11 @@ def main() -> int:
             print(f"  SKIP {d}: {sfmr} missing", flush=True)
             continue
         stride = args.dino_stride if d == "dino_dog_toy" else 1
-        results.append(measure_dataset(d, sfmr, subsample_stride=stride))
+        results.append(
+            measure_dataset(
+                d, sfmr, subsample_stride=stride, pipelines=pipelines_subset
+            )
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, indent=2))
