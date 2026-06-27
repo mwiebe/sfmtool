@@ -21,21 +21,29 @@ functions — is described in "Open questions" below._
 
 _**Decision-gate outcome (2026-06-27).** The plan's production-path fork —
 supersampled grid vs LK, on optimized A and B — was measured on
-`seoul_bull_sculpture`, `seattle_backyard`, and `kerry_park`. LK was wired into
-`_embed_patches.py` as a post-localization step 3.5 behind a new
-`subpixel: str = "none"` kwarg (`"lk"` for per-sweep, `"lk_per_move"` for the
-incremental variant) — see the `embed_patches` docstring. The supersampled
-grid is exposed in parallel via the new `search_resolution_multiplier` kwarg
-on `PatchCloud.localize_keypoints` (and pass-through on `embed_patches`).
-**No variant is a strict improvement over the baseline** across all
-datasets — LK gives +0.0027–0.0040 mean ECC on close-range textured
-seoul_bull at 1.5-3× cost, but **regresses** by −0.0024 to −0.0031 mean ECC
-on the kerry_park fisheye rig (plausibly an analytic-Jacobian linearization
+`seoul_bull_sculpture`, `seattle_backyard`, `kerry_park`, and
+`dino_dog_toy` (the last on a stride-5 point sub-sample for cost). LK was
+wired into `_embed_patches.py` as a post-localization step 3.5 behind a
+new `subpixel: str = "none"` kwarg (`"lk"` for per-sweep, `"lk_per_move"`
+for the incremental variant) — see the `embed_patches` docstring. The
+supersampled grid is exposed in parallel via the new
+`search_resolution_multiplier` kwarg on `PatchCloud.localize_keypoints`
+(and pass-through on `embed_patches`). **No variant is a strict
+improvement over the baseline** across all datasets — LK gives +0.0027 to
++0.0048 mean ECC on the three "LK-friendly" datasets (close-range
+seoul_bull, outdoor seattle_backyard, large textured dino_dog_toy) at
+1.5–3× cost, but **regresses** by −0.0020 to −0.0031 mean ECC on the
+kerry_park fisheye rig (plausibly an analytic-Jacobian linearization
 artifact on highly non-linear projections). The supersampled grid is a
-uniform +0.0007–0.0014 ECC at 5-7× cost. The production default therefore
-stays `subpixel="none"`, `search_resolution_multiplier=1.0`; all variants are
-opt-in. See `reports/2026-06-27-decision-gate-grid-vs-lk.md` for the per-dataset
-numbers and the methodology._
+uniform +0.0003–0.0032 ECC at 5–7× cost (largest gain on dino). The
+production default therefore stays `subpixel="none"`,
+`search_resolution_multiplier=1.0`; all variants are opt-in. Round 2
+(2026-06-27) tested three plausible LK fixes for the kerry_park
+regression — anisotropic sampler, tighter `max_offset_px=1.0`, 10 outer
+sweeps — **none recovered the regression**, ruling out the easy fixes
+(the tight-offset variant in fact made kerry_park worse, −0.0045). See
+`reports/2026-06-27-decision-gate-grid-vs-lk.md` for the per-dataset
+numbers and methodology._
 
 _**Per-move shared T (not LOO).** The "free with running sum" leave-one-out
 bonus the spec lists as the incremental variant's natural default was
