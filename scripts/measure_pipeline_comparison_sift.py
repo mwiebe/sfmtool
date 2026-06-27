@@ -459,6 +459,108 @@ def bitmaps_by_world(recon: SfmrReconstruction) -> dict[bytes, np.ndarray]:
     return out
 
 
+def _bitmap_sharpness_per_point(
+    bitmap_dict: dict[bytes, np.ndarray],
+) -> list[tuple[float, float]]:
+    """Per-point ``(laplacian_var, gradient_mag_mean)`` over each bitmap's
+    luminance channel.
+
+    Inputs:
+      ``bitmap_dict`` — ``{key: RGBA uint8 (H, W, 4)}`` (same shape the other
+      bitmap helpers consume).
+
+    Per bitmap:
+      * Luminance ``I_gray = mean(rgb, axis=-1)`` in ``float32`` normalized to
+        ``[0, 1]`` (so the metric is on the same scale as `bitmap_l1_summary`'s
+        normalized output).
+      * Alpha mask matches `bitmap_l1_summary` semantics: we use ``alpha > 0``
+        per bitmap so all-transparent border texels don't deflate sharpness.
+      * Laplacian: 3x3 kernel ``[[0,1,0],[1,-4,1],[0,1,0]]`` applied via
+        numpy slicing with ``'reflect'`` boundary handling (one-row/column
+        reflection — the standard symmetric padding so interior texels aren't
+        biased by zero borders). Variance is taken over masked texels only.
+      * Gradient magnitude: forward differences ``dx = diff(I, axis=1)``,
+        ``dy = diff(I, axis=0)``, padded to original shape with zeros on the
+        trailing column/row. ``mag = sqrt(dx**2 + dy**2)``. Mean is taken over
+        masked texels (same mask).
+      * If the masked region is empty OR has < 2 masked texels (the Laplacian
+        variance is undefined for n<2) the bitmap is skipped (returned tuple
+        omitted from the list, NOT NaN — caller aggregates the survivors).
+    """
+    out: list[tuple[float, float]] = []
+    for _key, rgba in bitmap_dict.items():
+        if rgba.ndim != 3 or rgba.shape[-1] != 4:
+            continue
+        alpha = rgba[:, :, 3]
+        mask = alpha > 0
+        if mask.sum() < 2:
+            continue
+        rgb = rgba[:, :, :3].astype(np.float32) / 255.0
+        gray = rgb.mean(axis=2)  # (H, W) in [0, 1]
+        # 3x3 Laplacian [[0,1,0],[1,-4,1],[0,1,0]] via numpy with reflect
+        # padding. np.pad(..., 'reflect') reflects across the edge sample
+        # without duplicating it, matching the standard image-processing
+        # convention used by scipy.ndimage.convolve(mode='reflect').
+        padded = np.pad(gray, 1, mode="reflect")
+        lap = (
+            padded[:-2, 1:-1]
+            + padded[2:, 1:-1]
+            + padded[1:-1, :-2]
+            + padded[1:-1, 2:]
+            - 4.0 * padded[1:-1, 1:-1]
+        )
+        lap_masked = lap[mask]
+        lap_var = float(lap_masked.var())
+        # Forward differences padded with zeros to original shape.
+        dx = np.zeros_like(gray)
+        dy = np.zeros_like(gray)
+        dx[:, :-1] = np.diff(gray, axis=1)
+        dy[:-1, :] = np.diff(gray, axis=0)
+        mag = np.sqrt(dx * dx + dy * dy)
+        mag_mean = float(mag[mask].mean())
+        out.append((lap_var, mag_mean))
+    return out
+
+
+def bitmap_sharpness_summary(
+    bitmap_dict: dict[bytes, np.ndarray],
+) -> dict[str, float | int]:
+    """Aggregate per-pipeline sharpness from ``_bitmap_sharpness_per_point``.
+
+    Returns mean / median / p95 of Laplacian variance and of gradient-mag mean
+    across the bitmaps that survived the alpha-mask check, plus ``n_compared``
+    (survivors) and ``n_skipped`` (bitmaps with <2 masked texels — fully
+    transparent or single-pixel coverage)."""
+    per_point = _bitmap_sharpness_per_point(bitmap_dict)
+    n_total = len(bitmap_dict)
+    n_compared = len(per_point)
+    n_skipped = n_total - n_compared
+    if not per_point:
+        return {
+            "lap_var_mean": float("nan"),
+            "lap_var_median": float("nan"),
+            "lap_var_p95": float("nan"),
+            "grad_mag_mean_mean": float("nan"),
+            "grad_mag_mean_median": float("nan"),
+            "grad_mag_mean_p95": float("nan"),
+            "n_compared": n_compared,
+            "n_skipped": n_skipped,
+        }
+    arr = np.array(per_point, dtype=np.float64)
+    lap = arr[:, 0]
+    grad = arr[:, 1]
+    return {
+        "lap_var_mean": float(lap.mean()),
+        "lap_var_median": float(np.median(lap)),
+        "lap_var_p95": float(np.percentile(lap, 95)),
+        "grad_mag_mean_mean": float(grad.mean()),
+        "grad_mag_mean_median": float(np.median(grad)),
+        "grad_mag_mean_p95": float(np.percentile(grad, 95)),
+        "n_compared": n_compared,
+        "n_skipped": n_skipped,
+    }
+
+
 def bitmap_l1_summary(
     reference: dict[bytes, np.ndarray],
     variant: dict[bytes, np.ndarray],
@@ -654,6 +756,18 @@ def measure_dataset(
                 {"pair": label, **bitmap_l1_summary(_pipe_b(rhs), _pipe_b(lhs))}
             )
 
+    # Per-pipeline bitmap sharpness (Laplacian variance + gradient-mag mean
+    # over the rendered RGBA bitmaps, aggregated to mean/median/p95 per
+    # pipeline per dataset). Computed against the same alpha>0 mask
+    # `bitmap_l1_summary` uses so sharpness isn't deflated by transparent
+    # border texels. Bitmaps were already rendered in memory — no re-render.
+    sharpness_by_pipeline: dict[str, dict] = {}
+    for p in pipelines:
+        info = pipeline_outputs.get(p, {})
+        if "error" in info:
+            continue
+        sharpness_by_pipeline[p] = bitmap_sharpness_summary(info.get("bitmaps", {}))
+
     # Strip the heavy in-memory dicts before returning so we can serialize.
     pipeline_summary = {}
     for p, info in pipeline_outputs.items():
@@ -686,6 +800,7 @@ def measure_dataset(
         "keypoint_comparisons": keypoint_rows,
         "normal_comparisons": normal_rows,
         "bitmap_comparisons": bitmap_rows,
+        "sharpness": sharpness_by_pipeline,
     }
 
 
@@ -768,6 +883,14 @@ def main() -> int:
                 f"    n  {n['pair']:>11s}: mean={n['mean_angle_deg']:.3f}deg  "
                 f"median={n['median_angle_deg']:.3f}deg  p95={n['p95_angle_deg']:.3f}deg  "
                 f"n={n['n_overlap']}",
+                flush=True,
+            )
+        for p, s in r.get("sharpness", {}).items():
+            print(
+                f"    sh {p:>11s}: lap_var mean={s['lap_var_mean']:.4f} "
+                f"median={s['lap_var_median']:.4f} p95={s['lap_var_p95']:.4f}  "
+                f"grad_mag mean={s['grad_mag_mean_mean']:.4f} "
+                f"n={s['n_compared']} skipped={s['n_skipped']}",
                 flush=True,
             )
         for b in r["bitmap_comparisons"]:

@@ -13,25 +13,25 @@
     "pipelines": {
       "A": {
         "label": "normals-only",
-        "wall_secs": 0.7908470270000407,
+        "wall_secs": 0.688827050999862,
         "out_points": 1054,
         "n_observations": 3137
       },
       "B": {
         "label": "grid (localize_keypoints)",
-        "wall_secs": 16.422278467000012,
+        "wall_secs": 16.17712365200009,
         "out_points": 1043,
         "n_observations": 4715
       },
       "C": {
         "label": "LK (refine_keypoints, bilinear)",
-        "wall_secs": 2.68011139500004,
+        "wall_secs": 2.6954899709999154,
         "out_points": 1054,
         "n_observations": 3137
       },
       "D": {
         "label": "LK (refine_keypoints, anisotropic)",
-        "wall_secs": 3.2191741469999897,
+        "wall_secs": 3.1778794280000966,
         "out_points": 1054,
         "n_observations": 3137
       }
@@ -74,28 +74,28 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_shift_px": 0.7196236535116435,
+        "mean_shift_px": 0.7196236535116437,
         "median_shift_px": 0.34947189548953,
         "p95_shift_px": 2.686725210715902,
         "n_overlap": 2904
       },
       {
         "pair": "D_vs_SIFT",
-        "mean_shift_px": 0.25840567922404867,
+        "mean_shift_px": 0.2584056792240486,
         "median_shift_px": 0.15762642343073005,
         "p95_shift_px": 0.8489855027549358,
         "n_overlap": 3137
       },
       {
         "pair": "D_vs_A",
-        "mean_shift_px": 0.25840567922404867,
+        "mean_shift_px": 0.2584056792240486,
         "median_shift_px": 0.15762642343073005,
         "p95_shift_px": 0.8489855027549358,
         "n_overlap": 3137
       },
       {
         "pair": "D_vs_B",
-        "mean_shift_px": 0.7075275945641735,
+        "mean_shift_px": 0.7075275945641734,
         "median_shift_px": 0.3471999544819855,
         "p95_shift_px": 2.6409194738159862,
         "n_overlap": 2904
@@ -135,7 +135,7 @@
       },
       {
         "pair": "B_vs_A",
-        "mean_angle_deg": 13.632738927472833,
+        "mean_angle_deg": 13.63273892747283,
         "median_angle_deg": 9.550545255837186,
         "p95_angle_deg": 36.07977588487034,
         "n_overlap": 1035,
@@ -151,7 +151,7 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_angle_deg": 11.656306662771199,
+        "mean_angle_deg": 11.656306662771195,
         "median_angle_deg": 5.985751270311395,
         "p95_angle_deg": 36.63842504348761,
         "n_overlap": 1035,
@@ -183,7 +183,7 @@
       },
       {
         "pair": "D_vs_C",
-        "mean_angle_deg": 0.525418274462339,
+        "mean_angle_deg": 0.5254182744623391,
         "median_angle_deg": 0.0,
         "p95_angle_deg": 1.3094569133201988,
         "n_overlap": 1046,
@@ -236,7 +236,7 @@
       },
       {
         "pair": "C_vs_A",
-        "mean_l1": 0.02411889546386351,
+        "mean_l1": 0.024118895463863515,
         "median_l1": 0.014703613169053022,
         "p95_l1": 0.05838507783179177,
         "n_substantially_different": 29,
@@ -267,7 +267,7 @@
       },
       {
         "pair": "D_vs_A",
-        "mean_l1": 0.024278150861564138,
+        "mean_l1": 0.02427815086156413,
         "median_l1": 0.01527096991445504,
         "p95_l1": 0.056469678691789184,
         "n_substantially_different": 30,
@@ -295,7 +295,49 @@
         "n_compared": 676,
         "n_skipped": 370
       }
-    ]
+    ],
+    "sharpness": {
+      "A": {
+        "lap_var_mean": 0.004427192790506721,
+        "lap_var_median": 0.0013342932797968388,
+        "lap_var_p95": 0.021427760273218126,
+        "grad_mag_mean_mean": 0.035724100237921705,
+        "grad_mag_mean_median": 0.03199152648448944,
+        "grad_mag_mean_p95": 0.06644240915775299,
+        "n_compared": 667,
+        "n_skipped": 379
+      },
+      "B": {
+        "lap_var_mean": 0.003326657154974428,
+        "lap_var_median": 0.0010222067940048873,
+        "lap_var_p95": 0.016280293464660645,
+        "grad_mag_mean_mean": 0.032638522943079694,
+        "grad_mag_mean_median": 0.029093071818351746,
+        "grad_mag_mean_p95": 0.06170441210269928,
+        "n_compared": 806,
+        "n_skipped": 229
+      },
+      "C": {
+        "lap_var_mean": 0.004454080523532462,
+        "lap_var_median": 0.0012464870233088732,
+        "lap_var_p95": 0.022942760959267616,
+        "grad_mag_mean_mean": 0.0352813994543649,
+        "grad_mag_mean_median": 0.031306397169828415,
+        "grad_mag_mean_p95": 0.06791715323925018,
+        "n_compared": 676,
+        "n_skipped": 370
+      },
+      "D": {
+        "lap_var_mean": 0.00444433418474196,
+        "lap_var_median": 0.0012464870233088732,
+        "lap_var_p95": 0.023628744762390852,
+        "grad_mag_mean_mean": 0.03530752567571627,
+        "grad_mag_mean_median": 0.031306397169828415,
+        "grad_mag_mean_p95": 0.06822975538671017,
+        "n_compared": 676,
+        "n_skipped": 370
+      }
+    }
   },
   {
     "dataset": "dino_dog_toy",
@@ -311,25 +353,25 @@
     "pipelines": {
       "A": {
         "label": "normals-only",
-        "wall_secs": 13.26491729899999,
+        "wall_secs": 6.321164740000086,
         "out_points": 3805,
         "n_observations": 17581
       },
       "B": {
         "label": "grid (localize_keypoints)",
-        "wall_secs": 255.74654369399997,
+        "wall_secs": 243.2632665770002,
         "out_points": 3802,
         "n_observations": 62989
       },
       "C": {
         "label": "LK (refine_keypoints, bilinear)",
-        "wall_secs": 22.369282827000006,
+        "wall_secs": 21.782415792000165,
         "out_points": 3805,
         "n_observations": 17581
       },
       "D": {
         "label": "LK (refine_keypoints, anisotropic)",
-        "wall_secs": 31.745642857000007,
+        "wall_secs": 30.45606644999998,
         "out_points": 3805,
         "n_observations": 17581
       }
@@ -372,28 +414,28 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_shift_px": 0.9651421424761905,
+        "mean_shift_px": 0.9651421424761903,
         "median_shift_px": 0.7207889410025464,
         "p95_shift_px": 2.2999793508191613,
         "n_overlap": 14378
       },
       {
         "pair": "D_vs_SIFT",
-        "mean_shift_px": 0.5018741824249082,
+        "mean_shift_px": 0.5018741824249083,
         "median_shift_px": 0.2869218746028045,
         "p95_shift_px": 1.6868191168847293,
         "n_overlap": 17581
       },
       {
         "pair": "D_vs_A",
-        "mean_shift_px": 0.5018741824249082,
+        "mean_shift_px": 0.5018741824249083,
         "median_shift_px": 0.2869218746028045,
         "p95_shift_px": 1.6868191168847293,
         "n_overlap": 17581
       },
       {
         "pair": "D_vs_B",
-        "mean_shift_px": 0.9483366970775609,
+        "mean_shift_px": 0.9483366970775607,
         "median_shift_px": 0.7072310224871652,
         "p95_shift_px": 2.2547041370731145,
         "n_overlap": 14378
@@ -425,7 +467,7 @@
       },
       {
         "pair": "C_vs_SIFT",
-        "mean_angle_deg": 27.866037362625864,
+        "mean_angle_deg": 27.866037362625868,
         "median_angle_deg": 30.489934560831873,
         "p95_angle_deg": 57.11173114569587,
         "n_overlap": 3803,
@@ -433,7 +475,7 @@
       },
       {
         "pair": "B_vs_A",
-        "mean_angle_deg": 11.986051227197164,
+        "mean_angle_deg": 11.986051227197166,
         "median_angle_deg": 7.856800196711957,
         "p95_angle_deg": 35.20673300081357,
         "n_overlap": 3800,
@@ -465,7 +507,7 @@
       },
       {
         "pair": "D_vs_A",
-        "mean_angle_deg": 8.157386818939946,
+        "mean_angle_deg": 8.157386818939944,
         "median_angle_deg": 3.817533948841683,
         "p95_angle_deg": 28.75612840803676,
         "n_overlap": 3803,
@@ -585,7 +627,7 @@
       },
       {
         "pair": "D_vs_C",
-        "mean_l1": 0.013017616890162384,
+        "mean_l1": 0.013017616890162387,
         "median_l1": 0.0022013435176774566,
         "p95_l1": 0.03445601930805278,
         "n_substantially_different": 57,
@@ -593,7 +635,49 @@
         "n_compared": 3223,
         "n_skipped": 580
       }
-    ]
+    ],
+    "sharpness": {
+      "A": {
+        "lap_var_mean": 0.015057150083326696,
+        "lap_var_median": 0.008513765409588814,
+        "lap_var_p95": 0.05412978492677212,
+        "grad_mag_mean_mean": 0.05003160601412294,
+        "grad_mag_mean_median": 0.046697746962308884,
+        "grad_mag_mean_p95": 0.09347874857485294,
+        "n_compared": 3216,
+        "n_skipped": 587
+      },
+      "B": {
+        "lap_var_mean": 0.01148912133840453,
+        "lap_var_median": 0.005799708887934685,
+        "lap_var_p95": 0.04186492934823034,
+        "grad_mag_mean_mean": 0.04540012541518337,
+        "grad_mag_mean_median": 0.04160262271761894,
+        "grad_mag_mean_p95": 0.086717864871025,
+        "n_compared": 3405,
+        "n_skipped": 395
+      },
+      "C": {
+        "lap_var_mean": 0.016543759125013366,
+        "lap_var_median": 0.009134335443377495,
+        "lap_var_p95": 0.0608275299891829,
+        "grad_mag_mean_mean": 0.05171190196851967,
+        "grad_mag_mean_median": 0.0480492077767849,
+        "grad_mag_mean_p95": 0.09864244945347309,
+        "n_compared": 3200,
+        "n_skipped": 603
+      },
+      "D": {
+        "lap_var_mean": 0.016733703331601815,
+        "lap_var_median": 0.009199562482535839,
+        "lap_var_p95": 0.062382138893008234,
+        "grad_mag_mean_mean": 0.05194362779348489,
+        "grad_mag_mean_median": 0.048364995047450066,
+        "grad_mag_mean_p95": 0.09906894192099569,
+        "n_compared": 3204,
+        "n_skipped": 599
+      }
+    }
   },
   {
     "dataset": "seattle_backyard",
@@ -609,25 +693,25 @@
     "pipelines": {
       "A": {
         "label": "normals-only",
-        "wall_secs": 4.264820524000015,
+        "wall_secs": 3.9825890039999194,
         "out_points": 3343,
         "n_observations": 14341
       },
       "B": {
         "label": "grid (localize_keypoints)",
-        "wall_secs": 109.8276156180001,
+        "wall_secs": 106.18849080299992,
         "out_points": 3314,
         "n_observations": 31040
       },
       "C": {
         "label": "LK (refine_keypoints, bilinear)",
-        "wall_secs": 14.358836846000031,
+        "wall_secs": 15.023931377000054,
         "out_points": 3343,
         "n_observations": 14341
       },
       "D": {
         "label": "LK (refine_keypoints, anisotropic)",
-        "wall_secs": 18.732035731999986,
+        "wall_secs": 18.11142477699991,
         "out_points": 3343,
         "n_observations": 14341
       }
@@ -670,7 +754,7 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_shift_px": 0.3776147699789052,
+        "mean_shift_px": 0.3776147699789053,
         "median_shift_px": 0.2529514646510884,
         "p95_shift_px": 1.148991854059187,
         "n_overlap": 13280
@@ -739,7 +823,7 @@
       },
       {
         "pair": "C_vs_A",
-        "mean_angle_deg": 16.17054682982055,
+        "mean_angle_deg": 16.170546829820548,
         "median_angle_deg": 15.850075062510701,
         "p95_angle_deg": 35.256470804812615,
         "n_overlap": 3278,
@@ -747,7 +831,7 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_angle_deg": 13.824201225598792,
+        "mean_angle_deg": 13.82420122559879,
         "median_angle_deg": 8.469106369159624,
         "p95_angle_deg": 39.36676508767141,
         "n_overlap": 3249,
@@ -842,7 +926,7 @@
       },
       {
         "pair": "C_vs_B",
-        "mean_l1": 0.0511375996872255,
+        "mean_l1": 0.05113759968722549,
         "median_l1": 0.03187863219018076,
         "p95_l1": 0.19448530010148582,
         "n_substantially_different": 572,
@@ -873,7 +957,7 @@
       },
       {
         "pair": "D_vs_B",
-        "mean_l1": 0.05096408632765933,
+        "mean_l1": 0.05096408632765934,
         "median_l1": 0.03167211495193781,
         "p95_l1": 0.192956028358609,
         "n_substantially_different": 577,
@@ -891,7 +975,49 @@
         "n_compared": 3117,
         "n_skipped": 164
       }
-    ]
+    ],
+    "sharpness": {
+      "A": {
+        "lap_var_mean": 0.01853698653418946,
+        "lap_var_median": 0.008880059234797955,
+        "lap_var_p95": 0.06926249414682388,
+        "grad_mag_mean_mean": 0.05578616209634479,
+        "grad_mag_mean_median": 0.05076359957456589,
+        "grad_mag_mean_p95": 0.10563076138496387,
+        "n_compared": 3077,
+        "n_skipped": 204
+      },
+      "B": {
+        "lap_var_mean": 0.014856140954378726,
+        "lap_var_median": 0.0051956623792648315,
+        "lap_var_p95": 0.06400210745632648,
+        "grad_mag_mean_mean": 0.04885596812455654,
+        "grad_mag_mean_median": 0.042757291346788406,
+        "grad_mag_mean_p95": 0.10138491578400134,
+        "n_compared": 3174,
+        "n_skipped": 78
+      },
+      "C": {
+        "lap_var_mean": 0.018849738682806823,
+        "lap_var_median": 0.008042668923735619,
+        "lap_var_p95": 0.07395208403468129,
+        "grad_mag_mean_mean": 0.05523296480349139,
+        "grad_mag_mean_median": 0.049157481640577316,
+        "grad_mag_mean_p95": 0.10791306942701338,
+        "n_compared": 3107,
+        "n_skipped": 174
+      },
+      "D": {
+        "lap_var_mean": 0.019218736426118477,
+        "lap_var_median": 0.008091171272099018,
+        "lap_var_p95": 0.07597664743661878,
+        "grad_mag_mean_mean": 0.055464302174360915,
+        "grad_mag_mean_median": 0.049181435257196426,
+        "grad_mag_mean_p95": 0.10878207907080649,
+        "n_compared": 3107,
+        "n_skipped": 174
+      }
+    }
   },
   {
     "dataset": "kerry_park",
@@ -907,25 +1033,25 @@
     "pipelines": {
       "A": {
         "label": "normals-only",
-        "wall_secs": 0.8592332859999487,
+        "wall_secs": 0.8501528770000277,
         "out_points": 786,
         "n_observations": 2728
       },
       "B": {
         "label": "grid (localize_keypoints)",
-        "wall_secs": 28.848448029999986,
+        "wall_secs": 28.21731453199982,
         "out_points": 786,
         "n_observations": 8319
       },
       "C": {
         "label": "LK (refine_keypoints, bilinear)",
-        "wall_secs": 3.108046571999921,
+        "wall_secs": 2.931711764000056,
         "out_points": 786,
         "n_observations": 2728
       },
       "D": {
         "label": "LK (refine_keypoints, anisotropic)",
-        "wall_secs": 3.6384290970000848,
+        "wall_secs": 3.4618630829997983,
         "out_points": 786,
         "n_observations": 2728
       }
@@ -947,7 +1073,7 @@
       },
       {
         "pair": "C_vs_SIFT",
-        "mean_shift_px": 0.19441827340408321,
+        "mean_shift_px": 0.19441827340408324,
         "median_shift_px": 0.11981581214171388,
         "p95_shift_px": 0.6313994985167812,
         "n_overlap": 2728
@@ -961,14 +1087,14 @@
       },
       {
         "pair": "C_vs_A",
-        "mean_shift_px": 0.19441827340408321,
+        "mean_shift_px": 0.19441827340408324,
         "median_shift_px": 0.11981581214171388,
         "p95_shift_px": 0.6313994985167812,
         "n_overlap": 2728
       },
       {
         "pair": "C_vs_B",
-        "mean_shift_px": 0.4000472808508373,
+        "mean_shift_px": 0.40004728085083735,
         "median_shift_px": 0.25734560405315776,
         "p95_shift_px": 1.178123380991209,
         "n_overlap": 2675
@@ -1021,7 +1147,7 @@
       },
       {
         "pair": "C_vs_SIFT",
-        "mean_angle_deg": 23.365796303181597,
+        "mean_angle_deg": 23.365796303181593,
         "median_angle_deg": 19.82269999318774,
         "p95_angle_deg": 64.59843446733827,
         "n_overlap": 756,
@@ -1037,7 +1163,7 @@
       },
       {
         "pair": "C_vs_A",
-        "mean_angle_deg": 11.453830310141175,
+        "mean_angle_deg": 11.453830310141173,
         "median_angle_deg": 1.3093278576281033,
         "p95_angle_deg": 34.107628609336174,
         "n_overlap": 756,
@@ -1061,7 +1187,7 @@
       },
       {
         "pair": "D_vs_A",
-        "mean_angle_deg": 11.41975709282481,
+        "mean_angle_deg": 11.419757092824812,
         "median_angle_deg": 1.7993247949960969,
         "p95_angle_deg": 34.03998138164151,
         "n_overlap": 756,
@@ -1069,7 +1195,7 @@
       },
       {
         "pair": "D_vs_B",
-        "mean_angle_deg": 15.732284279192488,
+        "mean_angle_deg": 15.732284279192484,
         "median_angle_deg": 13.77174919534938,
         "p95_angle_deg": 38.81800693924876,
         "n_overlap": 756,
@@ -1130,7 +1256,7 @@
       },
       {
         "pair": "C_vs_A",
-        "mean_l1": 0.05617777017578824,
+        "mean_l1": 0.05617777017578825,
         "median_l1": 0.027203614104027843,
         "p95_l1": 0.2742907954197304,
         "n_substantially_different": 98,
@@ -1189,6 +1315,48 @@
         "n_compared": 533,
         "n_skipped": 237
       }
-    ]
+    ],
+    "sharpness": {
+      "A": {
+        "lap_var_mean": 0.011191812646857457,
+        "lap_var_median": 0.005645362660288811,
+        "lap_var_p95": 0.039386359974741936,
+        "grad_mag_mean_mean": 0.05260184458226759,
+        "grad_mag_mean_median": 0.050794437527656555,
+        "grad_mag_mean_p95": 0.09202662482857704,
+        "n_compared": 526,
+        "n_skipped": 244
+      },
+      "B": {
+        "lap_var_mean": 0.00839016304532627,
+        "lap_var_median": 0.004137982381507754,
+        "lap_var_p95": 0.032173231244087226,
+        "grad_mag_mean_mean": 0.04756715044310444,
+        "grad_mag_mean_median": 0.04509895481169224,
+        "grad_mag_mean_p95": 0.08480016551911831,
+        "n_compared": 704,
+        "n_skipped": 66
+      },
+      "C": {
+        "lap_var_mean": 0.01118956731995358,
+        "lap_var_median": 0.005380780901759863,
+        "lap_var_p95": 0.03884922787547109,
+        "grad_mag_mean_mean": 0.051723524092873084,
+        "grad_mag_mean_median": 0.04947847127914429,
+        "grad_mag_mean_p95": 0.09336426556110382,
+        "n_compared": 533,
+        "n_skipped": 237
+      },
+      "D": {
+        "lap_var_mean": 0.010916001804922292,
+        "lap_var_median": 0.005301711615175009,
+        "lap_var_p95": 0.037592072412371634,
+        "grad_mag_mean_mean": 0.051376717476142426,
+        "grad_mag_mean_median": 0.04891130328178406,
+        "grad_mag_mean_p95": 0.09160372018814086,
+        "n_compared": 527,
+        "n_skipped": 243
+      }
+    }
   }
 ]

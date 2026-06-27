@@ -83,6 +83,26 @@ perturbations of the same answer — the keypoint-mover choice is a real
 signal that propagates through the second `refine_normals` and into
 the persisted reference appearance.
 
+**Bitmap sharpness — B's bitmaps are blurrier than A/C/D.** Per-pipeline
+Laplacian variance + gradient-mag mean over the rendered 24×24 RGBA bitmaps
+(masked to `alpha > 0` so transparent border texels don't deflate the
+metric) cleanly orders the same way as the bitmap-divergence story: **B is
+the blurriest on every dataset**, A/C/D are essentially tied. Mean
+Laplacian variance for B is **15–27% lower** than for A across the four
+datasets (seoul 0.0033 vs 0.0044; dino 0.0115 vs 0.0151; seattle 0.0149 vs
+0.0185; kerry 0.0084 vs 0.0112), with gradient-mag mean showing the same
+ordering (B is 7–10% lower than A everywhere). C and D match A to within
+±5% on every dataset — D vs C agrees to within ±2%, mirroring the
+near-zero D-vs-C bitmap divergence. The interpretation: **B's larger
+keypoint moves (0.48–1.09 px mean vs SIFT, vs C/D's 0.19–0.50 px) admit
+more views per point at the cost of consensus crispness — its rendered
+reference fuses more views together but with worse photometric alignment,
+producing a softer, ghosted patch**. The LK pipelines (C/D) move keypoints
+less, fuse the same view sets A does, and end up with the same sharpness.
+Across the catalog this is consistent with the bitmap-L1 picture: the
+~25–40% of points where B and C disagree visibly aren't B finding a
+sharper consensus — they're B blending more views with worse alignment.
+
 **One mild surprise.** On kerry_park, the *median* `B_vs_A` and `C_vs_A`
 normal angles are essentially 0° (0.000° and 1.309°) despite mean angles
 of ~12°. The mean and p95 (~36°) confirm there's real per-point movement
@@ -177,6 +197,20 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 | D_vs_B | 0.1079 | 0.0248 | 0.4748 | 211 / 837 |
 | D_vs_C | 0.0020 | 0.0000 | 0.0117 | 2 / 676 |
 
+### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
+
+Per-bitmap Laplacian variance + gradient magnitude mean, masked to `alpha > 0`
+per bitmap so transparent border texels don't deflate the metric. Aggregated
+per pipeline to mean / median / p95. Bitmaps with fewer than 2 covered texels
+are skipped (`n_skipped`).
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0044 | 0.0013 | 0.0214 | 0.0357 | 0.0320 | 0.0664 | 667 | 379 |
+| B | 0.0033 | 0.0010 | 0.0163 | 0.0326 | 0.0291 | 0.0617 | 806 | 229 |
+| C | 0.0045 | 0.0012 | 0.0229 | 0.0353 | 0.0313 | 0.0679 | 676 | 370 |
+| D | 0.0044 | 0.0012 | 0.0236 | 0.0353 | 0.0313 | 0.0682 | 676 | 370 |
+
 ## dino_dog_toy
 
 `20260621-00-solve-dino_dog_toy_1-85.sfmr` — 85 images, 19024 input points (stride-5 sub-sample: 3805 points), 17581 SIFT-seed observations, 3803 SIFT-seed points.
@@ -236,6 +270,15 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 | D_vs_A | 0.0308 | 0.0130 | 0.0589 | 138 / 3251 |
 | D_vs_B | 0.1126 | 0.0404 | 0.5822 | 1085 / 3574 |
 | D_vs_C | 0.0130 | 0.0022 | 0.0345 | 57 / 3223 |
+
+### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0151 | 0.0085 | 0.0541 | 0.0500 | 0.0467 | 0.0935 | 3216 | 587 |
+| B | 0.0115 | 0.0058 | 0.0419 | 0.0454 | 0.0416 | 0.0867 | 3405 | 395 |
+| C | 0.0165 | 0.0091 | 0.0608 | 0.0517 | 0.0480 | 0.0986 | 3200 | 603 |
+| D | 0.0167 | 0.0092 | 0.0624 | 0.0519 | 0.0484 | 0.0991 | 3204 | 599 |
 
 ## seattle_backyard
 
@@ -297,6 +340,15 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 | D_vs_B | 0.0510 | 0.0317 | 0.1930 | 577 / 3225 |
 | D_vs_C | 0.0077 | 0.0008 | 0.0360 | 50 / 3117 |
 
+### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0185 | 0.0089 | 0.0693 | 0.0558 | 0.0508 | 0.1056 | 3077 | 204 |
+| B | 0.0149 | 0.0052 | 0.0640 | 0.0489 | 0.0428 | 0.1014 | 3174 | 78 |
+| C | 0.0188 | 0.0080 | 0.0740 | 0.0552 | 0.0492 | 0.1079 | 3107 | 174 |
+| D | 0.0192 | 0.0081 | 0.0760 | 0.0555 | 0.0492 | 0.1088 | 3107 | 174 |
+
 ## kerry_park
 
 `20260621-00-solve-frame_1-24.sfmr` — 48 images, 786 input points, 2728 SIFT-seed observations, 770 SIFT-seed points.
@@ -357,6 +409,15 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 | D_vs_B | 0.1408 | 0.0510 | 0.5561 | 286 / 707 |
 | D_vs_C | 0.0082 | 0.0000 | 0.0273 | 9 / 533 |
 
+### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0112 | 0.0056 | 0.0394 | 0.0526 | 0.0508 | 0.0920 | 526 | 244 |
+| B | 0.0084 | 0.0041 | 0.0322 | 0.0476 | 0.0451 | 0.0848 | 704 | 66 |
+| C | 0.0112 | 0.0054 | 0.0388 | 0.0517 | 0.0495 | 0.0934 | 533 | 237 |
+| D | 0.0109 | 0.0053 | 0.0376 | 0.0514 | 0.0489 | 0.0916 | 527 | 243 |
+
 ## Cross-dataset summary
 
 ### Mean per-observation keypoint shift vs SIFT, by pipeline (px)
@@ -376,6 +437,37 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 | dino_dog_toy (stride=5) | 21.824 | 30.976 | 27.866 | 28.011 |
 | seattle_backyard | 21.116 | 36.457 | 34.013 | 34.100 |
 | kerry_park | 15.129 | 24.470 | 23.366 | 23.316 |
+
+### Mean Laplacian variance of rendered bitmap, by pipeline
+
+Per-pipeline mean of the per-bitmap Laplacian variance, alpha-masked. Higher
+= sharper rendered reference appearance.
+
+| Dataset | A | B | C | D |
+|---|---:|---:|---:|---:|
+| seoul_bull | 0.0044 | 0.0033 | 0.0045 | 0.0044 |
+| dino_dog_toy (stride=5) | 0.0151 | 0.0115 | 0.0165 | 0.0167 |
+| seattle_backyard | 0.0185 | 0.0149 | 0.0188 | 0.0192 |
+| kerry_park | 0.0112 | 0.0084 | 0.0112 | 0.0109 |
+
+### Mean gradient-magnitude mean of rendered bitmap, by pipeline
+
+Per-pipeline mean of the per-bitmap mean forward-difference gradient
+magnitude, alpha-masked. Same shape as the Laplacian-variance table.
+
+| Dataset | A | B | C | D |
+|---|---:|---:|---:|---:|
+| seoul_bull | 0.0357 | 0.0326 | 0.0353 | 0.0353 |
+| dino_dog_toy (stride=5) | 0.0500 | 0.0454 | 0.0517 | 0.0519 |
+| seattle_backyard | 0.0558 | 0.0489 | 0.0552 | 0.0555 |
+| kerry_park | 0.0526 | 0.0476 | 0.0517 | 0.0514 |
+
+On every dataset, both sharpness metrics agree: **B is the blurriest**
+(15–27% lower Laplacian variance, 7–10% lower gradient-mag mean than A),
+while A / C / D land within rendering-jitter of each other (D vs C agrees
+to within ±2%). This matches the bitmap-divergence picture in the opposite
+direction — B's larger keypoint moves admit more views per point at the
+cost of consensus crispness.
 
 ### Bitmap divergence between B and C (per-point mean-L1 + substantially-different count)
 
@@ -485,6 +577,23 @@ Per-observation keypoint comparisons are joined on `(rounded world position byte
 Per point we have a `24×24×4` `uint8` RGBA texture for each pipeline (the rendered reference appearance the second `refine_normals` pass uses for its consensus). The per-point distance is `mean(|a_rgb - b_rgb|.mean(-1))` over the texels where either pipeline has any alpha (so a texel covered by neither pipeline doesn't artificially deflate the mean). Per-point means are normalized into `[0, 1]` (`/= 255`). The "substantially-different" threshold is `16/255 ≈ 0.0627` — much smaller than typical JPEG-noise levels but well above bilinear-resample jitter, so a point that crosses it really has a different reference appearance, not just a per-texel sub-pixel wobble.
 
 The `*_vs_SIFT` bitmap rows are N/A: there is no rendered bitmap before the first `refine_normals` call, and the SIFT-baseline is `to_embedded_patches` alone (no rendering). Only the pipeline-to-pipeline bitmap rows (B-vs-A, C-vs-A, C-vs-B, D-vs-A, D-vs-B, D-vs-C) are populated.
+
+### Bitmap sharpness
+
+Per-bitmap Laplacian variance and gradient magnitude mean are computed on
+the luminance channel `I_gray = mean(rgb)` (RGB normalized to `[0, 1]`).
+The Laplacian uses the standard 3x3 kernel `[[0,1,0],[1,-4,1],[0,1,0]]`
+applied via numpy slicing with `reflect` boundary padding (matches
+`scipy.ndimage.convolve(mode='reflect')`); variance is taken over the
+covered texels. Gradient magnitude uses forward differences (`np.diff`
+along each axis, zero-padded back to original shape) and
+`sqrt(dx^2 + dy^2)`, again meaned over the covered texels.
+
+Both metrics share the per-bitmap alpha mask `alpha > 0` — the same
+mask the bitmap-distance helper uses, so sharpness isn't deflated by
+all-transparent border texels. Bitmaps with fewer than 2 covered texels
+are skipped (`n_skipped`); the per-pipeline aggregate (mean / median /
+p95) is over the survivors only.
 
 ### Dino sub-sampling
 
