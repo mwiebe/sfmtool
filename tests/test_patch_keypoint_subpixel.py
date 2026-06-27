@@ -203,3 +203,94 @@ def test_refine_keypoints_rejects_out_of_range_view_index(seoul_bull_workspace: 
         cloud.refine_keypoints(
             recon, images, view_sets=bad, point_ids=[pid], resolution=12
         )
+
+
+def test_refine_keypoints_honors_starting_keypoints(seoul_bull_workspace: Path):
+    """``starting_keypoints`` shifts the GN seed off the projection: a refinement
+    seeded ~0.3 px away from the projection lands somewhere subtly different
+    from the projection-seeded refinement, because GN's basin is *local* — the
+    seed direction biases which side of the photometric peak it climbs from.
+
+    The check is the binding contract: a different seed produces a different
+    refined keypoint for at least one view, and ``len(seeds) != len(views)``
+    is rejected.
+    """
+    import pytest
+
+    recon = SfmrReconstruction.load(seoul_bull_workspace)
+    images = _load_images(recon)
+    cloud = PatchCloud.from_reconstruction(
+        recon, normal="mean_viewing", extent_value=5.0
+    )
+    sample = _sample_point_ids(cloud, n=50)
+    view_sets = {
+        int(r["point_id"]): np.asarray(r["admitted"]).tolist()
+        for r in cloud.select_views(recon, images, point_ids=sample, resolution=12)
+    }
+    common = dict(
+        recon=recon,
+        images=images,
+        view_sets=view_sets,
+        point_ids=sample,
+        resolution=12,
+        max_gn_steps=10,
+    )
+
+    # Baseline: seeds default to each view's projection.
+    baseline = cloud.refine_keypoints(**common)
+    baseline_by_pid = {int(r["point_id"]): r for r in baseline}
+    positions = np.asarray(recon.positions, dtype=np.float64)
+
+    # Build seeds offset 0.5 px in +x from each view's projection. Only the
+    # subset of points with at least 2 views (the only ones the refiner
+    # actually GN-steps) is in scope; for the rest the refiner short-circuits
+    # to "no consensus" and the seed change is invisible.
+    seeds: dict[int, list[list[float]]] = {}
+    seeded_pids: list[int] = []
+    for r in baseline:
+        pid = int(r["point_id"])
+        views = view_sets[pid]
+        if len(views) < 2:
+            continue
+        per_view = []
+        for image_idx in views:
+            proj = _project(recon, positions[pid], image_idx)
+            if proj is None:
+                # The projection gate would drop this view anyway; seed at
+                # something arbitrary, the refiner won't read it.
+                per_view.append([0.0, 0.0])
+            else:
+                per_view.append([float(proj[0]) + 0.5, float(proj[1])])
+        seeds[pid] = per_view
+        seeded_pids.append(pid)
+
+    assert seeded_pids, "no multi-view point to seed-shift"
+
+    shifted = cloud.refine_keypoints(**common, starting_keypoints=seeds)
+
+    # At least one point's refined keypoints actually move when the seed is
+    # shifted. This is the binding contract (seeds are honored), not a
+    # quantitative claim about which local optimum the refiner finds.
+    moved_any = False
+    for r in shifted:
+        pid = int(r["point_id"])
+        if pid not in seeds:
+            continue
+        b = baseline_by_pid[pid]
+        b_kpts = np.asarray(b["keypoints"], dtype=np.float64).reshape(-1, 2)
+        s_kpts = np.asarray(r["keypoints"], dtype=np.float64).reshape(-1, 2)
+        if b_kpts.shape == s_kpts.shape and np.any(
+            np.linalg.norm(b_kpts - s_kpts, axis=1) > 1e-3
+        ):
+            moved_any = True
+            break
+    assert moved_any, (
+        "shifting the GN seed by 0.5 px never changed any refined keypoint"
+    )
+
+    # Length mismatch is rejected up front (per-point seeds must be parallel
+    # to that point's view set).
+    bad_pid = seeded_pids[0]
+    bad_seeds = {bad_pid: seeds[bad_pid][:-1]}  # one short
+    with pytest.raises(ValueError, match="starting_keypoints"):
+        cloud.refine_keypoints(**common, starting_keypoints=bad_seeds)

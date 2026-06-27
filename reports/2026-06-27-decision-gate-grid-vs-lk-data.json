@@ -1,0 +1,278 @@
+[
+  {
+    "dataset": "seoul_bull",
+    "sfmr_path": "/home/user/sfmtool/seoul_bull_ws/sfmr/20260621-00-solve-seoul_bull_sculpture_1-17.sfmr",
+    "image_count": 17,
+    "input_point_count": 1054,
+    "rows": [
+      {
+        "variant": "baseline",
+        "wall_secs": 2.1488336970001,
+        "out_points": 1029,
+        "mean_ecc": 0.9418052064483664,
+        "n_scored": 4714,
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "n_overlap": -1,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m2",
+        "wall_secs": 13.837822036000034,
+        "out_points": 1028,
+        "mean_ecc": 0.9426534424936126,
+        "n_scored": 4727,
+        "mean_shift_px": 0.3256143614372197,
+        "median_shift_px": 0.2057083471286035,
+        "n_overlap": 4660,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m3",
+        "wall_secs": 52.35231270100007,
+        "out_points": 1028,
+        "mean_ecc": 0.9429185754620972,
+        "n_scored": 4724,
+        "mean_shift_px": 0.301262935101174,
+        "median_shift_px": 0.20119818119486987,
+        "n_overlap": 4660,
+        "kwargs": {
+          "search_resolution_multiplier": 3.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "lk_per_sweep",
+        "wall_secs": 3.20386688900021,
+        "out_points": 1029,
+        "mean_ecc": 0.9445219396385175,
+        "n_scored": 4714,
+        "mean_shift_px": 0.09974074410969214,
+        "median_shift_px": 0.06339402254593249,
+        "n_overlap": 4686,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk"
+        }
+      },
+      {
+        "variant": "lk_per_move",
+        "wall_secs": 6.3652016419998745,
+        "out_points": 1029,
+        "mean_ecc": 0.9458489723366748,
+        "n_scored": 4714,
+        "mean_shift_px": 0.1743074331469834,
+        "median_shift_px": 0.10108769222042677,
+        "n_overlap": 4686,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk_per_move"
+        }
+      },
+      {
+        "variant": "grid_m2_then_lk",
+        "wall_secs": 14.938321807999955,
+        "out_points": 1028,
+        "mean_ecc": 0.9447076175547663,
+        "n_scored": 4727,
+        "mean_shift_px": 0.33493973750403144,
+        "median_shift_px": 0.2116530535537479,
+        "n_overlap": 4660,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "lk"
+        }
+      }
+    ]
+  },
+  {
+    "dataset": "seattle_backyard",
+    "sfmr_path": "/home/user/sfmtool/seattle_backyard_ws/sfmr/20260621-00-solve-seattle_backyard_1-26.sfmr",
+    "image_count": 26,
+    "input_point_count": 3343,
+    "rows": [
+      {
+        "variant": "baseline",
+        "wall_secs": 13.438422084999956,
+        "out_points": 3295,
+        "mean_ecc": 0.9266472432915354,
+        "n_scored": 31500,
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "n_overlap": -1,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m2",
+        "wall_secs": 90.40581295000015,
+        "out_points": 3293,
+        "mean_ecc": 0.9280240403848797,
+        "n_scored": 31477,
+        "mean_shift_px": 0.20234586295149498,
+        "median_shift_px": 0.13965277231597806,
+        "n_overlap": 30891,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m3",
+        "wall_secs": 350.20835758,
+        "out_points": 3293,
+        "mean_ecc": 0.9282275570138238,
+        "n_scored": 31498,
+        "mean_shift_px": 0.19512667415656096,
+        "median_shift_px": 0.13108346961634787,
+        "n_overlap": 30904,
+        "kwargs": {
+          "search_resolution_multiplier": 3.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "lk_per_sweep",
+        "wall_secs": 19.455468442999972,
+        "out_points": 3295,
+        "mean_ecc": 0.9273343444464893,
+        "n_scored": 31500,
+        "mean_shift_px": 0.06981215545860993,
+        "median_shift_px": 0.04122923128168653,
+        "n_overlap": 31045,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk"
+        }
+      },
+      {
+        "variant": "lk_per_move",
+        "wall_secs": 35.41502474899994,
+        "out_points": 3295,
+        "mean_ecc": 0.9275638947114211,
+        "n_scored": 31500,
+        "mean_shift_px": 0.10616694748584835,
+        "median_shift_px": 0.06144518691633333,
+        "n_overlap": 31045,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk_per_move"
+        }
+      },
+      {
+        "variant": "grid_m2_then_lk",
+        "wall_secs": 96.50469728899998,
+        "out_points": 3293,
+        "mean_ecc": 0.9279567832357415,
+        "n_scored": 31477,
+        "mean_shift_px": 0.20834054395271073,
+        "median_shift_px": 0.14402906564922582,
+        "n_overlap": 30891,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "lk"
+        }
+      }
+    ]
+  },
+  {
+    "dataset": "kerry_park",
+    "sfmr_path": "/home/user/sfmtool/kerry_park_ws/sfmr/20260621-00-solve-frame_1-24.sfmr",
+    "image_count": 48,
+    "input_point_count": 786,
+    "rows": [
+      {
+        "variant": "baseline",
+        "wall_secs": 4.9677766889999475,
+        "out_points": 786,
+        "mean_ecc": 0.9213780796505414,
+        "n_scored": 8408,
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "n_overlap": -1,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m2",
+        "wall_secs": 25.10944456399966,
+        "out_points": 786,
+        "mean_ecc": 0.9217242651205444,
+        "n_scored": 8432,
+        "mean_shift_px": 0.24322327274551533,
+        "median_shift_px": 0.17589174082946762,
+        "n_overlap": 8265,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "grid_m3",
+        "wall_secs": 97.24740624700007,
+        "out_points": 786,
+        "mean_ecc": 0.9221303738178052,
+        "n_scored": 8424,
+        "mean_shift_px": 0.2303939836168976,
+        "median_shift_px": 0.16986459281742247,
+        "n_overlap": 8261,
+        "kwargs": {
+          "search_resolution_multiplier": 3.0,
+          "subpixel": "none"
+        }
+      },
+      {
+        "variant": "lk_per_sweep",
+        "wall_secs": 5.869255485999929,
+        "out_points": 786,
+        "mean_ecc": 0.9182782257591746,
+        "n_scored": 8405,
+        "mean_shift_px": 0.13324453781754497,
+        "median_shift_px": 0.05344001543455788,
+        "n_overlap": 8294,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk"
+        }
+      },
+      {
+        "variant": "lk_per_move",
+        "wall_secs": 12.176681808000012,
+        "out_points": 786,
+        "mean_ecc": 0.9189743547907889,
+        "n_scored": 8406,
+        "mean_shift_px": 0.20239067568867103,
+        "median_shift_px": 0.10399136370655816,
+        "n_overlap": 8294,
+        "kwargs": {
+          "search_resolution_multiplier": 1.0,
+          "subpixel": "lk_per_move"
+        }
+      },
+      {
+        "variant": "grid_m2_then_lk",
+        "wall_secs": 28.28824552800006,
+        "out_points": 786,
+        "mean_ecc": 0.9182540443150026,
+        "n_scored": 8430,
+        "mean_shift_px": 0.2903460767281243,
+        "median_shift_px": 0.18622484886299426,
+        "n_overlap": 8265,
+        "kwargs": {
+          "search_resolution_multiplier": 2.0,
+          "subpixel": "lk"
+        }
+      }
+    ]
+  }
+]

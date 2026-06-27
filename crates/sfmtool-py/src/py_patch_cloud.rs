@@ -15,9 +15,7 @@ use sfmtool_core::patch::cloud::{OrientedPatch, PatchCloud, PatchExtent, PatchNo
 use sfmtool_core::patch::keypoint_localize::{
     localize_patch_cloud_keypoints, KeypointLocalizeParams,
 };
-use sfmtool_core::patch::keypoint_subpixel::{
-    refine_patch_cloud_keypoints, ConsensusRefresh, KeypointSubpixelParams,
-};
+use sfmtool_core::patch::keypoint_subpixel::{ConsensusRefresh, KeypointSubpixelParams};
 use sfmtool_core::patch::normal_refine::{
     refine_patch_cloud, view_indices_from_reconstruction, CacheMode, NormalRefineParams, Objective,
     PatchWindow, ProjectedImage, Sampler,
@@ -904,6 +902,11 @@ impl PyPatchCloud {
     ///         below this many patch-grid px.
     ///     point_ids: If given, localize only for the patches with these source
     ///         point ids; ``None`` (default) localizes for every patch.
+    ///     search_resolution_multiplier: ``m`` for the discrete cross-view search;
+    ///         the search runs at resolution ``R_s = round(m·R)``. ``m = 1.0``
+    ///         (default) is the no-op; ``m > 1`` (the supersampled grid) resolves
+    ///         sub-pixel offsets directly at a cost that grows ~``m²``. See
+    ///         ``specs/core/keypoint-localization-search-cache.md``.
     ///
     /// Returns:
     ///     A list of per-point dicts ``{point_id, views (uint32[K]),
@@ -915,7 +918,7 @@ impl PyPatchCloud {
         recon, images, *, view_sets=None, max_iters=5, search=6.0, max_shift_px=3.0,
         min_relative_zncc=0.7, min_grazing_cos=0.1, resolution=24, window="gaussian_disk",
         window_sigma=0.6, sampler="bilinear", robust_iters=3, convergence_px=0.05,
-        point_ids=None
+        point_ids=None, search_resolution_multiplier=1.0
     ))]
     #[allow(clippy::too_many_arguments)]
     fn localize_keypoints<'py>(
@@ -936,6 +939,7 @@ impl PyPatchCloud {
         robust_iters: u32,
         convergence_px: f64,
         point_ids: Option<Vec<u32>>,
+        search_resolution_multiplier: f32,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let recon = &recon.inner;
         if self.inner.point_ids.len() != self.inner.len() {
@@ -978,6 +982,11 @@ impl PyPatchCloud {
                 )))
             }
         };
+        if !(search_resolution_multiplier.is_finite() && search_resolution_multiplier > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "search_resolution_multiplier must be > 0, got {search_resolution_multiplier}"
+            )));
+        }
         let params = KeypointLocalizeParams {
             max_iters,
             search,
@@ -989,9 +998,7 @@ impl PyPatchCloud {
             sampler,
             robust_iters,
             convergence_px,
-            // Phase-1 search cache: the resolution multiplier is not yet plumbed
-            // through the Python binding, so keep the no-op default (`1.0`).
-            ..Default::default()
+            search_resolution_multiplier,
         };
 
         let (pyramids, poses) = build_pyramids_and_poses(recon, &images)?;
@@ -1118,6 +1125,16 @@ impl PyPatchCloud {
     ///     max_offset_px: Max total per-view drift from the seed, in patch-grid px.
     ///     point_ids: If given, refine only the patches with these source point ids;
     ///         ``None`` (default) refines every patch.
+    ///     starting_keypoints: Optional mapping ``point_id -> [[x, y], ...]`` giving
+    ///         per-view seed keypoints in **source-image** pixels, parallel to that
+    ///         point's entry in ``view_sets`` (one ``[x, y]`` per view in order). For
+    ///         a point absent from this map (or with ``None``), every view of that
+    ///         point seeds at its own projection ``project_i(X_p)`` (the current
+    ///         behaviour). When ``view_sets`` is also given, each point's
+    ///         ``starting_keypoints`` length must match its ``view_sets`` length.
+    ///         The seeds let the refiner align to keypoints produced by an upstream
+    ///         localizer (e.g. :meth:`localize_keypoints`) rather than the raw
+    ///         projection — the seed is the per-view starting offset for GN.
     ///
     /// Returns:
     ///     A list of per-point dicts ``{point_id, views (uint32[K]),
@@ -1130,7 +1147,8 @@ impl PyPatchCloud {
         recon, images, *, view_sets=None, resolution=24, window="gaussian_disk",
         window_sigma=0.6, sampler="bilinear", robust_iters=3, max_outer_sweeps=1,
         outer_convergence_px=0.005, max_gn_steps=10, convergence_px=0.01,
-        max_offset_px=2.0, consensus_refresh="per_sweep", point_ids=None
+        max_offset_px=2.0, consensus_refresh="per_sweep", point_ids=None,
+        starting_keypoints=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn refine_keypoints<'py>(
@@ -1151,6 +1169,7 @@ impl PyPatchCloud {
         max_offset_px: f64,
         consensus_refresh: &str,
         point_ids: Option<Vec<u32>>,
+        starting_keypoints: Option<std::collections::HashMap<u32, Vec<[f64; 2]>>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let recon = &recon.inner;
         if self.inner.point_ids.len() != self.inner.len() {
@@ -1252,8 +1271,54 @@ impl PyPatchCloud {
             }
         }
 
-        let results =
-            py.detach(|| refine_patch_cloud_keypoints(&self.inner, &views, &sets, None, &params));
+        // Optional per-view seeds in source-image px. The map is `point_id ->
+        // [[x, y], ...]` parallel to that point's (final) view set: one seed
+        // per view, in order. Points absent from the map seed at their own
+        // projection (the existing fallback inside the refiner).
+        //
+        // The map is validated up front and then handed to a custom per-patch
+        // loop. We bypass `refine_patch_cloud_keypoints`'s seed contract
+        // (parallel `Vec<Vec<[f64; 2]>>` over every patch) because most patches
+        // typically have no entry, and the per-patch refiner already accepts a
+        // `None` slot that means "seed at projection" — exactly the per-patch
+        // mix we want.
+        if let Some(seed_map) = &starting_keypoints {
+            for (pid, seeds) in seed_map {
+                if let Some(set) = self
+                    .inner
+                    .point_ids
+                    .iter()
+                    .zip(sets.iter())
+                    .find_map(|(p, s)| (p == pid).then_some(s))
+                {
+                    if seeds.len() != set.len() {
+                        return Err(PyValueError::new_err(format!(
+                            "starting_keypoints[{pid}] has {} seeds but the view set has {} views",
+                            seeds.len(),
+                            set.len(),
+                        )));
+                    }
+                }
+            }
+        }
+
+        let results = py.detach(|| {
+            use rayon::prelude::*;
+            use sfmtool_core::patch::keypoint_subpixel::refine_patch_keypoints;
+            self.inner
+                .patches
+                .par_iter()
+                .enumerate()
+                .map(|(i, patch)| {
+                    let pid = self.inner.point_ids[i];
+                    let per_view_seeds = starting_keypoints
+                        .as_ref()
+                        .and_then(|m| m.get(&pid))
+                        .map(|v| v.as_slice());
+                    refine_patch_keypoints(patch, &views, &sets[i], per_view_seeds, &params)
+                })
+                .collect::<Vec<_>>()
+        });
 
         let mut out = Vec::new();
         for (res, &pid) in results.iter().zip(&self.inner.point_ids) {

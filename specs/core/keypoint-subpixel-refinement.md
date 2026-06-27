@@ -1,7 +1,8 @@
 # Photometric Subpixel Keypoint Refinement
 
-_Status: **MVP + analytic Jacobian + per-move consensus implemented** (Phases 2
-and 3B). The forward-additive ECC Gauss–Newton refiner lives in
+_Status: **MVP + analytic Jacobian + per-move consensus implemented + wired
+into `embed_patches` as opt-in** (Phases 2, 3B, and decision gate). The
+forward-additive ECC Gauss–Newton refiner lives in
 `crates/sfmtool-core/src/patch/keypoint_subpixel.rs` (exposed to Python as
 `PatchCloud.refine_keypoints`). All three "Consensus refresh granularity"
 variants are wired so the trade-off is measurable: the single-pass-frozen
@@ -17,6 +18,24 @@ collapsing the per-GN-step gradient build from 5 renders (value + 4 FD) to 1
 deferred work — leave-one-out consensus (measured-and-rejected; see below),
 inverse-compositional ECC, the joint bundle, and SIMD of the new sampler
 functions — is described in "Open questions" below._
+
+_**Decision-gate outcome (2026-06-27).** The plan's production-path fork —
+supersampled grid vs LK, on optimized A and B — was measured on
+`seoul_bull_sculpture`, `seattle_backyard`, and `kerry_park`. LK was wired into
+`_embed_patches.py` as a post-localization step 3.5 behind a new
+`subpixel: str = "none"` kwarg (`"lk"` for per-sweep, `"lk_per_move"` for the
+incremental variant) — see the `embed_patches` docstring. The supersampled
+grid is exposed in parallel via the new `search_resolution_multiplier` kwarg
+on `PatchCloud.localize_keypoints` (and pass-through on `embed_patches`).
+**No variant is a strict improvement over the baseline** across all
+datasets — LK gives +0.0027–0.0040 mean ECC on close-range textured
+seoul_bull at 1.5-3× cost, but **regresses** by −0.0024 to −0.0031 mean ECC
+on the kerry_park fisheye rig (plausibly an analytic-Jacobian linearization
+artifact on highly non-linear projections). The supersampled grid is a
+uniform +0.0007–0.0014 ECC at 5-7× cost. The production default therefore
+stays `subpixel="none"`, `search_resolution_multiplier=1.0`; all variants are
+opt-in. See `reports/2026-06-27-decision-gate-grid-vs-lk.md` for the per-dataset
+numbers and the methodology._
 
 _**Per-move shared T (not LOO).** The "free with running sum" leave-one-out
 bonus the spec lists as the incremental variant's natural default was
