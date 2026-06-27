@@ -1,0 +1,766 @@
+[
+  {
+    "dataset": "seoul_bull",
+    "sfmr_path": "/home/user/sfmtool/seoul_bull_ws/sfmr/20260621-00-solve-seoul_bull_sculpture_1-17.sfmr",
+    "image_count": 17,
+    "input_point_count": 1054,
+    "subsample_stride": 1,
+    "sift_seed_obs_count": 3137,
+    "sift_seed_point_count": 1046,
+    "resolution": 24,
+    "bitmap_diff_threshold_l1": 0.06274509803921569,
+    "pipelines": {
+      "A": {
+        "label": "normals-only",
+        "wall_secs": 0.710128587999975,
+        "out_points": 1054,
+        "n_observations": 3137
+      },
+      "B": {
+        "label": "grid (localize_keypoints)",
+        "wall_secs": 16.87740247499994,
+        "out_points": 1043,
+        "n_observations": 4715
+      },
+      "C": {
+        "label": "LK (refine_keypoints)",
+        "wall_secs": 2.868798518999938,
+        "out_points": 1054,
+        "n_observations": 3137
+      }
+    },
+    "keypoint_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "p95_shift_px": 0.0,
+        "n_overlap": 3137
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_shift_px": 0.8496287261135,
+        "median_shift_px": 0.4646703285260345,
+        "p95_shift_px": 2.9264986437050773,
+        "n_overlap": 2904
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_shift_px": 0.23378634029767661,
+        "median_shift_px": 0.14985211444123836,
+        "p95_shift_px": 0.7856215858215527,
+        "n_overlap": 3137
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_shift_px": 0.8496287261135,
+        "median_shift_px": 0.4646703285260345,
+        "p95_shift_px": 2.9264986437050773,
+        "n_overlap": 2904
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_shift_px": 0.23378634029767661,
+        "median_shift_px": 0.14985211444123836,
+        "p95_shift_px": 0.7856215858215527,
+        "n_overlap": 3137
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_shift_px": 0.7196236535116437,
+        "median_shift_px": 0.34947189548953,
+        "p95_shift_px": 2.686725210715902,
+        "n_overlap": 2904
+      }
+    ],
+    "normal_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_angle_deg": 17.54690048520309,
+        "median_angle_deg": 19.03920264611714,
+        "p95_angle_deg": 36.02047218618927,
+        "n_overlap": 1046,
+        "n_skipped": 0
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_angle_deg": 27.354282150933308,
+        "median_angle_deg": 29.12021745146198,
+        "p95_angle_deg": 61.75408492136249,
+        "n_overlap": 1035,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_angle_deg": 24.460926930825842,
+        "median_angle_deg": 21.95005103907652,
+        "p95_angle_deg": 64.37336163917571,
+        "n_overlap": 1046,
+        "n_skipped": 0
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_angle_deg": 13.63273892747283,
+        "median_angle_deg": 9.550545255837186,
+        "p95_angle_deg": 36.07977588487034,
+        "n_overlap": 1035,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_angle_deg": 9.386053324954691,
+        "median_angle_deg": 2.0355960388696075,
+        "p95_angle_deg": 34.014521805881785,
+        "n_overlap": 1046,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_angle_deg": 11.656306662771197,
+        "median_angle_deg": 5.985751270311395,
+        "p95_angle_deg": 36.63842504348761,
+        "n_overlap": 1035,
+        "n_skipped": 0
+      }
+    ],
+    "bitmap_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_l1": 0.11391570798333452,
+        "median_l1": 0.03071555062836292,
+        "p95_l1": 0.4768785289689606,
+        "n_substantially_different": 229,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 836,
+        "n_skipped": 199
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_l1": 0.02411889546386351,
+        "median_l1": 0.014703613169053022,
+        "p95_l1": 0.05838507783179177,
+        "n_substantially_different": 29,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 677,
+        "n_skipped": 369
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_l1": 0.1081105267281475,
+        "median_l1": 0.024872912612615847,
+        "p95_l1": 0.4747617055855544,
+        "n_substantially_different": 214,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 837,
+        "n_skipped": 198
+      }
+    ],
+    "measured_point_count": 1054
+  },
+  {
+    "dataset": "dino_dog_toy",
+    "sfmr_path": "/home/user/sfmtool/dino_dog_toy_ws/sfmr/20260621-00-solve-dino_dog_toy_1-85.sfmr",
+    "image_count": 85,
+    "input_point_count": 19024,
+    "subsample_stride": 5,
+    "sift_seed_obs_count": 17581,
+    "sift_seed_point_count": 3803,
+    "resolution": 24,
+    "bitmap_diff_threshold_l1": 0.06274509803921569,
+    "pipelines": {
+      "A": {
+        "label": "normals-only",
+        "wall_secs": 11.863507352000056,
+        "out_points": 3805,
+        "n_observations": 17581
+      },
+      "B": {
+        "label": "grid (localize_keypoints)",
+        "wall_secs": 242.43482634999998,
+        "out_points": 3802,
+        "n_observations": 62989
+      },
+      "C": {
+        "label": "LK (refine_keypoints)",
+        "wall_secs": 22.201614793999966,
+        "out_points": 3805,
+        "n_observations": 17581
+      }
+    },
+    "keypoint_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "p95_shift_px": 0.0,
+        "n_overlap": 17581
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_shift_px": 1.0857515902576997,
+        "median_shift_px": 0.8400414586607758,
+        "p95_shift_px": 2.527490951605838,
+        "n_overlap": 14378
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_shift_px": 0.3633621936860195,
+        "median_shift_px": 0.22160374395075783,
+        "p95_shift_px": 1.2028301546540998,
+        "n_overlap": 17581
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_shift_px": 1.0857515902576997,
+        "median_shift_px": 0.8400414586607758,
+        "p95_shift_px": 2.527490951605838,
+        "n_overlap": 14378
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_shift_px": 0.3633621936860195,
+        "median_shift_px": 0.22160374395075783,
+        "p95_shift_px": 1.2028301546540998,
+        "n_overlap": 17581
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_shift_px": 0.9651421424761903,
+        "median_shift_px": 0.7207889410025464,
+        "p95_shift_px": 2.2999793508191613,
+        "n_overlap": 14378
+      }
+    ],
+    "normal_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_angle_deg": 21.82432132412122,
+        "median_angle_deg": 27.928018609936238,
+        "p95_angle_deg": 35.97710953331143,
+        "n_overlap": 3803,
+        "n_skipped": 0
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_angle_deg": 30.975658386162188,
+        "median_angle_deg": 32.829126305018306,
+        "p95_angle_deg": 55.76729662837257,
+        "n_overlap": 3800,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_angle_deg": 27.866037362625864,
+        "median_angle_deg": 30.489934560831873,
+        "p95_angle_deg": 57.11173114569587,
+        "n_overlap": 3803,
+        "n_skipped": 0
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_angle_deg": 11.986051227197164,
+        "median_angle_deg": 7.856800196711957,
+        "p95_angle_deg": 35.20673300081357,
+        "n_overlap": 3800,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_angle_deg": 7.909201018392664,
+        "median_angle_deg": 3.3391594582657893,
+        "p95_angle_deg": 28.762687286974803,
+        "n_overlap": 3803,
+        "n_skipped": 0
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_angle_deg": 8.945429154817646,
+        "median_angle_deg": 3.6885486342584395,
+        "p95_angle_deg": 34.553859000514244,
+        "n_overlap": 3800,
+        "n_skipped": 0
+      }
+    ],
+    "bitmap_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_l1": 0.11338709806741112,
+        "median_l1": 0.04314633350746304,
+        "p95_l1": 0.5784302505792356,
+        "n_substantially_different": 1109,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3576,
+        "n_skipped": 224
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_l1": 0.027864633838200446,
+        "median_l1": 0.01160130687788421,
+        "p95_l1": 0.057994844586241455,
+        "n_substantially_different": 129,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3242,
+        "n_skipped": 561
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_l1": 0.11340034319263649,
+        "median_l1": 0.040525144689223344,
+        "p95_l1": 0.58340347589231,
+        "n_substantially_different": 1088,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3574,
+        "n_skipped": 226
+      }
+    ],
+    "measured_point_count": 3805
+  },
+  {
+    "dataset": "seattle_backyard",
+    "sfmr_path": "/home/user/sfmtool/seattle_backyard_ws/sfmr/20260621-00-solve-seattle_backyard_1-26.sfmr",
+    "image_count": 26,
+    "input_point_count": 3343,
+    "subsample_stride": 1,
+    "sift_seed_obs_count": 14341,
+    "sift_seed_point_count": 3281,
+    "resolution": 24,
+    "bitmap_diff_threshold_l1": 0.06274509803921569,
+    "pipelines": {
+      "A": {
+        "label": "normals-only",
+        "wall_secs": 3.9946017549999624,
+        "out_points": 3343,
+        "n_observations": 14341
+      },
+      "B": {
+        "label": "grid (localize_keypoints)",
+        "wall_secs": 109.008123157,
+        "out_points": 3314,
+        "n_observations": 31040
+      },
+      "C": {
+        "label": "LK (refine_keypoints)",
+        "wall_secs": 14.708235951000006,
+        "out_points": 3343,
+        "n_observations": 14341
+      }
+    },
+    "keypoint_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "p95_shift_px": 0.0,
+        "n_overlap": 14341
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_shift_px": 0.5013065952393092,
+        "median_shift_px": 0.3600282861164005,
+        "p95_shift_px": 1.4424666044329642,
+        "n_overlap": 13280
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_shift_px": 0.227838598473137,
+        "median_shift_px": 0.1405195861011218,
+        "p95_shift_px": 0.7696248267796183,
+        "n_overlap": 14341
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_shift_px": 0.5013065952393092,
+        "median_shift_px": 0.3600282861164005,
+        "p95_shift_px": 1.4424666044329642,
+        "n_overlap": 13280
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_shift_px": 0.227838598473137,
+        "median_shift_px": 0.1405195861011218,
+        "p95_shift_px": 0.7696248267796183,
+        "n_overlap": 14341
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_shift_px": 0.3776147699789053,
+        "median_shift_px": 0.2529514646510884,
+        "p95_shift_px": 1.148991854059187,
+        "n_overlap": 13280
+      }
+    ],
+    "normal_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_angle_deg": 21.11575208527803,
+        "median_angle_deg": 28.018363461132196,
+        "p95_angle_deg": 36.05514815941984,
+        "n_overlap": 3278,
+        "n_skipped": 3
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_angle_deg": 36.45672924470997,
+        "median_angle_deg": 37.77566254584796,
+        "p95_angle_deg": 66.38562716992242,
+        "n_overlap": 3249,
+        "n_skipped": 3
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_angle_deg": 34.01267289340431,
+        "median_angle_deg": 35.689585654556325,
+        "p95_angle_deg": 66.6470264293751,
+        "n_overlap": 3278,
+        "n_skipped": 3
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_angle_deg": 20.396647123534933,
+        "median_angle_deg": 22.44296834247348,
+        "p95_angle_deg": 36.09418458710318,
+        "n_overlap": 3249,
+        "n_skipped": 3
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_angle_deg": 16.170546829820548,
+        "median_angle_deg": 15.850075062510701,
+        "p95_angle_deg": 35.256470804812615,
+        "n_overlap": 3278,
+        "n_skipped": 3
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_angle_deg": 13.824201225598792,
+        "median_angle_deg": 8.469106369159624,
+        "p95_angle_deg": 39.36676508767141,
+        "n_overlap": 3249,
+        "n_skipped": 3
+      }
+    ],
+    "bitmap_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_l1": 0.06025164203283952,
+        "median_l1": 0.04073166379741594,
+        "p95_l1": 0.21911311804079542,
+        "n_substantially_different": 813,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3226,
+        "n_skipped": 26
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_l1": 0.03836429298658064,
+        "median_l1": 0.026459241380878525,
+        "p95_l1": 0.09475921668258361,
+        "n_substantially_different": 493,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3142,
+        "n_skipped": 139
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_l1": 0.0511375996872255,
+        "median_l1": 0.03187863219018076,
+        "p95_l1": 0.19448530010148582,
+        "n_substantially_different": 572,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 3225,
+        "n_skipped": 27
+      }
+    ],
+    "measured_point_count": 3343
+  },
+  {
+    "dataset": "kerry_park",
+    "sfmr_path": "/home/user/sfmtool/kerry_park_ws/sfmr/20260621-00-solve-frame_1-24.sfmr",
+    "image_count": 48,
+    "input_point_count": 786,
+    "subsample_stride": 1,
+    "sift_seed_obs_count": 2728,
+    "sift_seed_point_count": 770,
+    "resolution": 24,
+    "bitmap_diff_threshold_l1": 0.06274509803921569,
+    "pipelines": {
+      "A": {
+        "label": "normals-only",
+        "wall_secs": 0.8692389530000355,
+        "out_points": 786,
+        "n_observations": 2728
+      },
+      "B": {
+        "label": "grid (localize_keypoints)",
+        "wall_secs": 29.639320053000006,
+        "out_points": 786,
+        "n_observations": 8319
+      },
+      "C": {
+        "label": "LK (refine_keypoints)",
+        "wall_secs": 3.103154299000039,
+        "out_points": 786,
+        "n_observations": 2728
+      }
+    },
+    "keypoint_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_shift_px": 0.0,
+        "median_shift_px": 0.0,
+        "p95_shift_px": 0.0,
+        "n_overlap": 2728
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_shift_px": 0.48273955365549354,
+        "median_shift_px": 0.34165830834713906,
+        "p95_shift_px": 1.378935373562598,
+        "n_overlap": 2675
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_shift_px": 0.19441827340408324,
+        "median_shift_px": 0.11981581214171388,
+        "p95_shift_px": 0.6313994985167812,
+        "n_overlap": 2728
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_shift_px": 0.48273955365549354,
+        "median_shift_px": 0.34165830834713906,
+        "p95_shift_px": 1.378935373562598,
+        "n_overlap": 2675
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_shift_px": 0.19441827340408324,
+        "median_shift_px": 0.11981581214171388,
+        "p95_shift_px": 0.6313994985167812,
+        "n_overlap": 2728
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_shift_px": 0.4000472808508373,
+        "median_shift_px": 0.25734560405315776,
+        "p95_shift_px": 1.178123380991209,
+        "n_overlap": 2675
+      }
+    ],
+    "normal_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_angle_deg": 15.129145789542234,
+        "median_angle_deg": 11.453031327852615,
+        "p95_angle_deg": 35.51008162888832,
+        "n_overlap": 756,
+        "n_skipped": 14
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_angle_deg": 24.469670071212782,
+        "median_angle_deg": 27.038177930943796,
+        "p95_angle_deg": 61.833121870736704,
+        "n_overlap": 756,
+        "n_skipped": 14
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_angle_deg": 23.365796303181597,
+        "median_angle_deg": 19.82269999318774,
+        "p95_angle_deg": 64.59843446733827,
+        "n_overlap": 756,
+        "n_skipped": 14
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_angle_deg": 12.950814878409453,
+        "median_angle_deg": 4.149282829865771e-06,
+        "p95_angle_deg": 36.08687969481694,
+        "n_overlap": 756,
+        "n_skipped": 14
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_angle_deg": 11.453830310141173,
+        "median_angle_deg": 1.3093278576281033,
+        "p95_angle_deg": 34.107628609336174,
+        "n_overlap": 756,
+        "n_skipped": 14
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_angle_deg": 15.703576490924455,
+        "median_angle_deg": 13.494174035240764,
+        "p95_angle_deg": 39.15468614464628,
+        "n_overlap": 756,
+        "n_skipped": 14
+      }
+    ],
+    "bitmap_comparisons": [
+      {
+        "pair": "A_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "C_vs_SIFT",
+        "mean_l1": NaN,
+        "median_l1": NaN,
+        "p95_l1": NaN,
+        "n_substantially_different": 0,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 0,
+        "n_skipped": 0,
+        "note": "no SIFT-baseline bitmap (rendering only happens during refine_normals)"
+      },
+      {
+        "pair": "B_vs_A",
+        "mean_l1": 0.14052208251916876,
+        "median_l1": 0.04718477772731407,
+        "p95_l1": 0.5644531040565638,
+        "n_substantially_different": 265,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 708,
+        "n_skipped": 62
+      },
+      {
+        "pair": "C_vs_A",
+        "mean_l1": 0.05617777017578824,
+        "median_l1": 0.027203614104027843,
+        "p95_l1": 0.2742907954197304,
+        "n_substantially_different": 98,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 551,
+        "n_skipped": 219
+      },
+      {
+        "pair": "C_vs_B",
+        "mean_l1": 0.13860854549964652,
+        "median_l1": 0.04984568053600835,
+        "p95_l1": 0.5509428256165746,
+        "n_substantially_different": 284,
+        "diff_threshold_l1": 0.06274509803921569,
+        "n_compared": 708,
+        "n_skipped": 62
+      }
+    ],
+    "measured_point_count": 786
+  }
+]
