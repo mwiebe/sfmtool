@@ -36,6 +36,11 @@ Example:
 The ``SFMTOOL_PROFILE=1`` environment variable is set automatically so
 the Rust ``N_EVAL`` counter is live; pass ``--phase-report`` to also
 print the per-phase timing breakdown to stderr.
+
+For per-cell visibility into the "+"-descent walk (which `(i, j)` cells
+were evaluated, which were cache hits, which were skipped, the per-level
+walk length), set ``SFMTOOL_PLUS_DESCENT_TRACE=1`` and pass
+``--n-points 1`` so the rayon parallelism doesn't interleave the traces.
 """
 
 from __future__ import annotations

@@ -1342,7 +1342,7 @@ fn coarse_to_fine(
     // Reused across every candidate of every level (cache path only).
     let mut scratch = fronto_cache::Scratch::default();
 
-    for _ in 0..params.refine_levels.max(1) {
+    for level_idx in 0..params.refine_levels.max(1) {
         let Some(ctx) = build_level_context(
             base,
             &center,
@@ -1441,60 +1441,114 @@ fn coarse_to_fine(
             SearchStrategy::PlusDescent => 'descent: {
                 use std::collections::HashMap;
                 let steps_i = steps as i32;
+                let trace = prof::plus_descent_trace_enabled();
+                if trace {
+                    eprintln!(
+                        "[plus_descent] level={level_idx} center_continuous \
+                         phi={best_phi:.6}"
+                    );
+                }
                 // Score one (i, j) cell, with a visited-cache so each cell is
-                // evaluated at most once. Returns:
-                //   Some(phi) — scoreable cell, in-bounds and in the δ-disk
-                //   None      — out of the grid, outside the δ-disk, or the φ
-                //               eval itself failed (treated as "no candidate")
-                // The cache stores the `Option<f64>` so repeated misses don't
-                // re-pay any cost. Macro (not closure) because `eval` is FnMut
-                // and capturing it twice through nested closures is awkward.
+                // evaluated at most once. Returns `(value, was_cached)`:
+                //   value = Some(phi) — scoreable cell, in-bounds + in δ-disk
+                //   value = None      — out of the grid, outside the δ-disk,
+                //                       or the φ eval itself failed
+                // Counters track the eval / cache-hit / oob-or-disk breakdown
+                // for the per-level trace summary. Macro (not closure) because
+                // `eval` is FnMut and capturing it through nested closures is
+                // awkward.
                 let mut visited: HashMap<(i32, i32), Option<f64>> = HashMap::new();
+                let mut n_eval_calls: u32 = 0;
+                let mut n_cache_hits: u32 = 0;
+                let mut n_oob_or_disk: u32 = 0;
                 macro_rules! score_cell {
                     ($ij:expr) => {{
                         let ij: (i32, i32) = $ij;
                         match visited.get(&ij) {
-                            Some(&cached) => cached,
+                            Some(&cached) => {
+                                n_cache_hits += 1;
+                                (cached, true)
+                            }
                             None => {
                                 let result =
                                     if ij.0 < 0 || ij.0 >= steps_i || ij.1 < 0 || ij.1 >= steps_i {
+                                        n_oob_or_disk += 1;
                                         None
                                     } else {
                                         let a = to_offset(ij.0);
                                         let b = to_offset(ij.1);
                                         if a.hypot(b) > range * (1.0 + 1e-9) {
+                                            n_oob_or_disk += 1;
                                             None
                                         } else {
                                             let n = exp_map_in_basis(&center, &u, &v, [a, b]);
+                                            n_eval_calls += 1;
                                             eval(&n)
                                         }
                                     };
                                 visited.insert(ij, result);
-                                result
+                                (result, false)
                             }
                         }
                     }};
                 }
                 // Seed at the grid cell closest to the level center. When
-                // `steps` is odd this lands on `(a=0, b=0)` exactly (the
+                // `steps` is odd this lands on `(a=0, b=0)` exactly — the
                 // level's continuous center, already scored above into
-                // `best_phi`); the cache lookup avoids the re-score. When
-                // `steps` is even it lands one half-step off — still a
-                // sensible warm start near the center.
+                // `best_phi`. We re-score it here as a fresh cell (the
+                // visited cache is empty at level start), so the trace makes
+                // one duplicate eval visible per level for odd `steps`. For
+                // even `steps` the seed lands one half-step off the center.
                 let seed = ((steps_i - 1) / 2, (steps_i - 1) / 2);
-                let Some(mut current_phi) = score_cell!(seed) else {
+                let (seed_phi_opt, _) = score_cell!(seed);
+                let Some(mut current_phi) = seed_phi_opt else {
+                    if trace {
+                        eprintln!(
+                            "[plus_descent] level={level_idx}   seed ({},{}) \
+                             unscoreable; skipping descent",
+                            seed.0, seed.1
+                        );
+                    }
                     // Seed unscoreable (rare: the disk excludes the seed only
                     // for a degenerate `range ≤ 0`, but be defensive). Leave
                     // `best_phi`/`best_n` at the continuous-center baseline
                     // and skip descent for this level.
                     break 'descent;
                 };
+                if trace {
+                    eprintln!(
+                        "[plus_descent] level={level_idx}   seed=({},{}) \
+                         phi={current_phi:.6}",
+                        seed.0, seed.1
+                    );
+                }
                 let mut current = seed;
+                let mut walk_steps: u32 = 0;
                 loop {
                     let mut best_move: Option<((i32, i32), f64)> = None;
                     for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                         let next = (current.0 + di, current.1 + dj);
-                        if let Some(phi) = score_cell!(next) {
+                        let (phi_opt, was_cached) = score_cell!(next);
+                        if trace {
+                            match phi_opt {
+                                Some(phi) => eprintln!(
+                                    "[plus_descent] level={level_idx}     \
+                                     {} ({},{}) phi={phi:.6}{}",
+                                    if was_cached { "cached" } else { "eval  " },
+                                    next.0,
+                                    next.1,
+                                    if phi > current_phi { "  improver" } else { "" },
+                                ),
+                                None => eprintln!(
+                                    "[plus_descent] level={level_idx}     \
+                                     {} ({},{}) skip (oob/out-of-disk)",
+                                    if was_cached { "cached" } else { "fresh " },
+                                    next.0,
+                                    next.1,
+                                ),
+                            }
+                        }
+                        if let Some(phi) = phi_opt {
                             if phi > current_phi && best_move.is_none_or(|(_, bs)| phi > bs) {
                                 best_move = Some((next, phi));
                             }
@@ -1503,10 +1557,28 @@ fn coarse_to_fine(
                     match best_move {
                         None => break,
                         Some((next, phi)) => {
+                            if trace {
+                                eprintln!(
+                                    "[plus_descent] level={level_idx}   move \
+                                     ({},{}) -> ({},{}) phi={current_phi:.6} -> \
+                                     {phi:.6}",
+                                    current.0, current.1, next.0, next.1
+                                );
+                            }
                             current = next;
                             current_phi = phi;
+                            walk_steps += 1;
                         }
                     }
+                }
+                if trace {
+                    eprintln!(
+                        "[plus_descent] level={level_idx}   STOP at ({},{}) \
+                         phi={current_phi:.6}  evals={n_eval_calls} \
+                         cache_hits={n_cache_hits} oob_or_disk={n_oob_or_disk} \
+                         walk_steps={walk_steps}",
+                        current.0, current.1
+                    );
                 }
                 if current_phi > best_phi {
                     best_phi = current_phi;

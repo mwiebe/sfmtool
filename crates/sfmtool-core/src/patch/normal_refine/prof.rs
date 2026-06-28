@@ -24,6 +24,19 @@ pub fn enabled() -> bool {
         .get_or_init(|| std::env::var("SFMTOOL_PROFILE").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
+/// Whether `SFMTOOL_PLUS_DESCENT_TRACE` is set (cached on first query). When
+/// set, the [`SearchStrategy::PlusDescent`](super::SearchStrategy::PlusDescent)
+/// branch logs every cell evaluation, cache hit, move, and per-level summary to
+/// stderr — for prototype inspection only. Runs in rayon, so for a readable
+/// trace pass `--n-points 1` to the experiment script (or
+/// `RAYON_NUM_THREADS=1`).
+pub fn plus_descent_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SFMTOOL_PLUS_DESCENT_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
 /// One accumulating phase counter: total nanoseconds and number of events.
 pub struct Phase {
     name: &'static str,
