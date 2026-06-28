@@ -96,6 +96,11 @@ per-(view, round) to per-view (renders 1.44M → 399k). Merged as #137.
 
 ### Phase 2 — Minimal subpixel reference (done, on `keypoint-subpixel-refine`)
 
+> _Status (2026-06-28): Done — merged as #138 (`e90f8a7`). The "not wired into
+> `_embed_patches.py` yet" caveat below is also resolved: the optional opt-in
+> wiring landed as #144 (`636c59a`), exposing `subpixel`/`search_resolution_multiplier`
+> as production knobs while leaving the default off pending the gate._
+
 The simplest correct continuous refiner — forward-additive ECC Gauss–Newton,
 per-view against a single frozen IRLS consensus, bilinear source-pyramid
 sampling, analytic z-norm derivative with the raw image Jacobian finite-
@@ -128,6 +133,12 @@ on its own merits**, not against the other.
   - Exit: `search_shift` collapses; the per-call planar deinterleave is gone;
     `localize` re-profile shows the expected drop on dino.
 
+  > _Status (2026-06-28): AVX2 kernel + planar deinterleave landed as #139
+  > (`ce75be0`) — `search_shift` collapsed on dino as expected. **`i16` stage 2
+  > dropped** per #141 (`be5fa8c`, "i16 stage 2 dropped"): its argmax/speedup
+  > gate did not pay off vs. the f32 kernel, so the variant was retired rather
+  > than shipped._
+
 - **Phase 3B — Subpixel optimizations (Spec B):**
   - The sampler value+gradient variants (`sample_bilinear_with_grad_u8`,
     `remap_aniso_with_grad`) + `WarpMap::get_jacobian`, per the subpixel spec's
@@ -141,6 +152,13 @@ on its own merits**, not against the other.
     the refreshing consensus.
   - Exit: B's per-view cost matches its asymptotic shape; the analytic Jacobian
     matches the MVP's FD Jacobian within sampling noise (an equivalence test).
+
+  > _Status (2026-06-28): Analytic image Jacobian landed as #140 (`2df0b9f`,
+  > equivalence test against the FD MVP holds). Per-move (Gauss-Seidel)
+  > incremental consensus landed as #142 (`09aed8e`). Inverse-compositional ECC
+  > **not pursued** — was always conditional on the precompute amortizing
+  > against the refreshing consensus; the incremental variant landed first and
+  > the conditional precondition never materialised._
 
 ### Decision gate — measure the production-path fork (after Phase 3A and 3B)
 
@@ -157,6 +175,17 @@ With **optimized** A (incl. the `m > 1` supersampled variant on AVX2/`i16`) and
   not whether LK exists.
 - Wire the chosen path into `_embed_patches.py` (if not already) and document
   the default in the relevant CLI / spec.
+
+> _Status (2026-06-28): Run, but **conclusion not adopted**. The gate was
+> exercised on `embed-patches-subpixel-decision-gate` (`83129f2`, round 2:
+> added dino, SIFT-baseline shift metric, three LK variations) with stacked
+> reports on `pipeline-comparison-sift` (`75cc496`). The methodology / data
+> were not strong enough to flip a production default on, so rather than ship
+> the agent-picked path we landed only the **minimal wiring** as #144
+> (`636c59a`) — both grid (`m > 1`) and LK are now selectable via
+> `embed-patches` kwargs, default off. The production-default decision is
+> **deferred pending a methodologically sound gate**; the two measurement
+> branches are parked as reference, not in flight._
 
 ## Interleave vs. sequential — verdict (updated)
 
