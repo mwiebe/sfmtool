@@ -20,6 +20,7 @@ use sfmtool_core::patch::keypoint_subpixel::{ConsensusRefresh, KeypointSubpixelP
 use sfmtool_core::patch::normal_refine::{
     refine_patch_cloud_normals, view_indices_from_reconstruction, CacheMode, NormalRefineParams,
     Objective, PatchWindow, ProjectedImage, Sampler,
+    SearchStrategy as NormalRefineSearchStrategy,
 };
 use sfmtool_core::patch::view_selection::{select_patch_cloud_views, ViewSelectParams};
 
@@ -439,7 +440,8 @@ impl PyPatchCloud {
         refine_levels=3, objective="robust", robust_iters=3, window="gaussian_disk",
         window_sigma=0.6, min_valid_fraction=0.6, min_views=3, sampler="bilinear",
         cache="fronto", cache_supersample=2.0, compute_confidence=false,
-        search_robust_iters=None, point_indexes=None, view_indices=None,
+        search_robust_iters=None, search_strategy="exhaustive",
+        point_indexes=None, view_indices=None,
         use_stored_keypoints=true, render_bitmaps=false
     ))]
     fn refine_normals<'py>(
@@ -462,6 +464,7 @@ impl PyPatchCloud {
         cache_supersample: f64,
         compute_confidence: bool,
         search_robust_iters: Option<u32>,
+        search_strategy: &str,
         point_indexes: Option<Vec<u32>>,
         view_indices: Option<Vec<Vec<u32>>>,
         use_stored_keypoints: bool,
@@ -537,6 +540,15 @@ impl PyPatchCloud {
                 "cache_supersample must be >= 1.0, got {cache_supersample}"
             )));
         }
+        let search_strategy = match search_strategy {
+            "exhaustive" => NormalRefineSearchStrategy::Exhaustive,
+            "plus_descent" => NormalRefineSearchStrategy::PlusDescent,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown search_strategy: {other:?} (expected exhaustive|plus_descent)"
+                )))
+            }
+        };
         let params = NormalRefineParams {
             angular_range_deg,
             init_steps,
@@ -551,6 +563,7 @@ impl PyPatchCloud {
             compute_confidence,
             search_robust_iters,
             render_bitmap: render_bitmaps,
+            search_strategy,
         };
 
         // Build one pyramid + pose per reconstruction image; the ProjectedImages
@@ -1419,4 +1432,21 @@ impl PyPatchCloud {
         }
         Ok(out)
     }
+}
+
+/// Current value of the normal-refinement `Φ`-evaluation counter (a process-wide
+/// `AtomicU64`).
+///
+/// Only incremented when ``SFMTOOL_PROFILE`` is set in the environment;
+/// otherwise stays at zero. ``PatchCloud.refine_normals`` resets the counter at
+/// the start of each call, so reading it right after a call returns gives the
+/// total `Φ` evaluations performed by that call across all rayon threads.
+///
+/// Exposed for experiment scripts comparing search strategies (see
+/// ``scripts/exp_plus_descent_normal.py``).
+#[pyfunction]
+pub(crate) fn normal_refine_eval_count() -> u64 {
+    use sfmtool_core::patch::normal_refine::prof;
+    use std::sync::atomic::Ordering;
+    prof::N_EVAL.load(Ordering::Relaxed)
 }

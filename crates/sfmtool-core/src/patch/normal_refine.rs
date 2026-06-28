@@ -82,6 +82,22 @@ pub enum Sampler {
     Anisotropic,
 }
 
+/// How the per-level grid is traversed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchStrategy {
+    /// Score every `(i, j)` cell of the `init_steps × init_steps` grid that
+    /// lies within the level's δ-disk. **The default**; exhaustively explores
+    /// the cone at fixed cost per level (~`init_steps²` evaluations).
+    #[default]
+    Exhaustive,
+    /// Steepest-descent on the integer grid: at the current cell, evaluate the
+    /// four axis neighbors and move to the best improver; repeat until the
+    /// current cell beats all four. Each cell is scored at most once (visited-
+    /// cell cache). **Prototype** — explores fewer cells when the seed is
+    /// already near the level's argmax, more when it has to walk.
+    PlusDescent,
+}
+
 /// How candidate normals are scored: re-rendered from the source images, or
 /// resampled from a cached base patch (see
 /// `specs/core/fronto-parallel-patch-cache.md`).
@@ -154,6 +170,9 @@ pub struct NormalRefineParams {
     /// computed only when a caller wants to persist the patch bitmaps. When
     /// `false`, [`NormalRefineResult::representative`] is `None`.
     pub render_bitmap: bool,
+    /// Per-level grid traversal — see [`SearchStrategy`]. Defaults to
+    /// [`SearchStrategy::Exhaustive`] (the current behaviour).
+    pub search_strategy: SearchStrategy,
 }
 
 impl NormalRefineParams {
@@ -186,6 +205,7 @@ impl Default for NormalRefineParams {
             compute_confidence: false,
             search_robust_iters: None,
             render_bitmap: false,
+            search_strategy: SearchStrategy::Exhaustive,
         }
     }
 }
@@ -1391,23 +1411,108 @@ fn coarse_to_fine(
         if let Some(phi) = eval(&center) {
             best_phi = phi;
         }
-        for i in 0..steps {
-            let a = -range + 2.0 * range * i as f64 / (steps - 1) as f64;
-            for j in 0..steps {
-                let b = -range + 2.0 * range * j as f64 / (steps - 1) as f64;
-                if a == 0.0 && b == 0.0 {
-                    continue; // Center already evaluated.
-                }
-                // Clamp the square grid to the δ-disk (circular cone).
-                if a.hypot(b) > range * (1.0 + 1e-9) {
-                    continue;
-                }
-                let n = exp_map_in_basis(&center, &u, &v, [a, b]);
-                if let Some(phi) = eval(&n) {
-                    if phi > best_phi {
-                        best_phi = phi;
-                        best_n = n;
+        // Map an integer grid index `i` to the level's tangent offset `δ_i`,
+        // matching the exhaustive scan's grid (`a = -range + 2·range·i/(steps-1)`,
+        // so `i = (steps-1)/2` is the level's center when `steps` is odd).
+        let to_offset = |i: i32| -> f64 { -range + 2.0 * range * i as f64 / (steps - 1) as f64 };
+        match params.search_strategy {
+            SearchStrategy::Exhaustive => {
+                for i in 0..steps {
+                    let a = to_offset(i as i32);
+                    for j in 0..steps {
+                        let b = to_offset(j as i32);
+                        if a == 0.0 && b == 0.0 {
+                            continue; // Center already evaluated.
+                        }
+                        // Clamp the square grid to the δ-disk (circular cone).
+                        if a.hypot(b) > range * (1.0 + 1e-9) {
+                            continue;
+                        }
+                        let n = exp_map_in_basis(&center, &u, &v, [a, b]);
+                        if let Some(phi) = eval(&n) {
+                            if phi > best_phi {
+                                best_phi = phi;
+                                best_n = n;
+                            }
+                        }
                     }
+                }
+            }
+            SearchStrategy::PlusDescent => 'descent: {
+                use std::collections::HashMap;
+                let steps_i = steps as i32;
+                // Score one (i, j) cell, with a visited-cache so each cell is
+                // evaluated at most once. Returns:
+                //   Some(phi) — scoreable cell, in-bounds and in the δ-disk
+                //   None      — out of the grid, outside the δ-disk, or the φ
+                //               eval itself failed (treated as "no candidate")
+                // The cache stores the `Option<f64>` so repeated misses don't
+                // re-pay any cost. Macro (not closure) because `eval` is FnMut
+                // and capturing it twice through nested closures is awkward.
+                let mut visited: HashMap<(i32, i32), Option<f64>> = HashMap::new();
+                macro_rules! score_cell {
+                    ($ij:expr) => {{
+                        let ij: (i32, i32) = $ij;
+                        match visited.get(&ij) {
+                            Some(&cached) => cached,
+                            None => {
+                                let result =
+                                    if ij.0 < 0 || ij.0 >= steps_i || ij.1 < 0 || ij.1 >= steps_i {
+                                        None
+                                    } else {
+                                        let a = to_offset(ij.0);
+                                        let b = to_offset(ij.1);
+                                        if a.hypot(b) > range * (1.0 + 1e-9) {
+                                            None
+                                        } else {
+                                            let n = exp_map_in_basis(&center, &u, &v, [a, b]);
+                                            eval(&n)
+                                        }
+                                    };
+                                visited.insert(ij, result);
+                                result
+                            }
+                        }
+                    }};
+                }
+                // Seed at the grid cell closest to the level center. When
+                // `steps` is odd this lands on `(a=0, b=0)` exactly (the
+                // level's continuous center, already scored above into
+                // `best_phi`); the cache lookup avoids the re-score. When
+                // `steps` is even it lands one half-step off — still a
+                // sensible warm start near the center.
+                let seed = ((steps_i - 1) / 2, (steps_i - 1) / 2);
+                let Some(mut current_phi) = score_cell!(seed) else {
+                    // Seed unscoreable (rare: the disk excludes the seed only
+                    // for a degenerate `range ≤ 0`, but be defensive). Leave
+                    // `best_phi`/`best_n` at the continuous-center baseline
+                    // and skip descent for this level.
+                    break 'descent;
+                };
+                let mut current = seed;
+                loop {
+                    let mut best_move: Option<((i32, i32), f64)> = None;
+                    for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let next = (current.0 + di, current.1 + dj);
+                        if let Some(phi) = score_cell!(next) {
+                            if phi > current_phi && best_move.is_none_or(|(_, bs)| phi > bs) {
+                                best_move = Some((next, phi));
+                            }
+                        }
+                    }
+                    match best_move {
+                        None => break,
+                        Some((next, phi)) => {
+                            current = next;
+                            current_phi = phi;
+                        }
+                    }
+                }
+                if current_phi > best_phi {
+                    best_phi = current_phi;
+                    let a = to_offset(current.0);
+                    let b = to_offset(current.1);
+                    best_n = exp_map_in_basis(&center, &u, &v, [a, b]);
                 }
             }
         }

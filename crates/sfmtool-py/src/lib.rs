@@ -153,6 +153,10 @@ fn _sfmtool(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRansacPhotometricOutput>()?;
     m.add_class::<PyOrientedPatch>()?;
     m.add_class::<PyPatchCloud>()?;
+    m.add_function(wrap_pyfunction!(
+        py_patch_cloud::normal_refine_eval_count,
+        m
+    )?)?;
 
     // Photometric refinement.
     m.add_function(wrap_pyfunction!(

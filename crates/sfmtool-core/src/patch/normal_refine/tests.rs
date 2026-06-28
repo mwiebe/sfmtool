@@ -1240,3 +1240,47 @@ fn all_none_keypoints_match_no_keypoints() {
     assert_eq!(baseline.photoconsistency, anchored.photoconsistency);
     assert_eq!(baseline.valid_view_count, anchored.valid_view_count);
 }
+
+#[test]
+fn plus_descent_agrees_with_exhaustive_on_a_well_posed_patch() {
+    // Both strategies search the same `init_steps × init_steps` grid at each
+    // coarse-to-fine level; "+"-descent just visits fewer cells when the seed
+    // is already near the level argmax. On a clean synthetic plane both must
+    // converge to (essentially) the same normal — small per-level argmax
+    // differences are possible when two cells tie or when "+"-descent's local
+    // walk gets stuck on a non-monotone ridge, so we require sub-degree
+    // agreement rather than bit-equivalence.
+    let scene = Scene::new(&[
+        [0.8, 0.0, 0.0],
+        [-0.8, 0.0, 0.0],
+        [0.0, 0.7, 0.0],
+        [0.0, -0.7, 0.0],
+    ]);
+    let views = scene.views();
+    let init_n = exp_map_normal(&true_normal(), [10.0f64.to_radians(), 0.0]);
+    let patch = plane_patch(init_n);
+    let exhaustive = NormalRefineParams {
+        search_strategy: SearchStrategy::Exhaustive,
+        ..test_params(Objective::MeanPairwise)
+    };
+    let plus = NormalRefineParams {
+        search_strategy: SearchStrategy::PlusDescent,
+        ..test_params(Objective::MeanPairwise)
+    };
+
+    let a = refine_patch_normal(&patch, &views, 15, &exhaustive, None);
+    let b = refine_patch_normal(&patch, &views, 15, &plus, None);
+
+    let disagreement = angle_between(&a.patch.normal(), &b.patch.normal()).to_degrees();
+    assert!(
+        disagreement < 1.0,
+        "plus_descent disagrees with exhaustive by {:.3}° (init err \
+         {:.2}°, exhaustive err {:.2}°, plus err {:.2}°)",
+        disagreement,
+        angle_between(&init_n, &true_normal()).to_degrees(),
+        angle_between(&a.patch.normal(), &true_normal()).to_degrees(),
+        angle_between(&b.patch.normal(), &true_normal()).to_degrees(),
+    );
+    // Both must score within sampling noise of each other.
+    assert_relative_eq!(a.photoconsistency, b.photoconsistency, max_relative = 1e-3);
+}
