@@ -2,29 +2,53 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pipeline comparison: how much do four SfM refinement pipelines diverge from
+"""Pipeline comparison: how much do six SfM refinement pipelines diverge from
 the raw SIFT input, and from each other?
 
-All four pipelines start by running ``recon.to_embedded_patches(...)``, which
-copies the raw SIFT-detection keypoints inline and seeds each point's patch
-frame from the mean-viewing direction. They then differ in what (if anything)
-moves the keypoints, before always re-refining the normals to be consistent
-with the final keypoint locations:
+The 2x2 — keypoint-mover (grid vs LK) × view-expansion (no select_views vs
+with select_views) — plus the original normals-only and LK-anisotropic
+pipelines. All pipelines start by running ``recon.to_embedded_patches(...)``,
+which copies the raw SIFT-detection keypoints inline and seeds each point's
+patch frame from the mean-viewing direction. They then differ in what (if
+anything) moves the keypoints, before always re-refining the normals to be
+consistent with the final keypoint locations:
 
 - **Pipeline A** ("normals-only"): ``to_embedded_patches`` → ``refine_normals``.
   Keypoints stay at SIFT positions; only the per-point normal is photometrically
   optimized.
-- **Pipeline B** ("grid"): ``to_embedded_patches`` → ``refine_normals`` →
-  ``localize_keypoints`` (the supersampled grid keypoint search) →
-  ``refine_normals`` again, with the moved keypoints.
-- **Pipeline C** ("LK-bilinear"): ``to_embedded_patches`` → ``refine_normals`` →
-  ``refine_keypoints`` (the LK subpixel refiner, default ``sampler="bilinear"``)
-  → ``refine_normals`` again.
-- **Pipeline D** ("LK-anisotropic"): identical to C except the LK refiner is
-  invoked with ``sampler="anisotropic"`` — the anti-aliased oblique-view
-  sampler. The decision-gate report already measured that this sampler does
-  not meaningfully change ECC scores; this run answers a different question:
-  how much does it move the persisted keypoints, normals, and bitmaps?
+- **Pipeline B+SV** (script key ``B``; "grid + select_views"): the production
+  grid pipeline — ``refine_normals`` → ``select_views`` (expands per-point view
+  sets) → ``localize_keypoints`` (supersampled grid) → ``refine_normals``.
+- **Pipeline C_track** (script key ``C``; "LK on track views"):
+  ``refine_normals`` → ``refine_keypoints`` (LK, ``sampler='bilinear'``) on
+  the SIFT-track view set only → ``refine_normals``.
+- **Pipeline D** ("LK-anisotropic"): identical to C_track except
+  ``refine_keypoints`` is invoked with ``sampler='anisotropic'``.
+- **Pipeline B_track** (new; "grid on track views"): same as B+SV but
+  *without* the ``select_views`` expansion — ``refine_normals`` →
+  ``localize_keypoints`` over the per-point SIFT-track view sets →
+  ``refine_normals``. Isolates the keypoint-mover (grid) from view expansion.
+- **Pipeline C+SV** (script key ``C_sv``; new; "LK + select_views"): same
+  as C_track but with ``select_views`` expansion before ``refine_keypoints``.
+  Track views seed at the stored SIFT keypoint; admitted candidate views
+  (which have no SIFT detection) seed at the point's projection in that view
+  (computed in Python from the recon's pose + camera intrinsics, since
+  ``refine_keypoints`` requires per-view seeds when ``starting_keypoints`` is
+  given for a point). Isolates the keypoint-mover (LK) view-expansion effect.
+
+The 2x2 cross-disentangles the two effects:
+
+| | no select_views | with select_views |
+|---|---|---|
+| **grid mover** | **B_track** | **B+SV** (production) |
+| **LK mover** | **C_track** (production-track) | **C+SV** |
+
+The informative pair-comparisons (not all 15 of 6-choose-2) are:
+
+- ``B_vs_B_track`` (= B+SV − B_track): view-expansion effect, grid mover.
+- ``C_sv_vs_C``   (= C+SV  − C_track): view-expansion effect, LK mover.
+- ``B_track_vs_C`` (= B_track − C_track): pure keypoint-mover (cleanest).
+- ``B_vs_C_sv``   (= B+SV   − C+SV): keypoint-mover at production scale.
 
 For each (dataset × pipeline), three artifacts are captured:
 
@@ -193,27 +217,56 @@ def _refine_normals_on(
     )
 
 
+def _track_view_sets(embedded: SfmrReconstruction) -> dict[int, list[int]]:
+    """Per-point view sets pulled straight from the recon's track arrays —
+    whatever the SIFT tracks already specified, no select_views expansion.
+    Used by the B_track and C_track pipelines."""
+    tpid = np.asarray(embedded.track_point_ids, dtype=np.int64)
+    timg = np.asarray(embedded.track_image_indexes, dtype=np.int64)
+    out: dict[int, list[int]] = {}
+    for p, i in zip(tpid.tolist(), timg.tolist()):
+        out.setdefault(int(p), []).append(int(i))
+    return out
+
+
 def _localize_and_recompact(
-    embedded: SfmrReconstruction, images: list[np.ndarray]
+    embedded: SfmrReconstruction,
+    images: list[np.ndarray],
+    *,
+    use_select_views: bool = True,
 ) -> SfmrReconstruction:
     """Run ``localize_keypoints`` and roll the result into a new
     embedded_patches recon. Reuses ``compact_to_embedded_patches`` so the join
     semantics line up with the production pipeline; ``min_views=1`` keeps every
-    point the localizer admitted, so the join-vs-SIFT overlap is maximal."""
+    point the localizer admitted, so the join-vs-SIFT overlap is maximal.
+
+    ``use_select_views=True`` (default; pipeline **B+SV**) runs ``select_views``
+    first so the localizer sees the expanded per-point view set (track views
+    plus admitted candidate views). ``use_select_views=False`` (pipeline
+    **B_track**) feeds the SIFT-track view sets directly, isolating the
+    keypoint-mover from the view-expansion effect.
+    """
     cloud = embedded.patches
     if cloud is None:
         raise ValueError("embedded recon has no patch cloud to localize")
-    # Step 2 (view selection) — re-run before localize so the view set is built
-    # to the same shape `embed_patches` uses.
-    selections = cloud.select_views(
-        embedded,
-        images,
-        min_relative_zncc=LOCALIZE_KWARGS["min_relative_zncc"],
-        resolution=RESOLUTION,
-    )
-    view_sets = {
-        int(s["point_id"]): np.asarray(s["admitted"]).tolist() for s in selections
-    }
+    if use_select_views:
+        # Step 2 (view selection) — re-run before localize so the view set is
+        # built to the same shape `embed_patches` uses (production B+SV).
+        selections = cloud.select_views(
+            embedded,
+            images,
+            min_relative_zncc=LOCALIZE_KWARGS["min_relative_zncc"],
+            resolution=RESOLUTION,
+        )
+        view_sets = {
+            int(s["point_id"]): np.asarray(s["admitted"]).tolist() for s in selections
+        }
+    else:
+        # B_track: per-point view sets from `track_image_indexes` — the same
+        # views the SIFT tracks specify, no select_views candidate-view
+        # expansion. This isolates the grid keypoint mover from the
+        # view-expansion effect.
+        view_sets = _track_view_sets(embedded)
     localizations = cloud.localize_keypoints(
         embedded,
         images,
@@ -235,11 +288,64 @@ def _localize_and_recompact(
     )
 
 
+def _project_world_to_image(
+    X_world: np.ndarray,
+    image_index: int,
+    rotations: list[np.ndarray],
+    translations: np.ndarray,
+    cameras: list,
+    camera_indexes: np.ndarray,
+) -> tuple[float, float] | None:
+    """Project a world-space 3D point to an image's pixel coordinates using
+    the recon's stored pose + camera intrinsics. Returns ``None`` if the point
+    is behind the camera (z <= 0 in cam frame) or projects outside the image
+    bounds — those views are unusable as LK seeds and the caller drops them.
+
+    This mirrors what ``refine_keypoints``'s internal "seed at projection"
+    fallback does for a view that has no ``starting_keypoint`` entry. We
+    replicate it in Python so we can build a mixed per-point seed list
+    (SIFT keypoint for track views, projection for candidate views) — the
+    refiner's Rust side requires ``starting_keypoints[pid]`` to be exactly
+    parallel to the point's ``view_sets`` entry when provided, so we cannot
+    leave individual views unset; instead we explicitly compute the same
+    projection the refiner would otherwise apply.
+    """
+    R = rotations[image_index]
+    t = translations[image_index]
+    Xc = R @ X_world + t  # cam_from_world
+    if Xc[2] <= 1e-6:
+        return None
+    x, y = float(Xc[0] / Xc[2]), float(Xc[1] / Xc[2])
+    cam = cameras[int(camera_indexes[image_index])]
+    u, v = cam.project(x, y)
+    if not (np.isfinite(u) and np.isfinite(v)):
+        return None
+    # Strict in-frame test — the same `< width` / `< height` check
+    # compact_to_embedded_patches's clamp matches.
+    if u < 0.0 or v < 0.0 or u >= cam.width or v >= cam.height:
+        return None
+    return (float(u), float(v))
+
+
+def _quat_wxyz_to_rotation(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Standard right-handed WXYZ unit quaternion → 3x3 rotation matrix."""
+    w, x, y, z = (float(v) for v in quat_wxyz)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
 def _refine_keypoints_and_recompact(
     embedded: SfmrReconstruction,
     images: list[np.ndarray],
     *,
     sampler: str = "bilinear",
+    use_select_views: bool = False,
 ) -> SfmrReconstruction:
     """LK counterpart of ``_localize_and_recompact``: build per-point view sets
     + per-view seeds from the recon's stored keypoints, run ``refine_keypoints``
@@ -248,24 +354,92 @@ def _refine_keypoints_and_recompact(
     ``sampler`` is passed straight through to ``refine_keypoints`` —
     ``"bilinear"`` (default; production ``subpixel="lk"`` path) or
     ``"anisotropic"`` (anti-aliased oblique-view sampler; pipeline D).
+
+    ``use_select_views=False`` (default; pipelines **C_track** and **D**) uses
+    the SIFT-track view set per point and seeds every view at its stored SIFT
+    keypoint. ``use_select_views=True`` (pipeline **C+SV**) runs
+    ``select_views`` first to expand the per-point view set with admitted
+    candidate views, then builds a mixed per-point seed list: track views
+    use the stored SIFT keypoint; candidate views (which have no SIFT
+    detection) use the projection of the 3D point through that view's stored
+    pose + camera intrinsics. (``refine_keypoints`` requires
+    ``starting_keypoints[pid]`` to be parallel to ``view_sets[pid]`` when
+    provided — we cannot ask it to fall back to projection on a per-view
+    basis within a single point — so we replicate the projection in Python.
+    Candidate views whose projection lands outside the image or behind the
+    camera are dropped from the view set, matching what the refiner's
+    internal "seed at projection" path would discard.)
     """
     cloud = embedded.patches
     if cloud is None:
         raise ValueError("embedded recon has no patch cloud for LK refinement")
-    # Use the stored keypoints as the seed: build per-point {views, keypoints}
-    # from `track_*` arrays (the same logic `_refine_subpixel` uses on the
-    # localizer's output).
+    # Stored SIFT keypoints by (point_id, image_index).
     tpid = np.asarray(embedded.track_point_ids, dtype=np.int64)
     timg = np.asarray(embedded.track_image_indexes, dtype=np.int64)
     kxy = np.asarray(embedded.keypoints_xy, dtype=np.float64)
     cloud_pids = set(int(p) for p in cloud.point_ids)
+    sift_kp: dict[tuple[int, int], tuple[float, float]] = {}
+    for k, (p, i) in enumerate(zip(tpid.tolist(), timg.tolist())):
+        sift_kp[(int(p), int(i))] = (float(kxy[k, 0]), float(kxy[k, 1]))
+
     view_sets: dict[int, list[int]] = {}
     seeds: dict[int, list[list[float]]] = {}
-    for k, (p, i) in enumerate(zip(tpid.tolist(), timg.tolist())):
-        if p not in cloud_pids:
-            continue
-        view_sets.setdefault(p, []).append(i)
-        seeds.setdefault(p, []).append([float(kxy[k, 0]), float(kxy[k, 1])])
+    if not use_select_views:
+        # C_track / D — track view sets, SIFT seeds everywhere.
+        for k, (p, i) in enumerate(zip(tpid.tolist(), timg.tolist())):
+            if p not in cloud_pids:
+                continue
+            view_sets.setdefault(p, []).append(i)
+            seeds.setdefault(p, []).append([float(kxy[k, 0]), float(kxy[k, 1])])
+    else:
+        # C+SV — select_views expansion, then SIFT for track views +
+        # projection for candidate views. Drop candidate views whose
+        # projection lands out-of-frame (same behaviour the refiner's
+        # internal projection fallback would have).
+        selections = cloud.select_views(
+            embedded,
+            images,
+            min_relative_zncc=LOCALIZE_KWARGS["min_relative_zncc"],
+            resolution=RESOLUTION,
+        )
+        positions = np.asarray(embedded.positions, dtype=np.float64)
+        quats = np.asarray(embedded.quaternions_wxyz, dtype=np.float64)
+        trans = np.asarray(embedded.translations, dtype=np.float64)
+        cam_idx = np.asarray(embedded.camera_indexes, dtype=np.int64)
+        cameras = embedded.cameras
+        rotations = [
+            _quat_wxyz_to_rotation(quats[i]) for i in range(embedded.image_count)
+        ]
+        for sel in selections:
+            pid = int(sel["point_id"])
+            if pid not in cloud_pids:
+                continue
+            admitted = np.asarray(sel["admitted"], dtype=np.int64).tolist()
+            if not admitted:
+                continue
+            X = positions[pid]
+            pt_views: list[int] = []
+            pt_seeds: list[list[float]] = []
+            for v in admitted:
+                kp = sift_kp.get((pid, int(v)))
+                if kp is not None:
+                    pt_views.append(int(v))
+                    pt_seeds.append([kp[0], kp[1]])
+                else:
+                    proj = _project_world_to_image(
+                        X, int(v), rotations, trans, cameras, cam_idx
+                    )
+                    if proj is None:
+                        # Candidate view whose projection we cannot place
+                        # inside the image — skip it (the refiner would
+                        # otherwise drop it via its own projection gate).
+                        continue
+                    pt_views.append(int(v))
+                    pt_seeds.append([proj[0], proj[1]])
+            if not pt_views:
+                continue
+            view_sets[pid] = pt_views
+            seeds[pid] = pt_seeds
     refined = cloud.refine_keypoints(
         embedded,
         images,
@@ -331,15 +505,30 @@ def run_pipeline(
     if pipeline == "A":
         out = embedded
     elif pipeline == "B":
-        # Move keypoints via the grid localizer, then refine normals again
-        # against the moved keypoints.
-        moved = _localize_and_recompact(embedded, images)
+        # B+SV: grid localizer with select_views expansion (production grid).
+        moved = _localize_and_recompact(embedded, images, use_select_views=True)
+        out = _refine_normals_on(moved, images)
+    elif pipeline == "B_track":
+        # B_track: grid localizer on SIFT-track view sets only (no expansion).
+        moved = _localize_and_recompact(embedded, images, use_select_views=False)
         out = _refine_normals_on(moved, images)
     elif pipeline == "C":
-        moved = _refine_keypoints_and_recompact(embedded, images, sampler="bilinear")
+        # C_track: LK refiner on SIFT-track view sets, SIFT seeds.
+        moved = _refine_keypoints_and_recompact(
+            embedded, images, sampler="bilinear", use_select_views=False
+        )
+        out = _refine_normals_on(moved, images)
+    elif pipeline == "C_sv":
+        # C+SV: LK refiner on select_views-expanded sets, SIFT seeds for
+        # track views + projection seeds for admitted candidate views.
+        moved = _refine_keypoints_and_recompact(
+            embedded, images, sampler="bilinear", use_select_views=True
+        )
         out = _refine_normals_on(moved, images)
     elif pipeline == "D":
-        moved = _refine_keypoints_and_recompact(embedded, images, sampler="anisotropic")
+        moved = _refine_keypoints_and_recompact(
+            embedded, images, sampler="anisotropic", use_select_views=False
+        )
         out = _refine_normals_on(moved, images)
     else:
         raise ValueError(f"unknown pipeline {pipeline!r}")
@@ -729,12 +918,14 @@ def bitmap_l1_summary(
 # ---------------------------------------------------------------------------
 
 
-PIPELINES = ("A", "B", "C", "D")
+PIPELINES = ("A", "B", "C", "D", "B_track", "C_sv")
 PIPELINE_LABELS = {
     "A": "normals-only",
-    "B": "grid (localize_keypoints)",
-    "C": "LK (refine_keypoints, bilinear)",
-    "D": "LK (refine_keypoints, anisotropic)",
+    "B": "B+SV: grid + select_views (production)",
+    "C": "C_track: LK on track views (bilinear)",
+    "D": "D: LK anisotropic on track views",
+    "B_track": "B_track: grid on track views (no select_views)",
+    "C_sv": "C+SV: LK on select_views-expanded set",
 }
 
 
@@ -799,9 +990,20 @@ def measure_dataset(
             flush=True,
         )
 
-    # Build the pair comparisons. Order kept stable across A/B/C from the
-    # original report; D-vs-* rows appended at the end so JSON readers that
-    # index by position on the legacy rows are unaffected.
+    # Build the pair comparisons. Order kept stable across A/B/C/D from the
+    # original report so JSON readers that index by position on the legacy
+    # rows are unaffected; the new pipelines' rows are appended.
+    #
+    # The new pairs disentangle the 2x2:
+    #   - B_track_vs_SIFT, C_sv_vs_SIFT — keep the per-pipeline vs SIFT row.
+    #   - B_track_vs_A, C_sv_vs_A — symmetric with the existing B/C/D_vs_A.
+    #   - B_vs_B_track  — view-expansion effect for the grid mover (B+SV - B_track).
+    #   - C_sv_vs_C     — view-expansion effect for the LK mover  (C+SV  - C_track).
+    #   - B_track_vs_C  — pure keypoint-mover, no view-expansion confound.
+    #   - B_vs_C_sv     — keypoint-mover at production-scale (both with SV).
+    # We deliberately do NOT enumerate all 6-choose-2 = 15 pairs; the four
+    # named comparisons illuminate the 2x2, and the existing A/B/C/D pairs
+    # remain for continuity.
     pairs = [
         ("A_vs_SIFT", "A", "_SIFT"),
         ("B_vs_SIFT", "B", "_SIFT"),
@@ -813,6 +1015,15 @@ def measure_dataset(
         ("D_vs_A", "D", "A"),
         ("D_vs_B", "D", "B"),
         ("D_vs_C", "D", "C"),
+        # 2x2 additions:
+        ("B_track_vs_SIFT", "B_track", "_SIFT"),
+        ("C_sv_vs_SIFT", "C_sv", "_SIFT"),
+        ("B_track_vs_A", "B_track", "A"),
+        ("C_sv_vs_A", "C_sv", "A"),
+        ("B_vs_B_track", "B", "B_track"),
+        ("C_sv_vs_C", "C_sv", "C"),
+        ("B_track_vs_C", "B_track", "C"),
+        ("B_vs_C_sv", "B", "C_sv"),
     ]
 
     def _pipe_kp(p: str) -> dict[tuple[bytes, int], np.ndarray]:
@@ -891,6 +1102,13 @@ def measure_dataset(
             ("C", "B"),
             ("D", "B"),
             ("D", "C"),
+            # 2x2 view-expansion + mover-isolation pairs:
+            ("B_track", "A"),
+            ("C_sv", "A"),
+            ("B", "B_track"),
+            ("C_sv", "C"),
+            ("B_track", "C"),
+            ("B", "C_sv"),
         ],
     )
 
@@ -959,7 +1177,7 @@ def main() -> int:
         type=str,
         default=",".join(PIPELINES),
         help=(
-            "Comma-separated subset of pipelines to run (default: all four — "
+            "Comma-separated subset of pipelines to run (default: all six — "
             f"{','.join(PIPELINES)}). Pairs involving a non-run pipeline are "
             "still emitted but with NaN summary stats and 0 overlap, since the "
             "comparison needs both sides' in-memory keypoint/normal/bitmap maps."

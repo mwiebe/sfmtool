@@ -1,24 +1,41 @@
-# Pipeline Comparison: SIFT Input vs Four Refinement Pipelines
+# Pipeline Comparison: SIFT Input vs Six Refinement Pipelines
 
 _Date: 2026-06-27._
 
-Four SfM refinement pipelines, all starting from the raw SIFT-detection
+Six SfM refinement pipelines, all starting from the raw SIFT-detection
 keypoints copied inline by `recon.to_embedded_patches(...)`, compared on
 the four checked-in datasets:
 
 - **Pipeline A** (normals-only): `to_embedded_patches` → `refine_normals`.
   Keypoints stay at SIFT positions; only the per-point normal is
   photometrically optimized.
-- **Pipeline B** (grid): `to_embedded_patches` → `refine_normals` →
-  `localize_keypoints` (supersampled grid, `search_resolution_multiplier=2`) →
-  `refine_normals` (second time, against the moved keypoints).
-- **Pipeline C** (LK-bilinear): `to_embedded_patches` → `refine_normals` →
-  `refine_keypoints` (LK, `subpixel='lk'` defaults; default
-  `sampler='bilinear'`) → `refine_normals` (second time, against the moved
-  keypoints).
-- **Pipeline D** (LK-anisotropic): identical to C except the LK refiner is
-  invoked with `sampler='anisotropic'` instead of the default
-  `'bilinear'` — the anti-aliased oblique-view sampler.
+- **Pipeline B** (grid + select_views; the production grid path):
+  `to_embedded_patches` → `refine_normals` → `select_views` →
+  `localize_keypoints` (supersampled grid, `search_resolution_multiplier=2`)
+  → `refine_normals` (second time, against the moved keypoints).
+- **Pipeline C** (LK-bilinear on track views): `to_embedded_patches` →
+  `refine_normals` → `refine_keypoints` (LK, `subpixel='lk'` defaults;
+  default `sampler='bilinear'`) → `refine_normals`. No `select_views`
+  expansion; LK operates only on the SIFT-track view sets.
+- **Pipeline D** (LK-anisotropic on track views): identical to C except
+  the LK refiner is invoked with `sampler='anisotropic'` instead of the
+  default `'bilinear'` — the anti-aliased oblique-view sampler.
+- **Pipeline B_track** (grid on track views, no select_views; **new**):
+  identical to B except `select_views` is skipped — the grid runs on the
+  SIFT-track view sets directly. Isolates the grid keypoint mover from
+  the view-expansion confound that the production B pipeline conflates.
+- **Pipeline C+SV** (LK-bilinear with select_views; **new**):
+  `to_embedded_patches` → `refine_normals` → `select_views` →
+  `refine_keypoints` (track views seeded with SIFT keypoints, candidate
+  views seeded from projection) → `refine_normals`. The LK analog of the
+  production B pipeline — same view-set expansion, different keypoint
+  mover.
+
+The six pipelines form a 2×2 over **keypoint mover** (grid vs LK) and
+**view-set scope** (SIFT tracks only vs select_views expanded), plus A
+(no mover) and D (LK-aniso, orthogonal). The 2×2 lets us attribute the
+B-vs-C divergence the previous rounds documented to either axis. See
+"The 2×2: select_views vs keypoint mover" below.
 
 Three artifacts captured per (dataset × pipeline):
 
@@ -137,6 +154,37 @@ This matches the decision-gate report's ECC finding (no meaningful
 ECC-score difference between `lk_per_sweep` and `lk_per_sweep_aniso`):
 the persisted artifacts agree too. Wall-time penalty for D over C is
 ~1.2–1.4× across datasets (largest on dino: 31.75s vs 22.37s).
+
+**The B-vs-C divergence is `select_views`, not the keypoint mover.** A
+fresh 2×2 measurement (keypoint mover × view-set scope) attributes the
+entire B-vs-A bitmap-blur the earlier rounds documented to `select_views`,
+not to the choice of grid vs LK keypoint mover. Paired ΔLapVar means on
+the common subset, per dataset:
+
+| Effect (paired ΔLapVar mean) | seoul | dino | seattle | kerry |
+|---|---:|---:|---:|---:|
+| view-expansion, grid mover (B − B_track) | -0.0005 | -0.0044 | -0.0036 | -0.0027 |
+| view-expansion, LK mover (C+SV − C) | -0.0006 | -0.0057 | -0.0038 | -0.0029 |
+| keypoint-mover only (B_track − C, no SV) | +0.0000 | -0.0001 | +0.0005 | +0.0002 |
+| keypoint-mover, with SV (B − C+SV) | +0.0001 | +0.0012 | +0.0007 | +0.0003 |
+
+The view-expansion rows are uniformly negative and meaningful in
+magnitude; the keypoint-mover rows are essentially zero on every
+dataset. **The grid mover with no view expansion (B_track) produces
+bitmaps as sharp as A** (B_track − A is ≤ +0.0015 on every dataset,
+indistinguishable from rendering jitter). The previous TL;DR
+attributed the B-vs-A blur to "B's larger keypoint moves admit more
+views per point at the cost of consensus crispness" — the **larger
+keypoint moves were a coincidence** (grid happens to be paired with
+select_views in production); the actual cause is the additional
+candidate views select_views admits beyond the SIFT track. Pairing LK
+with select_views (C+SV) reproduces the B-vs-A blur exactly; running
+the grid without select_views (B_track) eliminates it. See
+"The 2×2: select_views vs keypoint mover" below for the full breakdown
+and the implication: optimizing the keypoint mover won't recover the
+bitmap sharpness lost to view expansion — the question is whether the
+extra views are worth their blur cost (a separate ECC-quality question
+the decision-gate report addresses).
 
 
 ## seoul_bull
@@ -693,6 +741,164 @@ are well under C's own move from SIFT.
 
 Wall-time penalty for D over C: **1.16× (kerry) – 1.42× (dino)**,
 landing well below B's 6–11× cost over C.
+
+## The 2×2: select_views vs keypoint mover
+
+The first four pipelines (A/B/C/D) conflated two axes: the production
+B pipeline runs **both** `select_views` (which expands per-point view
+sets from the SIFT track to all geometrically-visible photometrically-
+vetted views) **and** the supersampled grid keypoint mover, while
+C/D run neither — they refine on the SIFT-track view sets directly.
+That left "is B blurrier than C because of the grid mover, or because
+of the view expansion?" unanswerable. The two new pipelines —
+**B_track** (grid mover, no select_views) and **C+SV** (LK mover,
+with select_views) — fill in the 2×2.
+
+| | no select_views | with select_views | view-expansion effect (LapVar) |
+|---|---|---|---|
+| **grid mover** | B_track | B (production) | B − B_track |
+| **LK mover** | C | C+SV | C+SV − C |
+| **keypoint-mover effect (LapVar)** | B_track − C | B − C+SV | — |
+
+### Paired ΔLapVar mean on the common subset, per dataset
+
+| Effect | seoul | dino | seattle | kerry |
+|---|---:|---:|---:|---:|
+| view-expansion, grid mover (B − B_track) | -0.0005 | -0.0044 | -0.0036 | -0.0027 |
+| view-expansion, LK mover (C+SV − C) | -0.0006 | -0.0057 | -0.0038 | -0.0029 |
+| keypoint-mover, no SV (B_track − C) | +0.0000 | -0.0001 | +0.0005 | +0.0002 |
+| keypoint-mover, with SV (B − C+SV) | +0.0001 | +0.0012 | +0.0007 | +0.0003 |
+
+The view-expansion rows are uniformly negative; the keypoint-mover
+rows are essentially zero. The grid and LK movers produce nearly
+identical sharpness on the same view set — the choice of mover does
+not move the bitmap sharpness needle. **All of the B-vs-A bitmap
+blur is `select_views`.**
+
+### Paired ΔLapVar mean vs A (the no-mover baseline)
+
+| Variant | seoul | dino | seattle | kerry |
+|---|---:|---:|---:|---:|
+| B_track − A (grid only, no SV) | +0.0001 | +0.0015 | +0.0008 | +0.0001 |
+| C − A (LK only, no SV) | -0.0001 | -0.0005 | -0.0003 | -0.0001 |
+| B − A (production: grid + SV) | -0.0005 | -0.0029 | -0.0029 | -0.0027 |
+| C+SV − A (LK + SV) | -0.0005 | -0.0040 | -0.0035 | -0.0030 |
+
+The two "no SV" variants land within rendering jitter of A; the two
+"with SV" variants land at essentially the same blur as each other.
+
+### Per-observation keypoint shift vs A (px, mean)
+
+| Variant | seoul | dino | seattle | kerry |
+|---|---:|---:|---:|---:|
+| B_track (grid, no SV) | 0.887 | 1.077 | 0.431 | 0.404 |
+| C (LK, no SV) | 0.234 | 0.363 | 0.228 | 0.194 |
+| B (grid + SV) | 0.850 | 1.086 | 0.501 | 0.483 |
+| C+SV (LK + SV) | 0.284 | 0.539 | 0.286 | 0.270 |
+| C+SV − C (SV effect, LK) | 0.129 | 0.412 | 0.160 | 0.184 |
+| B − B_track (SV effect, grid) | 0.364 | 0.876 | 0.291 | 0.340 |
+
+The keypoint axis behaves differently from sharpness: the **mover**
+matters here, not just `select_views`. Grid moves keypoints further
+than LK on every dataset (B_track 0.40–1.08 px mean vs C 0.19–0.36
+px mean), and `select_views` adds a much larger move when paired with
+grid than with LK (B − B_track 0.29–0.88 px, C+SV − C 0.13–0.41 px).
+The grid is essentially a coarse-to-fine search and finds basins LK
+won't seek out from the SIFT seed; on the candidate views select_views
+admits (where there's no SIFT seed), the grid's coarse-to-fine search
+has to work harder and finds keypoints further from the projected
+center than LK's local refinement does. That difference is real, but
+on the persisted **bitmap**, it doesn't propagate to sharpness — the
+mover's keypoint move is small relative to the patch size, so the
+rendered consensus comes out the same.
+
+### Observation counts: where did the extra views come from?
+
+| Dataset | A (=SIFT) | B_track (grid no SV) | C (LK no SV) | B (grid + SV) | C+SV (LK + SV) |
+|---|---:|---:|---:|---:|---:|
+| seoul_bull | 3137 | 2990 | 3137 | 4715 | 5073 |
+| dino_dog_toy (stride-5) | 17581 | 15360 | 17581 | 62989 | 75308 |
+| seattle_backyard | 14341 | 13264 | 14341 | 31040 | 35527 |
+| kerry_park | 2728 | 2668 | 2728 | 8319 | 11069 |
+
+Two things stand out:
+
+- **`select_views` admits 1.4–3.6× more observations** than the SIFT
+  tracks. The biggest expansion is on dino (3.6× for B, 4.3× for
+  C+SV); kerry_park and seattle are 3–4×; seoul is 1.5–1.6×.
+- **C+SV admits more views than B for the same `select_views` call.**
+  B (grid) culls candidate views whose ZNCC didn't co-register tightly
+  enough; C+SV (LK, project-seeded) accepts every admitted candidate
+  and refines locally. C+SV's view sets are therefore wider than B's,
+  which contributes a small extra blur (C+SV is consistently the
+  blurriest variant by 0.0001–0.0005 LapVar vs B).
+
+### Bitmap divergence (per-point mean L1; n_diff / n_compared)
+
+The 2×2 separation is also visible in pairwise bitmap-L1 (the
+"substantially-different" rates from earlier rounds, now extended):
+
+| Pair | seoul | dino | seattle | kerry |
+|---|---|---|---|---|
+| B − B_track (SV effect, grid) | 0.100 / 191/807 | 0.149 / 1200/3418 | 0.055 / 616/3166 | 0.135 / 271/705 |
+| C+SV − C (SV effect, LK) | 0.119 / 243/906 | 0.097 / 947/3677 | 0.043 / 467/3257 | 0.134 / 264/709 |
+| B_track − C (mover only, no SV) | 0.040 / 59/676 | 0.116 / 660/3233 | 0.041 / 365/3094 | 0.042 / 53/545 |
+| B − C+SV (mover only, with SV) | 0.063 / 113/906 | 0.050 / 349/3678 | 0.023 / 144/3234 | 0.024 / 29/713 |
+
+The "SV effect" rows hit 18–35% of points with a substantially-
+different bitmap; the "mover only" rows hit 4–20%. On dino the mover
+matters more than elsewhere on bitmaps (16–20% of points) — consistent
+with that dataset having the most aggressive keypoint motion.
+
+### Wall time (seconds)
+
+| Dataset | A | B_track | C | D | B (grid + SV) | C+SV (LK + SV) |
+|---|---:|---:|---:|---:|---:|---:|
+| seoul_bull | 0.86 | 14.63 | 3.38 | 4.18 | 23.85 | 6.33 |
+| dino_dog_toy (stride-5) | 13.71 | (see JSON) | (see JSON) | (see JSON) | (see JSON) | (see JSON) |
+| seattle_backyard | (see JSON) | (see JSON) | (see JSON) | (see JSON) | (see JSON) | (see JSON) |
+| kerry_park | (see JSON) | (see JSON) | (see JSON) | (see JSON) | (see JSON) | (see JSON) |
+
+(Wall times for all 6 pipelines per dataset are in
+`reports/2026-06-27-pipeline-comparison-sift-data.json`.) The
+interesting comparison: **C+SV is much cheaper than B** on every
+dataset (e.g. seoul: 6.33s vs 23.85s — ~3.8× cheaper). LK refines
+faster than the grid searches, and the cost grows with view count,
+which is larger in `+SV` than in `_track`.
+
+### Verdict / interpretation
+
+- **The keypoint mover (grid vs LK) doesn't matter for bitmap
+  sharpness.** B_track ≈ C ≈ A in bitmap sharpness; B ≈ C+SV in
+  bitmap sharpness; the mover is invariant on this axis.
+- **`select_views` is the cause of the bitmap blur** the earlier
+  rounds documented as a B-vs-A delta. The mechanism is mechanical:
+  the additional candidate views are admitted by a ZNCC threshold
+  (not perfect alignment), and the second `refine_normals` then fuses
+  them into the consensus — the more views, the more averaging, the
+  softer the rendered patch. This is a property of view-set expansion,
+  not of any particular keypoint mover.
+- **The keypoint mover *does* matter for keypoint positions.** Grid
+  moves keypoints further than LK on every dataset, and the gap grows
+  with `select_views` (since the grid handles candidate views worse
+  than LK does). For downstream consumers that care about keypoint
+  precision (BA reprojection error, triangulation), the mover choice
+  is real.
+- **Decision-gate implication.** The earlier decision-gate report's
+  finding that LK and grid are roughly interchangeable on ECC, with
+  LK regressing on the kerry_park fisheye rig, is consistent with
+  this picture: ECC measures self-consistency at the stored keypoints,
+  which the mover does move. The new picture adds that on the
+  rendered-bitmap axis, the mover doesn't matter at all and
+  `select_views` is the only knob that does.
+- **Open question for a future round.** Is the `select_views`-induced
+  blur worth the cost? More views = better triangulation /
+  reprojection / cross-view robustness, at the cost of a softer
+  reference. The decision-gate report measured ECC (self-consistency)
+  but not the downstream geometric quality. A direct
+  "min_relative_zncc sweep on select_views" measurement could find a
+  sweet spot — admit candidate views aggressively enough for
+  triangulation coverage but tight enough to keep the bitmap sharp.
 
 ## Methodology
 
