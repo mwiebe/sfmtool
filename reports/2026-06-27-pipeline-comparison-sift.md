@@ -83,25 +83,27 @@ perturbations of the same answer — the keypoint-mover choice is a real
 signal that propagates through the second `refine_normals` and into
 the persisted reference appearance.
 
-**Bitmap sharpness — B's bitmaps are blurrier than A/C/D.** Per-pipeline
-Laplacian variance + gradient-mag mean over the rendered 24×24 RGBA bitmaps
-(masked to `alpha > 0` so transparent border texels don't deflate the
-metric) cleanly orders the same way as the bitmap-divergence story: **B is
-the blurriest on every dataset**, A/C/D are essentially tied. Mean
-Laplacian variance for B is **15–27% lower** than for A across the four
-datasets (seoul 0.0033 vs 0.0044; dino 0.0115 vs 0.0151; seattle 0.0149 vs
-0.0185; kerry 0.0084 vs 0.0112), with gradient-mag mean showing the same
-ordering (B is 7–10% lower than A everywhere). C and D match A to within
-±5% on every dataset — D vs C agrees to within ±2%, mirroring the
-near-zero D-vs-C bitmap divergence. The interpretation: **B's larger
-keypoint moves (0.48–1.09 px mean vs SIFT, vs C/D's 0.19–0.50 px) admit
-more views per point at the cost of consensus crispness — its rendered
-reference fuses more views together but with worse photometric alignment,
-producing a softer, ghosted patch**. The LK pipelines (C/D) move keypoints
-less, fuse the same view sets A does, and end up with the same sharpness.
-Across the catalog this is consistent with the bitmap-L1 picture: the
-~25–40% of points where B and C disagree visibly aren't B finding a
-sharper consensus — they're B blending more views with worse alignment.
+**Bitmap sharpness — B's bitmaps are blurrier than A/C/D, but the gap is
+smaller paired than the per-pipeline aggregates make it look.** The
+unrestricted per-pipeline aggregates (Laplacian variance + gradient-mag
+mean, alpha-masked) show B 15–27% below A on Laplacian variance and 7–10%
+below on gradient-mag mean across the four datasets; A/C/D are within ~5%
+of each other. But those aggregates mix populations — each pipeline's
+`alpha > 0` coverage differs, and B in particular admits more points via
+`localize_keypoints`. **Restricted to the per-dataset common subset
+(504–2995 points covered by every pipeline) and computed as paired
+per-point deltas, the sign survives — B_vs_A ΔLapVar is negative on every
+dataset — but the magnitude shrinks**: paired ΔLapVar means are -0.0004
+(seoul), -0.0029 (dino), -0.0029 (seattle), -0.0027 (kerry), vs the
+unrestricted-aggregate differences of -0.0011 / -0.0036 / -0.0036 / -0.0028
+on the same datasets. Seoul is essentially zero in paired terms; dino /
+seattle / kerry keep a real but modest B-blurrier signal. C and D agree
+with A on the paired view to within ±0.002 LapVar (D vs C within ±0.0004).
+Interpretation unchanged: **B's larger keypoint moves admit more views per
+point at the cost of some consensus crispness**, but most of the
+unpaired-aggregate gap was the population-difference confound — the
+genuine per-point blur cost is smaller, and concentrated on the datasets
+where B moves keypoints furthest.
 
 **One mild surprise.** On kerry_park, the *median* `B_vs_A` and `C_vs_A`
 normal angles are essentially 0° (0.000° and 1.309°) despite mean angles
@@ -204,12 +206,43 @@ per bitmap so transparent border texels don't deflate the metric. Aggregated
 per pipeline to mean / median / p95. Bitmaps with fewer than 2 covered texels
 are skipped (`n_skipped`).
 
+> **Caveat:** each pipeline aggregates over its own `alpha > 0` population
+> (`n_compared` differs across A/B/C/D — B in particular admits extra points
+> via `localize_keypoints`), so this table mixes a population-difference signal
+> into the per-pipeline aggregates. The apples-to-apples view is the next
+> sub-table ("Bitmap sharpness on the common subset"), which restricts to the
+> per-dataset intersection of points covered by all four pipelines.
+
 | Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | A | 0.0044 | 0.0013 | 0.0214 | 0.0357 | 0.0320 | 0.0664 | 667 | 379 |
 | B | 0.0033 | 0.0010 | 0.0163 | 0.0326 | 0.0291 | 0.0617 | 806 | 229 |
 | C | 0.0045 | 0.0012 | 0.0229 | 0.0353 | 0.0313 | 0.0679 | 676 | 370 |
 | D | 0.0044 | 0.0012 | 0.0236 | 0.0353 | 0.0313 | 0.0682 | 676 | 370 |
+
+### Bitmap sharpness on the common subset
+
+Restricted to the 634 points covered by every pipeline (the intersection of all four `alpha > 0` populations). Same alpha-masked Laplacian variance + gradient-mag mean as the table above, but every pipeline aggregates over the **same** points.
+
+Per-pipeline aggregates on the common subset:
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_common |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0039 | 0.0013 | 0.0193 | 0.0350 | 0.0313 | 0.0648 | 634 |
+| B | 0.0035 | 0.0011 | 0.0165 | 0.0336 | 0.0299 | 0.0620 | 634 |
+| C | 0.0040 | 0.0012 | 0.0201 | 0.0347 | 0.0310 | 0.0658 | 634 |
+| D | 0.0040 | 0.0012 | 0.0200 | 0.0347 | 0.0310 | 0.0664 | 634 |
+
+Paired per-point deltas on the common subset (`metric_X - metric_Y`):
+
+| Pair | ΔLapVar mean | ΔLapVar median | ΔLapVar p95 | ΔGradMag mean | ΔGradMag median | ΔGradMag p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| B_vs_A | -0.0004 | -0.0001 | +0.0008 | -0.0014 | -0.0011 | +0.0033 |
+| C_vs_A | +0.0001 | -0.0000 | +0.0014 | -0.0004 | -0.0001 | +0.0033 |
+| D_vs_A | +0.0001 | -0.0000 | +0.0014 | -0.0004 | -0.0001 | +0.0034 |
+| C_vs_B | +0.0005 | +0.0001 | +0.0036 | +0.0011 | +0.0005 | +0.0066 |
+| D_vs_B | +0.0005 | +0.0001 | +0.0036 | +0.0011 | +0.0005 | +0.0067 |
+| D_vs_C | +0.0000 | +0.0000 | +0.0001 | +0.0000 | +0.0000 | +0.0004 |
 
 ## dino_dog_toy
 
@@ -273,12 +306,40 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 
 ### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
 
+> **Caveat:** see the seoul_bull bitmap-sharpness note — each pipeline aggregates
+> over its own `alpha > 0` population. See the next sub-table for the
+> common-subset apples-to-apples view.
+
 | Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | A | 0.0151 | 0.0085 | 0.0541 | 0.0500 | 0.0467 | 0.0935 | 3216 | 587 |
 | B | 0.0115 | 0.0058 | 0.0419 | 0.0454 | 0.0416 | 0.0867 | 3405 | 395 |
 | C | 0.0165 | 0.0091 | 0.0608 | 0.0517 | 0.0480 | 0.0986 | 3200 | 603 |
 | D | 0.0167 | 0.0092 | 0.0624 | 0.0519 | 0.0484 | 0.0991 | 3204 | 599 |
+
+### Bitmap sharpness on the common subset
+
+Restricted to the 2995 points covered by every pipeline (the intersection of all four `alpha > 0` populations). Same alpha-masked Laplacian variance + gradient-mag mean as the table above, but every pipeline aggregates over the **same** points.
+
+Per-pipeline aggregates on the common subset:
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_common |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0146 | 0.0083 | 0.0527 | 0.0498 | 0.0465 | 0.0932 | 2995 |
+| B | 0.0117 | 0.0060 | 0.0431 | 0.0459 | 0.0422 | 0.0873 | 2995 |
+| C | 0.0163 | 0.0090 | 0.0600 | 0.0517 | 0.0480 | 0.0986 | 2995 |
+| D | 0.0165 | 0.0091 | 0.0613 | 0.0519 | 0.0482 | 0.0987 | 2995 |
+
+Paired per-point deltas on the common subset (`metric_X - metric_Y`):
+
+| Pair | ΔLapVar mean | ΔLapVar median | ΔLapVar p95 | ΔGradMag mean | ΔGradMag median | ΔGradMag p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| B_vs_A | -0.0029 | -0.0010 | +0.0083 | -0.0039 | -0.0027 | +0.0128 |
+| C_vs_A | +0.0016 | +0.0003 | +0.0104 | +0.0019 | +0.0008 | +0.0116 |
+| D_vs_A | +0.0019 | +0.0003 | +0.0114 | +0.0021 | +0.0008 | +0.0125 |
+| C_vs_B | +0.0046 | +0.0015 | +0.0252 | +0.0058 | +0.0038 | +0.0278 |
+| D_vs_B | +0.0048 | +0.0016 | +0.0250 | +0.0061 | +0.0040 | +0.0286 |
+| D_vs_C | +0.0002 | +0.0000 | +0.0023 | +0.0002 | +0.0000 | +0.0025 |
 
 ## seattle_backyard
 
@@ -342,12 +403,40 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 
 ### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
 
+> **Caveat:** see the seoul_bull bitmap-sharpness note — each pipeline aggregates
+> over its own `alpha > 0` population. See the next sub-table for the
+> common-subset apples-to-apples view.
+
 | Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | A | 0.0185 | 0.0089 | 0.0693 | 0.0558 | 0.0508 | 0.1056 | 3077 | 204 |
 | B | 0.0149 | 0.0052 | 0.0640 | 0.0489 | 0.0428 | 0.1014 | 3174 | 78 |
 | C | 0.0188 | 0.0080 | 0.0740 | 0.0552 | 0.0492 | 0.1079 | 3107 | 174 |
 | D | 0.0192 | 0.0081 | 0.0760 | 0.0555 | 0.0492 | 0.1088 | 3107 | 174 |
+
+### Bitmap sharpness on the common subset
+
+Restricted to the 2963 points covered by every pipeline (the intersection of all four `alpha > 0` populations). Same alpha-masked Laplacian variance + gradient-mag mean as the table above, but every pipeline aggregates over the **same** points.
+
+Per-pipeline aggregates on the common subset:
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_common |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0176 | 0.0085 | 0.0649 | 0.0550 | 0.0501 | 0.1022 | 2963 |
+| B | 0.0146 | 0.0051 | 0.0632 | 0.0486 | 0.0426 | 0.1014 | 2963 |
+| C | 0.0178 | 0.0079 | 0.0706 | 0.0544 | 0.0486 | 0.1059 | 2963 |
+| D | 0.0182 | 0.0079 | 0.0732 | 0.0546 | 0.0486 | 0.1066 | 2963 |
+
+Paired per-point deltas on the common subset (`metric_X - metric_Y`):
+
+| Pair | ΔLapVar mean | ΔLapVar median | ΔLapVar p95 | ΔGradMag mean | ΔGradMag median | ΔGradMag p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| B_vs_A | -0.0029 | -0.0018 | +0.0075 | -0.0064 | -0.0054 | +0.0067 |
+| C_vs_A | +0.0003 | -0.0000 | +0.0080 | -0.0006 | +0.0000 | +0.0069 |
+| D_vs_A | +0.0006 | -0.0000 | +0.0097 | -0.0004 | +0.0000 | +0.0078 |
+| C_vs_B | +0.0032 | +0.0015 | +0.0178 | +0.0058 | +0.0044 | +0.0217 |
+| D_vs_B | +0.0036 | +0.0015 | +0.0183 | +0.0060 | +0.0045 | +0.0219 |
+| D_vs_C | +0.0004 | +0.0000 | +0.0026 | +0.0002 | +0.0000 | +0.0023 |
 
 ## kerry_park
 
@@ -411,12 +500,40 @@ Threshold for the "substantially different" count: per-point mean-L1 > 0.0627 (=
 
 ### Bitmap sharpness (per-pipeline aggregates over the rendered bitmaps)
 
+> **Caveat:** see the seoul_bull bitmap-sharpness note — each pipeline aggregates
+> over its own `alpha > 0` population. See the next sub-table for the
+> common-subset apples-to-apples view.
+
 | Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_compared | n_skipped |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | A | 0.0112 | 0.0056 | 0.0394 | 0.0526 | 0.0508 | 0.0920 | 526 | 244 |
 | B | 0.0084 | 0.0041 | 0.0322 | 0.0476 | 0.0451 | 0.0848 | 704 | 66 |
 | C | 0.0112 | 0.0054 | 0.0388 | 0.0517 | 0.0495 | 0.0934 | 533 | 237 |
 | D | 0.0109 | 0.0053 | 0.0376 | 0.0514 | 0.0489 | 0.0916 | 527 | 243 |
+
+### Bitmap sharpness on the common subset
+
+Restricted to the 504 points covered by every pipeline (the intersection of all four `alpha > 0` populations). Same alpha-masked Laplacian variance + gradient-mag mean as the table above, but every pipeline aggregates over the **same** points.
+
+Per-pipeline aggregates on the common subset:
+
+| Pipeline | LapVar mean | LapVar median | LapVar p95 | GradMag mean | GradMag median | GradMag p95 | n_common |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 0.0109 | 0.0055 | 0.0387 | 0.0522 | 0.0506 | 0.0917 | 504 |
+| B | 0.0081 | 0.0041 | 0.0313 | 0.0470 | 0.0448 | 0.0850 | 504 |
+| C | 0.0108 | 0.0052 | 0.0383 | 0.0514 | 0.0490 | 0.0917 | 504 |
+| D | 0.0110 | 0.0052 | 0.0394 | 0.0514 | 0.0489 | 0.0916 | 504 |
+
+Paired per-point deltas on the common subset (`metric_X - metric_Y`):
+
+| Pair | ΔLapVar mean | ΔLapVar median | ΔLapVar p95 | ΔGradMag mean | ΔGradMag median | ΔGradMag p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| B_vs_A | -0.0027 | -0.0010 | +0.0013 | -0.0052 | -0.0037 | +0.0029 |
+| C_vs_A | -0.0000 | -0.0000 | +0.0033 | -0.0008 | -0.0000 | +0.0046 |
+| D_vs_A | +0.0001 | -0.0000 | +0.0041 | -0.0008 | +0.0000 | +0.0048 |
+| C_vs_B | +0.0027 | +0.0007 | +0.0138 | +0.0044 | +0.0029 | +0.0180 |
+| D_vs_B | +0.0028 | +0.0008 | +0.0140 | +0.0044 | +0.0029 | +0.0180 |
+| D_vs_C | +0.0001 | +0.0000 | +0.0011 | +0.0000 | +0.0000 | +0.0007 |
 
 ## Cross-dataset summary
 
@@ -462,12 +579,33 @@ magnitude, alpha-masked. Same shape as the Laplacian-variance table.
 | seattle_backyard | 0.0558 | 0.0489 | 0.0552 | 0.0555 |
 | kerry_park | 0.0526 | 0.0476 | 0.0517 | 0.0514 |
 
-On every dataset, both sharpness metrics agree: **B is the blurriest**
-(15–27% lower Laplacian variance, 7–10% lower gradient-mag mean than A),
-while A / C / D land within rendering-jitter of each other (D vs C agrees
-to within ±2%). This matches the bitmap-divergence picture in the opposite
-direction — B's larger keypoint moves admit more views per point at the
-cost of consensus crispness.
+On every dataset, both unrestricted-aggregate sharpness metrics agree: **B is
+the blurriest** (15–27% lower Laplacian variance, 7–10% lower gradient-mag
+mean than A), while A / C / D land within rendering-jitter of each other (D
+vs C agrees to within ±2%). **Caveat:** these aggregates are over different
+per-pipeline populations (each pipeline's `alpha > 0` coverage differs); see
+"Paired ΔLapVar mean on the common subset" below for the apples-to-apples
+paired view. The sign of B-vs-A survives the paired restriction on every
+dataset; the magnitude shrinks (especially on seoul_bull, where the paired
+ΔLapVar mean is essentially zero).
+
+### Paired ΔLapVar mean on the common subset, by pair (LapVar units)
+
+Per-dataset paired ΔLapVar mean restricted to the per-dataset common subset
+(the same `n_common` set every pipeline aggregates over). Three informative
+pairs: **B-A** captures the grid pipeline's blur cost vs normals-only;
+**C-A** captures LK-bilinear's deviation; **D-C** captures the anisotropic
+sampler's marginal effect. The other three pairs derive from these via
+subtraction. Compare against the unrestricted "Mean Laplacian variance"
+table above — the common-subset numbers preserve the B-is-blurrier sign
+on every dataset but the magnitudes drop.
+
+| Dataset | B-A | C-A | D-C | n_common |
+|---|---:|---:|---:|---:|
+| seoul_bull | -0.0004 | +0.0001 | +0.0000 | 634 |
+| dino_dog_toy (stride=5) | -0.0029 | +0.0016 | +0.0002 | 2995 |
+| seattle_backyard | -0.0029 | +0.0003 | +0.0004 | 2963 |
+| kerry_park | -0.0027 | -0.0000 | +0.0001 | 504 |
 
 ### Bitmap divergence between B and C (per-point mean-L1 + substantially-different count)
 

@@ -463,11 +463,27 @@ def _bitmap_sharpness_per_point(
     bitmap_dict: dict[bytes, np.ndarray],
 ) -> list[tuple[float, float]]:
     """Per-point ``(laplacian_var, gradient_mag_mean)`` over each bitmap's
-    luminance channel.
+    luminance channel. Caller-side aggregate convenience: returns just the
+    survivors with no keys. See ``_bitmap_sharpness_by_world`` for the keyed
+    variant used to pair across pipelines.
+
+    Per-bitmap recipe is documented on ``_bitmap_sharpness_by_world``; this
+    function shares it.
+    """
+    return [v for v in _bitmap_sharpness_by_world(bitmap_dict).values()]
+
+
+def _bitmap_sharpness_by_world(
+    bitmap_dict: dict[bytes, np.ndarray],
+) -> dict[bytes, tuple[float, float]]:
+    """Per-point ``world_key -> (laplacian_var, gradient_mag_mean)`` over each
+    bitmap's luminance channel. Same join key as
+    :func:`bitmaps_by_world` / :func:`normals_by_world`, so the result can be
+    intersected across pipelines for paired per-point sharpness deltas.
 
     Inputs:
-      ``bitmap_dict`` — ``{key: RGBA uint8 (H, W, 4)}`` (same shape the other
-      bitmap helpers consume).
+      ``bitmap_dict`` — ``{world_key: RGBA uint8 (H, W, 4)}`` (the dict
+      returned by :func:`bitmaps_by_world`).
 
     Per bitmap:
       * Luminance ``I_gray = mean(rgb, axis=-1)`` in ``float32`` normalized to
@@ -484,11 +500,11 @@ def _bitmap_sharpness_per_point(
         trailing column/row. ``mag = sqrt(dx**2 + dy**2)``. Mean is taken over
         masked texels (same mask).
       * If the masked region is empty OR has < 2 masked texels (the Laplacian
-        variance is undefined for n<2) the bitmap is skipped (returned tuple
-        omitted from the list, NOT NaN — caller aggregates the survivors).
+        variance is undefined for n<2) the bitmap is skipped (key omitted from
+        the returned dict, NOT NaN — caller aggregates / intersects survivors).
     """
-    out: list[tuple[float, float]] = []
-    for _key, rgba in bitmap_dict.items():
+    out: dict[bytes, tuple[float, float]] = {}
+    for key, rgba in bitmap_dict.items():
         if rgba.ndim != 3 or rgba.shape[-1] != 4:
             continue
         alpha = rgba[:, :, 3]
@@ -518,7 +534,7 @@ def _bitmap_sharpness_per_point(
         dy[:-1, :] = np.diff(gray, axis=0)
         mag = np.sqrt(dx * dx + dy * dy)
         mag_mean = float(mag[mask].mean())
-        out.append((lap_var, mag_mean))
+        out[key] = (lap_var, mag_mean)
     return out
 
 
@@ -558,6 +574,93 @@ def bitmap_sharpness_summary(
         "grad_mag_mean_p95": float(np.percentile(grad, 95)),
         "n_compared": n_compared,
         "n_skipped": n_skipped,
+    }
+
+
+def common_subset_sharpness(
+    sharpness_by_pipeline: dict[str, dict[bytes, tuple[float, float]]],
+    *,
+    pairs: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Apples-to-apples sharpness aggregates restricted to the per-dataset
+    intersection of points covered by every pipeline.
+
+    Inputs:
+      ``sharpness_by_pipeline`` — ``{pipeline_label: {world_key: (lap_var,
+        grad_mag)}}`` as returned by :func:`_bitmap_sharpness_by_world` per
+        pipeline. Only pipelines present here (i.e. those whose sharpness was
+        successfully computed) participate in the intersection.
+      ``pairs`` — list of ``(X, Y)`` pipeline labels (e.g. ``("B", "A")``);
+        the function emits per-pair paired-delta aggregates for each. Pairs
+        whose either side is missing from ``sharpness_by_pipeline`` are
+        skipped (so the call site can pass the full 6-pair list and have
+        partial-pipeline runs Just Work).
+
+    Returns a dict with three keys:
+      * ``n_common`` — size of the intersection (0 if any pipeline has no
+        bitmaps or the intersection is empty).
+      * ``per_pipeline`` — ``{pipeline_label: {lap_var_*, grad_mag_mean_*,
+        n_common}}`` with mean/median/p95 of each metric restricted to the
+        intersection, in the same shape as :func:`bitmap_sharpness_summary`'s
+        return (minus ``n_skipped`` — every pipeline has exactly ``n_common``
+        survivors on the intersection by construction).
+      * ``paired_deltas`` — ``{"X_vs_Y": {delta_lap_var_*,
+        delta_grad_mag_mean_*, n_common}}`` for each pair, computed as
+        ``metric_X - metric_Y`` per point on the intersection. Paired deltas
+        eliminate per-point variance, so they give a cleaner signal than
+        comparing the per-pipeline aggregates.
+    """
+    pipelines_present = [p for p, d in sharpness_by_pipeline.items() if d]
+    if not pipelines_present:
+        return {"n_common": 0, "per_pipeline": {}, "paired_deltas": {}}
+    common: set[bytes] = set(sharpness_by_pipeline[pipelines_present[0]].keys())
+    for p in pipelines_present[1:]:
+        common &= sharpness_by_pipeline[p].keys()
+    n_common = len(common)
+    if n_common == 0:
+        return {
+            "n_common": 0,
+            "per_pipeline": {p: None for p in pipelines_present},
+            "paired_deltas": {},
+        }
+    # Stable key order so paired-delta indexing is deterministic across
+    # pipelines (numpy arrays are zipped index-wise).
+    keys = sorted(common)
+    per_pipeline_arrays: dict[str, np.ndarray] = {}
+    per_pipeline: dict[str, dict[str, float | int]] = {}
+    for p in pipelines_present:
+        arr = np.array([sharpness_by_pipeline[p][k] for k in keys], dtype=np.float64)
+        per_pipeline_arrays[p] = arr
+        lap = arr[:, 0]
+        grad = arr[:, 1]
+        per_pipeline[p] = {
+            "lap_var_mean": float(lap.mean()),
+            "lap_var_median": float(np.median(lap)),
+            "lap_var_p95": float(np.percentile(lap, 95)),
+            "grad_mag_mean_mean": float(grad.mean()),
+            "grad_mag_mean_median": float(np.median(grad)),
+            "grad_mag_mean_p95": float(np.percentile(grad, 95)),
+            "n_common": n_common,
+        }
+    paired_deltas: dict[str, dict[str, float | int]] = {}
+    for x, y in pairs:
+        if x not in per_pipeline_arrays or y not in per_pipeline_arrays:
+            continue
+        dlap = per_pipeline_arrays[x][:, 0] - per_pipeline_arrays[y][:, 0]
+        dgrad = per_pipeline_arrays[x][:, 1] - per_pipeline_arrays[y][:, 1]
+        paired_deltas[f"{x}_vs_{y}"] = {
+            "delta_lap_var_mean": float(dlap.mean()),
+            "delta_lap_var_median": float(np.median(dlap)),
+            "delta_lap_var_p95": float(np.percentile(dlap, 95)),
+            "delta_grad_mag_mean_mean": float(dgrad.mean()),
+            "delta_grad_mag_mean_median": float(np.median(dgrad)),
+            "delta_grad_mag_mean_p95": float(np.percentile(dgrad, 95)),
+            "n_common": n_common,
+        }
+    return {
+        "n_common": n_common,
+        "per_pipeline": per_pipeline,
+        "paired_deltas": paired_deltas,
     }
 
 
@@ -762,11 +865,34 @@ def measure_dataset(
     # `bitmap_l1_summary` uses so sharpness isn't deflated by transparent
     # border texels. Bitmaps were already rendered in memory — no re-render.
     sharpness_by_pipeline: dict[str, dict] = {}
+    sharpness_per_point: dict[str, dict[bytes, tuple[float, float]]] = {}
     for p in pipelines:
         info = pipeline_outputs.get(p, {})
         if "error" in info:
             continue
         sharpness_by_pipeline[p] = bitmap_sharpness_summary(info.get("bitmaps", {}))
+        sharpness_per_point[p] = _bitmap_sharpness_by_world(info.get("bitmaps", {}))
+
+    # Apples-to-apples sharpness: restrict to the per-dataset intersection of
+    # points covered by all pipelines (vs the per-pipeline `sharpness` view
+    # above, where A/B/C/D each aggregate over different populations because
+    # `alpha > 0` coverage differs per pipeline — B in particular admits extra
+    # views via `localize_keypoints` and so has more covered points). The
+    # restricted view emits per-pipeline aggregates on the same `n_common` set
+    # AND paired per-point deltas (six pairs, mean/median/p95). Paired deltas
+    # eliminate per-point variance and give a cleaner blurriness signal than
+    # comparing the unrestricted aggregates.
+    sharpness_common_subset = common_subset_sharpness(
+        sharpness_per_point,
+        pairs=[
+            ("B", "A"),
+            ("C", "A"),
+            ("D", "A"),
+            ("C", "B"),
+            ("D", "B"),
+            ("D", "C"),
+        ],
+    )
 
     # Strip the heavy in-memory dicts before returning so we can serialize.
     pipeline_summary = {}
@@ -801,6 +927,7 @@ def measure_dataset(
         "normal_comparisons": normal_rows,
         "bitmap_comparisons": bitmap_rows,
         "sharpness": sharpness_by_pipeline,
+        "sharpness_common_subset": sharpness_common_subset,
     }
 
 
@@ -893,6 +1020,24 @@ def main() -> int:
                 f"n={s['n_compared']} skipped={s['n_skipped']}",
                 flush=True,
             )
+        scs = r.get("sharpness_common_subset", {})
+        if scs.get("n_common"):
+            print(f"    common-subset n_common={scs['n_common']}", flush=True)
+            for p, s in scs.get("per_pipeline", {}).items():
+                if s is None:
+                    continue
+                print(
+                    f"    sh* {p:>10s}: lap_var mean={s['lap_var_mean']:.4f} "
+                    f"median={s['lap_var_median']:.4f} p95={s['lap_var_p95']:.4f}",
+                    flush=True,
+                )
+            for pair, d in scs.get("paired_deltas", {}).items():
+                print(
+                    f"    dsh {pair:>10s}: dlap mean={d['delta_lap_var_mean']:+.4f} "
+                    f"median={d['delta_lap_var_median']:+.4f} p95={d['delta_lap_var_p95']:+.4f}  "
+                    f"dgrad mean={d['delta_grad_mag_mean_mean']:+.4f}",
+                    flush=True,
+                )
         for b in r["bitmap_comparisons"]:
             if "note" in b:
                 print(f"    bm {b['pair']:>11s}: (N/A) {b['note']}", flush=True)
