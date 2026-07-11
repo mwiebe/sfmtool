@@ -89,6 +89,11 @@ coverage-html = "cargo llvm-cov --workspace --html --open"
 maturin = "maturin"
 bench-sift = "python scripts/benchmark_sift.py"
 
+[feature.dev.dependencies]
+# For experiment scripts (scripts/exp_*.py): spline fitting and the small
+# dense/sparse solvers they prototype with.
+scipy = ">=1.14"
+
 [feature.dev.tasks]
 ipython = "ipython"
 
