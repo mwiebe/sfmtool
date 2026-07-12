@@ -11,24 +11,31 @@ a `.sfmr` file — no COLMAP solver involved.
 Pipeline:
   1. Load patch clusters; refined member positions come from the stored
      affine warps applied to the reference keypoint (`x_m = A·x_ref + t`).
-  2. Affine (weak-perspective) ALS factorization of overlapping windows of
-     consecutive frames (a single global factorization breaks on wide
-     orbits) + Tomasi–Kanade metric upgrade, both reflection hypotheses.
-  3. Seed a perspective solve on the strongest window (a small fixed-focal
-     BA also resolves the reflection), then grow incrementally: each next
-     image is resected pose-only against the global structure (trimmed
-     iterations, constant-velocity init), new clusters are triangulated as
+  2. Group images by cluster covisibility (shared-cluster counts) — no
+     sequence order is assumed.  Affine (weak-perspective) ALS factorization
+     of candidate seed groups (a single global factorization breaks on wide
+     baselines) + Tomasi–Kanade metric upgrade, both reflection hypotheses.
+  3. Seed a perspective solve on the best group (a small fixed-focal BA
+     also resolves the reflection), then grow incrementally: the
+     next-best-view image (most observations of valid points) is resected
+     pose-only against the global structure (trimmed iterations, most-
+     covisible posed poses as inits), new clusters are triangulated as
      they gain posed views, short global BAs run every few images.
   4. Steps 2–3 run per candidate focal on a small grid with f held FIXED —
      the focal is unobservable from a weak init (the residual decreases
      monotonically toward the affine limit), but with a converged geometry
-     the inlier fraction peaks near the true focal.  The winner's BA then
-     releases f.
+     the inlier fraction peaks near the true focal.  The scan caps growth
+     at ~20 images; the winner grows fully and its BA then releases f.
   5. Report reprojection stats and, when a reference solve exists in the
      workspace, camera errors after similarity alignment; save the result
      as `sfmr/bootstrap-pinhole.sfmr`.
 
-Run: pixi run -e dev python scripts/exp_pinhole_bootstrap.py e_seoul_ws
+Run: pixi run -e dev python scripts/exp_pinhole_bootstrap.py <workspace> [ref.sfmr]
+
+The optional second argument names the reference solve to compare against
+(it may live in another workspace, e.g. a full-sequence solve when
+bootstrapping a frame subset — images are matched by workspace-relative
+name).  Default: the first non-bootstrap .sfmr in the workspace.
 """
 
 import sys
@@ -40,7 +47,9 @@ import scipy.sparse
 from scipy.spatial.transform import Rotation
 
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
+REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 MIN_SPAN_BA = 2  # min distinct images for a cluster to become a point
+MAX_CLUSTERS = 10000  # cap for the scipy BAs; highest-span clusters win
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, in units of max(w, h)
 TRIM_PX = 4.0  # BA inter-round observation trim threshold
 
@@ -74,17 +83,30 @@ def load_clusters():
     refs = np.asarray(data["reference_members"])
     aff = np.asarray(data["member_affines"])
 
-    obs_c, obs_i, obs_f, obs_uv = [], [], [], []
-    n_cl = 0
+    # First pass: member selections and spans of every usable cluster.
+    usable = []
     for c in range(len(starts) - 1):
         lo, hi = int(starts[c]), int(starts[c + 1])
         if refs[c] == np.iinfo(np.uint32).max:
             continue
+        sel = np.nonzero((st[lo:hi] == 0) | (st[lo:hi] == 1))[0] + lo
+        span = len(np.unique(mi[sel]))
+        if span >= MIN_SPAN_BA:
+            usable.append((span, c, sel))
+
+    # Cap for the scipy BAs: keep the highest-span clusters (deterministic;
+    # ties broken by cluster id).  A coarse bootstrap doesn't need them all.
+    if len(usable) > MAX_CLUSTERS:
+        usable.sort(key=lambda t: (-t[0], t[1]))
+        dropped = len(usable) - MAX_CLUSTERS
+        usable = sorted(usable[:MAX_CLUSTERS], key=lambda t: t[1])
+        print(f"capped clusters: kept {MAX_CLUSTERS} by span, dropped {dropped}")
+
+    obs_c, obs_i, obs_f, obs_uv = [], [], [], []
+    n_cl = 0
+    for _span, c, sel in usable:
         ref = int(refs[c])
         x_ref = positions[mi[ref]][mf[ref]]
-        sel = np.nonzero((st[lo:hi] == 0) | (st[lo:hi] == 1))[0] + lo
-        if len(np.unique(mi[sel])) < MIN_SPAN_BA:
-            continue
         for k in sel:
             obs_c.append(n_cl)
             obs_i.append(int(mi[k]))
@@ -214,22 +236,49 @@ def weak_perspective_poses(m_cam, t_cam, a_up, used):
     return rot, scale
 
 
-# ── Windowed factorization + chaining ────────────────────────────────────────
+# ── Covisibility grouping ────────────────────────────────────────────────────
 #
-# A single global affine factorization breaks on wide orbits (the seoul bull
-# sequence spans ~150 deg), so factorize overlapping windows of consecutive
-# frames — narrow enough for the weak-perspective model — and chain them into
-# one frame by similarity registration on shared cluster points.
+# No sequence order is assumed: the natural grouping is how many clusters a
+# pair of images shares.  High mutual covisibility implies nearby viewpoints,
+# which is exactly what the weak-perspective factorization needs from a seed
+# group, and the same counts drive the growth order and the resection inits.
 
 
-def make_windows(n_img, width=5, stride=2):
-    wins, a = [], 0
-    while True:
-        b = min(a + width, n_img)
-        wins.append(np.arange(a, b))
-        if b >= n_img:
-            return wins
-        a += stride
+def covisibility(obs_c, obs_i, n_img):
+    """W[i, j] = number of clusters observed in both image i and image j."""
+    w = np.zeros((n_img, n_img), dtype=np.int32)
+    order = np.argsort(obs_c, kind="stable")
+    oc, oi = obs_c[order], obs_i[order]
+    for imgs in np.split(oi, np.nonzero(np.diff(oc))[0] + 1):
+        uu = np.unique(imgs)
+        w[np.ix_(uu, uu)] += 1
+    np.fill_diagonal(w, 0)
+    return w
+
+
+def pick_seed_groups(w, size=5, count=2, min_shared=8):
+    """Up to ``count`` disjoint candidate seed groups: greedily grow from a
+    strongest remaining edge, each step adding the image with the best
+    minimum shared-cluster count against the whole group (mutual
+    covisibility, not a hub-and-spokes star)."""
+    w = w.copy()
+    groups = []
+    for _ in range(count):
+        if w.max() < min_shared:
+            break
+        i, j = np.unravel_index(np.argmax(w), w.shape)
+        group = [int(i), int(j)]
+        while len(group) < size:
+            mins = w[:, group].min(axis=1)
+            mins[group] = -1
+            k = int(np.argmax(mins))
+            if mins[k] < min_shared:
+                break
+            group.append(k)
+        groups.append(np.array(sorted(group)))
+        w[group, :] = 0
+        w[:, group] = 0
+    return groups
 
 
 def window_spans(obs_c, obs_i, u, imgs, min_span):
@@ -303,25 +352,6 @@ def pose_refine(uv, x_pts, rv0, tv0, f):
     return x0[:3], x0[3:], float((rn < 3.0).mean())
 
 
-def extrapolate_pose(i, rvec, tvec, posed):
-    """Constant-velocity pose prediction from the two nearest posed frames
-    (the sequences are videos, so the per-frame delta is nearly constant)."""
-    idx = np.nonzero(posed)[0]
-    j1 = idx[np.argmin(np.abs(idx - i))]
-    side = idx[np.sign(idx - i) == np.sign(j1 - i)]
-    j2s = side[np.abs(side - i) > abs(j1 - i)]
-    if len(j2s) == 0:
-        return rvec[j1], tvec[j1]
-    j2 = j2s[np.argmin(np.abs(j2s - i))]
-    r1, r2 = Rotation.from_rotvec(rvec[j1]), Rotation.from_rotvec(rvec[j2])
-    step = abs(i - j1) / abs(j1 - j2)
-    delta = (r1 * r2.inv()).as_rotvec() * step
-    r_i = Rotation.from_rotvec(delta) * r1
-    c1, c2 = -r1.apply(tvec[j1], inverse=True), -r2.apply(tvec[j2], inverse=True)
-    c_i = c1 + (c1 - c2) * step
-    return r_i.as_rotvec(), -r_i.apply(c_i)
-
-
 def fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f):
     """DLT-triangulate clusters that lack a point but now have >= 2 posed
     observations.  Existing points are left untouched."""
@@ -336,46 +366,52 @@ def fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f):
     return out
 
 
-def grow_reconstruction(win_data, f0, obs_c, obs_i, u, n_img, n_cl):
-    """Incremental bootstrap: seed a perspective solve on the strongest
-    window (both reflection hypotheses, best inlier fraction wins), then add
-    images one at a time by robust pose-only resection against the global
-    structure (nearest posed image as init), triangulating new clusters as
-    they gain posed views, with a short global BA every few images.
+def grow_reconstruction(
+    grp_data, f0, obs_c, obs_i, u, n_img, n_cl, covis, max_images=None
+):
+    """Incremental bootstrap, no sequence order assumed.
 
-    Returns (rvec, tvec, pts, posed) or None.
+    Seed a perspective solve on a candidate covisibility group (all groups x
+    both reflection hypotheses, best inlier fraction wins), then repeatedly
+    pose the unposed image with the most observations of valid 3D points
+    (next-best-view) by trimmed pose-only resection — initialised from its
+    most-covisible posed images — triangulating new clusters as they gain
+    posed views, with a short global BA every few images.
+
+    ``max_images`` caps growth (used by the focal scan, which only needs
+    enough geometry to rank candidates).  Returns (rvec, tvec, pts, posed)
+    or None.
     """
     grow_schedule = [(30.0, 3.0), (8.0, 1.5)]
+    ba_every = max(3, min(8, n_img // 10))
 
-    # Seed: the window with the most factorization clusters.
-    seed_wi = max(
-        (wi for wi, (_, wd) in enumerate(win_data) if wd is not None),
-        key=lambda wi: len(win_data[wi][1][2][2]),
-    )
-    imgs, (hyps, used, (sel, il, cl_ids, c2)) = win_data[seed_wi]
     best = None
-    for rot0, scale, t_aff in hyps:
-        trans0 = perspective_init(rot0, scale, t_aff, used, f0)
-        pts_w = triangulate(c2, il, u[sel], rot0, trans0, used, len(cl_ids), f0)
-        ok = ~np.isnan(pts_w[:, 0])[c2] & used[il]
-        _, rvw, tvw, p_w, _, _, inl = bundle_adjust(
-            c2[ok],
-            il[ok],
-            u[sel][ok],
-            rot0,
-            trans0,
-            pts_w,
-            f0,
-            len(imgs),
-            len(cl_ids),
-            opt_f=False,
-            verbose=False,
-        )
-        if best is None or inl > best[0]:
-            best = (inl, rvw, tvw, p_w)
+    for imgs, wd in grp_data:
+        if wd is None:
+            continue
+        hyps, used, (sel, il, cl_ids, c2) = wd
+        for rot0, scale, t_aff in hyps:
+            trans0 = perspective_init(rot0, scale, t_aff, used, f0)
+            pts_w = triangulate(c2, il, u[sel], rot0, trans0, used, len(cl_ids), f0)
+            ok = ~np.isnan(pts_w[:, 0])[c2] & used[il]
+            _, rvw, tvw, p_w, _, _, inl = bundle_adjust(
+                c2[ok],
+                il[ok],
+                u[sel][ok],
+                rot0,
+                trans0,
+                pts_w,
+                f0,
+                len(imgs),
+                len(cl_ids),
+                opt_f=False,
+                verbose=False,
+            )
+            if best is None or inl > best[0]:
+                best = (inl, imgs, used, cl_ids, rvw, tvw, p_w)
     if best is None:
         return None
-    seed_inl, rvw, tvw, p_w = best
+    _, imgs, used, cl_ids, rvw, tvw, p_w = best
 
     rvec = np.zeros((n_img, 3))
     tvec = np.tile([0.0, 0.0, f0], (n_img, 1))
@@ -386,23 +422,32 @@ def grow_reconstruction(win_data, f0, obs_c, obs_i, u, n_img, n_cl):
             rvec[i], tvec[i], posed[i] = rvw[k], tvw[k], True
     pts[cl_ids] = p_w
 
-    # Grow outward from the seed in orbit order.
-    seed_set = set(imgs[used])
-    remaining = sorted(
-        (i for i in range(n_img) if not posed[i]),
-        key=lambda i: min(abs(i - j) for j in seed_set),
-    )
     since_ba = 0
-    for i in remaining:
+    while max_images is None or posed.sum() < max_images:
+        # Next-best-view: most observations of currently-valid points.
+        cand = ~posed[obs_i] & ~np.isnan(pts[obs_c, 0])
+        if not cand.any():
+            break
+        cnt = np.bincount(obs_i[cand], minlength=n_img)
+        i = int(np.argmax(cnt))
+        if cnt[i] < 6:
+            break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
-        if s.sum() < 6:
-            continue
-        rv0, tv0 = extrapolate_pose(i, rvec, tvec, posed)
-        rvec[i], tvec[i], _ = pose_refine(u[s], pts[obs_c[s]], rv0, tv0, f0)
+        # Resect from the most-covisible posed images' poses; keep the best.
+        posed_idx = np.nonzero(posed)[0]
+        inits = posed_idx[np.argsort(-covis[i, posed_idx])][:3]
+        found = None
+        for j in inits:
+            rv, tv, inl = pose_refine(u[s], pts[obs_c[s]], rvec[j], tvec[j], f0)
+            if found is None or inl > found[0]:
+                found = (inl, rv, tv)
+            if inl > 0.4:
+                break
+        _, rvec[i], tvec[i] = found
         posed[i] = True
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f0)
         since_ba += 1
-        if since_ba >= 3:
+        if since_ba >= ba_every:
             since_ba = 0
             live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
             rot = Rotation.from_rotvec(rvec).as_matrix()
@@ -608,9 +653,12 @@ def compare_to_reference(names, rvec, tvec, f_est):
     Convert ours to canonical first so the per-camera rotation errors are
     meaningful (the world-frame difference is absorbed by the alignment).
     """
-    ref_files = sorted(
-        p for p in WS.glob("sfmr/*.sfmr") if p.name != "bootstrap-pinhole.sfmr"
-    )
+    if REF is not None:
+        ref_files = [REF]
+    else:
+        ref_files = sorted(
+            p for p in WS.glob("sfmr/*.sfmr") if p.name != "bootstrap-pinhole.sfmr"
+        )
     if not ref_files:
         print("no reference solve found; skipping comparison")
         return
@@ -651,11 +699,13 @@ def compare_to_reference(names, rvec, tvec, f_est):
     f_ref = cam0["parameters"].get("focal_length", cam0["parameters"].get("fx"))
     print(f"\nvs reference {ref_files[0].name} ({len(common)} common images):")
     print(
-        f"  camera rotation err: mean {rot_err.mean():.2f} deg, "
-        f"max {rot_err.max():.2f} deg"
+        f"  camera rotation err: mean {rot_err.mean():.2f}, "
+        f"median {np.median(rot_err):.2f}, max {rot_err.max():.2f} deg; "
+        f"{(rot_err > 10).sum()} cams > 10 deg"
     )
     print(
         f"  camera center err:   mean {100 * cen_err.mean():.2f}%, "
+        f"median {100 * np.median(cen_err):.2f}%, "
         f"max {100 * cen_err.max():.2f}% of scene diameter"
     )
     print(
@@ -789,30 +839,43 @@ def main():
         f"{len(obs_c)} observations"
     )
 
-    # Factorize overlapping windows of consecutive frames (a global affine
-    # factorization breaks on wide orbits), chained into one frame below.
-    win_data = []
-    for imgs in make_windows(n_img):
+    # Covisibility grouping — no sequence order assumed anywhere.
+    covis = covisibility(obs_c, obs_i, n_img)
+    groups = pick_seed_groups(covis)
+    grp_data = []
+    for imgs in groups:
         wd = factorize_window(obs_c, obs_i, u, imgs)
-        win_data.append((imgs, wd))
+        grp_data.append((imgs, wd))
         state = "sparse" if wd is None else f"{len(wd[2][2])} span-2 clusters"
-        print(f"window {imgs[0]:2d}-{imgs[-1]:2d}: {state}")
+        print(f"seed group {[int(k) for k in imgs]}: {state}")
 
     # The focal is unobservable at init quality (the residual decreases
     # monotonically toward the affine limit), so grow the reconstruction at
     # each candidate focal with f held FIXED and let the inlier fraction
-    # pick.  The seed window's inlier fraction resolves the reflection
-    # hypothesis.  Then release f from the winner.
+    # pick.  The seed group's inlier fraction resolves the reflection
+    # hypothesis.  The scan caps growth at ~20 images (enough to rank);
+    # only the winner grows fully, then releases f.
     f_grid = np.array(F_GRID) * dims.max()
+    scan_cap = min(n_img, 20)
     best = None
     for f_try in f_grid:
-        grown = grow_reconstruction(win_data, f_try, obs_c, obs_i, u, n_img, n_cl)
+        grown = grow_reconstruction(
+            grp_data,
+            f_try,
+            obs_c,
+            obs_i,
+            u,
+            n_img,
+            n_cl,
+            covis,
+            max_images=scan_cap,
+        )
         if grown is None:
             continue
         g_rvec, g_tvec, pts, posed = grown
         rot = Rotation.from_rotvec(g_rvec).as_matrix()
         ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
-        f, rvec, tvec, p_ba, keep, res, inl = bundle_adjust(
+        ba = bundle_adjust(
             obs_c[ok],
             obs_i[ok],
             u[ok],
@@ -825,16 +888,23 @@ def main():
             opt_f=False,
             verbose=False,
         )
+        res = ba[5]
+        # Rank on ALL observations of the posed subset: clusters that failed
+        # to triangulate under this candidate count as misses.
+        inl_scan = float((res < 2.0).sum() / max(posed[obs_i].sum(), 1))
         print(
             f"f={f_try:6.1f}: poses {posed.sum()}/{n_img}, "
-            f"inlier<2px {100 * inl:5.1f}%, "
+            f"inlier<2px {100 * inl_scan:5.1f}%, "
             f"median {np.median(res[np.isfinite(res)]):6.2f} px"
         )
-        if best is None or inl > best[0]:
-            best = (inl, f_try, rot, g_tvec, posed, pts)
+        if best is None or inl_scan > best[0]:
+            best = (inl_scan, f_try)
 
-    _, f_try, rot, trans, posed, pts = best
-    print(f"\nwinner: f = {f_try:.1f}; releasing f")
+    _, f_try = best
+    print(f"\nwinner: f = {f_try:.1f}; growing fully, then releasing f")
+    grown = grow_reconstruction(grp_data, f_try, obs_c, obs_i, u, n_img, n_cl, covis)
+    g_rvec, trans, pts, posed = grown
+    rot = Rotation.from_rotvec(g_rvec).as_matrix()
     ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
     f, rvec, tvec, p_ba, keep, res, inl = bundle_adjust(
         obs_c[ok],
