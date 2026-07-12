@@ -40,6 +40,7 @@ bootstrapping a frame subset — images are matched by workspace-relative
 name).  Default: the first non-bootstrap .sfmr in the workspace.
 """
 
+import itertools
 import sys
 from pathlib import Path
 
@@ -239,43 +240,18 @@ def weak_perspective_poses(m_cam, t_cam, a_up, used):
 # pair of images shares.  High mutual covisibility implies nearby viewpoints,
 # which is exactly what the weak-perspective factorization needs from a seed
 # group, and the same counts drive the growth order and the resection inits.
+# The counting and grouping live in the ClusterCovisibility binding; it is
+# built from the loaded (span-filtered, capped) observation arrays rather
+# than from the file so it sees exactly the clusters the bootstrap uses.
 
 
-def covisibility(obs_c, obs_i, n_img):
-    """W[i, j] = number of clusters observed in both image i and image j."""
-    w = np.zeros((n_img, n_img), dtype=np.int32)
-    order = np.argsort(obs_c, kind="stable")
-    oc, oi = obs_c[order], obs_i[order]
-    for imgs in np.split(oi, np.nonzero(np.diff(oc))[0] + 1):
-        uu = np.unique(imgs)
-        w[np.ix_(uu, uu)] += 1
-    np.fill_diagonal(w, 0)
-    return w
+def build_covisibility(obs_c, obs_i, n_img, n_cl):
+    """ClusterCovisibility over the loaded observation arrays."""
+    from sfmtool._sfmtool.matching import ClusterCovisibility
 
-
-def pick_seed_groups(w, size=5, count=2, min_shared=8):
-    """Up to ``count`` disjoint candidate seed groups: greedily grow from a
-    strongest remaining edge, each step adding the image with the best
-    minimum shared-cluster count against the whole group (mutual
-    covisibility, not a hub-and-spokes star)."""
-    w = w.copy()
-    groups = []
-    for _ in range(count):
-        if w.max() < min_shared:
-            break
-        i, j = np.unravel_index(np.argmax(w), w.shape)
-        group = [int(i), int(j)]
-        while len(group) < size:
-            mins = w[:, group].min(axis=1)
-            mins[group] = -1
-            k = int(np.argmax(mins))
-            if mins[k] < min_shared:
-                break
-            group.append(k)
-        groups.append(np.array(sorted(group)))
-        w[group, :] = 0
-        w[:, group] = 0
-    return groups
+    # obs_c is grouped by cluster in ascending order — derive the CSR starts.
+    starts = np.searchsorted(obs_c, np.arange(n_cl + 1)).astype(np.uint32)
+    return ClusterCovisibility.from_arrays(starts, obs_i.astype(np.uint32), n_img)
 
 
 def window_spans(obs_c, obs_i, u, imgs, min_span):
@@ -431,8 +407,10 @@ def grow_reconstruction(
             break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
         # Resect from the most-covisible posed images' poses; keep the best.
-        posed_idx = np.nonzero(posed)[0]
-        inits = posed_idx[np.argsort(-covis[i, posed_idx])][:3]
+        posed_idx = np.nonzero(posed)[0].astype(np.uint32)
+        inits = covis.rank_by_covisibility(i, posed_idx)[:3]
+        if len(inits) == 0:
+            inits = posed_idx[:1]
         found = None
         for j in inits:
             rv, tv, inl = pose_refine(u[s], pts[obs_c[s]], rvec[j], tvec[j], f0)
@@ -837,10 +815,10 @@ def main():
     )
 
     # Covisibility grouping — no sequence order assumed anywhere.
-    covis = covisibility(obs_c, obs_i, n_img)
-    groups = pick_seed_groups(covis)
+    covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
     grp_data = []
-    for imgs in groups:
+    for group in itertools.islice(covis.seed_groups(), 2):
+        imgs = np.asarray(group)
         wd = factorize_window(obs_c, obs_i, u, imgs)
         grp_data.append((imgs, wd))
         state = "sparse" if wd is None else f"{len(wd[2][2])} span-2 clusters"
