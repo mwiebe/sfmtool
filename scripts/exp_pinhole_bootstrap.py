@@ -9,8 +9,10 @@ a pinhole camera model, bootstrap a coarse 3D reconstruction and write it to
 a `.sfmr` file — no COLMAP solver involved.
 
 Pipeline:
-  1. Load patch clusters; refined member positions come from the stored
-     affine warps applied to the reference keypoint (`x_m = A·x_ref + t`).
+  1. Load patch clusters; refined member positions are read directly from
+     the stored affines' last column (`member_affines[k][:, 2]` holds the
+     absolute keypoint position since .matches format version 4), and the
+     image dimensions from the images section — no per-image .sift reads.
   2. Group images by cluster covisibility (shared-cluster counts) — no
      sequence order is assumed.  Affine (weak-perspective) ALS factorization
      of candidate seed groups (a single global factorization breaks on wide
@@ -58,23 +60,18 @@ TRIM_PX = 4.0  # BA inter-round observation trim threshold
 
 
 def load_clusters():
-    """Patch clusters as flat observation arrays with refined positions."""
-    from sfmtool._sfmtool.io import read_matches, read_sift, read_sift_metadata
+    """Patch clusters as flat observation arrays with refined positions.
+
+    Everything geometric comes straight from the .matches file: image
+    dimensions from the images section and member positions from the stored
+    affines' last column (the absolute refined keypoint position).
+    """
+    from sfmtool._sfmtool.io import read_matches
 
     patches = sorted(WS.glob("matches/*-clusters-patches.matches"))
     data = read_matches(patches[0])
     names = list(data["image_names"])
-    counts = np.asarray(data["feature_counts"])
-    prefix = data["metadata"]["workspace"]["contents"]["feature_prefix_dir"]
-
-    positions, dims = [], []
-    for i, name in enumerate(names):
-        rel = Path(name)
-        sp = WS / rel.parent / prefix / f"{rel.name}.sift"
-        meta = read_sift_metadata(sp)["metadata"]
-        dims.append((meta["image_width"], meta["image_height"]))
-        s = read_sift(sp)
-        positions.append(np.ascontiguousarray(s["positions_xy"][: int(counts[i])]))
+    dims = [(int(w), int(h)) for w, h in np.asarray(data["image_dims"])]
 
     starts = np.asarray(data["cluster_starts"])
     mi = np.asarray(data["member_images"])
@@ -105,13 +102,13 @@ def load_clusters():
     obs_c, obs_i, obs_f, obs_uv = [], [], [], []
     n_cl = 0
     for _span, c, sel in usable:
-        ref = int(refs[c])
-        x_ref = positions[mi[ref]][mf[ref]]
         for k in sel:
             obs_c.append(n_cl)
             obs_i.append(int(mi[k]))
             obs_f.append(int(mf[k]))
-            obs_uv.append(aff[k, :, :2] @ x_ref + aff[k, :, 2])
+            # The affine's last column is the member's absolute refined
+            # keypoint position (identity | x_ref for the reference row).
+            obs_uv.append(aff[k, :, 2])
         n_cl += 1
 
     return {
