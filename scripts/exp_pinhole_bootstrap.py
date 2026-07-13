@@ -463,11 +463,11 @@ def grow_loop(
         if ba is not None:
             live &= ba
         rot = Rotation.from_rotvec(rvec).as_matrix()
-        ba = bundle_adjust(
+        out = bundle_adjust(
             obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
             n_img, n_cl, opt_f=False, verbose=False, schedule=grow_schedule,
         )
-        return ba[1], ba[2], ba[3]
+        return out[1], out[2], out[3]
 
     def image_inl(i, rvec, tvec, pts):
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
