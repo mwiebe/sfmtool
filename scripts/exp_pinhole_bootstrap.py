@@ -41,7 +41,9 @@ name).  Default: the first non-bootstrap .sfmr in the workspace.
 """
 
 import itertools
+import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +53,11 @@ from scipy.spatial.transform import Rotation
 
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+# Global-BA backend: "scipy" (least_squares, the original path) or "apex"
+# (the apex-solver evaluation binding).  Pose-only resections stay scipy.
+BA_BACKEND = os.environ.get("SFMTOOL_BA", "scipy")
+_BA_STATS = {"seconds": 0.0, "calls": 0}
+_T0 = time.perf_counter()
 MIN_SPAN_BA = 2  # min distinct images for a cluster to become a point
 MAX_CLUSTERS = 10000  # cap for the scipy BAs; highest-span clusters win
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, in units of max(w, h)
@@ -403,10 +410,47 @@ def project(f, rvec, tvec, pts, obs_i, obs_c):
 
 
 def solve_round(obs_c, obs_i, u, f, rvec, tvec, pts, n_img, f_scale, opt_f):
-    """One robust sparse least-squares pass over the given observations.
+    """One robust least-squares pass, dispatched on ``SFMTOOL_BA``.
 
     Images and points are compact-indexed over what the observations touch;
     untouched poses/points pass through unchanged."""
+    impl = _solve_round_apex if BA_BACKEND == "apex" else _solve_round_scipy
+    t0 = time.perf_counter()
+    out = impl(obs_c, obs_i, u, f, rvec, tvec, pts, n_img, f_scale, opt_f)
+    _BA_STATS["seconds"] += time.perf_counter() - t0
+    _BA_STATS["calls"] += 1
+    return out
+
+
+def _solve_round_apex(obs_c, obs_i, u, f, rvec, tvec, pts, n_img, f_scale, opt_f):
+    """solve_round via the apex-solver evaluation binding.
+
+    Same compaction as the scipy path; soft_l1(f_scale) maps to the
+    binding's identical loss (applied per 2D observation rather than per
+    residual component) and max_nfev=60 to the LM iteration cap."""
+    from sfmtool._sfmtool.geometry import bundle_adjust_apex
+
+    uniq, oc2 = np.unique(obs_c, return_inverse=True)
+    uimg, oi2 = np.unique(obs_i, return_inverse=True)
+    res = bundle_adjust_apex(
+        oc2.astype(np.uint32),
+        oi2.astype(np.uint32),
+        np.ascontiguousarray(u),
+        np.ascontiguousarray(rvec[uimg]),
+        np.ascontiguousarray(tvec[uimg]),
+        np.ascontiguousarray(pts[uniq]),
+        float(f),
+        bool(opt_f),
+        float(f_scale),
+        60,
+    )
+    rvec, tvec, out = rvec.copy(), tvec.copy(), pts.copy()
+    rvec[uimg], tvec[uimg], out[uniq] = res["rvec"], res["tvec"], res["points"]
+    return res["f"], rvec, tvec, out
+
+
+def _solve_round_scipy(obs_c, obs_i, u, f, rvec, tvec, pts, n_img, f_scale, opt_f):
+    """The original scipy least_squares pass (trf, sparse jac, soft_l1)."""
     uniq, oc2 = np.unique(obs_c, return_inverse=True)
     uimg, oi2 = np.unique(obs_i, return_inverse=True)
     p0 = pts[uniq]
@@ -953,6 +997,12 @@ def main():
         f"reprojection (kept): rms {np.sqrt((rk**2).mean()):.2f} px, "
         f"median {np.median(rk):.2f} px; inlier<2px {100 * (res < 2).mean():.1f}% "
         f"of all obs"
+    )
+
+    print(
+        f"BA backend {BA_BACKEND}: {_BA_STATS['seconds']:.1f} s "
+        f"in {_BA_STATS['calls']} solve_round calls "
+        f"(total elapsed {time.perf_counter() - _T0:.1f} s)"
     )
 
     compare_to_reference(data["names"], rvec, tvec, f)

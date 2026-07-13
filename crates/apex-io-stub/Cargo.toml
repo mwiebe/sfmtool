@@ -1,0 +1,24 @@
+# Copyright The SfM Tool Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# EVALUATION SCAFFOLDING (branch apex-ba-eval).
+#
+# apex-solver 1.3.0 unconditionally depends on apex-io 0.2.0, whose mandatory
+# `rusqlite = "0.31"` (bundled) collides with sfmr-colmap's `rusqlite = "0.39"`
+# (`links = "sqlite3"` allows only one libsqlite3-sys in the graph). The
+# solver's library code only uses apex-io for one error variant and four
+# re-exported names, so this stub replaces it via [patch.crates-io] in the
+# workspace root. If apex-solver is adopted, upstream should make apex-io
+# optional instead.
+
+[package]
+name = "apex-io"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Stub replacing apex-io for the apex-solver evaluation (no sqlite/rosbag deps)"
+
+[features]
+default = []
+visualization = []
+dds = []

@@ -8,6 +8,7 @@
 use pyo3::prelude::*;
 
 pub mod affine_factorization;
+pub mod apex_ba;
 pub mod camera_intrinsics;
 pub mod convention;
 pub mod rigid_transform;
@@ -26,5 +27,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySe3Transform>()?;
     convention::register(m)?;
     affine_factorization::register(m)?;
+    apex_ba::register(m)?;
     Ok(())
 }

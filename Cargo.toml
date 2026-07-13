@@ -13,3 +13,11 @@ members = [
     "crates/sfmtool-py",
 ]
 resolver = "2"
+
+# EVALUATION (branch apex-ba-eval): apex-solver 1.3.0's mandatory apex-io
+# dependency drags in rusqlite 0.31, conflicting with sfmr-colmap's rusqlite
+# 0.39 (only one `links = "sqlite3"` allowed). The solver library only needs
+# apex-io for an error variant and four re-exported names, so we substitute a
+# local stub. See crates/apex-io-stub/Cargo.toml.
+[patch.crates-io]
+apex-io = { path = "crates/apex-io-stub" }
