@@ -182,6 +182,29 @@ Running log of the multi-dataset campaign; entries appended as tried.
   graceful and radially ordered, which is exactly the structure a
   camera-correction stage (or a center-out unlock) could pick up from.
 
+  > _Status (2026-07-12): Falsified by visual inspection — the kerry
+  > reconstruction is a complete geometric failure._ The GUI shows a
+  > tangle; diagnostics confirm: consecutive-frame rotation deltas of a
+  > steady walking capture swing 2.5°–157°, camera spread is 10× the
+  > scene scale, and camera 0 sees the *median* 3D point at negative
+  > depth (most structure behind the camera — a mirror/degenerate
+  > collapse). The paragraph above stands as a lesson in metric
+  > circularity, not as a result: kerry has no pose reference, so its
+  > inlier and radial-band numbers were computed against the bootstrap's
+  > own broken cameras — a self-referential score that locally-consistent
+  > wrong geometry passes. Pinhole-only on this fisheye fails outright,
+  > and the pipeline's internal metrics cannot detect it. Cheap
+  > self-diagnostics that would have caught it: cheirality fraction over
+  > all observations, and per-camera structure-depth sign stats.
+
+- **Visual inspection of dino_dog_toy (2026-07-12).** The misregistration
+  tail is visible as a partial duplicate ("echo") of the dino in the point
+  cloud: the >10° cameras are not randomly wrong but form a coherent
+  wrongly-registered subset that re-triangulates its own copy of the
+  object — consistent with resection locking onto a locally-consistent
+  wrong pose and the global 4 px trim then keeping the echo's
+  self-consistent observations.
+
 ### Cross-dataset summary
 
 | dataset | input | imgs | obs | inlier<2px | rot err mean/max (deg) | center err mean/max (% diam) | f vs ref | time |
@@ -191,7 +214,10 @@ Running log of the multi-dataset campaign; entries appended as tried.
 | south-building | 3072×2304 photos | 128 | 85,534 | 95.5% | 2.33 / 6.55 | 1.2 / 4.5 | +2.4% | 13 min |
 | DinoLedge (subset) | 4K video, forward walk | 120 | 88,890 | 84.6% | 2.61 / 3.20 | 0.4 / 0.6 | +0.16% | 15 min |
 | Swivel_Chair (subset) | portrait-4K video orbit | 106 | 80,615 | 78.9% | 0.26 / 0.70 | 0.2 / 0.6 | −1.1% | 13 min |
-| Kerry fisheye | 480×480 fisheye | 24 | 13,217 | 43.4% | (no reference) | — | n/a | 6 min |
+| Kerry fisheye | 480×480 fisheye | 24 | 13,217 | 43.4%† | (no reference) | — | n/a | 6 min |
+
+† Self-referential (no pose reference); visual inspection shows a complete
+geometric failure — see the kerry status note above.
 
 Cross-dataset observations:
 
@@ -225,5 +251,10 @@ Cross-dataset observations:
   would be a Rust kernel.
 - Whether the `cluster_bootstrap` `.sfmr` is good enough to seed `sfm solve`
   (as a triangulation/pose prior) or the planned cluster-level geometric
-  verifier — not tried. Kerry's radially-ordered inlier structure is the
-  natural handoff to a camera-correction stage.
+  verifier — not tried.
+- Self-diagnostics: kerry produced a completely broken reconstruction
+  while its internal inlier metric read 43% — with no external reference,
+  the bootstrap cannot currently tell success from locally-consistent
+  failure. Cheap candidates that would have caught it: cheirality fraction
+  over all observations, per-camera structure-depth sign statistics, and
+  pose-path coherence on sequential captures.
