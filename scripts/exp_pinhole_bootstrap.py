@@ -41,7 +41,9 @@ name).  Default: the first non-bootstrap .sfmr in the workspace.
 """
 
 import itertools
+import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,10 +53,26 @@ from scipy.spatial.transform import Rotation
 
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+_T0 = time.perf_counter()
 MIN_SPAN_BA = 2  # min distinct images for a cluster to become a point
-MAX_CLUSTERS = 10000  # cap for the scipy BAs; highest-span clusters win
+MAX_CLUSTERS = 10000  # cap for the scipy BAs
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, in units of max(w, h)
 TRIM_PX = 4.0  # BA inter-round observation trim threshold
+# Cluster ordering for the cap and the admission tiers: "cons" ranks by the
+# stored warp-consistency residual (max over members, ascending — measured
+# AUC 0.79-0.92 for junk prediction across the campaign datasets), "span" is
+# the original highest-span-first ordering.
+ORDER = os.environ.get("SFMTOOL_ORDER", "span")
+# Coarse-to-fine admission: comma-separated cumulative fractions of the
+# admitted (quality-ordered) clusters.  "1.0" = everything at once (the
+# original behavior); "0.35,1.0" seeds, scans, and grows on the best 35%
+# and then admits the rest for the fine-tune BAs.
+TIERS = [float(x) for x in os.environ.get("SFMTOOL_TIERS", "1.0").split(",")]
+# Resection init from warp-determinant depth ratios: each member warp's
+# sqrt|det| predicts the point's depth in the new image from its depth in
+# the (posed) reference image, giving camera-frame 3D points -> closed-form
+# trimmed Kabsch pose init (no neighbor-pose inits needed when it works).
+DEPTH_INIT = os.environ.get("SFMTOOL_DEPTH_INIT", "0") == "1"
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -80,8 +98,12 @@ def load_clusters():
     st = np.asarray(data["member_status"])
     refs = np.asarray(data["reference_members"])
     aff = np.asarray(data["member_affines"])
+    cons = np.asarray(data["member_consistency_residual"], dtype=np.float64)
 
-    # First pass: member selections and spans of every usable cluster.
+    # First pass: member selections, spans, and quality of every usable
+    # cluster.  Quality is the worst (max) finite warp-consistency residual
+    # over the selected members — lower is better; clusters where no member
+    # entered the consistency fit rank last (inf).
     usable = []
     for c in range(len(starts) - 1):
         lo, hi = int(starts[c]), int(starts[c + 1])
@@ -90,19 +112,27 @@ def load_clusters():
         sel = np.nonzero((st[lo:hi] == 0) | (st[lo:hi] == 1))[0] + lo
         span = len(np.unique(mi[sel]))
         if span >= MIN_SPAN_BA:
-            usable.append((span, c, sel))
+            cq = cons[sel]
+            cq = cq[np.isfinite(cq)]
+            quality = float(cq.max()) if len(cq) else np.inf
+            usable.append((span, c, sel, quality))
 
-    # Cap for the scipy BAs: keep the highest-span clusters (deterministic;
-    # ties broken by cluster id).  A coarse bootstrap doesn't need them all.
+    # Cap for the scipy BAs (deterministic; ties broken by cluster id).
+    key = {
+        "span": lambda t: (-t[0], t[1]),
+        "cons": lambda t: (t[3], -t[0], t[1]),
+    }[ORDER]
     if len(usable) > MAX_CLUSTERS:
-        usable.sort(key=lambda t: (-t[0], t[1]))
+        usable.sort(key=key)
         dropped = len(usable) - MAX_CLUSTERS
         usable = sorted(usable[:MAX_CLUSTERS], key=lambda t: t[1])
-        print(f"capped clusters: kept {MAX_CLUSTERS} by span, dropped {dropped}")
+        print(f"capped clusters: kept {MAX_CLUSTERS} by {ORDER}, dropped {dropped}")
 
     obs_c, obs_i, obs_f, obs_uv, obs_warp, obs_ref = [], [], [], [], [], []
+    quality = []
     n_cl = 0
-    for _span, c, sel in usable:
+    for _span, c, sel, q in usable:
+        quality.append(q)
         for k in sel:
             obs_c.append(n_cl)
             obs_i.append(int(mi[k]))
@@ -124,6 +154,7 @@ def load_clusters():
         "obs_uv": np.asarray(obs_uv, dtype=np.float64),
         "obs_warp": np.asarray(obs_warp, dtype=np.float64),
         "obs_ref": np.asarray(obs_ref, dtype=bool),
+        "quality": np.asarray(quality, dtype=np.float64),
         "refine_radius": float(data["refine_options"]["radius"]),
         "n_img": len(names),
         "n_cl": n_cl,
@@ -198,6 +229,57 @@ def factorize_window(obs_c, obs_i, u, imgs, min_span=3):
     return hyps, used, ba_sel
 
 
+def kabsch_trimmed(x_world, x_cam, rounds=3, keep_q=0.6):
+    """Rigid R, t with x_cam ~ R·x_world + t, trimmed to the best-fitting
+    fraction each round (the depth predictions include junk members)."""
+    m = np.ones(len(x_world), bool)
+    r_fit = np.eye(3)
+    t_fit = np.zeros(3)
+    for _ in range(rounds):
+        muw, muc = x_world[m].mean(axis=0), x_cam[m].mean(axis=0)
+        h = (x_cam[m] - muc).T @ (x_world[m] - muw)
+        uu, _, vt = np.linalg.svd(h)
+        d = np.sign(np.linalg.det(uu @ vt))
+        r_fit = uu @ np.diag([1.0, 1.0, d]) @ vt
+        t_fit = muc - r_fit @ muw
+        res = np.linalg.norm(x_world @ r_fit.T + t_fit - x_cam, axis=1)
+        m = res <= np.quantile(res, keep_q)
+    return r_fit, t_fit
+
+
+# Per-image warp-depth coherence measured at resection acceptance
+# (image, median |log(z_pose / z_warp_predicted)|, resection inlier frac).
+_DEPTH_COH = []
+
+
+def depth_init(s, obs_c, u, pts, rvec, tvec, posed, f0, i, aux):
+    """Closed-form pose init for image ``i`` from warp-predicted depths.
+
+    Each observation's sqrt|det warp| is the reference->member magnification,
+    so the point's depth in image i is its depth in the (posed) reference
+    image divided by it; backprojecting at those depths gives camera-frame
+    points and a trimmed Kabsch solve gives the pose.  Returns (rvec0,
+    tvec0, obs index array, predicted depths) or None when too few
+    observations have a posed reference view."""
+    ds, ref_img = aux
+    si = np.nonzero(s)[0]
+    rc = ref_img[obs_c[si]]
+    okd = (rc >= 0) & (rc != i) & posed[np.maximum(rc, 0)]
+    if okd.sum() < 8:
+        return None
+    x_w = pts[obs_c[si[okd]]]
+    r_ref = Rotation.from_rotvec(rvec[rc[okd]]).as_matrix()
+    z_ref = np.einsum("nij,nj->ni", r_ref, x_w)[:, 2] + tvec[rc[okd], 2]
+    z_pred = z_ref / ds[si[okd]]
+    good = z_pred > 1e-6
+    if good.sum() < 8:
+        return None
+    sel = si[okd][good]
+    x_cam = np.column_stack([u[sel] / f0, np.ones(good.sum())]) * z_pred[good, None]
+    r_fit, t_fit = kabsch_trimmed(x_w[good], x_cam)
+    return Rotation.from_matrix(r_fit).as_rotvec(), t_fit, sel, z_pred[good]
+
+
 def pose_refine(uv, x_pts, rv0, tv0, f):
     """Pose-only resection of one image against known 3D points.
 
@@ -249,7 +331,7 @@ def fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f):
 
 
 def grow_reconstruction(
-    grp_data, f0, obs_c, obs_i, u, n_img, n_cl, covis, max_images=None
+    grp_data, f0, obs_c, obs_i, u, n_img, n_cl, covis, max_images=None, aux=None
 ):
     """Incremental bootstrap, no sequence order assumed.
 
@@ -304,6 +386,21 @@ def grow_reconstruction(
             rvec[i], tvec[i], posed[i] = rvw[k], tvw[k], True
     pts[cl_ids] = p_w
 
+    return grow_loop(
+        rvec, tvec, pts, posed, f0, obs_c, obs_i, u, n_img, n_cl, covis,
+        max_images, aux,
+    )
+
+
+def grow_loop(
+    rvec, tvec, pts, posed, f0, obs_c, obs_i, u, n_img, n_cl, covis,
+    max_images=None, aux=None,
+):
+    """Next-best-view growth from an existing state (resumable: tier
+    admission re-enters here after activating more clusters)."""
+    grow_schedule = [(30.0, 3.0), (8.0, 1.5)]
+    ba_every = max(3, min(8, n_img // 10))
+
     since_ba = 0
     while max_images is None or posed.sum() < max_images:
         # Next-best-view: most observations of currently-valid points.
@@ -315,20 +412,37 @@ def grow_reconstruction(
         if cnt[i] < 6:
             break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
-        # Resect from the most-covisible posed images' poses; keep the best.
+        # Init candidates: the warp-depth Kabsch pose (when enabled and
+        # enough observations have posed reference views), then the
+        # most-covisible posed images' poses.  First init clearing 40%
+        # inliers wins.
+        di = depth_init(s, obs_c, u, pts, rvec, tvec, posed, f0, i, aux) \
+            if aux is not None and DEPTH_INIT else None
+        init_poses = [] if di is None else [(di[0], di[1])]
         posed_idx = np.nonzero(posed)[0].astype(np.uint32)
         inits = covis.rank_by_covisibility(i, posed_idx)[:3]
         if len(inits) == 0:
             inits = posed_idx[:1]
+        init_poses += [(rvec[j], tvec[j]) for j in inits]
         found = None
-        for j in inits:
-            rv, tv, inl = pose_refine(u[s], pts[obs_c[s]], rvec[j], tvec[j], f0)
+        for rv0, tv0 in init_poses:
+            rv, tv, inl = pose_refine(u[s], pts[obs_c[s]], rv0, tv0, f0)
             if found is None or inl > found[0]:
                 found = (inl, rv, tv)
             if inl > 0.4:
                 break
         _, rvec[i], tvec[i] = found
         posed[i] = True
+        if di is not None:
+            # Warp-depth coherence of the accepted pose (echo diagnostics):
+            # a misregistered camera can look reprojection-consistent while
+            # its pose-implied depths disagree with the warp-predicted ones.
+            _, _, sel, z_pred = di
+            xc = Rotation.from_rotvec(rvec[i]).apply(pts[obs_c[sel]]) + tvec[i]
+            ok_z = (xc[:, 2] > 1e-6) & (z_pred > 1e-6)
+            if ok_z.sum() >= 6:
+                coh = float(np.median(np.abs(np.log(xc[ok_z, 2] / z_pred[ok_z]))))
+                _DEPTH_COH.append((i, coh, found[0]))
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f0)
         since_ba += 1
         if since_ba >= ba_every:
@@ -849,25 +963,54 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
 
 def main():
     data = load_clusters()
-    obs_c, obs_i, u_px = data["obs_c"], data["obs_i"], data["obs_uv"]
+    all_c, all_i, u_px = data["obs_c"], data["obs_i"], data["obs_uv"]
     n_img, n_cl = data["n_img"], data["n_cl"]
     dims = np.asarray(data["dims"], dtype=np.float64)
     half = dims[data["obs_i"]] / 2
-    u = u_px - half
+    all_u = u_px - half
     print(
         f"{WS}: {n_img} images, {n_cl} clusters (span >= {MIN_SPAN_BA}), "
-        f"{len(obs_c)} observations"
+        f"{len(all_c)} observations"
     )
 
-    # Covisibility grouping — no sequence order assumed anywhere.
-    covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
-    grp_data = []
-    for group in itertools.islice(covis.seed_groups(), 2):
-        imgs = np.asarray(group)
-        wd = factorize_window(obs_c, obs_i, u, imgs)
-        grp_data.append((imgs, wd))
-        state = "sparse" if wd is None else f"{len(wd[2][2])} span-2 clusters"
-        print(f"seed group {[int(k) for k in imgs]}: {state}")
+    # Coarse-to-fine admission: quality-ordered cumulative tiers.  The seed
+    # search, focal scan, and first full growth run on tier 0 only; each
+    # later tier is triangulated in from the current poses and fine-tuned
+    # with a shortened BA.  If tier 0 fails to produce a seed, the next
+    # tier is folded in and seeding retries (incremental "until it catches").
+    qual_order = np.argsort(data["quality"], kind="stable")
+    bounds = sorted({max(1, int(round(fr * n_cl))) for fr in TIERS} | {n_cl})
+    # Warp-depth aux data: per-obs sqrt|det| magnification and each
+    # cluster's reference image (for the depth-ratio resection init).
+    ds_all = np.sqrt(np.maximum(np.abs(np.linalg.det(data["obs_warp"])), 1e-12))
+    ref_img = np.full(n_cl, -1, np.int64)
+    ref_img[all_c[data["obs_ref"]]] = all_i[data["obs_ref"]]
+    active_cl = np.zeros(n_cl, bool)
+    tier = 0
+    covis = grp_data = aux = None
+    while tier < len(bounds):
+        active_cl[qual_order[: bounds[tier]]] = True
+        act = active_cl[all_c]
+        obs_c, obs_i, u = all_c[act], all_i[act], all_u[act]
+        aux = (ds_all[act], ref_img)
+        print(
+            f"tier 0..{tier}: {int(active_cl.sum())} clusters, "
+            f"{len(obs_c)} observations"
+        )
+
+        # Covisibility grouping — no sequence order assumed anywhere.
+        covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
+        grp_data = []
+        for group in itertools.islice(covis.seed_groups(), 2):
+            imgs = np.asarray(group)
+            wd = factorize_window(obs_c, obs_i, u, imgs)
+            grp_data.append((imgs, wd))
+            state = "sparse" if wd is None else f"{len(wd[2][2])} span-2 clusters"
+            print(f"seed group {[int(k) for k in imgs]}: {state}")
+        if any(wd is not None for _, wd in grp_data):
+            break
+        print("no factorizable seed group at this tier; admitting the next")
+        tier += 1
 
     # The focal is unobservable at init quality (the residual decreases
     # monotonically toward the affine limit), so grow the reconstruction at
@@ -889,6 +1032,7 @@ def main():
             n_cl,
             covis,
             max_images=scan_cap,
+            aux=aux,
         )
         if grown is None:
             continue
@@ -921,12 +1065,16 @@ def main():
             best = (inl_scan, f_try)
 
     _, f_try = best
-    print(f"\nwinner: f = {f_try:.1f}; growing fully, then releasing f")
-    grown = grow_reconstruction(grp_data, f_try, obs_c, obs_i, u, n_img, n_cl, covis)
+    elapsed = time.perf_counter() - _T0
+    print(f"\nwinner: f = {f_try:.1f}; growing fully, then releasing f "
+          f"[scan done at {elapsed:.0f}s]")
+    grown = grow_reconstruction(
+        grp_data, f_try, obs_c, obs_i, u, n_img, n_cl, covis, aux=aux
+    )
     g_rvec, trans, pts, posed = grown
     rot = Rotation.from_rotvec(g_rvec).as_matrix()
     ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
-    f, rvec, tvec, p_ba, keep, res, inl = bundle_adjust(
+    f, rvec, tvec, pts, keep, res, inl = bundle_adjust(
         obs_c[ok],
         obs_i[ok],
         u[ok],
@@ -938,16 +1086,55 @@ def main():
         n_cl,
         opt_f=True,
     )
-    full_keep = np.zeros(len(obs_c), bool)
-    full_keep[np.nonzero(ok)[0]] = keep
-    full_res = np.full(len(obs_c), np.inf)
-    full_res[np.nonzero(ok)[0]] = res
-    pts, keep, res = p_ba, full_keep, full_res
+    print(f"[tier 0..{tier} solved at {time.perf_counter() - _T0:.0f}s: "
+          f"f {f:.1f}, inlier<2px {100 * inl:.1f}% of its obs]")
+
+    # Fine tiers: activate the remaining quality-ordered clusters,
+    # triangulate them from the current cameras, resume growth for images
+    # the coarse tier could not pose, and fine-tune with a shortened BA.
+    for b in [x for x in bounds if x > bounds[tier]]:
+        active_cl[qual_order[:b]] = True
+        act = active_cl[all_c]
+        obs_c, obs_i, u = all_c[act], all_i[act], all_u[act]
+        print(f"\nadmitting tier: {int(active_cl.sum())} clusters, "
+              f"{len(obs_c)} observations")
+        pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f)
+        covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
+        aux = (ds_all[act], ref_img)
+        rvec, tvec, pts, posed = grow_loop(
+            rvec, tvec, pts, posed, f, obs_c, obs_i, u, n_img, n_cl, covis,
+            aux=aux,
+        )
+        rot = Rotation.from_rotvec(rvec).as_matrix()
+        ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
+        f, rvec, tvec, pts, keep, res, inl = bundle_adjust(
+            obs_c[ok],
+            obs_i[ok],
+            u[ok],
+            rot,
+            tvec,
+            pts,
+            f,
+            n_img,
+            n_cl,
+            opt_f=True,
+            schedule=[(12.0, 2.0), (TRIM_PX, 1.0)],
+        )
+        print(f"[tier fine-tuned at {time.perf_counter() - _T0:.0f}s: "
+              f"f {f:.1f}, inlier<2px {100 * inl:.1f}% of its obs]")
+
+    act = active_cl[all_c]
+    act_idx = np.nonzero(act)[0]
+    full_keep = np.zeros(len(all_c), bool)
+    full_keep[act_idx[np.nonzero(ok)[0]]] = keep
+    full_res = np.full(len(all_c), np.inf)
+    full_res[act_idx[np.nonzero(ok)[0]]] = res
+    keep, res = full_keep, full_res
     rk = res[keep]
-    n_pts = len(np.unique(obs_c[keep]))
+    n_pts = len(np.unique(all_c[keep]))
     print(
         f"\nbootstrap result: f = {f:.1f} px, {n_pts} points, "
-        f"{keep.sum()}/{len(obs_c)} observations kept"
+        f"{keep.sum()}/{len(all_c)} observations kept"
     )
     print(
         f"reprojection (kept): rms {np.sqrt((rk**2).mean()):.2f} px, "
@@ -955,9 +1142,24 @@ def main():
         f"of all obs"
     )
 
+    if _DEPTH_COH:
+        # Warp-depth coherence at resection time (final-growth resections
+        # only appear once each; scan-phase entries repeat per focal).
+        coh = np.array([c for _, c, _ in _DEPTH_COH])
+        worst = sorted(_DEPTH_COH, key=lambda t: -t[1])[:5]
+        print(
+            f"\nwarp-depth coherence at resection ({len(coh)} resections): "
+            f"median {np.median(coh):.3f}, p90 {np.percentile(coh, 90):.3f} "
+            f"|log depth ratio|"
+        )
+        print(
+            "  worst: "
+            + ", ".join(f"img {i} {c:.2f} (inl {v:.0%})" for i, c, v in worst)
+        )
+
     compare_to_reference(data["names"], rvec, tvec, f)
 
-    out = WS / "sfmr" / "bootstrap-pinhole.sfmr"
+    out = WS / "sfmr" / os.environ.get("SFMTOOL_OUT", "bootstrap-pinhole.sfmr")
     save_sfmr(data, f, rvec, tvec, pts, keep, res, out)
 
 
