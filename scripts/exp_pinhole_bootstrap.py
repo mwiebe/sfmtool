@@ -602,6 +602,13 @@ def compare_to_reference(names, rvec, tvec, f_est):
 
 
 def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
+    """Write the bootstrap as an ``embedded_patches`` reconstruction.
+
+    The bootstrap's observations are the cluster patches' *refined*
+    positions, not the SIFT detections, so they are stored inline as
+    ``keypoints_xy`` rather than as feature indexes into the ``.sift``
+    files (which would silently resolve back to the unrefined seeds).
+    """
     from sfmtool._sfmtool import SfmrReconstruction
     from sfmtool._sfmtool.geometry import CameraIntrinsics
     from sfmtool._workspace import load_workspace_config
@@ -613,6 +620,7 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
         finite_positions_xyzw,
     )
 
+    out_path = Path(out_path).resolve()
     names, dims = data["names"], data["dims"]
     obs_c, obs_i, obs_f = data["obs_c"], data["obs_i"], data["obs_f"]
     w, h = dims[0]
@@ -626,6 +634,7 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
 
     track_img = obs_i[ko]
     track_feat = obs_f[ko]
+    keypoints_xy = data["obs_uv"][ko].astype(np.float32)
     point_idx = np.array([remap[int(c)] for c in obs_c[ko]])
     obs_counts = np.bincount(point_idx, minlength=len(alive))
 
@@ -646,7 +655,7 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
         ft_hashes,
         sc_hashes,
         thumbnails,
-    ) = _resolve_workspace_and_sift(names, WS)
+    ) = _resolve_workspace_and_sift(names, WS.resolve())
 
     # Colors from the .sift thumbnails at the (scaled) observation position.
     colors = np.zeros((len(alive), 3), dtype=np.uint8)
@@ -703,8 +712,16 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
     )
 
     recon = SfmrReconstruction.from_data(workspace_dir, sfmr_dict)
+    # Convert to embedded_patches (computes the mandatory per-point patch
+    # frames and per-image identity hashes), then substitute the refined
+    # patch positions for the SIFT-seed keypoints the conversion copied.
+    recon = recon.to_embedded_patches()
+    recon = recon.clone_with_changes(keypoints_xy=keypoints_xy)
     recon.save(out_path)
-    print(f"\nwrote {out_path} ({len(alive)} points, {int(obs_counts.sum())} obs)")
+    print(
+        f"\nwrote {out_path} ({len(alive)} points, {int(obs_counts.sum())} obs, "
+        f"{recon.feature_source})"
+    )
     return recon
 
 
