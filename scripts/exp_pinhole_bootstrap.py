@@ -752,25 +752,63 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
     half_v = np.zeros((len(alive), 3), dtype=np.float64)
     normals = np.zeros((len(alive), 3), dtype=np.float64)
     p_starts = np.searchsorted(point_idx, np.arange(len(alive) + 1))
+    # The reference constraint J_ref·B = I determines B up to a 2-vector
+    # b_z — the surfel's out-of-plane slope in the reference camera frame
+    # (B = R_refᵀ·[(z_r/f)·I + p_r·b_z ; b_z] with p_r the normalized ref
+    # coords).  Each other member contributes A_k − (z_r/f)·M2 = c_k·b_z
+    # with M = J_k·R_refᵀ = [M2 | m3] and c_k = M2·p_r + m3.  The tilt is
+    # exactly the depth-like weakly-observed direction, so the solve gets a
+    # fronto-parallel Tikhonov prior (weight relative to the members'
+    # leverage) and a hard obliquity cap; these are what the photometric
+    # normal refinement later polishes.
+    tan_cap = np.tan(np.radians(80.0))
     for p in range(len(alive)):
         lo, hi = int(p_starts[p]), int(p_starts[p + 1])
         refs_here = np.nonzero(is_ref[lo:hi])[0]
         if len(refs_here) == 0:
             continue  # reference member trimmed: leave the zero (no-patch) frame
         k_ref = lo + int(refs_here[0])
+        i_ref = int(track_img[k_ref])
         x_pt = positions[p]
-        j_rows, a_rows = [], []
+        r_ref = rot_all[i_ref]
+        xc_ref = r_ref @ x_pt + tvec[i_ref]
+        z_ref = max(xc_ref[2], 1e-6)
+        p_r = xc_ref[:2] / z_ref
+        rows, rhs = [], []
         for k in range(lo, hi):
+            if k == k_ref:
+                continue
             i = int(track_img[k])
             xc = rot_all[i] @ x_pt + tvec[i]
             z = max(xc[2], 1e-6)
             j_proj = (f / z) * np.array(
                 [[1.0, 0.0, -xc[0] / z], [0.0, 1.0, -xc[1] / z]]
             )
-            j_rows.append(j_proj @ rot_all[i])
-            a_rows.append(warps[k])
-        b_map = np.linalg.lstsq(np.vstack(j_rows), np.vstack(a_rows), rcond=None)[0]
-        i_ref = int(track_img[k_ref])
+            m = j_proj @ rot_all[i] @ r_ref.T
+            c_k = m[:, :2] @ p_r + m[:, 2]
+            resid = warps[k] - (z_ref / f) * m[:, :2]
+            for j in range(2):
+                rows.append([c_k[0] * (1 - j), c_k[0] * j])
+                rows.append([c_k[1] * (1 - j), c_k[1] * j])
+                rhs.append(resid[0, j])
+                rhs.append(resid[1, j])
+        if not rows:
+            continue
+        rows = np.asarray(rows)
+        rhs = np.asarray(rhs)
+        # Fronto prior: damping rows scaled to a fraction of member leverage.
+        lam = 0.3 * np.sqrt((rows**2).sum() / max(len(rows), 1))
+        rows = np.vstack([rows, [[lam, 0.0], [0.0, lam]]])
+        rhs = np.concatenate([rhs, [0.0, 0.0]])
+        b_z = np.linalg.lstsq(rows, rhs, rcond=None)[0]
+        # Obliquity cap: tan(tilt) = |b_z| / (z_ref / f).
+        b_norm = np.linalg.norm(b_z)
+        max_bz = tan_cap * z_ref / f
+        if b_norm > max_bz:
+            b_z *= max_bz / b_norm
+        b_map = r_ref.T @ np.vstack(
+            [(z_ref / f) * np.eye(2) + np.outer(p_r, b_z), b_z[None, :]]
+        )
         r_px = radius_kf * feature_scales[i_ref][int(track_feat[k_ref])]
         u3 = b_map @ np.array([r_px, 0.0])
         v3 = b_map @ np.array([0.0, r_px])
@@ -779,7 +817,7 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
         if norm < 1e-12:
             continue
         n3 /= norm
-        cam_c = -rot_all[i_ref].T @ tvec[i_ref]
+        cam_c = -r_ref.T @ tvec[i_ref]
         if np.dot(n3, cam_c - x_pt) < 0:
             u3, v3, n3 = v3, u3, -n3  # keep normal = normalize(u x v), front-facing
         half_u[p], half_v[p], normals[p] = u3, v3, n3
