@@ -360,24 +360,30 @@ def perspective_init(rot, scale, t_cam, used, f0):
 
 
 def triangulate(obs_c, obs_i, u, rot, trans, used, n_cl, f):
-    """Linear DLT triangulation of every cluster from the posed images."""
+    """Ray-midpoint triangulation of every cluster from the posed images,
+    via the batch triangulation binding (clusters with < 2 posed
+    observations stay NaN)."""
+    from sfmtool._sfmtool.analysis import triangulate_batch
+
     pts = np.full((n_cl, 3), np.nan)
-    ok_img = used[obs_i]
-    for c in range(n_cl):
-        s = (obs_c == c) & ok_img
-        if s.sum() < 2:
-            continue
-        rows = []
-        for i, uv in zip(obs_i[s], u[s]):
-            p = np.hstack([rot[i], trans[i][:, None]])  # 3x4, cam frame
-            rows.append(uv[0] * p[2] - f * p[0])
-            rows.append(uv[1] * p[2] - f * p[1])
-        m = np.asarray(rows)
-        _, _, vt = np.linalg.svd(m)
-        h = vt[-1]
-        if abs(h[3]) < 1e-12:
-            continue
-        pts[c] = h[:3] / h[3]
+    sel = used[obs_i]
+    if not sel.any():
+        return pts
+    oc, oi, uv = obs_c[sel], obs_i[sel], u[sel]
+    # World-space unit rays and camera centers: x_cam = R x + t, so the
+    # ray is Rᵀ·normalize([u/f, 1]) and the center -Rᵀ t.
+    d_loc = np.column_stack([uv / f, np.ones(len(uv))])
+    d_loc /= np.linalg.norm(d_loc, axis=1, keepdims=True)
+    dirs = np.einsum("nji,nj->ni", rot[oi], d_loc)
+    centers = -np.einsum("nji,nj->ni", rot[oi], trans[oi])
+    # obs_c is cluster-sorted, so the selection is CSR-ready.
+    uniq, counts = np.unique(oc, return_counts=True)
+    offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    result = triangulate_batch(
+        np.ascontiguousarray(dirs), np.ascontiguousarray(centers), offsets
+    )
+    good = counts >= 2
+    pts[uniq[good]] = np.asarray(result["points"])[good]
     return pts
 
 
