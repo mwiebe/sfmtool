@@ -124,116 +124,6 @@ def load_clusters():
     }
 
 
-# ── Affine factorization (ALS with trimming) ─────────────────────────────────
-
-
-def als_factorize(obs_c, obs_i, u, n_img, n_cl, rounds=25, trim=0.05):
-    grid = np.zeros((2 * n_img, n_cl))
-    cnt = np.zeros((n_img, n_cl))
-    for c, i, uv in zip(obs_c, obs_i, u):
-        grid[2 * i : 2 * i + 2, c] = uv
-        cnt[i, c] = 1
-    row_mean = grid.sum(axis=1, keepdims=True) / np.maximum(
-        np.repeat(cnt.sum(axis=1), 2)[:, None], 1
-    )
-    filled = np.where(np.repeat(cnt, 2, axis=0) > 0, grid, row_mean)
-    filled -= row_mean
-    _, _, vt = np.linalg.svd(filled, full_matrices=False)
-    x_pts = vt[:3].T
-
-    keep = np.ones(len(obs_c), bool)
-    m_cam = np.zeros((n_img, 2, 3))
-    t_cam = np.zeros((n_img, 2))
-    for it in range(rounds):
-        for i in range(n_img):
-            s = keep & (obs_i == i)
-            if s.sum() < 4:
-                continue
-            xh = np.concatenate([x_pts[obs_c[s]], np.ones((s.sum(), 1))], axis=1)
-            sol = np.linalg.lstsq(xh, u[s], rcond=None)[0]
-            m_cam[i] = sol[:3].T
-            t_cam[i] = sol[3]
-        for c in range(n_cl):
-            s = keep & (obs_c == c)
-            if s.sum() < 2:
-                continue
-            a = m_cam[obs_i[s]].reshape(-1, 3)
-            b = (u[s] - t_cam[obs_i[s]]).reshape(-1)
-            x_pts[c] = np.linalg.lstsq(a, b, rcond=None)[0]
-        res = u - (np.einsum("nij,nj->ni", m_cam[obs_i], x_pts[obs_c]) + t_cam[obs_i])
-        if trim > 0 and it >= rounds // 2:
-            rn = np.linalg.norm(res, axis=1)
-            keep = rn < np.quantile(rn[keep], 1 - trim)
-    return m_cam, t_cam, x_pts, res, keep
-
-
-# ── Metric upgrade (Tomasi–Kanade) ───────────────────────────────────────────
-
-
-def metric_upgrade(m_cam, used):
-    """Solve the 3x3 gauge A so that rows of M_i·A are orthogonal and equal
-    norm.  Linear least squares on the symmetric Q = A·Aᵀ (6 unknowns).
-    Returns both reflection hypotheses of A."""
-    rows_a, rows_b = [], []
-
-    def sym_row(p, q):
-        # coefficients of pᵀ Q q over Q's 6 upper-triangle entries
-        return np.array(
-            [
-                p[0] * q[0],
-                p[0] * q[1] + p[1] * q[0],
-                p[0] * q[2] + p[2] * q[0],
-                p[1] * q[1],
-                p[1] * q[2] + p[2] * q[1],
-                p[2] * q[2],
-            ]
-        )
-
-    for i in np.nonzero(used)[0]:
-        m1, m2 = m_cam[i]
-        rows_a.append(sym_row(m1, m1) - sym_row(m2, m2))
-        rows_a.append(sym_row(m1, m2))
-        rows_b.append(sym_row(m1, m1) + sym_row(m2, m2))
-    a = np.asarray(rows_a)
-    # Normalization: mean row-norm² = 1 (avoids the trivial Q = 0).
-    a = np.vstack([a, np.mean(rows_b, axis=0)[None, :]])
-    b = np.zeros(len(a))
-    b[-1] = 2.0
-    qv = np.linalg.lstsq(a, b, rcond=None)[0]
-    q_mat = np.array(
-        [
-            [qv[0], qv[1], qv[2]],
-            [qv[1], qv[3], qv[4]],
-            [qv[2], qv[4], qv[5]],
-        ]
-    )
-    w, v = np.linalg.eigh(q_mat)
-    w = np.maximum(w, 1e-8 * w.max())
-    a_up = v @ np.diag(np.sqrt(w))
-    return a_up, a_up @ np.diag([1.0, 1.0, -1.0])
-
-
-def weak_perspective_poses(m_cam, t_cam, a_up, used):
-    """Per-image rotation + scale from the metric-upgraded affine cameras."""
-    n_img = len(m_cam)
-    rot = np.zeros((n_img, 3, 3))
-    scale = np.zeros(n_img)
-    for i in range(n_img):
-        if not used[i]:
-            continue
-        m = m_cam[i] @ a_up
-        s = 0.5 * (np.linalg.norm(m[0]) + np.linalg.norm(m[1]))
-        r3 = np.cross(m[0], m[1])
-        stack = np.vstack([m / s, r3 / max(np.linalg.norm(r3), 1e-12)])
-        uu, _, vv = np.linalg.svd(stack)
-        r = uu @ vv
-        if np.linalg.det(r) < 0:
-            r = uu @ np.diag([1, 1, -1]) @ vv
-        rot[i] = r
-        scale[i] = s
-    return rot, scale
-
-
 # ── Covisibility grouping ────────────────────────────────────────────────────
 #
 # No sequence order is assumed: the natural grouping is how many clusters a
@@ -271,20 +161,33 @@ def window_spans(obs_c, obs_i, u, imgs, min_span):
 def factorize_window(obs_c, obs_i, u, imgs, min_span=3):
     """Factorize the clusters seen in >= min_span images of the window.
 
-    Returns (both metric hypotheses as (rot, scale, t_aff) in the window's
-    local frame, used mask, span-2 selection for the window mini-BA) or None
-    when the window is too sparse.
+    Uses the affine-factorization bindings (ALS + Tomasi–Kanade metric
+    upgrade).  Returns (both metric hypotheses as (rot, scale, t_aff) in
+    the window's local frame, used mask, span-2 selection for the window
+    mini-BA) or None when the window is too sparse.
     """
+    from sfmtool._sfmtool.geometry import factorize_affine
+
     sel, il, uniq, c2 = window_spans(obs_c, obs_i, u, imgs, min_span)
     if sel.sum() < 30:
         return None
-    m_cam, t_aff, _, _, keep = als_factorize(c2, il, u[sel], len(imgs), len(uniq))
-    used = np.bincount(il[keep], minlength=len(imgs)) >= 4
+    fac = factorize_affine(
+        c2.astype(np.uint32),
+        il.astype(np.uint32),
+        np.ascontiguousarray(u[sel]),
+        len(imgs),
+        len(uniq),
+    )
+    used = np.asarray(fac.used_images)
+    t_aff = np.asarray(fac.translations)
+    upgraded = fac.metric_upgrade()
     hyps = []
-    for a_up in metric_upgrade(m_cam, used):
-        rot, scale = weak_perspective_poses(m_cam, t_aff, a_up, used)
-        if (scale[used] > 0).all():
-            hyps.append((rot, scale, t_aff))
+    if upgraded is not None:
+        for hyp in upgraded:
+            rot = np.asarray(hyp.rotations)
+            scale = np.asarray(hyp.scales)
+            if (scale[used] > 0).all():
+                hyps.append((rot, scale, t_aff))
     ba_sel = window_spans(obs_c, obs_i, u, imgs, 2)
     return hyps, used, ba_sel
 
