@@ -235,16 +235,116 @@ Cross-dataset observations:
   the per-dataset ~13–19 min is throwaway-prototype speed, not a statement
   about the method.
 
+## Campaign log (2026-07-13): quality-ordered BA sets + gated growth
+
+Goals: fewer incorrect registrations / phantom points, and faster
+convergence to first-order-correct geometry, using the stored per-member
+quality signals and the warp determinants.
+
+### Signal diagnostics (all six datasets, vs reference-pose triangulation)
+
+- **`member_consistency_residual` is the junk signal everywhere**: AUC
+  0.79–0.92 for good-vs-bad clusters. Among a top-10k admission set:
+  dino 1.3% junk (consistency-ordered) vs 30.1% (span-ordered), DinoLedge
+  0.2% vs 19.1%, Swivel 1.5% vs 35.2%. Span ordering is *anti*-predictive
+  of junk on four of six datasets — but south-building's high-span
+  clusters are clean (0.5–4.4%), which matters below. ZNCC adds little
+  (already gated at match time); feature scale is slightly anti-predictive;
+  `.sift` features are scale-sorted, so the feature index is a free size
+  rank.
+- **`sqrt(|det warp|)` tracks the reference depth ratio `z_ref/z_k`**
+  where depth structure exists: dino corr 0.910 (5.5% median error vs
+  22.4% actual spread), south-building 0.846 (2.9% vs 6.7%). On
+  near-constant-depth captures (seoul, DinoLedge) the foreshortening
+  noise exceeds the tiny depth spread — no usable signal, but also little
+  to correct.
+
+### Architecture changes that survived
+
+1. **Admission is not binary.** Growth, resection, and triangulation see
+   every usable cluster; only the BAs are restricted to the best
+   `MAX_CLUSTERS` clusters in admission order. Every capped-admission
+   variant disconnected some capture: a 10k consistency-stratified cap
+   stranded south-building at 36/128 (and dino's 12-image tail starved
+   before ever reaching the gate); per-image round-robin admission
+   destroyed seed-window density (7/128). A related trap: the masked
+   growth BA's inter-round retriangulation rebuilds points from only the
+   observations it was given, wiping non-BA clusters — the points must be
+   refilled from the full observation set after each BA or the
+   next-best-view count sees only BA-set connectivity.
+2. **BA-set ordering = `union`**: interleave the span-descending backbone
+   with the best-consistency-within-span-stratum core, half/half in any
+   prefix. Span-only carries the junk that produced the dino echo;
+   consistency-only lacks multi-view rigidity (south 5.65° mean, 6 cams
+   > 10°; round-robin 7.8°, 27 > 10°). The union restores both.
+3. **Resection acceptance gate**: a resection under 0.35× the median
+   accepted inlier fraction is deferred (one BA + retriangulation retry
+   re-arms the blocked images). Without it, 0–7%-inlier resections at a
+   thin frontier cascade — each wrong pose builds phantom points that
+   justify the next wrong pose — and wreck even a previously-good core
+   (measured: 0.63° core → 81° after ungated regrowth).
+4. **Verified force-accept**: when growth stalls with everything
+   deferred, accept the strongest blocked candidate *without building
+   points from it*, run the growth BA, and keep it only if its inlier
+   fraction rises into the accepted band — else unpose it permanently.
+   This restores the accept-then-BA-repair path that completes marginal
+   frontiers (seoul imgs 0–5: 0–10% → 36–51% after BA, all kept) while
+   refusals stay honest (south imgs 13/115: 0% → 4–8%, left unposed).
+
+### Cross-dataset results (union BA set + gate + force-accept)
+
+Inlier fractions are over the BA-candidate observations (the baseline
+table's denominators were the full admitted set — not comparable).
+
+| dataset | posed | rot err mean/max (deg) | center err mean/max (% diam) | f vs ref | time | baseline (2026-07-12) |
+|---|---|---|---|---|---|---|
+| seoul bull | 17/17 | 3.37 / 5.89 | 1.7 / 3.1 | +3.1% | 2.1 min | 17/17, 3.46 / 6.00, 4 min |
+| dino_dog_toy | 84/85 | **0.65 / 4.06** | 0.2 / 0.7 | −3.0% | 18.3 min | 85/85, **17.9 / 112.7** (echo), 19 min |
+| south-building | 126/128 | 3.68 / 7.94 | 2.4 / 6.7 | +2.7% | 16.6 min | 128/128, 2.33 / 6.55, 13 min |
+| DinoLedge (subset) | 120/120 | 2.36 / 2.93 | 0.35 / 0.62 | **+0.03%** | 17 min | 120/120, 2.61 / 3.20, 15 min |
+| Swivel_Chair (subset) | 106/106 | 0.31 / 0.75 | 0.35 / 0.74 | −1.3% | 15.4 min | 106/106, 0.26 / 0.70, 13 min |
+| Kerry fisheye | 24/24 | 178.0 (mirror) | 24.1 / 51.2 | n/a | 6.3 min | complete failure (43% self-ref) |
+
+- **The dino echo is eliminated**: mean rotation error 17.9° → 0.65°, max
+  112.7° → 4.06°, zero cameras over 10°. Two tail images were recovered
+  by verified force-accept (15% → 56%, 12% → 30%); one was honestly
+  refused (0% → 3%).
+- Kerry now has an external reference (48-image fisheye rig solve) and
+  the pinhole bootstrap's failure is quantified: a uniform ~178° mirror
+  solution — the metric the earlier self-referential inlier fraction
+  could not provide.
+- south-building pays a small accuracy premium vs its span-only baseline
+  (3.68 vs 2.33 mean) for using the one-config union set; its two
+  refusals are genuine (0% resections after BA repair).
+- Wall-clock is roughly flat vs baseline at equal coverage. The measured
+  speed lever is the tiered scan (35% coarse tier: seoul scan 178 s →
+  47 s, 3.8×, with a 0.63°-mean 8-image core — better than any full
+  solve here), currently parked: frontier force-accepts off a stranded
+  coarse tier verify at marginal levels and settle ~12° off, so the
+  coarse tier needs either a connectivity-aware tier or a stricter
+  verification bar before it becomes the default. The apex-solver BA
+  backend (1.9–3.1×, separate evaluation) composes with all of this.
+- The warp-depth Kabsch resection init (`SFMTOOL_DEPTH_INIT`) is
+  implemented and exact on synthetic data but is not part of this
+  campaign's config; its measured per-resection warp-depth coherence is
+  logged for the future registration-verification channel.
+
 ## Open questions
 
 - The dino_dog_toy misregistration tail: weakly-connected views in
   unordered photo sets need either a resection acceptance gate (reject and
   retry later when more structure exists), a re-resection pass after the
   final BA, or RANSAC P3P. Everything else in the campaign has no tail.
+  > _Status (2026-07-13): Done — acceptance gate + verified force-accept
+  > (see the 2026-07-13 campaign log); dino 17.9° → 0.65° mean with zero
+  > cameras over 10°._
 - The junk-observation floor (~5–25% by dataset, ~50% on kerry) matches the
   contamination floor seen in the grid-distortion experiments; per-member
   vetting signals (ZNCC, consistency residual) are stored in the `.matches`
   file and are not yet used to pre-filter here.
+  > _Status (2026-07-13): Done for the consistency residual — it now
+  > orders the BA working set (union ordering, 2026-07-13 campaign log);
+  > ZNCC measured near-uninformative post-gating (AUC ≈ 0.55)._
 - Runtime is dominated by the focal scan (5 × capped growth) and the scipy
   BAs. A coarse-to-fine scan (2 candidates + golden-section refine) would
   cut most of it. All of this is throwaway scipy; a production version
@@ -258,3 +358,8 @@ Cross-dataset observations:
   failure. Cheap candidates that would have caught it: cheirality fraction
   over all observations, per-camera structure-depth sign statistics, and
   pose-path coherence on sequential captures.
+  > _Status (2026-07-13): Partially done — kerry now has an external rig
+  > reference (uniform ~178° mirror, quantified), and the warp-depth
+  > coherence measured at resection time is a stored pose-free
+  > verification channel; neither is wired into a self-diagnostic verdict
+  > yet._
