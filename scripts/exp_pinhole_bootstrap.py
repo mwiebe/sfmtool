@@ -73,6 +73,10 @@ TIERS = [float(x) for x in os.environ.get("SFMTOOL_TIERS", "1.0").split(",")]
 # the (posed) reference image, giving camera-frame 3D points -> closed-form
 # trimmed Kabsch pose init (no neighbor-pose inits needed when it works).
 DEPTH_INIT = os.environ.get("SFMTOOL_DEPTH_INIT", "0") == "1"
+# Diagnostics: trace per-resection inliers in growth; optionally disable the
+# periodic growth BA to attribute damage between resection and BA.
+TRACE = os.environ.get("SFMTOOL_TRACE", "0") == "1"
+GROW_BA = os.environ.get("SFMTOOL_GROW_BA", "1") == "1"
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -117,22 +121,44 @@ def load_clusters():
             quality = float(cq.max()) if len(cq) else np.inf
             usable.append((span, c, sel, quality))
 
-    # Cap for the scipy BAs (deterministic; ties broken by cluster id).
-    key = {
-        "span": lambda t: (-t[0], t[1]),
-        "cons": lambda t: (t[3], -t[0], t[1]),
-    }[ORDER]
+    # Admission order (best first) — used for both the cap and the tiers.
+    # "span": highest span first (the original).  "cons": best consistency
+    # first.  "cons_strat": best consistency first WITHIN each span stratum,
+    # strata interleaved proportionally — any admission prefix then keeps
+    # the span distribution (wide-baseline rigidity) while dropping the
+    # worst-consistency clusters of every stratum first.
+    spans = np.array([t[0] for t in usable])
+    quals = np.array([t[3] for t in usable])
+    cids = np.array([t[1] for t in usable])
+    if ORDER == "span":
+        order = np.lexsort((cids, -spans))
+    elif ORDER == "cons":
+        order = np.lexsort((cids, -spans, quals))
+    elif ORDER == "cons_strat":
+        p = np.empty(len(usable))
+        for s in np.unique(spans):
+            idx = np.nonzero(spans == s)[0]
+            r = np.argsort(np.argsort(quals[idx], kind="stable"))
+            p[idx] = (r + 0.5) / len(idx)
+        order = np.lexsort((cids, quals, p))
+    else:
+        raise SystemExit(f"unknown SFMTOOL_ORDER {ORDER!r}")
+
+    pos = {int(k): i for i, k in enumerate(order)}
+    n_keep = min(len(usable), MAX_CLUSTERS)
     if len(usable) > MAX_CLUSTERS:
-        usable.sort(key=key)
-        dropped = len(usable) - MAX_CLUSTERS
-        usable = sorted(usable[:MAX_CLUSTERS], key=lambda t: t[1])
-        print(f"capped clusters: kept {MAX_CLUSTERS} by {ORDER}, dropped {dropped}")
+        print(
+            f"capped clusters: kept {MAX_CLUSTERS} by {ORDER}, "
+            f"dropped {len(usable) - MAX_CLUSTERS}"
+        )
+    keep_idx = sorted(order[:n_keep], key=lambda k: usable[k][1])
 
     obs_c, obs_i, obs_f, obs_uv, obs_warp, obs_ref = [], [], [], [], [], []
-    quality = []
+    adm_rank = []
     n_cl = 0
-    for _span, c, sel, q in usable:
-        quality.append(q)
+    for k in keep_idx:
+        _span, c, sel, q = usable[k]
+        adm_rank.append(pos[int(k)])
         for k in sel:
             obs_c.append(n_cl)
             obs_i.append(int(mi[k]))
@@ -154,7 +180,7 @@ def load_clusters():
         "obs_uv": np.asarray(obs_uv, dtype=np.float64),
         "obs_warp": np.asarray(obs_warp, dtype=np.float64),
         "obs_ref": np.asarray(obs_ref, dtype=bool),
-        "quality": np.asarray(quality, dtype=np.float64),
+        "adm_rank": np.asarray(adm_rank, dtype=np.int64),
         "refine_radius": float(data["refine_options"]["radius"]),
         "n_img": len(names),
         "n_cl": n_cl,
@@ -402,14 +428,38 @@ def grow_loop(
     ba_every = max(3, min(8, n_img // 10))
 
     since_ba = 0
+    accepted_inl = []
+    blocked = set()
+    ba_retry = True
     while max_images is None or posed.sum() < max_images:
         # Next-best-view: most observations of currently-valid points.
         cand = ~posed[obs_i] & ~np.isnan(pts[obs_c, 0])
         if not cand.any():
             break
         cnt = np.bincount(obs_i[cand], minlength=n_img)
+        for j in blocked:
+            cnt[j] = 0
         i = int(np.argmax(cnt))
         if cnt[i] < 6:
+            # Every eligible image is blocked or too weak.  One BA +
+            # retriangulation pass may repair the frontier; afterwards the
+            # blocked images get a second chance.  If it happens again,
+            # leave the rest unposed — a refused registration is recoverable,
+            # a wrong one poisons the reconstruction.
+            if blocked and ba_retry:
+                ba_retry = False
+                blocked.clear()
+                live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
+                rot = Rotation.from_rotvec(rvec).as_matrix()
+                ba = bundle_adjust(
+                    obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
+                    n_img, n_cl, opt_f=False, verbose=False,
+                    schedule=grow_schedule,
+                )
+                rvec, tvec, pts = ba[1], ba[2], ba[3]
+                pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f0)
+                since_ba = 0
+                continue
             break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
         # Init candidates: the warp-depth Kabsch pose (when enabled and
@@ -431,8 +481,23 @@ def grow_loop(
                 found = (inl, rv, tv)
             if inl > 0.4:
                 break
+        # Acceptance gate: a resection far below the accepted-so-far level
+        # is a misregistration in the making (the no-gate trace showed 0-7%
+        # resections cascading into an 80° wreck).  Defer the image; it
+        # gets another chance after the frontier improves.
+        if accepted_inl and found[0] < 0.5 * float(np.median(accepted_inl)):
+            blocked.add(i)
+            if TRACE:
+                print(f"    defer  img {i}: inl {found[0]:.0%} on "
+                      f"{int(s.sum())} obs (median accepted "
+                      f"{float(np.median(accepted_inl)):.0%})")
+            continue
+        accepted_inl.append(found[0])
         _, rvec[i], tvec[i] = found
         posed[i] = True
+        ba_retry = True
+        if TRACE:
+            print(f"    resect img {i}: inl {found[0]:.0%} on {int(s.sum())} obs")
         if di is not None:
             # Warp-depth coherence of the accepted pose (echo diagnostics):
             # a misregistered camera can look reprojection-consistent while
@@ -445,7 +510,7 @@ def grow_loop(
                 _DEPTH_COH.append((i, coh, found[0]))
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f0)
         since_ba += 1
-        if since_ba >= ba_every:
+        if GROW_BA and since_ba >= ba_every:
             since_ba = 0
             live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
             rot = Rotation.from_rotvec(rvec).as_matrix()
@@ -650,13 +715,17 @@ def umeyama(src, dst):
     return s, r, t
 
 
-def compare_to_reference(names, rvec, tvec, f_est):
+def compare_to_reference(names, rvec, tvec, f_est, mask=None):
     """Compare against the first non-bootstrap solve in the workspace.
 
     Our BA poses are COLMAP-convention; the reference ``.sfmr`` is canonical.
     Convert ours to canonical first so the per-camera rotation errors are
     meaningful (the world-frame difference is absorbed by the alignment).
+    ``mask`` restricts to a subset of images (e.g. the posed ones).
     """
+    if mask is not None:
+        names = [n for j, n in enumerate(names) if mask[j]]
+        rvec, tvec = rvec[np.asarray(mask)], tvec[np.asarray(mask)]
     if REF is not None:
         ref_files = [REF]
     else:
@@ -978,7 +1047,7 @@ def main():
     # later tier is triangulated in from the current poses and fine-tuned
     # with a shortened BA.  If tier 0 fails to produce a seed, the next
     # tier is folded in and seeding retries (incremental "until it catches").
-    qual_order = np.argsort(data["quality"], kind="stable")
+    qual_order = np.argsort(data["adm_rank"], kind="stable")
     bounds = sorted({max(1, int(round(fr * n_cl))) for fr in TIERS} | {n_cl})
     # Warp-depth aux data: per-obs sqrt|det| magnification and each
     # cluster's reference image (for the depth-ratio resection init).
@@ -1087,7 +1156,9 @@ def main():
         opt_f=True,
     )
     print(f"[tier 0..{tier} solved at {time.perf_counter() - _T0:.0f}s: "
-          f"f {f:.1f}, inlier<2px {100 * inl:.1f}% of its obs]")
+          f"f {f:.1f}, inlier<2px {100 * inl:.1f}% of its {int(ok.sum())} obs "
+          f"({len(obs_c)} in tier), {int(posed.sum())}/{n_img} posed]")
+    compare_to_reference(data["names"], rvec, tvec, f, mask=posed)
 
     # Fine tiers: activate the remaining quality-ordered clusters,
     # triangulate them from the current cameras, resume growth for images
@@ -1101,12 +1172,23 @@ def main():
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f)
         covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
         aux = (ds_all[act], ref_img)
+        posed_before = int(posed.sum())
         rvec, tvec, pts, posed = grow_loop(
             rvec, tvec, pts, posed, f, obs_c, obs_i, u, n_img, n_cl, covis,
             aux=aux,
         )
         rot = Rotation.from_rotvec(rvec).as_matrix()
         ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
+        # When the tier only added observations to an already-posed set,
+        # the cameras are converged and admission is gated tightly BY the
+        # current solve (an admitted observation disagreeing at > 2×TRIM_PX
+        # under known-good cameras is junk, not unconverged).  When the
+        # tier grew NEW poses, those need the full staged schedule.
+        grew = int(posed.sum()) > posed_before
+        if grew:
+            print(f"  [after regrowth, before fine BA: "
+                  f"{int(posed.sum())}/{n_img} posed]")
+            compare_to_reference(data["names"], rvec, tvec, f, mask=posed)
         f, rvec, tvec, pts, keep, res, inl = bundle_adjust(
             obs_c[ok],
             obs_i[ok],
@@ -1118,8 +1200,12 @@ def main():
             n_img,
             n_cl,
             opt_f=True,
-            schedule=[(12.0, 2.0), (TRIM_PX, 1.0)],
+            verbose=False,
+            schedule=None if grew else [(2 * TRIM_PX, 1.5), (TRIM_PX, 1.0)],
         )
+        if grew:
+            print(f"  (tier grew {int(posed.sum()) - posed_before} new poses; "
+                  f"full BA schedule)")
         print(f"[tier fine-tuned at {time.perf_counter() - _T0:.0f}s: "
               f"f {f:.1f}, inlier<2px {100 * inl:.1f}% of its obs]")
 
@@ -1134,7 +1220,8 @@ def main():
     n_pts = len(np.unique(all_c[keep]))
     print(
         f"\nbootstrap result: f = {f:.1f} px, {n_pts} points, "
-        f"{keep.sum()}/{len(all_c)} observations kept"
+        f"{keep.sum()}/{len(all_c)} observations kept, "
+        f"{int(posed.sum())}/{n_img} images posed"
     )
     print(
         f"reprojection (kept): rms {np.sqrt((rk**2).mean()):.2f} px, "
@@ -1157,7 +1244,7 @@ def main():
             + ", ".join(f"img {i} {c:.2f} (inl {v:.0%})" for i, c, v in worst)
         )
 
-    compare_to_reference(data["names"], rvec, tvec, f)
+    compare_to_reference(data["names"], rvec, tvec, f, mask=posed)
 
     out = WS / "sfmr" / os.environ.get("SFMTOOL_OUT", "bootstrap-pinhole.sfmr")
     save_sfmr(data, f, rvec, tvec, pts, keep, res, out)
