@@ -100,7 +100,7 @@ def load_clusters():
         usable = sorted(usable[:MAX_CLUSTERS], key=lambda t: t[1])
         print(f"capped clusters: kept {MAX_CLUSTERS} by span, dropped {dropped}")
 
-    obs_c, obs_i, obs_f, obs_uv = [], [], [], []
+    obs_c, obs_i, obs_f, obs_uv, obs_warp, obs_ref = [], [], [], [], [], []
     n_cl = 0
     for _span, c, sel in usable:
         for k in sel:
@@ -108,8 +108,11 @@ def load_clusters():
             obs_i.append(int(mi[k]))
             obs_f.append(int(mf[k]))
             # The affine's last column is the member's absolute refined
-            # keypoint position (identity | x_ref for the reference row).
+            # keypoint position (identity | x_ref for the reference row);
+            # the 2x2 block is the member<-reference patch warp.
             obs_uv.append(aff[k, :, 2])
+            obs_warp.append(aff[k, :, :2])
+            obs_ref.append(st[k] == 0)
         n_cl += 1
 
     return {
@@ -119,6 +122,9 @@ def load_clusters():
         "obs_i": np.asarray(obs_i),
         "obs_f": np.asarray(obs_f),
         "obs_uv": np.asarray(obs_uv, dtype=np.float64),
+        "obs_warp": np.asarray(obs_warp, dtype=np.float64),
+        "obs_ref": np.asarray(obs_ref, dtype=bool),
+        "refine_radius": float(data["refine_options"]["radius"]),
         "n_img": len(names),
         "n_cl": n_cl,
     }
@@ -712,15 +718,90 @@ def save_sfmr(data, f, rvec, tvec, pts, keep, res, out_path):
     )
 
     recon = SfmrReconstruction.from_data(workspace_dir, sfmr_dict)
-    # Convert to embedded_patches (computes the mandatory per-point patch
-    # frames and per-image identity hashes), then substitute the refined
-    # patch positions for the SIFT-seed keypoints the conversion copied.
-    recon = recon.to_embedded_patches()
-    recon = recon.clone_with_changes(keypoints_xy=keypoints_xy)
+
+    # ── Surfel frames copied from the cluster patches ────────────────────
+    # Each member's stored 2x2 warp is the projection of the cluster's
+    # common surfel into that image, so the 3D patch frame is recoverable:
+    # solve J_k·B = A_k per point (J_k the projection Jacobian at the
+    # point, B the 3x2 map from reference-image pixels to 3D on the surfel
+    # plane; the reference row contributes J_ref·B = I), then
+    # u = B·(r, 0), v = B·(0, r) with r the refinement radius in reference
+    # pixels (keypoint-frame radius x the reference feature's scale).
+    from sfmtool._sfmtool import PatchCloud
+    from sfmtool._sfmtool.io import read_sift, read_sift_metadata
+    from sfmtool.colmap.convention import world_rotate_w
+    from sfmtool.sift.file import get_sift_path_for_image
+
+    feature_scales = {}
+    image_file_hashes = []
+    for i, name in enumerate(names):
+        sp = get_sift_path_for_image(workspace_dir / name)
+        meta = read_sift_metadata(sp)["metadata"]
+        image_file_hashes.append(bytes.fromhex(meta["image_file_xxh128"]))
+        shapes = np.asarray(read_sift(sp)["affine_shapes"], dtype=np.float64)
+        feature_scales[i] = 0.5 * (
+            np.linalg.norm(shapes[:, :, 0], axis=1)
+            + np.linalg.norm(shapes[:, :, 1], axis=1)
+        )
+
+    rot_all = Rotation.from_rotvec(rvec).as_matrix()
+    warps = data["obs_warp"][ko]
+    is_ref = data["obs_ref"][ko]
+    radius_kf = data["refine_radius"]
+    half_u = np.zeros((len(alive), 3), dtype=np.float64)
+    half_v = np.zeros((len(alive), 3), dtype=np.float64)
+    normals = np.zeros((len(alive), 3), dtype=np.float64)
+    p_starts = np.searchsorted(point_idx, np.arange(len(alive) + 1))
+    for p in range(len(alive)):
+        lo, hi = int(p_starts[p]), int(p_starts[p + 1])
+        refs_here = np.nonzero(is_ref[lo:hi])[0]
+        if len(refs_here) == 0:
+            continue  # reference member trimmed: leave the zero (no-patch) frame
+        k_ref = lo + int(refs_here[0])
+        x_pt = positions[p]
+        j_rows, a_rows = [], []
+        for k in range(lo, hi):
+            i = int(track_img[k])
+            xc = rot_all[i] @ x_pt + tvec[i]
+            z = max(xc[2], 1e-6)
+            j_proj = (f / z) * np.array(
+                [[1.0, 0.0, -xc[0] / z], [0.0, 1.0, -xc[1] / z]]
+            )
+            j_rows.append(j_proj @ rot_all[i])
+            a_rows.append(warps[k])
+        b_map = np.linalg.lstsq(np.vstack(j_rows), np.vstack(a_rows), rcond=None)[0]
+        i_ref = int(track_img[k_ref])
+        r_px = radius_kf * feature_scales[i_ref][int(track_feat[k_ref])]
+        u3 = b_map @ np.array([r_px, 0.0])
+        v3 = b_map @ np.array([0.0, r_px])
+        n3 = np.cross(u3, v3)
+        norm = np.linalg.norm(n3)
+        if norm < 1e-12:
+            continue
+        n3 /= norm
+        cam_c = -rot_all[i_ref].T @ tvec[i_ref]
+        if np.dot(n3, cam_c - x_pt) < 0:
+            u3, v3, n3 = v3, u3, -n3  # keep normal = normalize(u x v), front-facing
+        half_u[p], half_v[p], normals[p] = u3, v3, n3
+
+    # COLMAP -> canonical for the direction quantities (same W as the points).
+    half_u = np.asarray(world_rotate_w(half_u), dtype=np.float32)
+    half_v = np.asarray(world_rotate_w(half_v), dtype=np.float32)
+    normals = np.asarray(world_rotate_w(normals), dtype=np.float32)
+
+    cloud = PatchCloud.from_halfvec_arrays(half_u, half_v, np.asarray(p_can))
+    recon = recon.clone_with_changes(
+        feature_source="embedded_patches",
+        keypoints_xy=keypoints_xy,
+        image_file_hashes=image_file_hashes,
+        normals=normals,
+        patches=cloud,
+    )
     recon.save(out_path)
+    n_patched = int(np.count_nonzero(np.linalg.norm(half_u, axis=1) > 0))
     print(
         f"\nwrote {out_path} ({len(alive)} points, {int(obs_counts.sum())} obs, "
-        f"{recon.feature_source})"
+        f"{recon.feature_source}, {n_patched} warp-derived patch frames)"
     )
     return recon
 
