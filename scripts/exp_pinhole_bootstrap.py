@@ -463,8 +463,10 @@ def grow_loop(
         if cnt[i] < 6:
             # Every eligible image is blocked or too weak.  One BA +
             # retriangulation pass may repair the frontier; afterwards the
-            # blocked images get a second chance.
-            if blocked and ba_retry:
+            # blocked images get a second chance.  (Ranking-only scan
+            # growth skips the retry like it skips force-accept: it does
+            # not need completion and each retry costs a BA.)
+            if blocked and ba_retry and max_images is None:
                 ba_retry = False
                 blocked.clear()
                 rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
@@ -477,7 +479,11 @@ def grow_loop(
             # candidate WITHOUT building points from it, BA, then verify:
             # keep it only if its inliers rose into the accepted band,
             # else unpose it for good.  Damage is bounded to one BA whose
-            # trims already suppress a single wrong camera.
+            # trims already suppress a single wrong camera.  Skipped in
+            # capped (focal-scan) growth: the scan ranks candidates, it
+            # does not need completion, and each trial costs a BA.
+            if max_images is not None:
+                break
             trial = [j for j in blocked if j not in force_tried and cnt_all[j] >= 6]
             if trial:
                 j = max(trial, key=lambda k: cnt_all[k])
