@@ -467,7 +467,12 @@ def grow_loop(
             obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
             n_img, n_cl, opt_f=False, verbose=False, schedule=grow_schedule,
         )
-        return out[1], out[2], out[3]
+        # The BA retriangulates only the observations it was given, wiping
+        # every other cluster's point to NaN — refill them from the full
+        # observation set at the updated poses, or the next-best-view count
+        # sees only BA-set connectivity and growth stalls at its boundary.
+        pts = fill_new_points(out[3], obs_c, obs_i, u, out[1], out[2], posed, f0)
+        return out[1], out[2], pts
 
     def image_inl(i, rvec, tvec, pts):
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
