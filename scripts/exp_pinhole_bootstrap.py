@@ -427,9 +427,28 @@ def grow_loop(
     grow_schedule = [(30.0, 3.0), (8.0, 1.5)]
     ba_every = max(3, min(8, n_img // 10))
 
+    def run_grow_ba(rvec, tvec, pts):
+        live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
+        rot = Rotation.from_rotvec(rvec).as_matrix()
+        ba = bundle_adjust(
+            obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
+            n_img, n_cl, opt_f=False, verbose=False, schedule=grow_schedule,
+        )
+        return ba[1], ba[2], ba[3]
+
+    def image_inl(i, rvec, tvec, pts):
+        s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
+        if not s.any():
+            return 0.0
+        xc = Rotation.from_rotvec(rvec[i]).apply(pts[obs_c[s]]) + tvec[i]
+        z = np.maximum(xc[:, 2], 1e-6)
+        rn = np.linalg.norm(f0 * xc[:, :2] / z[:, None] - u[s], axis=1)
+        return float((rn < 3.0).mean())
+
     since_ba = 0
     accepted_inl = []
     blocked = set()
+    force_tried = set()
     ba_retry = True
     while max_images is None or posed.sum() < max_images:
         # Next-best-view: most observations of currently-valid points.
@@ -437,28 +456,64 @@ def grow_loop(
         if not cand.any():
             break
         cnt = np.bincount(obs_i[cand], minlength=n_img)
+        cnt_all = cnt.copy()
         for j in blocked:
             cnt[j] = 0
         i = int(np.argmax(cnt))
         if cnt[i] < 6:
             # Every eligible image is blocked or too weak.  One BA +
             # retriangulation pass may repair the frontier; afterwards the
-            # blocked images get a second chance.  If it happens again,
-            # leave the rest unposed — a refused registration is recoverable,
-            # a wrong one poisons the reconstruction.
+            # blocked images get a second chance.
             if blocked and ba_retry:
                 ba_retry = False
                 blocked.clear()
-                live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
-                rot = Rotation.from_rotvec(rvec).as_matrix()
-                ba = bundle_adjust(
-                    obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
-                    n_img, n_cl, opt_f=False, verbose=False,
-                    schedule=grow_schedule,
-                )
-                rvec, tvec, pts = ba[1], ba[2], ba[3]
+                rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
                 pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f0)
                 since_ba = 0
+                continue
+            # Verified force-accept: low-inlier resections are often
+            # BA-recoverable (ungated seoul carried imgs 0-5 to <= 6°
+            # final error this way).  Accept the strongest blocked
+            # candidate WITHOUT building points from it, BA, then verify:
+            # keep it only if its inliers rose into the accepted band,
+            # else unpose it for good.  Damage is bounded to one BA whose
+            # trims already suppress a single wrong camera.
+            trial = [j for j in blocked if j not in force_tried and cnt_all[j] >= 6]
+            if trial:
+                j = max(trial, key=lambda k: cnt_all[k])
+                force_tried.add(j)
+                blocked.discard(j)
+                sj = (obs_i == j) & ~np.isnan(pts[obs_c, 0])
+                posed_idx = np.nonzero(posed)[0].astype(np.uint32)
+                inits = covis.rank_by_covisibility(j, posed_idx)[:3]
+                best_j = None
+                for k in inits:
+                    rv, tv, inl = pose_refine(
+                        u[sj], pts[obs_c[sj]], rvec[k], tvec[k], f0
+                    )
+                    if best_j is None or inl > best_j[0]:
+                        best_j = (inl, rv, tv)
+                _, rvec[j], tvec[j] = best_j
+                posed[j] = True
+                rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
+                since_ba = 0
+                inl_after = image_inl(j, rvec, tvec, pts)
+                bar = 0.35 * float(np.median(accepted_inl)) if accepted_inl else 0.0
+                if inl_after >= bar:
+                    accepted_inl.append(inl_after)
+                    pts = fill_new_points(
+                        pts, obs_c, obs_i, u, rvec, tvec, posed, f0
+                    )
+                    ba_retry = True
+                    blocked.clear()
+                    if TRACE:
+                        print(f"    force-accept img {j}: {best_j[0]:.0%} -> "
+                              f"{inl_after:.0%} after BA (kept)")
+                else:
+                    posed[j] = False
+                    if TRACE:
+                        print(f"    force-reject img {j}: {best_j[0]:.0%} -> "
+                              f"{inl_after:.0%} after BA (unposed)")
                 continue
             break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
@@ -483,9 +538,12 @@ def grow_loop(
                 break
         # Acceptance gate: a resection far below the accepted-so-far level
         # is a misregistration in the making (the no-gate trace showed 0-7%
-        # resections cascading into an 80° wreck).  Defer the image; it
-        # gets another chance after the frontier improves.
-        if accepted_inl and found[0] < 0.5 * float(np.median(accepted_inl)):
+        # resections cascading into an 80° wreck), but the marginal band is
+        # recoverable by the periodic BAs and carries the growth chain, so
+        # the bar sits well below the median (seoul full-data trace:
+        # accepted 49-81%, recoverable boundary 22%, poison 0-10%).  Defer
+        # the image; it gets another chance after the frontier improves.
+        if accepted_inl and found[0] < 0.35 * float(np.median(accepted_inl)):
             blocked.add(i)
             if TRACE:
                 print(f"    defer  img {i}: inl {found[0]:.0%} on "
