@@ -907,7 +907,7 @@ def compare_to_reference(names, rvec, tvec, f_est, mask=None):
     ).magnitude() * (180 / np.pi)
 
     cam0 = ref.cameras[0].to_dict()
-    f_ref = cam0["parameters"].get("focal_length", cam0["parameters"].get("fx"))
+    f_ref = ref.cameras[0].focal_lengths[0]
     print(f"\nvs reference {ref_files[0].name} ({len(common)} common images):")
     print(
         f"  camera rotation err: mean {rot_err.mean():.2f}, "
