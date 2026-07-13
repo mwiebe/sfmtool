@@ -141,17 +141,47 @@ def load_clusters():
             r = np.argsort(np.argsort(quals[idx], kind="stable"))
             p[idx] = (r + 0.5) / len(idx)
         order = np.lexsort((cids, quals, p))
+    elif ORDER == "cons_rr":
+        # Per-image round-robin by quality: every image repeatedly claims
+        # its best not-yet-claimed cluster, so any admission prefix gives
+        # every image its locally-best clusters (balanced coverage — a
+        # global quality or stratified cap can disconnect a chain-shaped
+        # capture: south-building fragmented at 36/128 under cons_strat).
+        by_img = {}
+        for k, (_span, _c, sel, _q) in enumerate(usable):
+            for im in np.unique(mi[sel]):
+                by_img.setdefault(int(im), []).append(k)
+        for im in by_img:
+            by_img[im].sort(key=lambda k: (quals[k], cids[k]))
+        ptr = dict.fromkeys(by_img, 0)
+        claimed = np.zeros(len(usable), bool)
+        order = []
+        img_ids = sorted(by_img)
+        while len(order) < len(usable):
+            progress = False
+            for im in img_ids:
+                lst = by_img[im]
+                p_i = ptr[im]
+                while p_i < len(lst) and claimed[lst[p_i]]:
+                    p_i += 1
+                ptr[im] = p_i
+                if p_i < len(lst):
+                    claimed[lst[p_i]] = True
+                    order.append(lst[p_i])
+                    ptr[im] = p_i + 1
+                    progress = True
+            if not progress:
+                break
+        order = np.asarray(order, dtype=np.int64)
     else:
         raise SystemExit(f"unknown SFMTOOL_ORDER {ORDER!r}")
 
+    # No admission cap: growth and triangulation see every usable cluster
+    # (a capped set can disconnect a chain-shaped capture — south-building
+    # fragmented at 36/128).  The ordering instead selects which clusters'
+    # observations enter the BAs (the top MAX_CLUSTERS by adm_rank).
     pos = {int(k): i for i, k in enumerate(order)}
-    n_keep = min(len(usable), MAX_CLUSTERS)
-    if len(usable) > MAX_CLUSTERS:
-        print(
-            f"capped clusters: kept {MAX_CLUSTERS} by {ORDER}, "
-            f"dropped {len(usable) - MAX_CLUSTERS}"
-        )
-    keep_idx = sorted(order[:n_keep], key=lambda k: usable[k][1])
+    keep_idx = sorted(range(len(usable)), key=lambda k: usable[k][1])
 
     obs_c, obs_i, obs_f, obs_uv, obs_warp, obs_ref = [], [], [], [], [], []
     adm_rank = []
@@ -357,7 +387,8 @@ def fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f):
 
 
 def grow_reconstruction(
-    grp_data, f0, obs_c, obs_i, u, n_img, n_cl, covis, max_images=None, aux=None
+    grp_data, f0, obs_c, obs_i, u, n_img, n_cl, covis, max_images=None,
+    aux=None, ba=None,
 ):
     """Incremental bootstrap, no sequence order assumed.
 
@@ -414,13 +445,13 @@ def grow_reconstruction(
 
     return grow_loop(
         rvec, tvec, pts, posed, f0, obs_c, obs_i, u, n_img, n_cl, covis,
-        max_images, aux,
+        max_images, aux, ba,
     )
 
 
 def grow_loop(
     rvec, tvec, pts, posed, f0, obs_c, obs_i, u, n_img, n_cl, covis,
-    max_images=None, aux=None,
+    max_images=None, aux=None, ba=None,
 ):
     """Next-best-view growth from an existing state (resumable: tier
     admission re-enters here after activating more clusters)."""
@@ -429,6 +460,8 @@ def grow_loop(
 
     def run_grow_ba(rvec, tvec, pts):
         live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
+        if ba is not None:
+            live &= ba
         rot = Rotation.from_rotvec(rvec).as_matrix()
         ba = bundle_adjust(
             obs_c[live], obs_i[live], u[live], rot, tvec, pts, f0,
@@ -576,23 +609,7 @@ def grow_loop(
         since_ba += 1
         if GROW_BA and since_ba >= ba_every:
             since_ba = 0
-            live = posed[obs_i] & ~np.isnan(pts[obs_c, 0])
-            rot = Rotation.from_rotvec(rvec).as_matrix()
-            ba = bundle_adjust(
-                obs_c[live],
-                obs_i[live],
-                u[live],
-                rot,
-                tvec,
-                pts,
-                f0,
-                n_img,
-                n_cl,
-                opt_f=False,
-                verbose=False,
-                schedule=grow_schedule,
-            )
-            rvec, tvec, pts = ba[1], ba[2], ba[3]
+            rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
     return rvec, tvec, pts, posed
 
 
@@ -810,6 +827,30 @@ def compare_to_reference(names, rvec, tvec, f_est, mask=None):
     ref = SfmrReconstruction.load(ref_files[0])
     ref_names = list(ref.image_names)
     common = [n for n in names if n in ref_names]
+    if len(common) < 3:
+        # Cross-workspace fallback: match by basename against the ref
+        # directory with the most unique matches (e.g. the bootstrap's
+        # frames/ against a rig reference's fisheye_left/).
+        from collections import defaultdict
+        from pathlib import PurePosixPath
+
+        groups = defaultdict(dict)
+        for rn in ref_names:
+            pp = PurePosixPath(rn)
+            groups[str(pp.parent)][pp.name] = rn
+        best = {}
+        for g in groups.values():
+            mm = {
+                n: g[PurePosixPath(n).name]
+                for n in names
+                if PurePosixPath(n).name in g
+            }
+            if len(mm) > len(best):
+                best = mm
+        if len(best) >= 3:
+            print(f"matched {len(best)} images by basename fallback")
+            names = [n if n not in best else best[n] for n in names]
+            common = [best[n] for n in best]
     if len(common) < 3:
         print(f"only {len(common)} common images with {ref_files[0].name}; skipping")
         return
@@ -1113,6 +1154,13 @@ def main():
     # tier is folded in and seeding retries (incremental "until it catches").
     qual_order = np.argsort(data["adm_rank"], kind="stable")
     bounds = sorted({max(1, int(round(fr * n_cl))) for fr in TIERS} | {n_cl})
+    # BA working set: the best MAX_CLUSTERS clusters in admission order.
+    # Growth, resection, and triangulation always see every cluster
+    # (connectivity must not starve); only the BAs are restricted to the
+    # representative subset.
+    ba_cl = data["adm_rank"] < MAX_CLUSTERS
+    if n_cl > MAX_CLUSTERS:
+        print(f"BA set: best {MAX_CLUSTERS} of {n_cl} clusters by {ORDER}")
     # Warp-depth aux data: per-obs sqrt|det| magnification and each
     # cluster's reference image (for the depth-ratio resection init).
     ds_all = np.sqrt(np.maximum(np.abs(np.linalg.det(data["obs_warp"])), 1e-12))
@@ -1120,12 +1168,13 @@ def main():
     ref_img[all_c[data["obs_ref"]]] = all_i[data["obs_ref"]]
     active_cl = np.zeros(n_cl, bool)
     tier = 0
-    covis = grp_data = aux = None
+    covis = grp_data = aux = bam = None
     while tier < len(bounds):
         active_cl[qual_order[: bounds[tier]]] = True
         act = active_cl[all_c]
         obs_c, obs_i, u = all_c[act], all_i[act], all_u[act]
         aux = (ds_all[act], ref_img)
+        bam = ba_cl[all_c][act]
         print(
             f"tier 0..{tier}: {int(active_cl.sum())} clusters, "
             f"{len(obs_c)} observations"
@@ -1166,12 +1215,13 @@ def main():
             covis,
             max_images=scan_cap,
             aux=aux,
+            ba=bam,
         )
         if grown is None:
             continue
         g_rvec, g_tvec, pts, posed = grown
         rot = Rotation.from_rotvec(g_rvec).as_matrix()
-        ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
+        ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c] & bam
         ba = bundle_adjust(
             obs_c[ok],
             obs_i[ok],
@@ -1188,7 +1238,7 @@ def main():
         res = ba[5]
         # Rank on ALL observations of the posed subset: clusters that failed
         # to triangulate under this candidate count as misses.
-        inl_scan = float((res < 2.0).sum() / max(posed[obs_i].sum(), 1))
+        inl_scan = float((res < 2.0).sum() / max((posed[obs_i] & bam).sum(), 1))
         print(
             f"f={f_try:6.1f}: poses {posed.sum()}/{n_img}, "
             f"inlier<2px {100 * inl_scan:5.1f}%, "
@@ -1202,11 +1252,11 @@ def main():
     print(f"\nwinner: f = {f_try:.1f}; growing fully, then releasing f "
           f"[scan done at {elapsed:.0f}s]")
     grown = grow_reconstruction(
-        grp_data, f_try, obs_c, obs_i, u, n_img, n_cl, covis, aux=aux
+        grp_data, f_try, obs_c, obs_i, u, n_img, n_cl, covis, aux=aux, ba=bam
     )
     g_rvec, trans, pts, posed = grown
     rot = Rotation.from_rotvec(g_rvec).as_matrix()
-    ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
+    ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c] & bam
     f, rvec, tvec, pts, keep, res, inl = bundle_adjust(
         obs_c[ok],
         obs_i[ok],
@@ -1236,13 +1286,14 @@ def main():
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f)
         covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
         aux = (ds_all[act], ref_img)
+        bam = ba_cl[all_c][act]
         posed_before = int(posed.sum())
         rvec, tvec, pts, posed = grow_loop(
             rvec, tvec, pts, posed, f, obs_c, obs_i, u, n_img, n_cl, covis,
-            aux=aux,
+            aux=aux, ba=bam,
         )
         rot = Rotation.from_rotvec(rvec).as_matrix()
-        ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c]
+        ok = posed[obs_i] & ~np.isnan(pts[:, 0])[obs_c] & bam
         # When the tier only added observations to an already-posed set,
         # the cameras are converged and admission is gated tightly BY the
         # current solve (an admitted observation disagreeing at > 2×TRIM_PX
