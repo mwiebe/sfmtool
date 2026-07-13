@@ -141,6 +141,34 @@ def load_clusters():
             r = np.argsort(np.argsort(quals[idx], kind="stable"))
             p[idx] = (r + 0.5) / len(idx)
         order = np.lexsort((cids, quals, p))
+    elif ORDER == "union":
+        # Interleave the span backbone with the stratified-consistency
+        # core: any prefix is half highest-span clusters (multi-view
+        # rigidity + connectivity: south-building's quality lives here)
+        # and half best-consistency-within-stratum (junk-poor: dino's
+        # echo-free accuracy lives here).
+        o_span = np.lexsort((cids, -spans))
+        p = np.empty(len(usable))
+        for s in np.unique(spans):
+            idx = np.nonzero(spans == s)[0]
+            r = np.argsort(np.argsort(quals[idx], kind="stable"))
+            p[idx] = (r + 0.5) / len(idx)
+        o_strat = np.lexsort((cids, quals, p))
+        claimed = np.zeros(len(usable), bool)
+        order = []
+        ia = ib = 0
+        while len(order) < len(usable):
+            while ia < len(o_span) and claimed[o_span[ia]]:
+                ia += 1
+            if ia < len(o_span):
+                claimed[o_span[ia]] = True
+                order.append(o_span[ia])
+            while ib < len(o_strat) and claimed[o_strat[ib]]:
+                ib += 1
+            if ib < len(o_strat):
+                claimed[o_strat[ib]] = True
+                order.append(o_strat[ib])
+        order = np.asarray(order, dtype=np.int64)
     elif ORDER == "cons_rr":
         # Per-image round-robin by quality: every image repeatedly claims
         # its best not-yet-claimed cluster, so any admission prefix gives
