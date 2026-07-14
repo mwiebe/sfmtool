@@ -55,7 +55,7 @@ WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 _T0 = time.perf_counter()
 MIN_SPAN_BA = 2  # min distinct images for a cluster to become a point
-MAX_CLUSTERS = 10000  # cap for the scipy BAs
+MAX_CLUSTERS = int(os.environ.get("SFMTOOL_MAX_CLUSTERS", "10000"))  # BA-set size
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, in units of max(w, h)
 TRIM_PX = 4.0  # BA inter-round observation trim threshold
 # Cluster ordering for the cap and the admission tiers: "cons" ranks by the
@@ -174,6 +174,51 @@ def load_clusters():
             if ib < len(o_strat):
                 claimed[o_strat[ib]] = True
                 order.append(o_strat[ib])
+        order = np.asarray(order, dtype=np.int64)
+    elif ORDER == "img_union":
+        # Per-image top-K union: within each image, interleave its clusters
+        # by span-desc and consistency-asc (the union rule per image), then
+        # round-robin across images.  Any prefix gives EVERY image its
+        # locally-best backbone + core — a global ordering starves images
+        # whose matches are globally poor (dino img 52: 6 BA-set obs vs
+        # median 375 under `union`), which are exactly the images that
+        # need BA anchoring.
+        by_img = {}
+        for k, (_span, _c, sel, _q) in enumerate(usable):
+            for im in np.unique(mi[sel]):
+                by_img.setdefault(int(im), []).append(k)
+        img_lists = {}
+        for im, ks in by_img.items():
+            ks = np.asarray(ks)
+            o_span = ks[np.lexsort((cids[ks], -spans[ks]))]
+            o_cons = ks[np.lexsort((cids[ks], quals[ks]))]
+            seen = set()
+            lst = []
+            for a, b in zip(o_span, o_cons):
+                for x in (int(a), int(b)):
+                    if x not in seen:
+                        seen.add(x)
+                        lst.append(x)
+            img_lists[im] = lst
+        ptr = dict.fromkeys(img_lists, 0)
+        claimed = np.zeros(len(usable), bool)
+        order = []
+        img_ids = sorted(img_lists)
+        while len(order) < len(usable):
+            progress = False
+            for im in img_ids:
+                lst = img_lists[im]
+                p_i = ptr[im]
+                while p_i < len(lst) and claimed[lst[p_i]]:
+                    p_i += 1
+                ptr[im] = p_i
+                if p_i < len(lst):
+                    claimed[lst[p_i]] = True
+                    order.append(lst[p_i])
+                    ptr[im] = p_i + 1
+                    progress = True
+            if not progress:
+                break
         order = np.asarray(order, dtype=np.int64)
     elif ORDER == "cons_rr":
         # Per-image round-robin by quality: every image repeatedly claims
