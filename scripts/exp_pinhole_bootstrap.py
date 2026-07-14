@@ -91,7 +91,13 @@ def load_clusters():
     """
     from sfmtool._sfmtool.io import read_matches
 
-    patches = sorted(WS.glob("matches/*-clusters-patches.matches"))
+    override = os.environ.get("SFMTOOL_MATCHES")
+    patches = (
+        [Path(override)]
+        if override
+        else sorted(WS.glob("matches/*-clusters-patches.matches"))
+    )
+    print(f"matches file: {patches[0]}")
     data = read_matches(patches[0])
     names = list(data["image_names"])
     dims = [(int(w), int(h)) for w, h in np.asarray(data["image_dims"])]
