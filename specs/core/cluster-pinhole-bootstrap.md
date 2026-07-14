@@ -329,6 +329,51 @@ table's denominators were the full admitted set — not comparable).
   campaign's config; its measured per-resection warp-depth coherence is
   logged for the future registration-verification channel.
 
+### Addendum (2026-07-13): RANSAC P3P last-chance registration
+
+Root cause of the refused dino image (index 52, the dataset's closest
+camera): its kept features are 3–4× physically finer than every far
+image's extractable band, so ~60–70% have no legitimate counterpart and
+~90% of its cluster memberships are wrong matches (reference-arbitrated).
+Descriptor-based 2D–3D rematching cannot rescue this (measured 1%
+candidate precision — wrong matches score 0.96+ cosine on this texture),
+but the surviving ~7–10% true correspondences are ample for
+minimal-sample estimation. The last-chance path (when growth stalls with
+every candidate deferred) now runs RANSAC P3P with four load-bearing
+pieces, each forced by a measured failure:
+
+1. **Tight 4 px RANSAC threshold** (the 12 px default's consensus was 75%
+   loose junk and anchoring on it dragged the pose).
+2. **Consensus polish**: the pose is refit on the RANSAC consensus only.
+3. **Whole-cluster BA promotion**: the consensus clusters (all members'
+   observations) enter the BA working set and the image's non-consensus
+   observations are quarantined out — single-observation anchoring lets
+   the BA's inter-round retriangulation wipe the anchored points, saving
+   a pose with zero kept features.
+4. **Consensus-survival verification**: accept when the consensus set
+   stays ≥ 50% inliers through the growth BA — the all-obs inlier bar
+   can never certify an image whose observations are mostly wrong
+   *matches* even under a correct pose.
+
+Six-dataset result vs the pre-P3P config (same union/gate config,
+scipy):
+
+| dataset | posed | rot err mean/max (deg) | pre-P3P |
+|---|---|---|---|
+| seoul bull | 17/17 | 2.99 / 5.27 | 17/17, 3.37 / 5.89 |
+| dino_dog_toy | **85/85** | **0.57 / 1.27** | 84/85, 0.65 / 4.06 |
+| south-building | **128/128** | **2.63 / 4.53** | 126/128, 3.68 / 7.94 |
+| DinoLedge (subset) | 120/120 | 2.36 / 2.93 | identical (P3P never fired) |
+| Swivel_Chair (subset) | 106/106 | 0.31 / 0.75 | identical (P3P never fired) |
+| Kerry fisheye | 24/24 | mirror (~176) | mirror (~178), unchanged |
+
+Every dataset where the path fired gained full coverage AND accuracy
+(south-building now beats its span-only baseline's max, 6.55°; all its
+three previously-refused images registered at 99–100% consensus
+survival); where it did not fire the results are unchanged. The estimator
+is pycolmap's (experiment-grade); a native Lambda-Twist P3P belongs with
+the planned geometric verifier.
+
 ## Open questions
 
 - The dino_dog_toy misregistration tail: weakly-connected views in
@@ -337,7 +382,8 @@ table's denominators were the full admitted set — not comparable).
   final BA, or RANSAC P3P. Everything else in the campaign has no tail.
   > _Status (2026-07-13): Done — acceptance gate + verified force-accept
   > (see the 2026-07-13 campaign log); dino 17.9° → 0.65° mean with zero
-  > cameras over 10°._
+  > cameras over 10°. Then RANSAC P3P last-chance (addendum above):
+  > 85/85 at 0.57 / 1.27._
 - The junk-observation floor (~5–25% by dataset, ~50% on kerry) matches the
   contamination floor seen in the grid-distortion experiments; per-member
   vetting signals (ZNCC, consistency residual) are stored in the `.matches`
