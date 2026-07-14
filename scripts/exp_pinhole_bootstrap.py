@@ -351,7 +351,7 @@ def depth_init(s, obs_c, u, pts, rvec, tvec, posed, f0, i, aux):
     points and a trimmed Kabsch solve gives the pose.  Returns (rvec0,
     tvec0, obs index array, predicted depths) or None when too few
     observations have a posed reference view."""
-    ds, ref_img = aux
+    ds, ref_img = aux[0], aux[1]
     si = np.nonzero(s)[0]
     rc = ref_img[obs_c[si]]
     okd = (rc >= 0) & (rc != i) & posed[np.maximum(rc, 0)]
@@ -368,6 +368,39 @@ def depth_init(s, obs_c, u, pts, rvec, tvec, posed, f0, i, aux):
     x_cam = np.column_stack([u[sel] / f0, np.ones(good.sum())]) * z_pred[good, None]
     r_fit, t_fit = kabsch_trimmed(x_w[good], x_cam)
     return Rotation.from_matrix(r_fit).as_rotvec(), t_fit, sel, z_pred[good]
+
+
+def p3p_resect(uv_centered, x_pts, f0, wh):
+    """Minimal-sample absolute pose: RANSAC P3P over 2D-3D candidates.
+
+    The trimmed-LS ``pose_refine`` needs a decent inlier fraction; a
+    junk-match-dominated image (dino img 52: ~7-10% true 2D-3D pairs from a
+    4x physical scale gap) defeats it, while minimal 3-point sampling finds
+    the consensus routinely.  Uses pycolmap's estimator (experiment-grade;
+    a native Lambda-Twist P3P belongs with the planned geometric verifier).
+    Returns (rvec, tvec, inlier mask over the given obs) or None."""
+    try:
+        import pycolmap
+    except ImportError:
+        return None
+    w, h = float(wh[0]), float(wh[1])
+    cam = pycolmap.Camera(
+        model="SIMPLE_PINHOLE",
+        width=int(w),
+        height=int(h),
+        params=[f0, w / 2.0, h / 2.0],
+    )
+    uv = np.ascontiguousarray(uv_centered + np.array([w / 2.0, h / 2.0]))
+    ans = pycolmap.estimate_and_refine_absolute_pose(
+        uv, np.ascontiguousarray(x_pts), cam
+    )
+    if ans is None:
+        return None
+    rig = ans["cam_from_world"]
+    q = np.asarray(rig.rotation.quat)  # xyzw
+    rv = Rotation.from_quat(q).as_rotvec()
+    tv = np.asarray(rig.translation, dtype=np.float64)
+    return rv, tv, np.asarray(ans["inlier_mask"], dtype=bool)
 
 
 def pose_refine(uv, x_pts, rv0, tv0, f):
@@ -562,23 +595,61 @@ def grow_loop(
                 force_tried.add(j)
                 blocked.discard(j)
                 sj = (obs_i == j) & ~np.isnan(pts[obs_c, 0])
-                posed_idx = np.nonzero(posed)[0].astype(np.uint32)
-                inits = covis.rank_by_covisibility(j, posed_idx)[:3]
-                best_j = None
-                for k in inits:
-                    rv, tv, inl = pose_refine(
-                        u[sj], pts[obs_c[sj]], rvec[k], tvec[k], f0
+                sj_idx = np.nonzero(sj)[0]
+                # RANSAC P3P first: a junk-dominated image (wrong matches
+                # from a scale gap) can hold a small true consensus that
+                # trimmed-LS can never find (dino img 52: ~7-10% inliers,
+                # P3P registers at 0.33 deg vs 0% from every LS init).
+                consensus = None
+                p3p = (
+                    p3p_resect(u[sj], pts[obs_c[sj]], f0, aux[2][j])
+                    if aux is not None and len(aux) > 2
+                    else None
+                )
+                if p3p is not None and int(p3p[2].sum()) >= 12:
+                    rv0, tv0, mask = p3p
+                    # polish on the consensus subset only (mostly inliers)
+                    rv, tv, inl_c = pose_refine(
+                        u[sj][mask], pts[obs_c[sj]][mask], rv0, tv0, f0
                     )
-                    if best_j is None or inl > best_j[0]:
-                        best_j = (inl, rv, tv)
+                    best_j = (float(inl_c), rv, tv)
+                    consensus = sj_idx[mask]
+                    if TRACE:
+                        print(f"    p3p img {j}: {int(mask.sum())}/"
+                              f"{int(sj.sum())} RANSAC inliers, "
+                              f"consensus refit inl {inl_c:.0%}")
+                else:
+                    posed_idx = np.nonzero(posed)[0].astype(np.uint32)
+                    inits = covis.rank_by_covisibility(j, posed_idx)[:3]
+                    best_j = None
+                    for k in inits:
+                        rv, tv, inl = pose_refine(
+                            u[sj], pts[obs_c[sj]], rvec[k], tvec[k], f0
+                        )
+                        if best_j is None or inl > best_j[0]:
+                            best_j = (inl, rv, tv)
                 _, rvec[j], tvec[j] = best_j
                 posed[j] = True
                 rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
                 since_ba = 0
                 inl_after = image_inl(j, rvec, tvec, pts)
                 bar = 0.35 * float(np.median(accepted_inl)) if accepted_inl else 0.0
-                if inl_after >= bar:
-                    accepted_inl.append(inl_after)
+                # Verification: the all-obs inlier bar, OR — for a
+                # P3P-registered image whose observations are mostly wrong
+                # MATCHES — survival of the P3P consensus set through the
+                # BA (the registration claim is those obs, not the junk).
+                surv = np.nan
+                if consensus is not None:
+                    xc = Rotation.from_rotvec(rvec[j]).apply(
+                        pts[obs_c[consensus]]
+                    ) + tvec[j]
+                    z = np.maximum(xc[:, 2], 1e-6)
+                    rn = np.linalg.norm(
+                        f0 * xc[:, :2] / z[:, None] - u[consensus], axis=1
+                    )
+                    surv = float((rn < 3.0).mean())
+                if inl_after >= bar or (consensus is not None and surv >= 0.5):
+                    accepted_inl.append(max(inl_after, bar))
                     pts = fill_new_points(
                         pts, obs_c, obs_i, u, rvec, tvec, posed, f0
                     )
@@ -586,12 +657,16 @@ def grow_loop(
                     blocked.clear()
                     if TRACE:
                         print(f"    force-accept img {j}: {best_j[0]:.0%} -> "
-                              f"{inl_after:.0%} after BA (kept)")
+                              f"{inl_after:.0%} after BA"
+                              f"{'' if consensus is None else f', consensus surv {surv:.0%}'}"
+                              f" (kept)")
                 else:
                     posed[j] = False
                     if TRACE:
                         print(f"    force-reject img {j}: {best_j[0]:.0%} -> "
-                              f"{inl_after:.0%} after BA (unposed)")
+                              f"{inl_after:.0%} after BA"
+                              f"{'' if consensus is None else f', consensus surv {surv:.0%}'}"
+                              f" (unposed)")
                 continue
             break
         s = (obs_i == i) & ~np.isnan(pts[obs_c, 0])
@@ -1212,7 +1287,7 @@ def main():
         active_cl[qual_order[: bounds[tier]]] = True
         act = active_cl[all_c]
         obs_c, obs_i, u = all_c[act], all_i[act], all_u[act]
-        aux = (ds_all[act], ref_img)
+        aux = (ds_all[act], ref_img, dims)
         bam = ba_cl[all_c][act]
         print(
             f"tier 0..{tier}: {int(active_cl.sum())} clusters, "
@@ -1324,7 +1399,7 @@ def main():
               f"{len(obs_c)} observations")
         pts = fill_new_points(pts, obs_c, obs_i, u, rvec, tvec, posed, f)
         covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
-        aux = (ds_all[act], ref_img)
+        aux = (ds_all[act], ref_img, dims)
         bam = ba_cl[all_c][act]
         posed_before = int(posed.sum())
         rvec, tvec, pts, posed = grow_loop(
