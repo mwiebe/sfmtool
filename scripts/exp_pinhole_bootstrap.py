@@ -645,7 +645,16 @@ def grow_loop(
                 # leave it (restored if verification rejects).
                 ba_saved = None
                 if consensus is not None and ba is not None:
-                    ba_saved = ba[sj_idx].copy()
+                    ba_saved = ba.copy()
+                    # Promote the WHOLE consensus clusters (all members'
+                    # obs), not just image j's rows: with only j's obs in
+                    # the BA, each anchored point has a single participating
+                    # observation, the inter-round retriangulation wipes it
+                    # to NaN, and the image saves with a pose but zero kept
+                    # features.  Then quarantine j's non-consensus (junk)
+                    # obs out of the BA.
+                    cons_cl = np.unique(obs_c[consensus])
+                    ba[np.isin(obs_c, cons_cl)] = True
                     ba[sj_idx] = False
                     ba[consensus] = True
                 rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
@@ -681,7 +690,7 @@ def grow_loop(
                 else:
                     posed[j] = False
                     if ba_saved is not None:
-                        ba[sj_idx] = ba_saved
+                        ba[:] = ba_saved
                     if TRACE:
                         print(f"    force-reject img {j}: {best_j[0]:.0%} -> "
                               f"{inl_after:.0%} after BA"
