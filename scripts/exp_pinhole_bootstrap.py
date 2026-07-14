@@ -391,8 +391,14 @@ def p3p_resect(uv_centered, x_pts, f0, wh):
         params=[f0, w / 2.0, h / 2.0],
     )
     uv = np.ascontiguousarray(uv_centered + np.array([w / 2.0, h / 2.0]))
+    # Tight RANSAC threshold: the default 12 px consensus is mostly loose
+    # junk on a wrong-match-heavy image (dino img 52: 95 "inliers" of which
+    # ~22 hold at 3 px), and anchoring the verification BA on it drags the
+    # pose.  4 px matches the bootstrap's TRIM_PX.
+    opts = pycolmap.AbsolutePoseEstimationOptions()
+    opts.ransac.max_error = 4.0
     ans = pycolmap.estimate_and_refine_absolute_pose(
-        uv, np.ascontiguousarray(x_pts), cam
+        uv, np.ascontiguousarray(x_pts), cam, estimation_options=opts
     )
     if ans is None:
         return None
