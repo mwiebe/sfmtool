@@ -630,6 +630,18 @@ def grow_loop(
                             best_j = (inl, rv, tv)
                 _, rvec[j], tvec[j] = best_j
                 posed[j] = True
+                # A P3P-registered image's clusters are mostly junk matches
+                # and mostly absent from the BA set, so the growth BA would
+                # leave its pose anchored on almost nothing (dino img 52:
+                # registered at 47% inl, then dragged to 10% by a BA that
+                # held ~7 of its obs).  Anchor it on its own verified
+                # evidence: consensus obs enter the BA set, its junk obs
+                # leave it (restored if verification rejects).
+                ba_saved = None
+                if consensus is not None and ba is not None:
+                    ba_saved = ba[sj_idx].copy()
+                    ba[sj_idx] = False
+                    ba[consensus] = True
                 rvec, tvec, pts = run_grow_ba(rvec, tvec, pts)
                 since_ba = 0
                 inl_after = image_inl(j, rvec, tvec, pts)
@@ -662,6 +674,8 @@ def grow_loop(
                               f" (kept)")
                 else:
                     posed[j] = False
+                    if ba_saved is not None:
+                        ba[sj_idx] = ba_saved
                     if TRACE:
                         print(f"    force-reject img {j}: {best_j[0]:.0%} -> "
                               f"{inl_after:.0%} after BA"
