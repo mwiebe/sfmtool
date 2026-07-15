@@ -421,37 +421,41 @@ def p3p_resect(uv_centered, x_pts, f0, wh):
     The trimmed-LS ``pose_refine`` needs a decent inlier fraction; a
     junk-match-dominated image (dino img 52: ~7-10% true 2D-3D pairs from a
     4x physical scale gap) defeats it, while minimal 3-point sampling finds
-    the consensus routinely.  Uses pycolmap's estimator (experiment-grade;
-    a native Lambda-Twist P3P belongs with the planned geometric verifier).
-    Returns (rvec, tvec, inlier mask over the given obs) or None."""
-    try:
-        import pycolmap
-    except ImportError:
-        return None
+    the consensus routinely.  Uses the native Lambda Twist estimator
+    (specs/core/absolute-pose.md); a tight 4 px threshold matches the
+    bootstrap's TRIM_PX (a loose consensus is mostly junk on a
+    wrong-match-heavy image and anchoring the verification BA on it drags
+    the pose).  Returns (rvec, tvec, inlier mask over the given obs) or
+    None."""
+    from sfmtool._sfmtool.geometry import CameraIntrinsics, estimate_absolute_pose
+
     w, h = float(wh[0]), float(wh[1])
-    cam = pycolmap.Camera(
-        model="SIMPLE_PINHOLE",
-        width=int(w),
-        height=int(h),
-        params=[f0, w / 2.0, h / 2.0],
+    cam = CameraIntrinsics.from_dict(
+        {
+            "model": "SIMPLE_PINHOLE",
+            "width": int(w),
+            "height": int(h),
+            "parameters": {
+                "focal_length": float(f0),
+                "principal_point_x": w / 2.0,
+                "principal_point_y": h / 2.0,
+            },
+        }
     )
     uv = np.ascontiguousarray(uv_centered + np.array([w / 2.0, h / 2.0]))
-    # Tight RANSAC threshold: the default 12 px consensus is mostly loose
-    # junk on a wrong-match-heavy image (dino img 52: 95 "inliers" of which
-    # ~22 hold at 3 px), and anchoring the verification BA on it drags the
-    # pose.  4 px matches the bootstrap's TRIM_PX.
-    opts = pycolmap.AbsolutePoseEstimationOptions()
-    opts.ransac.max_error = 4.0
-    ans = pycolmap.estimate_and_refine_absolute_pose(
-        uv, np.ascontiguousarray(x_pts), cam, estimation_options=opts
+    ans = estimate_absolute_pose(
+        uv, np.ascontiguousarray(x_pts), camera=cam, max_error_px=4.0, seed=0
     )
     if ans is None:
         return None
-    rig = ans["cam_from_world"]
-    q = np.asarray(rig.rotation.quat)  # xyzw
-    rv = Rotation.from_quat(q).as_rotvec()
-    tv = np.asarray(rig.translation, dtype=np.float64)
-    return rv, tv, np.asarray(ans["inlier_mask"], dtype=bool)
+    # The estimator returns a canonical world-to-camera pose; the script
+    # works in the COLMAP camera convention — flip the camera frame (S).
+    q = np.asarray(ans["quaternion_wxyz"])
+    r_can = Rotation.from_quat(q[[1, 2, 3, 0]]).as_matrix()
+    s_flip = np.diag([1.0, -1.0, -1.0])
+    rv = Rotation.from_matrix(s_flip @ r_can).as_rotvec()
+    tv = s_flip @ np.asarray(ans["translation"], dtype=np.float64)
+    return rv, tv, np.asarray(ans["inliers"], dtype=bool)
 
 
 def pose_refine(uv, x_pts, rv0, tv0, f):
