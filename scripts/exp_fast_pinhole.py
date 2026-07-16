@@ -66,6 +66,8 @@ SHELL = int(os.environ.get("SFMTOOL_SHELL", "6"))
 # Per-image BA row cap: each image keeps only its best observations (by
 # admission rank), so BA cost stays flat as the shell widens the image set.
 OBS_PER_IMG = int(os.environ.get("SFMTOOL_OBS_PER_IMG", "250"))
+# Anchor-cluster budget for the photometric verification pass.
+N_ANCHORS = int(os.environ.get("SFMTOOL_ANCHORS", "400"))
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 
 # Canonical camera frame (-Z forward, +Y up) throughout; full-pixel
@@ -116,11 +118,15 @@ def load_clusters():
 
     starts = np.asarray(data["cluster_starts"])
     mi = np.asarray(data["member_images"])
+    mf = np.asarray(data["member_features"])
     st = np.asarray(data["member_status"])
     refs = np.asarray(data["reference_members"])
     aff = np.asarray(data["member_affines"])
+    cons = np.asarray(data["member_consistency_residual"], dtype=np.float64)
 
-    usable = []  # (span, cluster id, member selection)
+    # (span, cluster id, member selection, worst finite warp-consistency
+    # residual — lower = better; inf where no member entered the fit)
+    usable = []
     for c in range(len(starts) - 1):
         lo, hi = int(starts[c]), int(starts[c + 1])
         if refs[c] == np.iinfo(np.uint32).max:
@@ -128,28 +134,34 @@ def load_clusters():
         sel = np.nonzero((st[lo:hi] == 0) | (st[lo:hi] == 1))[0] + lo
         span = len(np.unique(mi[sel]))
         if span >= 2:
-            usable.append((span, c, sel))
+            cq = cons[sel]
+            cq = cq[np.isfinite(cq)]
+            usable.append((span, c, sel, float(cq.max()) if len(cq) else np.inf))
     spans = np.array([t[0] for t in usable])
     cids = np.array([t[1] for t in usable])
     order = np.lexsort((cids, -spans))
     rank = np.empty(len(usable), np.int64)
     rank[order] = np.arange(len(usable))
 
-    obs_c, obs_i, obs_uv, adm_rank = [], [], [], []
+    obs_c, obs_i, obs_f, obs_uv, adm_rank, quality = [], [], [], [], [], []
     for n_cl, k in enumerate(sorted(range(len(usable)), key=lambda k: cids[k])):
-        _span, _c, sel = usable[k]
+        _span, _c, sel, q = usable[k]
         adm_rank.append(rank[k])
+        quality.append(q)
         for m in sel:
             obs_c.append(n_cl)
             obs_i.append(int(mi[m]))
+            obs_f.append(int(mf[m]))
             obs_uv.append(aff[m, :, 2])
     return {
         "names": names,
         "dims": dims,
         "obs_c": np.asarray(obs_c),
         "obs_i": np.asarray(obs_i),
+        "obs_f": np.asarray(obs_f),
         "obs_uv": np.asarray(obs_uv, dtype=np.float64),
         "adm_rank": np.asarray(adm_rank, dtype=np.int64),
+        "cl_quality": np.asarray(quality, dtype=np.float64),
         "n_img": len(names),
         "n_cl": len(usable),
     }
@@ -669,6 +681,106 @@ def widen(rvec, tvec, pts, posed, f0, obs_c, obs_i, u, n_img, n_cl, bam, gate):
     return rvec, tvec, pts, posed
 
 
+# ── Photometric verification (embed-patches machinery) ──────────────────────
+
+
+def localize_anchors(names, sub, rvec, tvec, f0, pts_a, tr_a, tr_img, tr_feat):
+    """Congeal-localize anchor keypoints across an image subset.
+
+    Builds an in-memory reconstruction over ``sub`` (image indexes, all
+    posed), a feature-scaled mean-viewing-normal patch cloud over the
+    anchor points, and an in-memory pyramid set, then localizes every
+    anchor in EVERY subset view (a patch tile is registered against the
+    leave-one-out consensus of the other views' tiles).  Returns
+    (anchor idx, full image idx, keypoint xy) arrays of the KEPT views —
+    appearance-verified observations.  Cost: ~1-2 s for 400 anchors over
+    ~15 4K frames, pyramids included.
+    """
+    import cv2
+
+    from sfmtool._sfmtool import ImagePyramidSet, PatchCloud, SfmrReconstruction
+    from sfmtool._workspace import load_workspace_config
+    from sfmtool.colmap.io import (
+        _build_sfmr_data_dict,
+        _resolve_workspace_and_sift,
+        build_metadata,
+        finite_positions_xyzw,
+    )
+
+    sub_names = [names[int(g)] for g in sub]
+    q = Rotation.from_rotvec(rvec[sub]).as_quat()[:, [3, 0, 1, 2]]
+    counts = np.bincount(tr_a, minlength=len(pts_a)).astype(np.uint32)
+    wsdir, _contents, resolved, ft_hashes, sc_hashes, thumbs = (
+        _resolve_workspace_and_sift(sub_names, WS.resolve())
+    )
+    metadata = build_metadata(
+        workspace_dir=wsdir,
+        output_path=WS.resolve() / "sfmr" / "fast-pinhole-anchors.sfmr",
+        workspace_config=load_workspace_config(wsdir),
+        operation="fast_pinhole_anchors",
+        tool_name="sfmtool",
+        tool_options={},
+        image_count=len(sub_names),
+        point_count=len(pts_a),
+        observation_count=int(counts.sum()),
+        camera_count=1,
+    )
+    sfmr_dict = _build_sfmr_data_dict(
+        cameras=[make_cam(f0)],
+        image_names=resolved,
+        camera_indexes=np.zeros(len(sub_names), dtype=np.uint32),
+        quaternions_wxyz=q,
+        translations_xyz=tvec[sub],
+        positions_xyzw=finite_positions_xyzw(pts_a),
+        colors_rgb=np.zeros((len(pts_a), 3), np.uint8),
+        reprojection_errors=np.zeros(len(pts_a), np.float32),
+        track_image_indexes=tr_img.astype(np.uint32),
+        track_feature_indexes=tr_feat.astype(np.uint32),
+        point_indexes=tr_a.astype(np.uint32),
+        observation_counts=counts,
+        feature_tool_hashes=ft_hashes,
+        sift_content_hashes=sc_hashes,
+        thumbnails=thumbs,
+        metadata=metadata,
+    )
+    recon = SfmrReconstruction.from_data(wsdir, sfmr_dict)
+    imgs = [
+        np.ascontiguousarray(cv2.imread(str(wsdir / n), cv2.IMREAD_COLOR))
+        for n in sub_names
+    ]
+    pyrset = ImagePyramidSet(recon, imgs)
+    # Patch size must track the FEATURE scale: a fixed pixel radius that is
+    # fine on a 480 px frame is hopelessly small on 4K (a 12 px tile has no
+    # discriminative texture and a patch-grid search budget of a few source
+    # px, so localization can neither reach nor reject anything).
+    cloud = PatchCloud.from_reconstruction(
+        recon, normal="mean_viewing", extent="feature_size", extent_value=2.5
+    )
+    all_views = list(range(len(sub_names)))
+    results = cloud.localize_keypoints(
+        recon,
+        pyrset,
+        view_sets=dict.fromkeys(range(len(pts_a)), all_views),
+        max_shift_px=60.0,
+        search=12.0,
+        min_relative_zncc=0.6,
+    )
+    a_idx, i_idx, uv = [], [], []
+    for r in results:
+        pid = int(r["point_index"])
+        views = np.asarray(r["views"])
+        kps = np.asarray(r["keypoints"], dtype=np.float64)
+        for k, v in enumerate(views):
+            a_idx.append(pid)
+            i_idx.append(int(sub[int(v)]))
+            uv.append(kps[k])
+    return (
+        np.asarray(a_idx),
+        np.asarray(i_idx),
+        np.asarray(uv, dtype=np.float64).reshape(-1, 2),
+    )
+
+
 # ── Evaluation ───────────────────────────────────────────────────────────────
 
 
@@ -845,13 +957,58 @@ def main():
         rvec, tvec, pts, posed, f_probe, obs_c, obs_i, u, n_img, n_cl, bam,
         gate=0.35 * med_inl,
     )
-    denom = ba_rows(posed[obs_i] & bam, obs_i)
     print(f"widened to {int(posed.sum())}/{n_img} images [{elapsed():.1f}s]")
+
+    # Photometric verification of the widened set: anchors (valid points,
+    # >= 3 posed views, best stored warp-consistency first) are localized
+    # in every posed view; an image that keeps too little photometric
+    # support is a junk rung the geometric gates missed — un-pose it before
+    # the focal scan.  The verified keypoints themselves stay OUT of the
+    # estimation: the localization renders through the current geometry,
+    # so they carry a bias toward the probe focal (seoul's scan moved from
+    # 336 to 432 when fed them) — appearance VERIFIES, geometry decides.
+    pv = np.bincount(obs_c[posed[obs_i]], minlength=n_cl)
+    cand_a = np.nonzero(~np.isnan(pts[:, 0]) & (pv >= 3))[0]
+    cand_a = cand_a[np.argsort(data["cl_quality"][cand_a], kind="stable")]
+    anchors = cand_a[:N_ANCHORS]
+    a_of_cl = np.full(n_cl, -1, np.int64)
+    a_of_cl[anchors] = np.arange(len(anchors))
+    sub = np.nonzero(posed)[0]
+    rows = np.nonzero((a_of_cl[obs_c] >= 0) & posed[obs_i])[0]
+    ai = a_of_cl[obs_c[rows]]
+    order = np.argsort(ai, kind="stable")
+    rows, ai = rows[order], ai[order]
+    sub_of_full = np.full(n_img, -1, np.int64)
+    sub_of_full[sub] = np.arange(len(sub))
+    a_c, a_i, _a_uv = localize_anchors(
+        data["names"],
+        sub,
+        rvec,
+        tvec,
+        f_probe,
+        pts[anchors],
+        ai,
+        sub_of_full[obs_i[rows]],
+        data["obs_f"][rows],
+    )
+    kept_per_img = np.bincount(a_i, minlength=n_img)
+    floor = max(15, 0.2 * np.median(kept_per_img[sub]))
+    for j in sub:
+        if kept_per_img[j] < floor:
+            posed[j] = False
+            print(f"  un-posing image {j}: {kept_per_img[j]} verified obs "
+                  f"(floor {floor:.0f})")
+    print(f"photometric verify kept {int(posed.sum())}/{len(sub)} images "
+          f"[{elapsed():.1f}s]")
+    denom = ba_rows(posed[obs_i] & bam, obs_i)
 
     # Focal scan on the widened geometry: per candidate, rescale the
     # translations (depth scale ~ f), retriangulate, staged fixed-f BA.
-    best = None
-    for f_try in np.asarray(F_GRID) * max(_CAM_WH):
+    # Two phases: a capped-iteration pass ranks all candidates cheaply, and
+    # heavier refits decide between the top two (neighbouring candidates
+    # can rank within a point of each other — DinoLedge flips at 52 vs 54 —
+    # and the light pass is not reliable at that margin).
+    def scan_candidate(f_try, nfev):
         scale = f_try / f_probe
         rv_t, tv_t = rvec.copy(), tvec * scale
         rot = Rotation.from_rotvec(rv_t).as_matrix()
@@ -868,11 +1025,23 @@ def main():
             n_img,
             n_cl,
             opt_f=False,
+            max_nfev=nfev,
         )
         inl = float((res < 2.0).sum() / max(int(denom.sum()), 1))
-        print(f"f={f_try:6.1f}: inlier<2px {100 * inl:5.1f}% [{elapsed():.1f}s]")
-        if best is None or inl > best[0]:
-            best = (inl, f_try, rv_t, tv_t, p_t)
+        return inl, f_try, rv_t, tv_t, p_t
+
+    coarse = []
+    for f_try in np.asarray(F_GRID) * max(_CAM_WH):
+        cand = scan_candidate(f_try, 25)
+        coarse.append(cand)
+        print(f"f={cand[1]:6.1f}: inlier<2px {100 * cand[0]:5.1f}% "
+              f"[{elapsed():.1f}s]")
+    coarse.sort(key=lambda t: -t[0])
+    finals = [scan_candidate(c[1], 60) for c in coarse[:2]]
+    for c in finals:
+        print(f"f={c[1]:6.1f} (refit): inlier<2px {100 * c[0]:5.1f}% "
+              f"[{elapsed():.1f}s]")
+    best = max(finals, key=lambda t: t[0])
 
     inl0, f, rvec, tvec, pts = best
     print(f"scan winner: f = {f:.1f} [{elapsed():.1f}s]; releasing f")
@@ -895,15 +1064,18 @@ def main():
             n_img,
             n_cl,
             opt_f=True,
+            max_nfev=30,
         )
         inl = float((res < 2.0).sum() / max(int(denom.sum()), 1))
         # The affine collapse is an UPWARD escape: on narrow or shallow
-        # geometry, f -> inf keeps fitting better (rising inlier fraction),
-        # so a release that leaves the scan winner's basin upward
-        # contradicts the scan's trim-consistent ranking and loses to it.
-        # Downward walks are legitimate (a true focal below the grid floor
-        # releases past the smallest candidate) up to a plausibility floor.
-        if f > 1.35 * best[1] or f < 0.3 * max(_CAM_WH):
+        # geometry, f -> inf keeps fitting better (rising inlier fraction —
+        # which also means the keep-best rule cannot be trusted upward), so
+        # a release drifting above the scan winner contradicts the scan's
+        # trim-consistent ranking and loses to it (every legitimate upward
+        # walk observed stayed under +10%).  Downward walks are legitimate
+        # (a true focal below the grid floor releases past the smallest
+        # candidate) up to a plausibility floor.
+        if f > 1.15 * best[1] or f < 0.3 * max(_CAM_WH):
             print(f"release left the scan basin (f = {f:.0f}); keeping previous")
             break
         if inl > kept[0]:
