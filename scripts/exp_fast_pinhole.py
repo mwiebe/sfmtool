@@ -1084,6 +1084,24 @@ def main():
             break
         f_prev = f
     inl, f, rvec, tvec, pts = kept
+
+    # Confidence flag for the failure classes rigid pinhole SfM cannot fix
+    # (diagnosed on the validation campaign): non-rigid / scene-changed
+    # captures (swivel-chair: people and a dog in frame, props moved
+    # mid-capture) and f-degenerate near-planar close-ups (dino-ledge)
+    # both leave NO focal fitting well — the best scan/release inlier
+    # fraction stays below the healthy band (broken: 17-54%, healthy: 62%+
+    # across the campaign) while the poses bend smoothly (bas-relief warp),
+    # so the per-image geometric and photometric checks all pass.  (A
+    # structure-thickness planarity test does NOT work: orbit captures
+    # produce thin relief shells of surface points, and the healthiest
+    # datasets measure as "planar" as the broken ones.)
+    flags = ["low_consensus"] if inl < 0.58 else []
+    if flags:
+        print(f"LOW CONFIDENCE: best inlier fraction {100 * inl:.1f}% — "
+              f"no focal fits this capture well (non-rigid scene or "
+              f"f-degenerate structure); do not trust the estimate")
+
     print(
         f"\nfast pinhole estimate: f = {f:.1f} px on {int(posed.sum())}/{n_img} "
         f"images, inlier<2px {100 * inl:.1f}% [{elapsed():.1f}s]"
@@ -1097,6 +1115,8 @@ def main():
         "posed_images": [n for j, n in enumerate(data["names"]) if posed[j]],
         "rvec": rvec[posed].tolist(),
         "tvec": tvec[posed].tolist(),
+        "confidence_flags": flags,
+        "inlier_fraction": round(inl, 4),
         "elapsed_s": round(elapsed(), 2),
     }
     (WS / "fast-pinhole.json").write_text(json.dumps(out, indent=1))
