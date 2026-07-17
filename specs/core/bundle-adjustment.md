@@ -93,10 +93,11 @@ their own choosing.
 ## The solve
 
 Levenberg–Marquardt over a local parameterization, minimizing the soft-L1
-robust cost
+robust cost applied per residual COMPONENT (matching scipy's element-wise
+`loss="soft_l1"` that this kernel replaces)
 
 ```
-cost = Σ_k s² · ρ(‖r_k‖² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_scale
+cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_scale
 ```
 
 - **Parameters.** Per touched image a local `SO(3) × ℝ³` perturbation
@@ -111,9 +112,15 @@ cost = Σ_k s² · ρ(‖r_k‖² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s =
   `pose_refine.rs`. An observation whose point is behind the camera /
   outside the model domain contributes residual `(1e6, 0)` with a zero
   Jacobian row — penalized, never steering.
-- **Robust weighting.** First-order IRLS: residual and Jacobian rows scale
-  by `w = ρ'(z)^½ = (1 + z)^(−¼)`; the true robust cost (not the weighted
-  surrogate) decides step acceptance.
+- **Robust weighting.** Second-order (Triggs-style) scaling, exactly
+  scipy's `scale_for_robust_loss_function`: per residual component with
+  `z = (r/s)²`, the Jacobian row scales by `√(ρ' + 2ρ''z)` — for soft-L1
+  `(1 + z)^(−¾)` — and the residual by `ρ'/√(ρ' + 2ρ''z) = (1 + z)^(+¼)`,
+  so `Jᵀr` is the true robust gradient while `JᵀJ` carries the corrected
+  curvature. The true robust cost (not the surrogate) decides step
+  acceptance. First-order IRLS was measurably worse here: its shallower
+  valley model stopped the focal release short on seoul (kept f at the
+  scan winner where scipy walked −20% to the reference focal).
 - **Schur complement.** Points are eliminated: per-point 3×3 blocks are
   inverted directly and the reduced camera system
   (`[f? | 6·n_im]`, dense) is solved by LU; point updates back-substitute.
@@ -121,8 +128,10 @@ cost = Σ_k s² · ρ(‖r_k‖² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s =
   re-evaluation), with Marquardt scaling `λ·diag(JᵀJ)` for the
   `x_scale="jac"` parameter-scale invariance of the scipy original.
 - **Termination.** `max_iters` accepted-step budget per round; stop early
-  when an accepted step improves the cost by less than `1e-8` relative, or
-  when no damping in a bounded ladder (12 doublings) finds a downhill step.
+  when accepted steps improve the cost by less than `1e-8` relative TWICE
+  in a row (one tiny step is how a traverse of a nearly-flat valley starts
+  — the focal release walks −20% through one), or when no damping in a
+  bounded ladder (12 doublings) finds a downhill step.
 
 ## Bindings
 

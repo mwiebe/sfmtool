@@ -144,11 +144,14 @@ def test_recovers_perturbed_poses_and_points():
     out = _run(s)
     res = out["residual_norms"]
     assert np.median(res) < 0.05, f"median {np.median(res)}"
-    # Cameras land back near truth (gauge pinned by the held camera 0).
-    for i in range(len(q_true)):
-        dot = abs(float(np.dot(out["quaternions_wxyz"][i], q_true[i])))
-        ang = 2 * np.arccos(min(1.0, dot))
-        assert ang < 5e-3, f"camera {i} rotation err {ang}"
+    # Cameras land back near truth up to the free global gauge: compare the
+    # relative rotations R_i · R_0ᵀ (gauge-invariant) against ground truth.
+    r_est = [_quat_to_matrix(q) for q in out["quaternions_wxyz"]]
+    r_true = [_quat_to_matrix(q) for q in q_true]
+    for i in range(1, len(q_true)):
+        rel = (r_est[i] @ r_est[0].T) @ (r_true[i] @ r_true[0].T).T
+        ang = np.arccos(min(1.0, (np.trace(rel) - 1) / 2))
+        assert ang < 5e-3, f"camera {i} relative rotation err {ang}"
 
 
 def _quat_to_matrix(q):

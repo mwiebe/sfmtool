@@ -410,6 +410,12 @@ def bundle_adjust(
         np.asarray(out["quaternions_wxyz"])[:, [1, 2, 3, 0]]
     ).as_rotvec()
     res = np.asarray(out["residual_norms"])
+    if os.environ.get("SFMTOOL_BA_DEBUG", "0") == "1":
+        print(
+            f"    [BA opt_f={int(opt_f)} n_obs={len(obs_c)} "
+            f"f {f0:.2f} -> {out['focal']:.2f}, "
+            f"inl<2 {(res < 2.0).mean():.3f}]"
+        )
     return (
         float(out["focal"]),
         rv,
@@ -1131,7 +1137,14 @@ def main():
     # structure-thickness planarity test does NOT work: orbit captures
     # produce thin relief shells of surface points, and the healthiest
     # datasets measure as "planar" as the broken ones.)
-    flags = ["low_consensus"] if inl < 0.58 else []
+    #
+    # The 0.60 cut is recalibrated for the native BA (the scipy-era band was
+    # broken 17-54% / healthy 62%+ with a 0.58 cut): the native optimizer
+    # squeezes more inliers out of a broken capture (kerry fisheye: 43% ->
+    # 58.7%), compressing the separation — on the in-repo datasets the gap is
+    # now 58.7% (broken) vs 61.8%+ (healthy).  Knife-edge; re-validate the
+    # band on the full campaign datasets.
+    flags = ["low_consensus"] if inl < 0.60 else []
     if flags:
         print(
             f"LOW CONFIDENCE: best inlier fraction {100 * inl:.1f}% — "

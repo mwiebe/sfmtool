@@ -66,17 +66,26 @@ pub struct BundleAdjustment {
     pub residual_norms: Vec<f64>,
 }
 
-/// Soft-L1 robust cost of a squared-norm-over-scale² argument:
-/// `ρ(z) = 2·(√(1 + z) − 1)`.
+/// Soft-L1 robust cost of a squared-residual-over-scale² argument:
+/// `ρ(z) = 2·(√(1 + z) − 1)`, applied per residual COMPONENT (matching
+/// scipy's element-wise `loss="soft_l1"` that this kernel replaces).
 #[inline]
 fn rho(z: f64) -> f64 {
     2.0 * ((1.0 + z).sqrt() - 1.0)
 }
 
-/// First-order IRLS weight `√(ρ'(z)) = (1 + z)^(−¼)`.
+/// Second-order (Triggs-style) robust scaling of one residual component,
+/// exactly scipy's `scale_for_robust_loss_function`: with `z = (r/s)²`,
+/// scale the Jacobian row by `√(ρ' + 2·ρ''·z)` and the residual by
+/// `ρ'/√(ρ' + 2·ρ''·z)`. For soft-L1 the curvature term collapses to
+/// `ρ' + 2ρ''z = (1 + z)^(−3/2)`, so the row scale is `(1 + z)^(−¾)` and the
+/// residual scale `(1 + z)^(+¼)`; the resulting `Jᵀr` equals the true robust
+/// gradient `ρ'·Jᵀr` while `JᵀJ` carries the corrected curvature.
 #[inline]
-fn irls_weight(z: f64) -> f64 {
-    (1.0 + z).powf(-0.25)
+fn robust_scales(z: f64) -> (f64, f64) {
+    let js = (1.0 + z).powf(-0.75);
+    let rs = (1.0 + z).powf(0.25);
+    (js, rs)
 }
 
 /// The shared camera at focal `f` (identity when the model has separate x/y
@@ -199,15 +208,14 @@ fn robust_cost(
         .enumerate()
         .map(|(kk, &k)| {
             let c = quats[obs_ci[kk]] * points[obs_cp[kk]] + trans[obs_ci[kk]];
-            let sq = match cam.ray_to_pixel([c.x, c.y, c.z]) {
+            match cam.ray_to_pixel([c.x, c.y, c.z]) {
                 Some((u, v)) => {
                     let dx = u - uv[k][0];
                     let dy = v - uv[k][1];
-                    dx * dx + dy * dy
+                    s2 * (rho(dx * dx / s2) + rho(dy * dy / s2))
                 }
-                None => INVALID_RESIDUAL * INVALID_RESIDUAL,
-            };
-            s2 * rho(sq / s2)
+                None => s2 * rho(INVALID_RESIDUAL * INVALID_RESIDUAL / s2),
+            }
         })
         .sum()
 }
@@ -268,6 +276,7 @@ fn solve_lm(
     let d = 1 + 6 * n_im;
     let s2 = loss_scale * loss_scale;
     let mut lambda = 1e-3;
+    let mut tiny_steps = 0usize;
     let mut cam = cam_at(cam0, f);
     let mut prev_cost = robust_cost(&cam, &q, &t, &x, uv, kept, &obs_ci, &obs_cp, loss_scale);
 
@@ -310,13 +319,23 @@ fn solve_lm(
                     let r_mat: Matrix3<f64> = q[ci].to_rotation_matrix().into_inner();
                     pt_j.copy_from(&(jp * r_mat));
                 }
-                let w = irls_weight(res.norm_squared() / s2);
+                for row in 0..2 {
+                    let z = res[row] * res[row] / s2;
+                    let (js, rs) = robust_scales(z);
+                    res[row] *= rs;
+                    for col in 0..7 {
+                        cam_j[(row, col)] *= js;
+                    }
+                    for col in 0..3 {
+                        pt_j[(row, col)] *= js;
+                    }
+                }
                 ObsBlocks {
                     ci,
                     cp,
-                    res: res * w,
-                    cam_j: cam_j * w,
-                    pt_j: pt_j * w,
+                    res,
+                    cam_j,
+                    pt_j,
                 }
             })
             .collect();
@@ -476,9 +495,17 @@ fn solve_lm(
                 prev_cost = new_cost;
                 lambda = (lambda * 0.5).max(1e-12);
                 improved = true;
+                // Converged only after tiny improvements twice in a row: a
+                // single small step is how a traverse of a nearly-flat
+                // valley STARTS (the focal release walks −20% through one),
+                // so one is not proof of convergence.
                 if rel < 1e-8 {
-                    // Converged: accept and stop iterating.
-                    lambda = f64::INFINITY;
+                    tiny_steps += 1;
+                    if tiny_steps >= 2 {
+                        lambda = f64::INFINITY;
+                    }
+                } else {
+                    tiny_steps = 0;
                 }
                 break;
             }
