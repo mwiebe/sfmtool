@@ -5,18 +5,26 @@
 
 The first stage of a divide-and-conquer bootstrap: from a workspace holding
 a `*-clusters-patches.matches` file, get to a good shared SIMPLE_PINHOLE
-estimate (focal + a small set of posed views) as fast as possible.  This is
-`exp_pinhole_bootstrap.py` cut down to the part before full growth:
+estimate (focal + a small set of posed views) as fast as possible.
 
-  1. Load patch clusters (span >= 2), keep only the best SFMTOOL_MAX_CL
-     clusters by span (the wide clusters carry both the covisibility signal
-     and the focal observability).
-  2. Covisibility seed groups -> affine ALS factorization + Tomasi-Kanade
-     metric upgrade of the best two candidate windows.
-  3. Fixed-focal scan over a small grid: seed a perspective solve per
-     candidate (both reflection hypotheses), grow by P3P resection to a
-     small image cap (SFMTOOL_SCAN_CAP), rank by inlier fraction.
-  4. Release f in a staged BA on the winner's subset -> final estimate.
+  1. Pairwise focal vote: wide-baseline image pairs each estimate a
+     fundamental matrix (native RANSAC) and cast a Bougnoux focal vote;
+     the median picks the BASIN — no structure, so no bas-relief trap.
+  2. Covisibility seed groups (parallax-gated: a video's most-covisible
+     frames are its most static ones) -> affine ALS factorization +
+     Tomasi-Kanade metric upgrade; grow an 8-image core by P3P resection
+     at a probe focal from the vote.
+  3. Ladder-widen (far-first verified resections), then one photometric
+     verification pass (feature-scaled patch localization) that un-poses
+     junk rungs the geometric gates missed.
+  4. Fixed-focal scan across a vote-centred grid on the widened geometry
+     (coarse ranking + heavy refits, arbitrated toward the bias-corrected
+     vote when the structure has no opinion), then an iterated release
+     with an anti-affine basin guard.
+  5. When the best consensus stays below the healthy band (non-rigid or
+     f-degenerate capture), report the structure-free vote instead of the
+     structure estimate — the flagged cases are exactly where structure
+     is a lottery and the vote is not.
 
 Run: pixi run -e dev python scripts/exp_fast_pinhole.py <workspace> [ref.sfmr]
 
@@ -40,7 +48,9 @@ from scipy.spatial.transform import Rotation
 from sfmtool._sfmtool.geometry import (
     CameraIntrinsics,
     estimate_absolute_pose,
+    estimate_fundamental,
     factorize_affine,
+    focal_from_fundamental,
     inlier_fraction as _inlier_fraction,
     refine_absolute_pose as _refine_absolute_pose,
     reprojection_residuals as _reprojection_residuals,
@@ -169,79 +179,19 @@ def load_clusters():
 
 # ── Pairwise focal vote (Bougnoux) ───────────────────────────────────────────
 #
-# Each wide-baseline image pair casts an independent focal vote: fundamental
-# matrix by 8-point RANSAC on the pair's cluster correspondences, then the
-# Bougnoux focal (principal point at the centre).  The median over pairs is
-# a consensus that needs NO reconstruction — immune to the bas-relief warp
-# that traps every structure-based estimate on hard captures (swivel-chair,
-# dino-ledge: votes within 5% where the full pipeline sat 17-84% off).  It
-# is coarse (-10..+5% observed), so it picks the BASIN: the probe focal and
-# the scan grid centre.  Structure-based release does the refinement.
-
-_ITILDE = np.diag([1.0, 1.0, 0.0])
-
-
-def _bougnoux_f(f_mat, pp):
-    p_h = np.array([pp[0], pp[1], 1.0])
-    _u, _s, vt = np.linalg.svd(f_mat.T)
-    e2 = vt[-1]
-    e2x = np.array(
-        [[0, -e2[2], e2[1]], [e2[2], 0, -e2[0]], [-e2[1], e2[0], 0]]
-    )
-    num = (p_h @ e2x @ _ITILDE @ f_mat @ p_h) * (p_h @ f_mat @ p_h)
-    den = p_h @ e2x @ _ITILDE @ f_mat @ _ITILDE @ f_mat.T @ p_h
-    if abs(den) < 1e-12:
-        return None
-    f2 = -num / den
-    return float(np.sqrt(f2)) if f2 > 0 else None
-
-
-def _fransac(x1, x2, rng, thresh=3.0, iters=300):
-    n = len(x1)
-    if n < 12:
-        return None
-
-    def norm_t(x):
-        m = x.mean(0)
-        s = np.sqrt(2.0) / max(np.linalg.norm(x - m, axis=1).mean(), 1e-9)
-        return np.array([[s, 0, -s * m[0]], [0, s, -s * m[1]], [0, 0, 1.0]])
-
-    t1, t2 = norm_t(x1), norm_t(x2)
-    x1h = np.hstack([x1, np.ones((n, 1))])
-    x2h = np.hstack([x2, np.ones((n, 1))])
-    x1n, x2n = x1h @ t1.T, x2h @ t2.T
-
-    def eight_point(idx):
-        a = (x2n[idx][:, :, None] * x1n[idx][:, None, :]).reshape(len(idx), 9)
-        _, _, vt = np.linalg.svd(a)
-        f_mat = vt[-1].reshape(3, 3)
-        uu, ss, vv = np.linalg.svd(f_mat)
-        return t2.T @ (uu @ np.diag([ss[0], ss[1], 0.0]) @ vv) @ t1
-
-    def sampson(f_px):
-        fx1 = x1h @ f_px.T
-        ftx2 = x2h @ f_px
-        num = (x2h * fx1).sum(1) ** 2
-        den = fx1[:, 0] ** 2 + fx1[:, 1] ** 2 + ftx2[:, 0] ** 2 + ftx2[:, 1] ** 2
-        return num / np.maximum(den, 1e-12)
-
-    best_mask, best_n = None, 0
-    for _ in range(iters):
-        try:
-            f_px = eight_point(rng.choice(n, 8, replace=False))
-        except np.linalg.LinAlgError:
-            continue
-        mask = sampson(f_px) < thresh**2
-        if mask.sum() > best_n:
-            best_n, best_mask = int(mask.sum()), mask
-    if best_mask is None or best_n < 12:
-        return None
-    return eight_point(np.nonzero(best_mask)[0])
+# Each wide-baseline image pair casts an independent focal vote: a native
+# fundamental-matrix estimate (RANSAC, `sfmtool-core`) on the pair's cluster
+# correspondences, then the Bougnoux focal of each camera (principal point at
+# the centre).  The median over pairs is a consensus that needs NO
+# reconstruction — immune to the bas-relief warp that traps every
+# structure-based estimate on hard captures (swivel-chair, dino-ledge: votes
+# within 5% where the full pipeline sat 17-84% off).  It is coarse (-10..+5%
+# observed), so it picks the BASIN: the probe focal and the scan grid centre.
+# Structure-based release does the refinement.
 
 
 def focal_vote(obs_c, obs_i, u, n_img):
     """Median Bougnoux focal over wide-baseline pairs, or None."""
-    rng = np.random.default_rng(0)
     pp = (_CAM_WH[0] / 2.0, _CAM_WH[1] / 2.0)
     row_of = {}
     cl_by_img = {}
@@ -271,12 +221,14 @@ def focal_vote(obs_c, obs_i, u, n_img):
     votes = []
     for i, j in pairs:
         sh = sorted(cl_by_img[i] & cl_by_img[j])
-        x1 = np.array([u[row_of[(c, i)]] for c in sh])
-        x2 = np.array([u[row_of[(c, j)]] for c in sh])
-        f_mat = _fransac(x1, x2, rng)
-        if f_mat is None:
+        x1 = np.ascontiguousarray([u[row_of[(c, i)]] for c in sh])
+        x2 = np.ascontiguousarray([u[row_of[(c, j)]] for c in sh])
+        est = estimate_fundamental(x1, x2, max_error_px=3.0, seed=0)
+        if est is None:
             continue
-        for v in (_bougnoux_f(f_mat, pp), _bougnoux_f(f_mat.T, pp)):
+        f_mat = est["f_matrix"]
+        for f_dir in (f_mat, np.ascontiguousarray(f_mat.T)):
+            v = focal_from_fundamental(f_dir, pp, pp)
             if v is not None and 0.2 * max(_CAM_WH) < v < 4 * max(_CAM_WH):
                 votes.append(v)
     if len(votes) < 8:
@@ -556,9 +508,7 @@ def ba_rows(live, obs_i):
     for i in np.unique(obs_i[idx]):
         rows = idx[obs_i[idx] == i]
         if len(rows) > OBS_PER_IMG:
-            keep[rows[np.argsort(_RANK_O[rows], kind="stable")[OBS_PER_IMG:]]] = (
-                False
-            )
+            keep[rows[np.argsort(_RANK_O[rows], kind="stable")[OBS_PER_IMG:]]] = False
     return keep
 
 
@@ -1025,6 +975,7 @@ def main():
             f"[{elapsed():.1f}s]"
         )
     else:
+        f_vote = None
         f_probe = 0.9 * max(_CAM_WH)
         f_grid = np.asarray(F_GRID) * max(_CAM_WH)
         print(f"no focal vote (sparse pairs); probing at {f_probe:.1f}")
@@ -1086,7 +1037,17 @@ def main():
     # ANY focal at high inlier fraction (bas-relief compensation), so both
     # the focal scan and the release only mean something on a wide arc.
     rvec, tvec, pts, posed = widen(
-        rvec, tvec, pts, posed, f_probe, obs_c, obs_i, u, n_img, n_cl, bam,
+        rvec,
+        tvec,
+        pts,
+        posed,
+        f_probe,
+        obs_c,
+        obs_i,
+        u,
+        n_img,
+        n_cl,
+        bam,
         gate=0.35 * med_inl,
     )
     print(f"widened to {int(posed.sum())}/{n_img} images [{elapsed():.1f}s]")
@@ -1128,10 +1089,14 @@ def main():
     for j in sub:
         if kept_per_img[j] < floor:
             posed[j] = False
-            print(f"  un-posing image {j}: {kept_per_img[j]} verified obs "
-                  f"(floor {floor:.0f})")
-    print(f"photometric verify kept {int(posed.sum())}/{len(sub)} images "
-          f"[{elapsed():.1f}s]")
+            print(
+                f"  un-posing image {j}: {kept_per_img[j]} verified obs "
+                f"(floor {floor:.0f})"
+            )
+    print(
+        f"photometric verify kept {int(posed.sum())}/{len(sub)} images "
+        f"[{elapsed():.1f}s]"
+    )
     denom = ba_rows(posed[obs_i] & bam, obs_i)
 
     # Focal scan on the widened geometry: per candidate, rescale the
@@ -1166,14 +1131,27 @@ def main():
     for f_try in f_grid:
         cand = scan_candidate(f_try, 25)
         coarse.append(cand)
-        print(f"f={cand[1]:6.1f}: inlier<2px {100 * cand[0]:5.1f}% "
-              f"[{elapsed():.1f}s]")
+        print(f"f={cand[1]:6.1f}: inlier<2px {100 * cand[0]:5.1f}% [{elapsed():.1f}s]")
     coarse.sort(key=lambda t: -t[0])
-    finals = [scan_candidate(c[1], 60) for c in coarse[:2]]
+    pick = [coarse[0], coarse[1]]
+    if f_vote is not None:
+        # A flat scan is f-degenerate structure with no opinion of its own —
+        # marginal captures then flip basins on run-to-run noise.  The
+        # pairwise vote is an INDEPENDENT measurement, so the candidate
+        # nearest the bias-corrected vote (the raw vote runs ~10% low)
+        # always earns a refit slot when it ranks within noise of the
+        # leader, and it wins outright when the refits tie.
+        near = min(coarse, key=lambda t: abs(np.log(t[1] / (1.1 * f_vote))))
+        if near[1] not in (pick[0][1], pick[1][1]) and near[0] >= coarse[0][0] - 0.05:
+            pick[1] = near
+    finals = [scan_candidate(c[1], 60) for c in pick]
     for c in finals:
-        print(f"f={c[1]:6.1f} (refit): inlier<2px {100 * c[0]:5.1f}% "
-              f"[{elapsed():.1f}s]")
+        print(
+            f"f={c[1]:6.1f} (refit): inlier<2px {100 * c[0]:5.1f}% [{elapsed():.1f}s]"
+        )
     best = max(finals, key=lambda t: t[0])
+    if f_vote is not None and abs(finals[0][0] - finals[1][0]) < 0.05:
+        best = min(finals, key=lambda t: abs(np.log(t[1] / (1.1 * f_vote))))
 
     inl0, f, rvec, tvec, pts = best
     print(f"scan winner: f = {f:.1f} [{elapsed():.1f}s]; releasing f")
@@ -1230,18 +1208,31 @@ def main():
     # datasets measure as "planar" as the broken ones.)
     flags = ["low_consensus"] if inl < 0.58 else []
     if flags:
-        print(f"LOW CONFIDENCE: best inlier fraction {100 * inl:.1f}% — "
-              f"no focal fits this capture well (non-rigid scene or "
-              f"f-degenerate structure); do not trust the estimate")
+        print(
+            f"LOW CONFIDENCE: best inlier fraction {100 * inl:.1f}% — "
+            f"no focal fits this capture well (non-rigid scene or "
+            f"f-degenerate structure); do not trust the structure estimate"
+        )
+        # When the structure pipeline disqualifies itself, its focal is a
+        # lottery over run-to-run noise (marginal captures flip basins on a
+        # 2% probe shift).  The pairwise vote never touched structure, so
+        # it is the more reliable focal on exactly these captures — report
+        # it as the estimate and keep the structure value alongside.
+        if f_vote is not None:
+            print(f"falling back to the structure-free pairwise vote: f = {f_vote:.1f}")
 
+    f_report = f_vote if (flags and f_vote is not None) else f
     print(
-        f"\nfast pinhole estimate: f = {f:.1f} px on {int(posed.sum())}/{n_img} "
-        f"images, inlier<2px {100 * inl:.1f}% [{elapsed():.1f}s]"
+        f"\nfast pinhole estimate: f = {f_report:.1f} px on "
+        f"{int(posed.sum())}/{n_img} images, inlier<2px {100 * inl:.1f}% "
+        f"[{elapsed():.1f}s]"
     )
-    compare_to_reference(data["names"], rvec, tvec, f, posed)
+    compare_to_reference(data["names"], rvec, tvec, f_report, posed)
 
     out = {
-        "focal_px": float(f),
+        "focal_px": float(f_report),
+        "focal_structure_px": float(f),
+        "focal_vote_px": None if f_vote is None else float(f_vote),
         "width": _CAM_WH[0],
         "height": _CAM_WH[1],
         "posed_images": [n for j, n in enumerate(data["names"]) if posed[j]],
