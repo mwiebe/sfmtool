@@ -1,4 +1,4 @@
-# Staged robust bundle adjustment (shared camera)
+# Staged bundle adjustment (shared camera)
 
 **Status:** Implemented —
 `crates/sfmtool-core/src/geometry/bundle_adjust.rs` (`bundle_adjust`,
@@ -36,9 +36,13 @@ handling dominated the bootstrap's wall-clock.
   (un-centered) pixel position.
 - A **track** is the set of observations of one point.
 
-The state arrays are full-sized: images and points never touched by an
-observation pass through unchanged (the solve compacts internally over what
-the observations reference).
+The state arrays are full-sized (the solve compacts internally over what
+the observations reference). Images never touched by an observation pass
+through unchanged. Points do too under a single-round schedule — but any
+retriangulation round (rounds after the first) rebuilds the whole points
+array from the supplied observations, so under a multi-round schedule an
+unobserved point comes back `NaN`, not unchanged (see step 1 below; the
+callers refill).
 
 ## The staged loop
 
@@ -104,14 +108,18 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   (`R ← exp(δθ)·R`, `t ← t + δt`); per touched point `X ← X + δX`; when
   `opt_f`, the shared focal `f ← f + δf`. Focal optimization requires
   `SIMPLE_PINHOLE` (single focal, no distortion), where
-  `∂(u, v)/∂f = ((u − cx)/f, (v − cy)/f)` exactly; other models are
-  rejected at the binding.
-- **Jacobian.** Analytic throughout: the projection block from
-  `CameraIntrinsics::ray_to_pixel_with_jacobian` composed with `−[R·X]ₓ`
-  (rotation), `I₃` (translation), and `R` (point) blocks, exactly as in
-  `pose_refine.rs`. An observation whose point is behind the camera /
-  outside the model domain contributes residual `(1e6, 0)` with a zero
-  Jacobian row — penalized, never steering.
+  `∂(u, v)/∂f = ((u − cx)/f, (v − cy)/f)` exactly; the binding rejects
+  `opt_f` for other models loudly, and the core silently degrades it to a
+  fixed-focal solve (never a half-modeled focal DOF).
+- **Jacobian.** The projection block `∂(u, v)/∂p_cam` — analytic from
+  `CameraIntrinsics::ray_to_pixel_with_jacobian` for the perspective
+  family, a central difference of `ray_to_pixel` for fisheye /
+  equirectangular models that have no analytic form — composed with
+  `−[R·X]ₓ` (rotation), `I₃` (translation), and `R` (point) blocks,
+  exactly as in `pose_refine.rs` (including the fallback). An observation
+  whose point is behind the camera / outside the model domain contributes
+  residual `(1e6, 0)` with a zero Jacobian row — penalized, never
+  steering.
 - **Robust weighting.** Second-order (Triggs-style) scaling, exactly
   scipy's `scale_for_robust_loss_function`: per residual component with
   `z = (r/s)²`, the Jacobian row scales by `√(ρ' + 2ρ''z)` — for soft-L1
@@ -131,7 +139,8 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   when accepted steps improve the cost by less than `1e-8` relative TWICE
   in a row (one tiny step is how a traverse of a nearly-flat valley starts
   — the focal release walks −20% through one), or when no damping in a
-  bounded ladder (12 doublings) finds a downhill step.
+  bounded ladder (12 ×4 escalations, capped at `λ = 10¹²`) finds a
+  downhill step.
 
 ## Bindings
 
@@ -174,10 +183,18 @@ Python's point of view).
   the state passed through.
 - **Retriangulation re-admission**: a `NaN` point with ≥ 2 observations is
   reborn in round 2 and its observations participate thereafter.
-- **Pass-through**: images/points not referenced by any observation are
-  returned bit-identical.
-- **Binding parity**: the Python binding reproduces the Rust result on a
-  small synthetic problem (`tests/rust_bindings/`).
+- **Pass-through**: images not referenced by any observation are returned
+  bit-identical; so are unreferenced points under a single-round schedule
+  (multi-round schedules retriangulate them to `NaN` by design).
+- **Non-perspective models**: a fisheye scene with perturbed poses
+  converges through the central-difference Jacobian fallback under a
+  single-round (no-retriangulation) schedule — guarding against a
+  zero-Jacobian no-op solve masked by live retriangulation.
+- **Memory order**: Fortran-ordered inputs to the binding produce the same
+  result as C-ordered ones (guards the `to_contiguous!` zero-copy path
+  against silent transposition).
+- **Binding behavior**: the Python binding reproduces the kernel's
+  behavior on analogous synthetic scenes (`tests/rust_bindings/`).
 
 ## Non-goals
 

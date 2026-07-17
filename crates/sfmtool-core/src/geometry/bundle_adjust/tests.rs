@@ -38,7 +38,10 @@ struct Scene {
 }
 
 fn make_scene(n_img: usize, n_pt: usize) -> Scene {
-    let cam = simple_pinhole(500.0);
+    make_scene_cam(simple_pinhole(500.0), n_img, n_pt)
+}
+
+fn make_scene_cam(cam: CameraIntrinsics, n_img: usize, n_pt: usize) -> Scene {
     let mut quats = Vec::new();
     let mut trans = Vec::new();
     for i in 0..n_img {
@@ -67,7 +70,7 @@ fn make_scene(n_img: usize, n_pt: usize) -> Scene {
             let Some((u, v)) = cam.ray_to_pixel([c.x, c.y, c.z]) else {
                 continue;
             };
-            if !(0.0..640.0).contains(&u) || !(0.0..480.0).contains(&v) {
+            if !(0.0..cam.width as f64).contains(&u) || !(0.0..cam.height as f64).contains(&v) {
                 continue;
             }
             uv.push([u, v]);
@@ -252,13 +255,21 @@ fn run_with_schedule(s: &mut Scene, schedule: &[BaSchedule]) -> BundleAdjustment
 #[test]
 fn min_track_drops_starved_points() {
     let mut s = make_scene(4, 30);
-    // Push one point's observations (except one) far off so trimming leaves
-    // a single survivor — the whole track must leave the solve, and the
-    // final residuals for it reflect the retriangulated NaN (infinite).
-    let victim = s.obs_pt[0];
+    // Perturb every point so the solve visibly moves the survivors, then
+    // push one point's observations (except one) far off so trimming leaves
+    // a single survivor — the whole track must leave the solve, and with a
+    // single-round schedule (no retriangulation to overwrite it) the
+    // starved point must come back bit-identical while clean points move.
+    for (p, x) in s.points.iter_mut().enumerate() {
+        for c in 0..3 {
+            x[c] += 0.03 * jitter(p, 60 + c as u64);
+        }
+    }
+    let victim = s.obs_pt[0] as usize;
+    let victim_before = s.points[victim];
     let mut first = true;
     for k in 0..s.uv.len() {
-        if s.obs_pt[k] == victim {
+        if s.obs_pt[k] as usize == victim {
             if first {
                 first = false;
                 continue;
@@ -266,28 +277,75 @@ fn min_track_drops_starved_points() {
             s.uv[k][0] += 500.0;
         }
     }
-    let schedule = [
-        BaSchedule {
-            trim_px: 4.0,
-            loss_scale: 1.0,
-        },
-        BaSchedule {
-            trim_px: 4.0,
-            loss_scale: 1.0,
-        },
-    ];
+    let schedule = [BaSchedule {
+        trim_px: 25.0,
+        loss_scale: 1.0,
+    }];
     let out = run_with_schedule(&mut s, &schedule);
-    // After the retriangulation round the starved track has < 2 trimmed-in
-    // observations... it is rebuilt from all its observations, but the
-    // corrupted ones dominate; either way the corrupted rows stay outliers.
-    let bad: Vec<f64> = (0..s.uv.len())
-        .filter(|&k| s.obs_pt[k] == victim && out.residual_norms[k] < 4.0)
-        .map(|k| out.residual_norms[k])
-        .collect();
+    assert_eq!(
+        s.points[victim], victim_before,
+        "starved track must be dropped from the solve (point untouched)"
+    );
+    let moved = (0..s.points.len())
+        .filter(|&p| p != victim && s.points[p] != [0.0; 3])
+        .filter(|&p| {
+            let d: f64 = (0..3)
+                .map(|c| (s.points[p][c] - victim_before[c]).abs())
+                .sum();
+            d > 0.0 // touched points differ from the victim; just count them
+        })
+        .count();
+    assert!(moved > 0);
+    // The corrupted rows end as outliers; the survivor row fits.
+    let bad = (0..s.uv.len())
+        .filter(|&k| s.obs_pt[k] as usize == victim && out.residual_norms[k] < 25.0)
+        .count();
+    assert!(bad <= 1, "corrupted track kept {bad} obs under the trim");
+}
+
+#[test]
+fn fisheye_solve_via_numeric_jacobian() {
+    // Non-perspective models have no analytic pixel Jacobian; the solve must
+    // fall back to the central difference (a zero-Jacobian regression left
+    // the LM unable to move anything while retriangulation still ran).
+    let cam = CameraIntrinsics {
+        model: CameraModel::OpenCVFisheye {
+            focal_length_x: 200.0,
+            focal_length_y: 200.0,
+            principal_point_x: 240.0,
+            principal_point_y: 240.0,
+            radial_distortion_k1: 0.05,
+            radial_distortion_k2: -0.01,
+            radial_distortion_k3: 0.0,
+            radial_distortion_k4: 0.0,
+        },
+        width: 480,
+        height: 480,
+    };
+    let mut s = make_scene_cam(cam, 5, 40);
+    let t_true = s.trans.clone();
+    for i in 0..s.trans.len() {
+        s.trans[i] += Vector3::new(
+            0.04 * jitter(i, 71),
+            0.04 * jitter(i, 72),
+            0.04 * jitter(i, 73),
+        );
+    }
+    // Single round: no retriangulation, so any improvement is the LM's.
+    let schedule = [BaSchedule {
+        trim_px: 50.0,
+        loss_scale: 1.0,
+    }];
+    let out = run_with_schedule(&mut s, &schedule);
+    let mut r: Vec<f64> = out.residual_norms.clone();
+    r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(r[r.len() / 2] < 0.05, "median residual {}", r[r.len() / 2]);
+    let moved = (0..s.trans.len())
+        .filter(|&i| (s.trans[i] - t_true[i]).norm() < 0.02)
+        .count();
     assert!(
-        bad.len() <= 1,
-        "corrupted track kept {} obs under 4px",
-        bad.len()
+        moved >= s.trans.len() - 1,
+        "only {moved} cameras recovered toward truth"
     );
 }
 

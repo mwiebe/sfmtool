@@ -1,7 +1,7 @@
 // Copyright The SfM Tool Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Binding for the staged robust bundle adjustment
+//! Binding for the staged bundle adjustment
 //! ([`sfmtool_core::geometry::bundle_adjust`]).
 
 use std::borrow::Cow;
@@ -16,7 +16,7 @@ use sfmtool_core::geometry::{bundle_adjust as core_bundle_adjust, BaSchedule};
 
 use crate::geometry::PyCameraIntrinsics;
 
-/// Staged robust bundle adjustment for images sharing one camera model.
+/// Staged bundle adjustment for images sharing one camera model.
 ///
 /// Jointly refines world-to-camera poses, world points, and optionally the
 /// shared focal length by minimizing soft-L1 pixel reprojection error over a

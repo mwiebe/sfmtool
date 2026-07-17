@@ -207,6 +207,23 @@ def test_opt_f_rejected_for_non_simple_pinhole():
         _run(s, opt_f=True)
 
 
+def test_fortran_order_inputs_match_c_order():
+    # A Fortran-ordered 2-D array satisfies as_slice() with column-major
+    # memory; the binding's to_contiguous! must not read it as row-major
+    # (a silent transpose regression gave focal 309 instead of 500 here).
+    s = _scene(n_img=8, n_pt=60)
+    s["cam"] = _cam(600.0)
+    ref = _run(s, opt_f=True)
+    f = _scene(n_img=8, n_pt=60)
+    f["cam"] = _cam(600.0)
+    for key in ("quats", "trans", "points", "uv"):
+        f[key] = np.asfortranarray(f[key])
+    out = _run(f, opt_f=True)
+    npt.assert_allclose(out["focal"], ref["focal"], rtol=0, atol=1e-9)
+    npt.assert_allclose(out["translations"], ref["translations"], atol=1e-9)
+    npt.assert_allclose(out["residual_norms"], ref["residual_norms"], atol=1e-9)
+
+
 def test_shape_validation():
     s = _scene()
     with pytest.raises(ValueError, match="uv"):

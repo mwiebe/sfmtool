@@ -1,7 +1,7 @@
 // Copyright The SfM Tool Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Staged robust bundle adjustment for images sharing one camera model.
+//! Staged bundle adjustment for images sharing one camera model.
 //!
 //! Jointly refines world-to-camera poses, world points, and optionally the
 //! shared focal length by minimizing soft-L1 pixel reprojection error over a
@@ -18,7 +18,7 @@
 
 use nalgebra::{DMatrix, DVector, Matrix3, Point3, SMatrix, UnitQuaternion, Vector2, Vector3};
 
-use crate::camera::CameraModel;
+use crate::camera::{CameraModel, PixelJacobian};
 use crate::reconstruction::triangulation::triangulate_batch;
 use crate::CameraIntrinsics;
 
@@ -88,8 +88,9 @@ fn robust_scales(z: f64) -> (f64, f64) {
     (js, rs)
 }
 
-/// The shared camera at focal `f` (identity when the model has separate x/y
-/// focals — `opt_f` is rejected for those at the API boundary).
+/// The shared camera at focal `f` (identity for every model but
+/// SIMPLE_PINHOLE — `opt_f` is gated on that model, so no other ever sees a
+/// moved focal).
 fn cam_at(cam: &CameraIntrinsics, f: f64) -> CameraIntrinsics {
     let mut out = cam.clone();
     if let CameraModel::SimplePinhole { focal_length, .. } = &mut out.model {
@@ -176,6 +177,35 @@ fn retriangulate(
             points[track_pt[t]] = [tri.point.x, tri.point.y, tri.point.z];
         }
     }
+}
+
+/// Projected pixel and the 2×3 projection Jacobian `∂(u, v)/∂p_cam` at a
+/// camera-frame point. Analytic for the perspective family; a central
+/// difference of `ray_to_pixel` for fisheye / equirectangular models, which
+/// have no analytic Jacobian yet (same fallback as `pose_refine`). `None`
+/// when the point is outside the model domain.
+fn project_with_jac(
+    cam: &CameraIntrinsics,
+    p_cam: Vector3<f64>,
+    analytic: bool,
+) -> Option<PixelJacobian> {
+    if analytic {
+        return cam.ray_to_pixel_with_jacobian([p_cam.x, p_cam.y, p_cam.z]);
+    }
+    let uv = cam.ray_to_pixel([p_cam.x, p_cam.y, p_cam.z])?;
+    let h = 1e-6;
+    let mut j = [[0.0f64; 3]; 2];
+    for c in 0..3 {
+        let mut pp = p_cam;
+        let mut pm = p_cam;
+        pp[c] += h;
+        pm[c] -= h;
+        let (up, vp) = cam.ray_to_pixel([pp.x, pp.y, pp.z])?;
+        let (um, vm) = cam.ray_to_pixel([pm.x, pm.y, pm.z])?;
+        j[0][c] = (up - um) / (2.0 * h);
+        j[1][c] = (vp - vm) / (2.0 * h);
+    }
+    Some((uv, j))
 }
 
 /// Linearization of one observation: weighted residual and the weighted
@@ -280,6 +310,7 @@ fn solve_lm(
     let mut cam = cam_at(cam0, f);
     let mut prev_cost = robust_cost(&cam, &q, &t, &x, uv, kept, &obs_ci, &obs_cp, loss_scale);
 
+    let analytic = cam.model.supports_pixel_jacobian();
     for _ in 0..max_iters {
         // ── Linearize at the current state ───────────────────────────────
         let (cx, cy) = cam.principal_point();
@@ -294,9 +325,7 @@ fn solve_lm(
                 let mut res = Vector2::new(INVALID_RESIDUAL, 0.0);
                 let mut cam_j = SMatrix::<f64, 2, 7>::zeros();
                 let mut pt_j = SMatrix::<f64, 2, 3>::zeros();
-                if let Some(((u, v), jp)) =
-                    cam.ray_to_pixel_with_jacobian([p_cam.x, p_cam.y, p_cam.z])
-                {
+                if let Some(((u, v), jp)) = project_with_jac(&cam, p_cam, analytic) {
                     res = Vector2::new(u - uv[k][0], v - uv[k][1]);
                     let jp = SMatrix::<f64, 2, 3>::from_rows(&[
                         SMatrix::<f64, 1, 3>::from_row_slice(&jp[0]),
@@ -530,7 +559,7 @@ fn solve_lm(
     f
 }
 
-/// Staged robust bundle adjustment over images sharing one camera model.
+/// Staged bundle adjustment over images sharing one camera model.
 ///
 /// Per schedule round: retriangulate every point from all supplied
 /// observations at the current poses (rounds after the first), trim to
@@ -542,8 +571,9 @@ fn solve_lm(
 /// with the state passed through, when fewer than `min_obs` observations
 /// survive a trim).
 ///
-/// `opt_f` releases the shared focal (SIMPLE_PINHOLE only — enforced by the
-/// binding; other models ignore it here by construction of [`cam_at`]).
+/// `opt_f` releases the shared focal (SIMPLE_PINHOLE only — the binding
+/// rejects other models loudly; the core silently degrades them to a
+/// fixed-focal solve).
 #[allow(clippy::too_many_arguments)]
 pub fn bundle_adjust(
     cam: &CameraIntrinsics,
@@ -562,6 +592,13 @@ pub fn bundle_adjust(
     let n_obs = obs_img.len();
     assert_eq!(obs_pt.len(), n_obs, "obs_img and obs_pt length mismatch");
     assert_eq!(uv.len(), n_obs, "uv and obs_img length mismatch");
+
+    // Focal release is SIMPLE_PINHOLE-only: `cam_at` applies `f` to no other
+    // model, so an opt_f linearization elsewhere would model a focal DOF the
+    // cost does not have (garbage `δf` perturbing every coupled step). The
+    // binding rejects this loudly; at the core boundary it degrades to a
+    // fixed-focal solve.
+    let opt_f = opt_f && matches!(cam.model, CameraModel::SimplePinhole { .. });
 
     let mut f = cam.focal_lengths().0;
 
