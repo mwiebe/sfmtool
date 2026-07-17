@@ -167,6 +167,123 @@ def load_clusters():
     }
 
 
+# ── Pairwise focal vote (Bougnoux) ───────────────────────────────────────────
+#
+# Each wide-baseline image pair casts an independent focal vote: fundamental
+# matrix by 8-point RANSAC on the pair's cluster correspondences, then the
+# Bougnoux focal (principal point at the centre).  The median over pairs is
+# a consensus that needs NO reconstruction — immune to the bas-relief warp
+# that traps every structure-based estimate on hard captures (swivel-chair,
+# dino-ledge: votes within 5% where the full pipeline sat 17-84% off).  It
+# is coarse (-10..+5% observed), so it picks the BASIN: the probe focal and
+# the scan grid centre.  Structure-based release does the refinement.
+
+_ITILDE = np.diag([1.0, 1.0, 0.0])
+
+
+def _bougnoux_f(f_mat, pp):
+    p_h = np.array([pp[0], pp[1], 1.0])
+    _u, _s, vt = np.linalg.svd(f_mat.T)
+    e2 = vt[-1]
+    e2x = np.array(
+        [[0, -e2[2], e2[1]], [e2[2], 0, -e2[0]], [-e2[1], e2[0], 0]]
+    )
+    num = (p_h @ e2x @ _ITILDE @ f_mat @ p_h) * (p_h @ f_mat @ p_h)
+    den = p_h @ e2x @ _ITILDE @ f_mat @ _ITILDE @ f_mat.T @ p_h
+    if abs(den) < 1e-12:
+        return None
+    f2 = -num / den
+    return float(np.sqrt(f2)) if f2 > 0 else None
+
+
+def _fransac(x1, x2, rng, thresh=3.0, iters=300):
+    n = len(x1)
+    if n < 12:
+        return None
+
+    def norm_t(x):
+        m = x.mean(0)
+        s = np.sqrt(2.0) / max(np.linalg.norm(x - m, axis=1).mean(), 1e-9)
+        return np.array([[s, 0, -s * m[0]], [0, s, -s * m[1]], [0, 0, 1.0]])
+
+    t1, t2 = norm_t(x1), norm_t(x2)
+    x1h = np.hstack([x1, np.ones((n, 1))])
+    x2h = np.hstack([x2, np.ones((n, 1))])
+    x1n, x2n = x1h @ t1.T, x2h @ t2.T
+
+    def eight_point(idx):
+        a = (x2n[idx][:, :, None] * x1n[idx][:, None, :]).reshape(len(idx), 9)
+        _, _, vt = np.linalg.svd(a)
+        f_mat = vt[-1].reshape(3, 3)
+        uu, ss, vv = np.linalg.svd(f_mat)
+        return t2.T @ (uu @ np.diag([ss[0], ss[1], 0.0]) @ vv) @ t1
+
+    def sampson(f_px):
+        fx1 = x1h @ f_px.T
+        ftx2 = x2h @ f_px
+        num = (x2h * fx1).sum(1) ** 2
+        den = fx1[:, 0] ** 2 + fx1[:, 1] ** 2 + ftx2[:, 0] ** 2 + ftx2[:, 1] ** 2
+        return num / np.maximum(den, 1e-12)
+
+    best_mask, best_n = None, 0
+    for _ in range(iters):
+        try:
+            f_px = eight_point(rng.choice(n, 8, replace=False))
+        except np.linalg.LinAlgError:
+            continue
+        mask = sampson(f_px) < thresh**2
+        if mask.sum() > best_n:
+            best_n, best_mask = int(mask.sum()), mask
+    if best_mask is None or best_n < 12:
+        return None
+    return eight_point(np.nonzero(best_mask)[0])
+
+
+def focal_vote(obs_c, obs_i, u, n_img):
+    """Median Bougnoux focal over wide-baseline pairs, or None."""
+    rng = np.random.default_rng(0)
+    pp = (_CAM_WH[0] / 2.0, _CAM_WH[1] / 2.0)
+    row_of = {}
+    cl_by_img = {}
+    for r in range(len(obs_c)):
+        c, im = int(obs_c[r]), int(obs_i[r])
+        row_of[(c, im)] = r
+        cl_by_img.setdefault(im, set()).add(c)
+    for gap, min_sh in ((max(3, n_img // 4), 30), (max(2, n_img // 6), 16)):
+        cand = []
+        for i in range(n_img):
+            for j in range(i + gap, n_img):
+                sh = cl_by_img.get(i, set()) & cl_by_img.get(j, set())
+                if len(sh) >= min_sh:
+                    cand.append((len(sh), i, j))
+        if len(cand) >= 6:
+            break
+    cand.sort(reverse=True)
+    used = {}
+    pairs = []
+    for _nsh, i, j in cand:
+        if used.get(i, 0) >= 2:
+            continue
+        used[i] = used.get(i, 0) + 1
+        pairs.append((i, j))
+        if len(pairs) >= 18:
+            break
+    votes = []
+    for i, j in pairs:
+        sh = sorted(cl_by_img[i] & cl_by_img[j])
+        x1 = np.array([u[row_of[(c, i)]] for c in sh])
+        x2 = np.array([u[row_of[(c, j)]] for c in sh])
+        f_mat = _fransac(x1, x2, rng)
+        if f_mat is None:
+            continue
+        for v in (_bougnoux_f(f_mat, pp), _bougnoux_f(f_mat.T, pp)):
+            if v is not None and 0.2 * max(_CAM_WH) < v < 4 * max(_CAM_WH):
+                votes.append(v)
+    if len(votes) < 8:
+        return None
+    return float(np.median(votes)), len(votes)
+
+
 # ── Seed: covisibility grouping + affine factorization ───────────────────────
 
 
@@ -895,7 +1012,22 @@ def main():
     # video's most-mutually-covisible frames are where the camera moved
     # least, and a near-static core fits any focal at high inlier fraction
     # while its depths are unusable (DinoLedge seeded on a static clip).
-    f_probe = 0.9 * max(_CAM_WH)
+    vote = focal_vote(obs_c, obs_i, u, n_img)
+    if vote is not None:
+        f_vote, n_votes = vote
+        # Bougnoux votes from noisy F run consistently LOW on this campaign
+        # (-1..-10%, one -22%): probe above the vote and skew the scan grid
+        # upward so the true focal stays inside it.
+        f_probe = 1.1 * f_vote
+        f_grid = np.array([0.8, 0.95, 1.1, 1.3, 1.55]) * f_vote
+        print(
+            f"pairwise focal vote: f ~ {f_vote:.1f} ({n_votes} votes) "
+            f"[{elapsed():.1f}s]"
+        )
+    else:
+        f_probe = 0.9 * max(_CAM_WH)
+        f_grid = np.asarray(F_GRID) * max(_CAM_WH)
+        print(f"no focal vote (sparse pairs); probing at {f_probe:.1f}")
     cap = min(n_img, SCAN_CAP)
     covis = build_covisibility(obs_c, obs_i, n_img, n_cl)
     groups = list(itertools.islice(covis.seed_groups(), 8))
@@ -1031,7 +1163,7 @@ def main():
         return inl, f_try, rv_t, tv_t, p_t
 
     coarse = []
-    for f_try in np.asarray(F_GRID) * max(_CAM_WH):
+    for f_try in f_grid:
         cand = scan_candidate(f_try, 25)
         coarse.append(cand)
         print(f"f={cand[1]:6.1f}: inlier<2px {100 * cand[0]:5.1f}% "
