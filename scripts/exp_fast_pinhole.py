@@ -41,12 +41,11 @@ import time
 from pathlib import Path
 
 import numpy as np
-import scipy.optimize
-import scipy.sparse
 from scipy.spatial.transform import Rotation
 
 from sfmtool._sfmtool.geometry import (
     CameraIntrinsics,
+    bundle_adjust as _bundle_adjust,
     estimate_absolute_pose,
     estimate_fundamental,
     factorize_affine,
@@ -374,80 +373,6 @@ def reproj_res_one(cam, rvec_i, tvec_i, x_pts, uv):
 # ── Bundle adjustment ────────────────────────────────────────────────────────
 
 
-def project(cam, rvec, tvec, pts, obs_i, obs_c):
-    xc = Rotation.from_rotvec(rvec[obs_i]).apply(pts[obs_c]) + tvec[obs_i]
-    return cam.ray_to_pixel_batch(np.ascontiguousarray(xc)), -xc[:, 2]
-
-
-def solve_round(obs_c, obs_i, u, f, rvec, tvec, pts, f_scale, opt_f, max_nfev):
-    """One robust sparse least-squares pass (compact-indexed)."""
-    uniq, oc2 = np.unique(obs_c, return_inverse=True)
-    uimg, oi2 = np.unique(obs_i, return_inverse=True)
-    n_pt, n_im = len(uniq), len(uimg)
-    nf = 1 if opt_f else 0
-
-    def unpack(x):
-        fv = x[0] if opt_f else f
-        rv = x[nf : nf + 3 * n_im].reshape(-1, 3)
-        tv = x[nf + 3 * n_im : nf + 6 * n_im].reshape(-1, 3)
-        pv = x[nf + 6 * n_im :].reshape(-1, 3)
-        return fv, rv, tv, pv
-
-    base_cam = None if opt_f else make_cam(f)
-    oi2_u32, oc2_u32 = oi2.astype(np.uint32), oc2.astype(np.uint32)
-    u_c = np.ascontiguousarray(u, dtype=np.float64)
-
-    def resid(x):
-        fv, rv, tv, pv = unpack(x)
-        cam = base_cam if base_cam is not None else make_cam(fv)
-        q = Rotation.from_rotvec(rv).as_quat()[:, [3, 0, 1, 2]]
-        return _reprojection_residuals(
-            cam,
-            np.ascontiguousarray(q),
-            np.ascontiguousarray(tv),
-            np.ascontiguousarray(pv),
-            u_c,
-            oi2_u32,
-            oc2_u32,
-            1e6,
-        ).ravel()
-
-    n_obs = len(oc2)
-    spar = scipy.sparse.lil_matrix(
-        (2 * n_obs, nf + 6 * n_im + 3 * n_pt), dtype=np.uint8
-    )
-    rows = np.arange(2 * n_obs)
-    if opt_f:
-        spar[:, 0] = 1
-    for k in range(3):
-        spar[rows, nf + 3 * np.repeat(oi2, 2) + k] = 1
-        spar[rows, nf + 3 * n_im + 3 * np.repeat(oi2, 2) + k] = 1
-        spar[rows, nf + 6 * n_im + 3 * np.repeat(oc2, 2) + k] = 1
-
-    x0 = np.concatenate(
-        [
-            [f] if opt_f else [],
-            rvec[uimg].ravel(),
-            tvec[uimg].ravel(),
-            pts[uniq].ravel(),
-        ]
-    )
-    sol = scipy.optimize.least_squares(
-        resid,
-        x0,
-        jac_sparsity=spar,
-        loss="soft_l1",
-        f_scale=f_scale,
-        max_nfev=max_nfev,
-        x_scale="jac",
-        verbose=0,
-    )
-    f, rv, tv, p_new = unpack(sol.x)
-    rvec, tvec, out = rvec.copy(), tvec.copy(), pts.copy()
-    rvec[uimg], tvec[uimg], out[uniq] = rv, tv, p_new
-    return f, rvec, tvec, out
-
-
 def bundle_adjust(
     obs_c,
     obs_i,
@@ -462,37 +387,37 @@ def bundle_adjust(
     schedule=((50.0, 5.0), (12.0, 2.0), (4.0, 1.0)),
     max_nfev=60,
 ):
-    """Staged robust BA: trim, solve, re-triangulate between rounds."""
-    f = f0
-    all_img = np.ones(n_img, bool)
-    for rnd, (thresh, f_scale) in enumerate(schedule):
-        if rnd > 0:
-            rot_now = Rotation.from_rotvec(rvec).as_matrix()
-            pts = triangulate(obs_c, obs_i, u, rot_now, tvec, all_img, n_cl, f)
-        proj, depth = project(make_cam(f), rvec, tvec, pts, obs_i, obs_c)
-        rn = np.linalg.norm(proj - u, axis=1)
-        with np.errstate(invalid="ignore"):
-            keep = (rn < thresh) & (depth > 1e-3 * f) & ~np.isnan(pts[obs_c, 0])
-        surv = np.bincount(obs_c[keep], minlength=n_cl)
-        keep &= surv[obs_c] >= 2
-        if keep.sum() < 12:  # degenerate (e.g. a wildly wrong focal)
-            return f, rvec, tvec, pts, np.full(len(obs_c), np.inf), 0.0
-        f, rvec, tvec, pts = solve_round(
-            obs_c[keep],
-            obs_i[keep],
-            u[keep],
-            f,
-            rvec,
-            tvec,
-            pts,
-            f_scale,
-            opt_f,
-            max_nfev,
-        )
-    proj, depth = project(make_cam(f), rvec, tvec, pts, obs_i, obs_c)
-    rn = np.linalg.norm(proj - u, axis=1)
-    res = np.where(np.isnan(rn), np.inf, rn)
-    return f, rvec, tvec, pts, res, float((res < 2.0).mean())
+    """Staged robust BA via the native kernel: trim, solve, re-triangulate
+    between rounds (specs/core/bundle-adjustment.md — same semantics as the
+    scipy original it replaced, including the < 12-survivors degenerate exit
+    with all-inf residuals)."""
+    q = Rotation.from_rotvec(rvec).as_quat()[:, [3, 0, 1, 2]]
+    out = _bundle_adjust(
+        make_cam(f0),
+        np.ascontiguousarray(q),
+        np.ascontiguousarray(tvec, dtype=np.float64),
+        np.ascontiguousarray(pts, dtype=np.float64),
+        np.ascontiguousarray(u, dtype=np.float64),
+        obs_i.astype(np.uint32),
+        obs_c.astype(np.uint32),
+        opt_f=opt_f,
+        schedule=[(float(t), float(s)) for t, s in schedule],
+        max_iters=max_nfev,
+        min_track=2,
+        min_obs=12,
+    )
+    rv = Rotation.from_quat(
+        np.asarray(out["quaternions_wxyz"])[:, [1, 2, 3, 0]]
+    ).as_rotvec()
+    res = np.asarray(out["residual_norms"])
+    return (
+        float(out["focal"]),
+        rv,
+        np.asarray(out["translations"]),
+        np.asarray(out["points"]),
+        res,
+        float((res < 2.0).mean()),
+    )
 
 
 # ── Growth (scan-sized) ──────────────────────────────────────────────────────
