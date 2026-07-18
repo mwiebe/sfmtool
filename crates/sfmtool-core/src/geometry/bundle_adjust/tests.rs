@@ -148,8 +148,8 @@ fn recovers_from_perturbed_state() {
         );
     }
     for (p, x) in s.points.iter_mut().enumerate() {
-        for c in 0..3 {
-            x[c] += 0.05 * jitter(p, 30 + c as u64);
+        for (c, xc) in x.iter_mut().enumerate() {
+            *xc += 0.05 * jitter(p, 30 + c as u64);
         }
     }
     let out = run(&mut s, false, &DEFAULT_SCHEDULE);
@@ -192,7 +192,7 @@ fn junk_observations_do_not_pull_the_solution() {
     // handled by design: the inter-round retriangulation rebuilds each point
     // from ALL its observations (the script's re-admission semantics), so a
     // junk member drags its own track until the trim excludes the track.
-    let junk_track = |p: u32| p % 10 == 0;
+    let junk_track = |p: u32| p.is_multiple_of(10);
     for k in 0..s.uv.len() {
         if junk_track(s.obs_pt[k]) {
             s.uv[k][0] += 80.0 + 40.0 * jitter(k, 41);
@@ -200,8 +200,8 @@ fn junk_observations_do_not_pull_the_solution() {
         }
     }
     let out = run(&mut s, false, &DEFAULT_SCHEDULE);
-    for i in 0..s.quats.len() {
-        let ang = s.quats[i].angle_to(&q_true[i]);
+    for (i, (q, qt)) in s.quats.iter().zip(&q_true).enumerate() {
+        let ang = q.angle_to(qt);
         assert!(ang < 5e-3, "camera {i} rotation err {ang} rad");
     }
     // The clean tracks end sub-pixel; the junk tracks stay outliers.
@@ -240,11 +240,8 @@ fn degenerate_exit_passes_state_through() {
     }];
     let out = run_with_schedule(&mut s, &schedule);
     assert!(out.residual_norms.iter().all(|r| r.is_infinite()));
-    for k in 0..s.quats.len() {
-        assert!(
-            s.quats[k].angle_to(&q0[k]) < 1e-12,
-            "state must pass through"
-        );
+    for (q, q_orig) in s.quats.iter().zip(&q0) {
+        assert!(q.angle_to(q_orig) < 1e-12, "state must pass through");
     }
 }
 
@@ -261,8 +258,8 @@ fn min_track_drops_starved_points() {
     // single-round schedule (no retriangulation to overwrite it) the
     // starved point must come back bit-identical while clean points move.
     for (p, x) in s.points.iter_mut().enumerate() {
-        for c in 0..3 {
-            x[c] += 0.03 * jitter(p, 60 + c as u64);
+        for (c, xc) in x.iter_mut().enumerate() {
+            *xc += 0.03 * jitter(p, 60 + c as u64);
         }
     }
     let victim = s.obs_pt[0] as usize;
