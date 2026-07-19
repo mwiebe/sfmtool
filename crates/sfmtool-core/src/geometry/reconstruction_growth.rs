@@ -53,7 +53,8 @@ use crate::CameraIntrinsics;
 // ── Tuning (see the spec) ────────────────────────────────────────────────────
 
 /// The growth adjustments' staged schedule (the finishing adjustment uses
-/// [`DEFAULT_SCHEDULE`]).
+/// [`DEFAULT_SCHEDULE`]); both are subject to the fraction-of-diagonal
+/// scaling of [`GrowOptions::reference_diagonal`].
 const GROW_SCHEDULE: [BaSchedule; 2] = [
     BaSchedule {
         trim_px: 30.0,
@@ -119,6 +120,18 @@ pub struct GrowOptions {
     /// Defer an image whose inlier fraction falls below `accept_gate ×` the
     /// median accepted-so-far fraction.
     pub accept_gate: f64,
+    /// Reference image diagonal (px) for fraction-of-diagonal threshold
+    /// scaling; 0 disables the scaling (byte-identical to the fixed pixel
+    /// schedules). When > 0, the coarse BA trim schedules — geometry-dominated,
+    /// so they scale with framing — are multiplied by
+    /// `max(1.0, hypot(width, height) / reference_diagonal)`: every
+    /// [`GROW_SCHEDULE`] entry and the finishing [`DEFAULT_SCHEDULE`]'s coarse
+    /// entries, while its final entry stays in pixels (keypoint noise is
+    /// ~constant in pixels regardless of resolution). The `max(1.0, ·)` clamp
+    /// gives `threshold = max(frac × diagonal, floor_px)` semantics: an entry
+    /// never drops below its reference-pixel value. Resection thresholds
+    /// ([`INLIER_PX`], the P3P bound) and the gates are not scaled.
+    pub reference_diagonal: f64,
     /// Seed for the P3P RANSAC; same inputs + seed give identical output.
     pub seed: u64,
 }
@@ -131,6 +144,7 @@ impl Default for GrowOptions {
             ba_cluster_cap: 0,
             min_obs: 8,
             accept_gate: 0.35,
+            reference_diagonal: 0.0,
             seed: 0,
         }
     }
@@ -198,6 +212,37 @@ fn cam_with_focal(cam: &CameraIntrinsics, f: f64) -> CameraIntrinsics {
         *focal_length = f;
     }
     out
+}
+
+/// The fraction-of-diagonal threshold scale (see
+/// [`GrowOptions::reference_diagonal`]): `max(1.0, image diagonal /
+/// reference)` when a reference is given, else exactly 1.
+fn threshold_scale(cam: &CameraIntrinsics, reference_diagonal: f64) -> f64 {
+    if reference_diagonal <= 0.0 {
+        return 1.0;
+    }
+    let diagonal = (cam.width as f64).hypot(cam.height as f64);
+    (diagonal / reference_diagonal).max(1.0)
+}
+
+/// A schedule with every entry's trim threshold and loss scale multiplied by
+/// `scale`, except the last `keep_final` entries which stay in pixels.
+fn scaled_schedule(schedule: &[BaSchedule], scale: f64, keep_final: usize) -> Vec<BaSchedule> {
+    let n_scaled = schedule.len().saturating_sub(keep_final);
+    schedule
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if i < n_scaled {
+                BaSchedule {
+                    trim_px: s.trim_px * scale,
+                    loss_scale: s.loss_scale * scale,
+                }
+            } else {
+                *s
+            }
+        })
+        .collect()
 }
 
 /// The P3P RANSAC's angular inlier threshold from the pixel bound.
@@ -607,6 +652,14 @@ pub fn grow_reconstruction(
         &mut points,
     );
 
+    // Fraction-of-diagonal threshold scaling: the coarse (geometry-dominated)
+    // trim schedules scale with framing; the finishing schedule's final entry
+    // stays in pixels (keypoint noise). Scale 1 leaves both schedules
+    // byte-identical to the reference constants.
+    let scale = threshold_scale(camera, options.reference_diagonal);
+    let grow_schedule = scaled_schedule(&GROW_SCHEDULE, scale, 0);
+    let finish_schedule = scaled_schedule(&DEFAULT_SCHEDULE, scale, 1);
+
     // ── Growth loop ──────────────────────────────────────────────────────
     let ba_every = (n_img / 10).clamp(3, 8);
     let mut ba_calls = 0usize;
@@ -634,6 +687,7 @@ pub fn grow_reconstruction(
         ba_mask: &[bool],
         covis: Option<&ClusterCovisibility>,
         options: &GrowOptions,
+        grow_schedule: &[BaSchedule],
         ba_calls: &mut usize,
     ) {
         *ba_calls += 1;
@@ -689,7 +743,7 @@ pub fn grow_reconstruction(
             &obs_pt,
             None,
             false,
-            &GROW_SCHEDULE,
+            grow_schedule,
             BA_MAX_ITERS,
             BA_MIN_TRACK,
             BA_MIN_OBS,
@@ -825,6 +879,7 @@ pub fn grow_reconstruction(
                         &ba_mask,
                         covis.as_ref(),
                         options,
+                        &grow_schedule,
                         &mut ba_calls,
                     );
                     since_ba = 0;
@@ -908,6 +963,7 @@ pub fn grow_reconstruction(
                     &ba_mask,
                     covis.as_ref(),
                     options,
+                    &grow_schedule,
                     &mut ba_calls,
                 );
                 since_ba = 0;
@@ -1026,6 +1082,7 @@ pub fn grow_reconstruction(
                     &ba_mask,
                     covis.as_ref(),
                     options,
+                    &grow_schedule,
                     &mut ba_calls,
                 );
             }
@@ -1083,7 +1140,7 @@ pub fn grow_reconstruction(
         &obs_pt,
         None,
         true,
-        &DEFAULT_SCHEDULE,
+        &finish_schedule,
         BA_MAX_ITERS,
         BA_MIN_TRACK,
         BA_MIN_OBS,

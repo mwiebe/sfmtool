@@ -386,6 +386,50 @@ fn determinism_same_inputs() {
     assert_growth_bits_eq(&a, &b);
 }
 
+#[test]
+fn reference_diagonal_identity_at_scale_1_no_degradation_at_scale_4() {
+    let mut rng = Lcg(7);
+    let scene = orbit_scene(16, 240, 0.2, 0.4, &mut rng);
+    let cam = test_cam(F0);
+    let diagonal = (W as f64).hypot(H as f64);
+
+    // reference_diagonal = the image diagonal → scale exactly 1: the scaled
+    // schedules are byte-identical to the constants, so the whole run is.
+    let base = grow(&scene, &cam, 3, &GrowOptions::default());
+    let unit = grow(
+        &scene,
+        &cam,
+        3,
+        &GrowOptions {
+            reference_diagonal: diagonal,
+            ..Default::default()
+        },
+    );
+    assert_growth_bits_eq(&base, &unit);
+
+    // A camera 4× the reference diagonal scales the coarse trims 4×; growth
+    // on the same (in-gauge) scene must not degrade: full registration,
+    // tight cameras, focal recovered.
+    let scaled = grow(
+        &scene,
+        &cam,
+        3,
+        &GrowOptions {
+            reference_diagonal: diagonal / 4.0,
+            ..Default::default()
+        },
+    );
+    assert!(scaled.posed.iter().all(|&p| p), "posed {:?}", scaled.posed);
+    let (max_c, max_r) = camera_errors(&scene, &scaled);
+    assert!(max_c < 0.02, "center error {max_c} of spread");
+    assert!(max_r < 0.5, "rotation error {max_r} deg");
+    assert!(
+        (scaled.focal - F0).abs() / F0 < 0.01,
+        "released focal {} vs truth {F0}",
+        scaled.focal
+    );
+}
+
 // ── Bounded adjustments ──────────────────────────────────────────────────────
 
 #[test]

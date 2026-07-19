@@ -102,6 +102,15 @@ fn read_observations(
 ///     accept_gate: Defer an image whose inlier fraction falls below
 ///         ``accept_gate ×`` the median accepted-so-far fraction
 ///         (default 0.35).
+///     reference_diagonal: Reference image diagonal (px) for
+///         fraction-of-diagonal threshold scaling; 0 disables it (default 0,
+///         byte-identical to the fixed pixel schedules). When > 0, the coarse
+///         BA trim schedules are multiplied by
+///         ``max(1.0, hypot(width, height) / reference_diagonal)`` — the
+///         growth schedule and the finishing schedule's coarse entries, while
+///         the finishing final entry stays in pixels — so an entry never
+///         drops below its reference-pixel value. Resection thresholds and
+///         the gates are not scaled.
 ///     seed: RANSAC seed; same inputs + seed give identical output
 ///         (default 0).
 ///
@@ -114,7 +123,7 @@ fn read_observations(
 ///     ``min_obs``) return the input state with empty growth, not an error.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (cluster_indexes, image_indexes, positions_xy, camera, quaternions_wxyz, translations, posed_indexes, *, ba_window=0, anchor_every=0, ba_cluster_cap=0, min_obs=8, accept_gate=0.35, seed=0))]
+#[pyo3(signature = (cluster_indexes, image_indexes, positions_xy, camera, quaternions_wxyz, translations, posed_indexes, *, ba_window=0, anchor_every=0, ba_cluster_cap=0, min_obs=8, accept_gate=0.35, reference_diagonal=0.0, seed=0))]
 pub fn grow_reconstruction<'py>(
     py: Python<'py>,
     cluster_indexes: PyReadonlyArray1<'py, u32>,
@@ -129,6 +138,7 @@ pub fn grow_reconstruction<'py>(
     ba_cluster_cap: usize,
     min_obs: usize,
     accept_gate: f64,
+    reference_diagonal: f64,
     seed: u64,
 ) -> PyResult<Bound<'py, PyDict>> {
     let (clusters, images, positions) =
@@ -149,6 +159,7 @@ pub fn grow_reconstruction<'py>(
         ba_cluster_cap,
         min_obs,
         accept_gate,
+        reference_diagonal,
         seed,
     };
     let out = py.detach(move || {

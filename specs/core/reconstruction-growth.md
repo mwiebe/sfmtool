@@ -33,7 +33,10 @@ covisibility (specs/core/cluster-covisibility.md).
 > platform float noise); the default-run unit test therefore asserts
 > anchoring does not degrade a converged loop, and the discriminative
 > 140-camera comparison is an `#[ignore]`d minutes-scale test run
-> manually._
+> manually. (9) 2026-07-19: `grow_reconstruction` gained the
+> `reference_diagonal` option (fraction-of-diagonal scaling of the
+> coarse trim schedules, validated on matched-pair and fleet data);
+> default 0 keeps the fixed pixel schedules byte-identical._
 
 ## Purpose
 
@@ -68,6 +71,18 @@ index list), and options:
 - `ba_cluster_cap` (default 0 = all): the adjustments are restricted to
   the best-`cap` clusters by span; resection, triangulation, and the
   next-best-view count always see every cluster.
+- `reference_diagonal` (default 0 = disabled): fraction-of-diagonal
+  threshold scaling. The coarse BA trim schedules are geometry-dominated
+  and scale with framing: when > 0, the growth schedule's entries and
+  the finishing schedule's coarse entries (trim threshold and loss
+  scale) are multiplied by `max(1.0, hypot(width, height) /
+  reference_diagonal)`, while the finishing schedule's final entry stays
+  in pixels (keypoint noise is ~constant in pixels regardless of
+  resolution). The clamp gives `threshold = max(fraction × diagonal,
+  floor_px)` semantics — an entry never drops below its reference-pixel
+  value — and at scale 1 the schedules are byte-identical to the
+  disabled default. Resection thresholds (the 3 px inlier bound, the
+  P3P bound — already angular) and the gates are not scaled.
 - `min_obs` (default 8), `accept_gate` (default 0.35), `seed` for the
   RANSAC.
 
@@ -140,7 +155,7 @@ returns per-image poses, inlier fractions, and the accepted mask.
 `sfmtool._sfmtool.geometry.grow_reconstruction(cluster_indexes,
 image_indexes, positions_xy, camera, quaternions_wxyz, translations,
 posed_indexes, *, ba_window=0, anchor_every=0, ba_cluster_cap=0,
-min_obs=8, accept_gate=0.35, seed=0)` and
+min_obs=8, accept_gate=0.35, reference_diagonal=0.0, seed=0)` and
 `resect_images_batch(cluster_indexes, image_indexes, positions_xy,
 camera, points, image_list, *, min_obs=8, accept_gate=0.30, seed=0)`,
 NumPy in/out, following the geometry submodule's conventions.

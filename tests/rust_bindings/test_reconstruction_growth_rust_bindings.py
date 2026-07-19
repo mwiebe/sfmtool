@@ -218,6 +218,32 @@ def test_grow_bounded_window_and_anchor_still_register():
         assert np.linalg.norm(c_est - sc["centers"][i]) < 0.4, f"image {i}"
 
 
+def test_grow_reference_diagonal_scaling():
+    sc = _orbit_scene(3)
+    base = _grow(sc)
+
+    # reference_diagonal equal to the image diagonal gives scale exactly 1:
+    # byte-identical to the disabled default.
+    diag = float(np.hypot(W, H))
+    unit = _grow(sc, reference_diagonal=diag)
+    npt.assert_array_equal(base["quaternions_wxyz"], unit["quaternions_wxyz"])
+    npt.assert_array_equal(base["translations"], unit["translations"])
+    npt.assert_array_equal(base["posed"], unit["posed"])
+    npt.assert_array_equal(base["points"], unit["points"])
+    npt.assert_array_equal(base["residual_norms"], unit["residual_norms"])
+    assert base["focal"] == unit["focal"]
+
+    # A 4x-diagonal camera (reference a quarter of the diagonal) scales the
+    # coarse trims; growth must not degrade on the same scene.
+    scaled = _grow(sc, reference_diagonal=diag / 4.0)
+    assert scaled["posed"].all()
+    assert abs(scaled["focal"] - F0) / F0 < 0.02
+    for i in range(12):
+        r = _quat_to_mat(scaled["quaternions_wxyz"][i])
+        c_est = -(r.T @ scaled["translations"][i])
+        assert np.linalg.norm(c_est - sc["centers"][i]) < 0.2, f"image {i}"
+
+
 def test_grow_degenerate_no_seed_returns_input_state():
     sc = _orbit_scene(3)
     empty_q = np.zeros((0, 4))
