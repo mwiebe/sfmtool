@@ -1,11 +1,14 @@
 # Cluster Match Census
 
-_Status: **prototyped** (Python: `scripts/seed_census.py`, in-process scorer used
-by the seed finalization's focal arbitration). This spec is the design for the
-`sfmtool-core` operation, its Python binding, and the `census_echo` seed
-confidence flag. The group-consistency companion
-(§ [Group consistency](#companion-group-consistency)) is prototyped in a
-worst-pair variant alongside but specified here as a second phase._
+_Status: **implemented (phase 1)** —
+`sfmtool_core::analysis::cluster_census`, bound as
+`sfmtool._sfmtool.analysis.cluster_census`. The score, the viewpoint groups,
+the per-pair stats, and `sat_pct` are native and at parity with the Python
+prototype (`scripts/seed_census.py`); the group-consistency companion
+(§ [Group consistency](#companion-group-consistency)) remains **phase 2**
+— `CensusReport.group_consistency` is `None` and the binding returns
+`"group_consistency": None`. The `census_echo` seed confidence flag is
+not wired up yet._
 
 ## Problem
 
@@ -13,8 +16,9 @@ A reconstruction can be internally consistent and wrong. Two failure shapes
 share this property:
 
 - **Misregistration (echo):** a viewpoint group — a covisibility-connected
-  subset of the images — glued to the rest at a wrong relative pose — its own tracks reproject cleanly on both sides of the
-  seam, and duplicate structure appears where the groups disagree.
+  subset of the images — glued to the rest at a wrong relative pose: its own
+  tracks reproject cleanly on both sides of the seam, and duplicate structure
+  appears where the groups disagree.
 - **Focal compensation (bas-relief):** poses and structure bend smoothly to
   absorb a wrong focal; every retained track fits.
 
@@ -77,6 +81,14 @@ The solve's own track graph must not be used for grouping: tracks glued
 across a bad seam span both sides by construction and inflate exactly the
 cross-group counts the partition needs to be low. The raw covisibility graph
 is independent of the solve.
+
+Merge order is fixed by the gain `ΔQ = 2·(w_ab/2m − k_a·k_b/(2m)²)`; ties take
+the **last** maximal pair over communities scanned in ascending `(a, b)` with
+`a < b`, i.e. the merge maximizes `(ΔQ, a, b)` lexicographically. Group ids are
+the positions of the communities in the live community list at the best-`Q`
+partition (first partition to attain the maximum wins). Because the edge
+weights are integer shared-cluster counts, the gains are exact and the whole
+merge path is bit reproducible.
 
 Fewer than two groups ⇒ the capture has no group structure to census; the
 result is **unverifiable** (score 0 with `n_groups < 2`), which callers must
@@ -201,13 +213,24 @@ CensusReport {
     score:      f64,              // max per-pair Wilson lower bound
     n_groups:   usize,            // < 2 ⇒ unverifiable, score is vacuous
     group_of:   Vec<i32>,         // per input image, -1 = unposed
-    pairs:      Vec<PairStats>,   // (ga, gb, n_eligible_hi, n_unsat_hi, wilson_lb)
+    pairs:      Vec<PairStats>,   // (ga, gb, n_eligible_hi, n_unsatisfied_hi, wilson_lb)
     sat_pct:    f64,
     // phase 2:
     group_consistency: Option<GroupConsistency>,
         // per-group corrections, explained fraction, net
 }
 ```
+
+`pairs` carries every group pair joined by at least one bridge cluster,
+including pairs whose bridges are all ineligible or low-parallax
+(`n_eligible_hi == 0`, `wilson_lb == 0`) — the absence of evidence for a seam is
+itself reportable. `sat_pct` is computed whenever there are eligible, measurable
+clusters, including the `n_groups < 2` case where the score is vacuous: it
+needs no grouping.
+
+The candidate's intrinsics enter as a full camera model, not a bare focal, so
+the operation applies to any model the projection supports; the arbitration
+callers pass a shared pinhole.
 
 ## Callers
 
