@@ -20,11 +20,12 @@ use crate::camera::warp_map::{WarpMap, PAR_MIN_PIXELS};
 /// counts from an instrumented run and the timings from a clean run.
 ///
 /// Counted paths: `remap_bilinear`, `remap_bilinear_mip`,
-/// `remap_aniso_with_pyramid`, and the bilinear gradient path
-/// `remap_bilinear_with_grad_into` (the default subpixel sampler).
-/// The anisotropic and mip *gradient* paths (`remap_aniso_with_grad_into`,
-/// `remap_bilinear_mip_with_grad_into`) are not tap-counted yet — they are only
-/// reached when the subpixel stage runs with a non-default sampler.
+/// `remap_aniso_with_pyramid`, and the two bilinear gradient paths
+/// `remap_bilinear_with_grad_into` and `remap_bilinear_mip_with_grad_into` (the
+/// latter is the default subpixel sampler). The anisotropic *gradient* path
+/// (`remap_aniso_with_grad_into`) is not tap-counted — its per-pixel tap count
+/// depends on the footprint walk, which the value path already characterizes
+/// via [`ANISO_FAST`] / [`ANISO_MULTI`] / [`ANISO_SUM_N`].
 pub mod prof {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
@@ -583,8 +584,13 @@ pub fn remap_bilinear(src: &ImageU8, map: &WarpMap) -> ImageU8 {
 ///
 /// A NaN `sigma_major` (degenerate local Jacobian) resolves to level 0 via the
 /// `max(rho, 1)` (`f32::max` returns the non-NaN operand).
+///
+/// `pub(crate)` so view selection's affine fast path selects its level by the
+/// **same** rule the per-pixel slow path applies, evaluated once on the affine
+/// map's constant linear part (see
+/// [`affine_core_map`](crate::patch::view_selection)).
 #[inline]
-fn mip_level_for_sigma(sigma_major: f32, num_levels: usize) -> usize {
+pub(crate) fn mip_level_for_sigma(sigma_major: f32, num_levels: usize) -> usize {
     let l = sigma_major.max(1.0).log2().round() as usize;
     l.min(num_levels - 1)
 }
@@ -1214,6 +1220,7 @@ pub fn remap_bilinear_mip_with_grad_into(
     out.resize(out_w, out_h, c);
 
     let fill_row = |row: u32, val_row: &mut [f32], gx_row: &mut [f32], gy_row: &mut [f32]| {
+        let mut sampled = 0u64;
         for col in 0..out_w {
             let (sx, sy) = map.get(col, row);
             let base = col as usize * c as usize;
@@ -1225,6 +1232,7 @@ pub fn remap_bilinear_mip_with_grad_into(
                 }
                 continue;
             }
+            sampled += 1;
             let (sigma_major, _, _, _) = map.get_svd(col, row);
             let level = mip_level_for_sigma(sigma_major, num_levels);
             let scale = (1u32 << level) as f32;
@@ -1248,6 +1256,8 @@ pub fn remap_bilinear_mip_with_grad_into(
                 }
             }
         }
+        prof::add(&prof::PX_SAMPLED, sampled);
+        prof::add(&prof::TAPS, sampled * c as u64);
     };
 
     remap_rows_f32x3_into(
@@ -1259,6 +1269,9 @@ pub fn remap_bilinear_mip_with_grad_into(
         &mut out.grad_y,
         fill_row,
     );
+
+    prof::add(&prof::CALLS, 1);
+    prof::add(&prof::PX_TOTAL, out_w as u64 * out_h as u64);
 }
 
 #[cfg(test)]

@@ -187,8 +187,9 @@ Per cluster:
 2. **Seed.** For each other member, seed the warp from the SIFT affine
    shapes: `M₀ = A_member · A_ref⁻¹`, translation from the detections.
 3. **Refine.** Hill-climb Gaussian-windowed ZNCC over a shift → similarity →
-   affine cascade (never perspective) on a template of `radius` keypoint-frame
-   units around the reference detection. No multi-view congealing pass (see
+   affine cascade (never perspective) on a template spanning `patch_size`
+   keypoint-frame units, centred on the reference detection. No multi-view
+   congealing pass (see
    findings above).
 4. **Vet.** Reject members below `min_zncc` or drifting more than
    `max_shift_px` from the seed; keep at most one member per image (best
@@ -198,7 +199,7 @@ Defaults (from the experiment calibration):
 
 | option | default | notes |
 |---|---|---|
-| `radius` | 4.0 | template half-width, keypoint-frame units; 2 is too small for the affine DOF, 6–8 buys nothing |
+| `patch_size` | 8.0 | full template edge length, keypoint-frame units (halved to the kernel's `radius` half-width); 4 is too small for the affine DOF, 12–16 buys nothing |
 | `resolution` | 25 | template samples per axis |
 | `min_zncc` | 0.85 | permissive by design — over-culling, not contamination, is the failure mode; downstream stages re-gate |
 | `max_shift_px` | 3.0 | matches the `embed-patches` keypoint-localization gate |

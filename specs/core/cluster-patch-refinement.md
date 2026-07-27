@@ -289,8 +289,11 @@ closure, thread-local by construction (the `SearchScratch` convention,
    image (sample spacing in source pixels), and divide the map by `2^ℓ`
    before sampling — the standard mip rule, preventing the aliasing the
    level-0-only prototype tolerated. (Full anisotropic footprints,
-   `remap_aniso_with_pyramid`, are a later refinement; bilinear-in-level
-   matches the other kernels' `Sampler::Bilinear` default.)
+   `remap_aniso_with_pyramid`, are a later refinement; bilinear-in-level is the
+   same single-tap-from-the-selected-level sampling the other kernels'
+   `Sampler::BilinearMip` default does, differing only in the level rule —
+   `floor(log2 s_min)` here, a pinned kernel contract, vs
+   `round(log2 sigma_major)` there.)
 5. **Per non-reference member** (in member order):
    - Same image as the reference → `DuplicateImage`, skip.
    - Seed `M₀ = A_mem · A_ref⁻¹` (f64), translation anchored at the
@@ -527,7 +530,7 @@ category, spec to live at `specs/cli/cluster-patches-command.md`:
 
 ```
 sfm cluster-patches -i clusters.matches [-o out.matches]
-    [--radius 4.0] [--resolution 25] [--min-zncc 0.85] [--max-shift 3.0]
+    [--patch-size 8.0] [--resolution 25] [--min-zncc 0.85] [--max-shift 3.0]
     [--max-keypoint-uncertainty 0.35]
 ```
 
@@ -540,7 +543,10 @@ sfm cluster-patches -i clusters.matches [-o out.matches]
    (`read_sift`, capped at `feature_counts[i]`).
 3. Load images with cv2 in the images-section order, call
    `refine_cluster_patches`, with a progress bar via the `ProgressCounter`
-   pattern the other long kernels use.
+   pattern the other long kernels use. `--patch-size` is the **full**
+   template edge length (`embed-patches`' convention); the kernel's `radius`
+   is a half-width, so the command passes `radius = patch_size / 2` — the
+   single conversion site.
 4. Write a **new** `.matches` file: images + clusters sections copied
    verbatim, `cluster_patches` from the kernel output,
    `refine_options` = the CLI parameters, metadata updated
