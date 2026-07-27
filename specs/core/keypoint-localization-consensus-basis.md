@@ -5,9 +5,11 @@
 > `keypoint_localize/basis.rs` (the ranking pick), exposed as
 > `PatchCloud.localize_keypoints(basis_max_views=…)`,
 > `sfm embed-patches --localize-basis-views` and
-> `sfm xform --localize-keypoints basis_max_views=…`. The Rust-layer **and**
-> pipeline defaults are `0` = off (bit-identical current behavior); flipping the
-> pipeline default is a separate decision from the A/B validation below.
+> `sfm xform --localize-keypoints basis_max_views=…`. The default is **`8` at
+> every layer** (2026-07-27, adopted from the A/B + downstream ladder evidence
+> below — roughly halves embed wall; a point with `V ≤ 8` views takes the
+> uncapped path unchanged). Pass `0` for the uncapped, cleanest-error path,
+> preferred for ground-truth cleanup.
 
 ## Motivation
 
@@ -51,7 +53,7 @@ so a point with 20 raw views of which 10 survive the filters is uncapped at
 
 New fields on `KeypointLocalizeParams` (mirrored as PyO3 kwargs):
 
-- `basis_max_views: u32` — consensus-basis cap `K`. `0` (default) disables the
+- `basis_max_views: u32` — consensus-basis cap `K`, default `8`. `0` disables the
   cap: all views congeal, exactly the current behavior. A non-zero `K` below `2`
   is raised to `2` — a leave-one-out consensus needs two members, and a
   one-member basis would leave the tail nothing to register against.
@@ -158,8 +160,9 @@ first).
 3. **Python pipeline** — `_embed_patches.py`: keep `selections[i]["scores"]`
    and the track-view counts (currently discarded) and pass both to
    `localize_keypoints`; `embed_patches(localize_basis_views=…)`.
-4. **CLI** — `sfm embed-patches --localize-basis-views N` (default `0` =
-   uncapped) and `sfm xform --localize-keypoints` `basis_max_views=N` option.
+4. **CLI** — `sfm embed-patches --localize-basis-views N` and
+   `sfm xform --localize-keypoints` `basis_max_views=N` (both default `8`;
+   `0` = uncapped).
    Update `specs/cli/embed-patches-command.md` and the xform spec row.
 5. **Cross-links** — `specs/core/patch-keypoint-localization.md` and
    `specs/core/keypoint-localization-search-cache.md` reference this file where
@@ -290,10 +293,56 @@ Readings:
   small-`K` and large-`K` ends of the band is therefore delegated entirely to
   the downstream comparison below, on arms `K ∈ {0, 8, 16}`.
 
-The pipeline default therefore stays `0`. The keypoint divergence is large
-enough that adopting a non-zero default needs the downstream
-embed→size-cull→BA+refine evidence this section calls for, which reprojection
-error and yield can settle but these localizer-internal metrics cannot.
+These localizer-internal metrics cannot by themselves justify a default; the
+downstream embed→size-cull→BA+refine evidence below is what a default flip
+rests on.
+
+### Downstream ladder evidence (recorded 2026-07-27)
+
+Arms `K ∈ {0, 8, 16}` through embed → `--filter-by-patch-size 3.0` →
+`--bundle-adjust --refine-normals --refine-keypoints` on the same high-`V`
+capture (same build, sequential runs). Rogue % = normals > 70° off their
+8-NN consensus.
+
+| arm | embed wall | pts | obs | reproj med / p90 | rogue % |
+| --- | --- | --- | --- | --- | --- |
+| `K=0` | 21m 0s | 117,428 | 3.986 M | 1.308 / 1.831 | 3.99 |
+| `K=8` | 10m 22s | 119,411 | 4.180 M | 1.372 / 1.947 | 4.31 |
+| `K=16` | 11m 8s | 118,771 | 4.181 M | 1.357 / 1.926 | 4.13 |
+
+Restricted to the 115,777 points common to all three arms (removes the
+yield-composition confound between arms):
+
+| arm | reproj med / p90 | rogue % | obs/pt |
+| --- | --- | --- | --- |
+| `K=0` | 1.307 / 1.826 | 3.96 | 34.02 |
+| `K=8` | 1.365 / 1.929 | 4.25 | 35.20 |
+| `K=16` | 1.351 / 1.909 | 4.08 | 35.28 |
+
+The capped arms' extra-only points (kept by them, culled by `K=0`): median
+reproj 1.76 px, rogue 6.4–6.9 % — marginal but usable observations, not junk.
+
+Readings:
+
+- The cap halves end-to-end embed wall and raises yield ~1.7 % pts / ~4.9 %
+  obs, at a small error cost that persists on the common subset: +3–4 %
+  median reproj and +0.1–0.3 pp rogue. Even on common points the capped arms
+  carry ~1.2 more obs/pt (the single-shot tail gate keeps marginal
+  observations the moving multi-round bar culls), so the residual deltas
+  conflate keypoint quality with observation composition; separating them
+  needs a tail-bar-tightening arm that matches `K=0`'s obs/pt.
+- Between the capped arms, `K=16` beats `K=8` on every downstream metric
+  (small margins) — the sharper-template internal reading of small `K` did
+  not cash out downstream on this capture.
+- Decision (2026-07-27): the default is **`K=8`** at every layer —
+  the small-`K` end of the validated band, taking the halved wall and the
+  extra yield at the measured +3–4 % median-reproj cost. The `K=8` / `K=16`
+  downstream margins (1.365 vs 1.351 med, 4.25 vs 4.08 % rogue on the common
+  subset) are small; `K=8` congeals the sharpest template and does the least
+  work. `K=0` (`--localize-basis-views 0`) remains the choice where error
+  metrics are the product — e.g. ground-truth cleanup ladders. Still
+  outstanding: the tail-bar experiment separating gate composition from
+  keypoint quality, and the moderate-`V` control.
 
 ## Tests
 
