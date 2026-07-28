@@ -6,25 +6,38 @@
 //!
 //! Image pairs drawn from cluster-track observations each cast one focal vote
 //! through whichever of two estimators their geometry can observe, and the
-//! consensus focal is the median of the winning family:
+//! consensus focal is the median of the pooled votes from both families:
 //!
 //! - **Epipolar** — pairs with parallax vote the Bougnoux focal of a robustly
-//!   estimated fundamental matrix.
+//!   estimated fundamental matrix. The two cameras share the focal, so the
+//!   pair's two directional focals (from `F` and `Fᵀ`) must agree; when they
+//!   do, the pair casts one vote — their geometric mean.
 //! - **Rotation** — pairs dominated by a parallax-free homography vote by
 //!   rotation self-calibration: `H = K R K⁻¹`, so the focal is the `f` that
-//!   makes `K⁻¹ H K` orthogonal.
+//!   makes `K⁻¹ H K` orthogonal. Each unordered image pair votes at most once:
+//!   the inverse homography over the same correspondences is the same
+//!   measurement, not a second one.
 //!
-//! Each estimator is degenerate exactly where the other is informative; a
-//! per-pair split plus a capture-level poverty arbitration keeps each on its
-//! own ground. Because no structure is estimated, the vote cannot be biased by
-//! the depth/focal (bas-relief) compensation that afflicts structure-based
-//! focal estimation.
+//! Each estimator is degenerate exactly where the other is informative; per-pair
+//! gates (homography domination and direction agreement for epipolar pairs, the
+//! orthogonality residual for rotation pairs) keep each on its own ground, and
+//! every vote that survives its gate enters one pooled median. Because no
+//! structure is estimated, the vote cannot be biased by the depth/focal
+//! (bas-relief) compensation that afflicts structure-based focal estimation.
+//!
+//! Every focal median here is taken in log space (an even-length median is the
+//! geometric mean of the two central votes), consistent with the direction
+//! agreement band, the spreads, and the epipolar pair vote itself. When both
+//! families voted and their medians disagree by more than the
+//! family-disagreement band the pool is bimodal, and its blended median would
+//! be a value no pair voted for; the consensus is then the majority family's
+//! median instead.
 //!
 //! The pair-table pass is deterministic and the RANSAC estimators derive their
 //! sampling from the input seed, so identical inputs and seed reproduce
 //! identical output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nalgebra::Matrix3;
 
@@ -33,7 +46,7 @@ use crate::geometry::epipolar_estimation::{
 };
 use crate::geometry::homography_estimation::{estimate_homography, HomographyOptions};
 
-/// Which family produced the consensus focal.
+/// Which family contributed the majority of the pooled votes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoteFamily {
     /// Bougnoux focal of a fundamental matrix (parallax-rich pairs).
@@ -52,28 +65,104 @@ impl VoteFamily {
     }
 }
 
+/// One in-band directional Bougnoux focal with the candidate-pair covariates
+/// that produced it (diagnostic detail, independent of what pools; two entries
+/// per pair when both F and Fᵀ yield an in-band focal).
+#[derive(Clone, Copy, Debug)]
+pub struct EpipolarVote {
+    /// First image of the candidate pair.
+    pub image_a: u32,
+    /// Second image of the candidate pair.
+    pub image_b: u32,
+    /// Shared-cluster covisibility count of the pair.
+    pub shared_clusters: f64,
+    /// Mean feature displacement of the pair in pixels.
+    pub mean_disp_px: f64,
+    /// Fundamental-matrix RANSAC inlier count.
+    pub n_f_inliers: usize,
+    /// Homography RANSAC inlier count on the same correspondences.
+    pub n_h_inliers: usize,
+    /// `false` for the vote from F, `true` for the vote from Fᵀ.
+    pub transposed: bool,
+    /// The directional Bougnoux focal in pixels.
+    pub focal_px: f64,
+}
+
+/// One accepted rotation self-calibration vote with its pair covariates
+/// (diagnostic detail; one entry per unordered image pair).
+#[derive(Clone, Copy, Debug)]
+pub struct RotationVote {
+    /// The sampled image.
+    pub image: u32,
+    /// Its widest-displacement partner.
+    pub partner: u32,
+    /// Mean feature displacement of the pair in pixels.
+    pub mean_disp_px: f64,
+    /// Homography RANSAC inlier count.
+    pub n_inliers: usize,
+    /// The self-calibration focal vote in pixels.
+    pub focal_px: f64,
+}
+
 /// Result of [`focal_vote`].
 #[derive(Clone, Debug)]
 pub struct FocalVoteResult {
-    /// Consensus focal in pixels, `None` when neither family reaches quorum.
+    /// Consensus focal in pixels — the log-space median of the pooled votes, or
+    /// of the majority family's votes when the two families' medians disagree
+    /// beyond the family-disagreement band. `None` with fewer than 2 pooled
+    /// votes.
     pub focal_px: Option<f64>,
-    /// Which family produced `focal_px`, `None` when there is no consensus.
+    /// Majority contributor to the pool (ties go to `Rotation`), `None` when
+    /// there is no consensus. Under the family-disagreement rule `focal_px` is
+    /// this family's median; otherwise diagnostic.
     pub family: Option<VoteFamily>,
-    /// Median of the epipolar votes (diagnostic).
+    /// Log-space median of the epipolar pair votes (diagnostic).
     pub epipolar_focal_px: Option<f64>,
-    /// Median of the rotation votes (diagnostic).
+    /// Log-space median of the rotation votes (diagnostic).
     pub rotation_focal_px: Option<f64>,
-    /// Number of epipolar (Bougnoux) votes.
+    /// Epipolar pair votes entering the pool (one per direction-consistent
+    /// pair).
     pub n_epipolar: usize,
-    /// Number of rotation (self-calibration) votes.
+    /// Rotation (self-calibration) votes entering the pool (one per unordered
+    /// image pair).
     pub n_rotation: usize,
+    /// Total pooled votes (`n_epipolar + n_rotation`).
+    pub n_pool: usize,
+    /// Interquartile range, in log-focal space, of the votes behind `focal_px`
+    /// — the whole pool, or the majority family's votes under the
+    /// family-disagreement rule. `0` without a consensus.
+    pub pool_spread: f64,
+    /// `|ln(epipolar_focal_px / rotation_focal_px)|`, the gap between the two
+    /// families' medians; `None` unless both families voted (available even
+    /// when the pool is too small for a consensus).
+    pub family_disagreement: Option<f64>,
     /// Median H/F inlier ratio over the epipolar candidate pairs.
     pub parallax_poverty: f64,
-    /// Interquartile range of the epipolar votes in log-focal space — junk
-    /// vote populations scatter where genuine consensus is tight.
+    /// Interquartile range of the epipolar pair votes in log-focal space —
+    /// junk vote populations scatter where genuine consensus is tight.
     pub epipolar_spread: f64,
     /// Interquartile range of the rotation votes in log-focal space.
     pub rotation_spread: f64,
+    /// Every in-band directional Bougnoux focal with its pair covariates
+    /// (both directions; diagnostic detail, not the pooled population).
+    pub epipolar_votes: Vec<EpipolarVote>,
+    /// Every accepted rotation vote with its pair covariates (one per unordered
+    /// image pair).
+    pub rotation_votes: Vec<RotationVote>,
+    /// Epipolar candidate pairs skipped as homography-dominated (pair count).
+    pub n_h_dominated: usize,
+    /// Epipolar candidate pairs whose estimator produced no usable F (pair
+    /// count).
+    pub n_estimator_failed: usize,
+    /// Directional Bougnoux focals rejected by the plausibility band
+    /// (direction count).
+    pub n_band_rejected: usize,
+    /// Directions whose Bougnoux extraction produced no value at all
+    /// (direction count).
+    pub n_degenerate: usize,
+    /// Epipolar candidate pairs whose two directional focals disagree (or
+    /// where only one direction is in-band), and so cast no vote (pair count).
+    pub n_inconsistent_pairs: usize,
 }
 
 // ── Vote thresholds (see the spec) ───────────────────────────────────────────
@@ -99,10 +188,17 @@ const ORTHO_COST_FLOOR: f64 = 0.15;
 const FOCAL_BAND_LO: f64 = 0.2;
 const FOCAL_BAND_HI: f64 = 4.0;
 
-const POVERTY_THRESHOLD: f64 = 0.55;
-const ROT_QUORUM_HIGH: usize = 5;
-const EPIPOLAR_QUORUM: usize = 8;
-const ROT_QUORUM_LOW: usize = 6;
+/// Maximum `|ln(f_F / f_Fᵀ)|` for a pair's two directional Bougnoux focals to
+/// count as two measurements of the same shared focal.
+const DIRECTION_AGREEMENT_BAND: f64 = 0.05;
+
+/// Log-focal gap between the two families' medians beyond which the pool is
+/// bimodal: blending it would report a focal no pair voted for, so the
+/// consensus falls back to the majority family's median.
+const FAMILY_DISAGREEMENT_BAND: f64 = 0.25;
+
+/// Pooled votes needed for a consensus.
+const MIN_POOL: usize = 2;
 
 /// Interquartile range in log space (linear-interpolated quartiles), `0`
 /// for fewer than 2 votes.
@@ -121,7 +217,28 @@ fn log_iqr(vals: &[f64]) -> f64 {
     q(0.75) - q(0.25)
 }
 
-/// numpy-style median (even length averages the two central elements).
+/// Median of a focal population in log space: odd length takes the middle
+/// vote, even length their geometric mean. Every focal median in this kernel
+/// is taken this way, consistent with the log-space agreement bands and
+/// spreads. `None` for an empty population.
+fn log_median(vals: &[f64]) -> Option<f64> {
+    if vals.is_empty() {
+        return None;
+    }
+    let mut v: Vec<f64> = vals.iter().map(|x| x.ln()).collect();
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    let l = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    };
+    Some(l.exp())
+}
+
+/// numpy-style linear median (even length averages the two central elements),
+/// for the non-focal populations: the orthogonality-scan costs and the H/F
+/// inlier ratios behind `parallax_poverty`.
 fn median(vals: &[f64]) -> Option<f64> {
     if vals.is_empty() {
         return None;
@@ -271,7 +388,7 @@ pub fn focal_vote(
 /// `focal_vote` with an explicit epipolar displacement floor (fraction of the
 /// image diagonal a candidate pair's mean feature displacement must reach).
 /// The floor is the wide-baseline gate: too low admits near-static pairs whose
-/// ill-conditioned fundamental matrices vote junk focals in quorum.
+/// ill-conditioned fundamental matrices vote junk focals into the pool.
 pub fn focal_vote_with_min_disp(
     cluster_indexes: &[u32],
     image_indexes: &[u32],
@@ -288,9 +405,19 @@ pub fn focal_vote_with_min_disp(
         rotation_focal_px: None,
         n_epipolar: 0,
         n_rotation: 0,
+        n_pool: 0,
+        pool_spread: 0.0,
+        family_disagreement: None,
         parallax_poverty: 0.0,
         epipolar_spread: 0.0,
         rotation_spread: 0.0,
+        epipolar_votes: Vec::new(),
+        rotation_votes: Vec::new(),
+        n_h_dominated: 0,
+        n_estimator_failed: 0,
+        n_band_rejected: 0,
+        n_degenerate: 0,
+        n_inconsistent_pairs: 0,
     };
     let n_obs = cluster_indexes.len();
     if n_obs == 0 || image_indexes.len() != n_obs || positions_xy.len() != n_obs {
@@ -400,14 +527,25 @@ pub fn focal_vote_with_min_disp(
         ..Default::default()
     };
 
+    // `bou` holds the pooled epipolar votes — one geometric-mean vote per
+    // direction-consistent pair; `bou_detail` holds every in-band directional
+    // focal (the diagnostic layer, independent of what pools).
     let mut bou: Vec<f64> = Vec::new();
+    let mut bou_detail: Vec<EpipolarVote> = Vec::new();
     let mut ratios: Vec<f64> = Vec::new();
+    let mut n_h_dominated = 0usize;
+    let mut n_estimator_failed = 0usize;
+    let mut n_band_rejected = 0usize;
+    let mut n_degenerate = 0usize;
+    let mut n_inconsistent_pairs = 0usize;
     for (a, b) in epipolar_pairs {
         let (x1, x2) = pair_correspondences(&image_clusters, a as usize, b as usize);
         if x1.len() < 8 {
+            n_estimator_failed += 1;
             continue;
         }
         let Some(fest) = estimate_fundamental(&x1, &x2, &f_opts) else {
+            n_estimator_failed += 1;
             continue;
         };
         let n_f = fest.inliers.iter().filter(|&&b| b).count();
@@ -419,21 +557,54 @@ pub fn focal_vote_with_min_disp(
         }
         // Homography-dominated: F is collapsing toward H, no epipolar vote.
         if (n_h as f64) >= 16.0_f64.max(0.8 * n_f as f64) {
+            n_h_dominated += 1;
             continue;
         }
-        for f_dir in [fest.f_matrix, fest.f_matrix.transpose()] {
-            if let Some(v) = focal_from_fundamental(&f_dir, pp, pp) {
-                if v > FOCAL_BAND_LO * max_wh && v < FOCAL_BAND_HI * max_wh {
-                    bou.push(v);
-                }
+        let acc = pair_accum[&(a, b)];
+        let mut in_band: Vec<f64> = Vec::with_capacity(2);
+        for (transposed, f_dir) in [(false, fest.f_matrix), (true, fest.f_matrix.transpose())] {
+            // A direction whose Bougnoux extraction is degenerate yields no
+            // value at all — separate from an out-of-band value.
+            let Some(v) = focal_from_fundamental(&f_dir, pp, pp) else {
+                n_degenerate += 1;
+                continue;
+            };
+            if v > FOCAL_BAND_LO * max_wh && v < FOCAL_BAND_HI * max_wh {
+                in_band.push(v);
+                bou_detail.push(EpipolarVote {
+                    image_a: a,
+                    image_b: b,
+                    shared_clusters: acc.count,
+                    mean_disp_px: acc.mean_disp(),
+                    n_f_inliers: n_f,
+                    n_h_inliers: n_h,
+                    transposed,
+                    focal_px: v,
+                });
+            } else {
+                n_band_rejected += 1;
             }
+        }
+        // The two cameras share the focal, so the two directional focals are
+        // two measurements of the same quantity. Agreement certifies the pair;
+        // it then casts ONE vote, their geometric mean. A pair that disagrees
+        // (or has only one in-band direction) carries no consistent focal.
+        match in_band.as_slice() {
+            [f0, f1] if (f0.ln() - f1.ln()).abs() <= DIRECTION_AGREEMENT_BAND => {
+                bou.push((f0 * f1).sqrt());
+            }
+            [_, _] | [_] => n_inconsistent_pairs += 1,
+            _ => {}
         }
     }
 
     // ── Rotation votes ───────────────────────────────────────────────────────
     // For a sample of images spaced to visit at most 60, the partner with the
     // largest mean displacement among pairs sharing >= 25 clusters, when that
-    // displacement is >= 0.08·diagonal.
+    // displacement is >= 0.08·diagonal. Each unordered pair votes at most once:
+    // two images that are each other's widest partner are reached twice, and
+    // the inverse homography over the same correspondences is the same
+    // measurement, not a second one — so the later occurrence is skipped.
     let step = (n_img / ROTATION_MAX_IMAGES).max(1);
     let rot_h_opts = HomographyOptions {
         max_error_px: 3.0,
@@ -442,6 +613,8 @@ pub fn focal_vote_with_min_disp(
         ..Default::default()
     };
     let mut rot: Vec<f64> = Vec::new();
+    let mut rot_detail: Vec<RotationVote> = Vec::new();
+    let mut voted_pairs: HashSet<(u32, u32)> = HashSet::new();
     let mut i = 0usize;
     while i < n_img {
         let mut best: Option<(f64, u32)> = None;
@@ -466,7 +639,8 @@ pub fn focal_vote_with_min_disp(
             }
         }
         if let Some((dmean, j)) = best {
-            if dmean >= ROTATION_MIN_DISP_FRAC * diag {
+            let key = ((i as u32).min(j), (i as u32).max(j));
+            if dmean >= ROTATION_MIN_DISP_FRAC * diag && !voted_pairs.contains(&key) {
                 let (x1, x2) = pair_correspondences(&image_clusters, i, j as usize);
                 // Centre on the principal point: H = K R K⁻¹ has K at the origin.
                 let x1c: Vec<[f64; 2]> = x1.iter().map(|p| [p[0] - pp[0], p[1] - pp[1]]).collect();
@@ -475,6 +649,14 @@ pub fn focal_vote_with_min_disp(
                     if let Some(fv) = rotation_self_calib_focal(&hest.h_matrix, max_wh) {
                         if fv > FOCAL_BAND_LO * max_wh && fv < FOCAL_BAND_HI * max_wh {
                             rot.push(fv);
+                            voted_pairs.insert(key);
+                            rot_detail.push(RotationVote {
+                                image: i as u32,
+                                partner: j,
+                                mean_disp_px: dmean,
+                                n_inliers: hest.inliers.iter().filter(|&&k| k).count(),
+                                focal_px: fv,
+                            });
                         }
                     }
                 }
@@ -483,28 +665,48 @@ pub fn focal_vote_with_min_disp(
         i += step;
     }
 
-    // ── Arbitration ──────────────────────────────────────────────────────────
+    // ── Consensus ────────────────────────────────────────────────────────────
+    // Per-pair gating already certified every surviving vote, so both families
+    // pool into a single population and the consensus is its log-space median —
+    // unless the two families' medians disagree so far that the pool is bimodal
+    // and a blend would report a focal no pair voted for.
+    // `parallax_poverty` medians H/F inlier ratios, not focals, so it stays a
+    // linear median.
     let poverty = median(&ratios).unwrap_or(0.0);
-    let epipolar_focal_px = median(&bou);
-    let rotation_focal_px = median(&rot);
+    let epipolar_focal_px = log_median(&bou);
+    let rotation_focal_px = log_median(&rot);
     let n_epipolar = bou.len();
     let n_rotation = rot.len();
+    let n_pool = n_epipolar + n_rotation;
     let epipolar_spread = log_iqr(&bou);
     let rotation_spread = log_iqr(&rot);
-
-    let (focal_px, family) = if n_rotation >= ROT_QUORUM_HIGH && poverty >= POVERTY_THRESHOLD {
-        (rotation_focal_px, Some(VoteFamily::Rotation))
-    } else if n_epipolar >= EPIPOLAR_QUORUM {
-        (epipolar_focal_px, Some(VoteFamily::Epipolar))
-    } else if n_rotation >= ROT_QUORUM_LOW {
-        (rotation_focal_px, Some(VoteFamily::Rotation))
-    } else {
-        (None, None)
+    let pool: Vec<f64> = bou.iter().chain(rot.iter()).copied().collect();
+    // Computable whenever both families voted, consensus or not.
+    let family_disagreement = match (epipolar_focal_px, rotation_focal_px) {
+        (Some(e), Some(r)) => Some((e.ln() - r.ln()).abs()),
+        _ => None,
     };
-    // A chosen family with no median (empty vote list) collapses to no consensus.
-    let (focal_px, family) = match focal_px {
-        Some(f) => (Some(f), family),
-        None => (None, None),
+
+    let (focal_px, family, pool_spread) = if n_pool >= MIN_POOL {
+        let fam = if n_epipolar > n_rotation {
+            VoteFamily::Epipolar
+        } else {
+            VoteFamily::Rotation
+        };
+        let bimodal = family_disagreement.is_some_and(|d| d > FAMILY_DISAGREEMENT_BAND);
+        let backing: &[f64] = if bimodal {
+            // Majority family only — `family` reports it, so `focal_px` is
+            // exactly that family's median.
+            match fam {
+                VoteFamily::Epipolar => &bou,
+                VoteFamily::Rotation => &rot,
+            }
+        } else {
+            &pool
+        };
+        (log_median(backing), Some(fam), log_iqr(backing))
+    } else {
+        (None, None, 0.0)
     };
 
     FocalVoteResult {
@@ -514,9 +716,19 @@ pub fn focal_vote_with_min_disp(
         rotation_focal_px,
         n_epipolar,
         n_rotation,
+        n_pool,
+        pool_spread,
+        family_disagreement,
         parallax_poverty: poverty,
         epipolar_spread,
         rotation_spread,
+        epipolar_votes: bou_detail,
+        rotation_votes: rot_detail,
+        n_h_dominated,
+        n_estimator_failed,
+        n_band_rejected,
+        n_degenerate,
+        n_inconsistent_pairs,
     }
 }
 
