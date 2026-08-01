@@ -824,10 +824,10 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+ "sfmtool-archive-io",
  "thiserror 2.0.18",
  "xxhash-rust",
  "zip",
- "zstd",
 ]
 
 [[package]]
@@ -2677,6 +2677,7 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+ "sfmtool-archive-io",
  "thiserror 2.0.18",
  "xxhash-rust",
  "zip",
@@ -4528,6 +4529,20 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+ "sfmtool-archive-io",
+ "thiserror 2.0.18",
+ "xxhash-rust",
+ "zip",
+ "zstd",
+]
+
+[[package]]
+name = "sfmtool-archive-io"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "xxhash-rust",
  "zip",
@@ -4608,10 +4623,10 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+ "sfmtool-archive-io",
  "thiserror 2.0.18",
  "xxhash-rust",
  "zip",
- "zstd",
 ]
 
 [[package]]

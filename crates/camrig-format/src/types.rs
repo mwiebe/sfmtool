@@ -3,14 +3,14 @@
 
 //! Data types for the `.camrig` file format.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::archive_io::ArchiveIoError;
 use crate::pattern::{count_frame_fields, validate_pattern};
+use sfmtool_archive_io::ArchiveIoError;
 
 /// Errors that can occur when reading or writing `.camrig` files.
 #[derive(Error, Debug)]
@@ -122,7 +122,7 @@ pub struct CamRigCamera {
     /// Image height in pixels.
     pub height: u32,
     /// Named model parameters; the key set is determined by `model`.
-    pub parameters: HashMap<String, f64>,
+    pub parameters: BTreeMap<String, f64>,
 }
 
 /// Top-level rig metadata from `metadata.json.zst`.

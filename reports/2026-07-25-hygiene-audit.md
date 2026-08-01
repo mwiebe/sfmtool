@@ -305,6 +305,41 @@ drifting, and drift here is silent — no compile error, just two behaviours.
   `break` vs `break 'outer`, so verifier output ordering may shift.
 
 **`archive_io.rs` is copy-pasted into all four format crates, and camrig diverged in the right direction**
+
+> _Status (2026-07-31): Done — extracted to a new `sfmtool-archive-io` workspace
+> crate. The four copies are deleted; camrig's non-cloning `write_binary_entry`
+> signature is now the only one, removing all 55 clone sites (26 sfmr, 25
+> matches, 4 sift — the finding's "51" is the sfmr+matches subtotal).
+> `sfmr-format`/`matches-format` moved to a new `write_binary_entry_hashed`
+> helper that writes the entry and folds the uncompressed bytes into the section
+> hasher in one call. `raw_to_u32`/`raw_to_f64` moved there too, taking
+> the unaligned-buffer regression test with them (it had only ever guarded the
+> sfmr copy). `read_uint128_array` was **kept**, correcting this finding: it is
+> dead only in `sift-format`, but live in `sfmr-format/src/read.rs:10` and
+> `matches-format/src/read.rs:12`, so the shared copy simply drops sift's
+> `#[allow(dead_code)]`._
+>
+> _Scope note: the write/hash pairing is enforced for **binary** entries only.
+> Fourteen JSON entries across the two writers still pair `write_json_entry`
+> with a manual `hasher.update(&bytes)`, and they feed the same section hashes —
+> so the invariant is structural for binary entries and conventional for JSON.
+> A `write_json_entry_hashed`, plus a `write_binary_entry_digested` for the
+> seven remaining one-shot-digest sites in sift/camrig, would finish the job and
+> let the unhashed `write_binary_entry` go private._
+>
+> _Evidence note: content-hash preservation was **not** established by the
+> cross-verification run first cited here. Both verifiers recompute digests from
+> the bytes present in the file, so any self-consistent archive passes both —
+> that experiment shows the two trees produce mutually intelligible archives,
+> not that a hash value is unchanged. The claim does hold, on stronger evidence
+> gathered afterwards: a static comparison showing all 51 migrated call sites
+> are byte-identical old-vs-new in (entry name, data expression, zstd level,
+> hasher identity, order), and a direct old-vs-new comparison of stored section
+> digests over a fixture exercising every optional section, which came out
+> bit-identical (with `.sift` archives byte-identical end to end). Only the JSON
+> sections carrying `HashMap` fields differed, for the unrelated reason recorded
+> below._
+
 - Location: `crates/{sfmr,sift,matches,camrig}-format/src/archive_io.rs` (163/164/164/142)
 - Problem: Verified by diff. `sfmr` vs `sift`: one line. `sift` vs `matches`: a doc
   comment plus that line. So three copies are functionally identical. **`camrig` is
@@ -330,6 +365,45 @@ drifting, and drift here is silent — no compile error, just two behaviours.
 - Note: this supersedes the old report's `archive_io` finding, which was deferred
   twice (2026-06-23 #9) on the grounds that the copies were still in sync. They are
   no longer, and the drift now carries a measurable allocation cost.
+
+**Archives are not byte-reproducible: `HashMap` fields serialize in randomized order**
+- _Added 2026-07-31, found while validating the `archive_io` extraction — not part
+  of the original snapshot._
+> _Status (2026-07-31): Done — all five affected fields moved to `BTreeMap`.
+> Verified: three separate processes writing the same reconstruction now emit
+> byte-identical `.sfmr` archives (they differed before). Pre-change archives,
+> whose JSON carries keys in the old arbitrary order, still read and verify —
+> confirmed against the checked-in `kerry_park.camrig` and against `.sfmr`/
+> `.matches` files written by the pre-change tree. Locked in by
+> `sfmr-format/src/tests.rs::json_maps_serialize_in_sorted_key_order`; note an
+> in-process double-write cannot catch a regression here (equal keys in
+> equal-capacity maps iterate identically within one process), so the test
+> asserts sorted key order instead._
+
+- Location — **wider than first recorded**: this is five fields across three
+  crates, not two in one. `crates/sfmr-format/src/types.rs:66`
+  (`parameters: HashMap<String, f64>`), `:114`
+  (`tool_options: HashMap<String, serde_json::Value>`);
+  `crates/matches-format/src/types.rs:145` (`matching_options`), `:270`
+  (`verification_options`); `crates/camrig-format/src/types.rs:125`
+  (`parameters`). `.matches` was affected too — a varying
+  `two_view_geometries_xxh128` is reproducible from the pre-change tree alone,
+  via `TvgMetadata.verification_options`.
+- Problem: Writing the *same* `SfmrData` twice in two processes produces archives
+  that differ in bytes and in stored `metadata` hash — measured: two runs of one
+  unchanged binary emitted `basic.sfmr` at 4,873 and 4,874 bytes. Rust's `HashMap`
+  iteration order is randomized per process, and `serde_json` serializes in
+  iteration order, so the camera-parameter JSON key order varies run to run.
+  Verification is unaffected (the hash is computed over what was actually
+  written), so this is not a correctness bug — but it rules out byte-comparing
+  two archives as a regression test, which is exactly the check a future change to
+  the write path most wants.
+- Proposed fix: `BTreeMap<String, f64>` for `parameters`, or
+  `#[serde(serialize_with = …)]` sorting keys. Either makes writes reproducible
+  and changes no existing file's validity. Note it *does* change the metadata hash
+  of newly written files relative to old ones, which is already true run-to-run.
+- Effort: low
+- Risk: low
 
 **Four monolithic per-section entry points in the two big format crates**
 - Location: `sfmr-format/src/write.rs:96–628` (`write_sfmr_with_options`, **533**);
@@ -826,7 +900,8 @@ convention and is applied consistently.
    `solve_lm_mixed`. Highest value because every future fix to the damping ladder,
    the Schur accumulation or the convergence test currently has to be made twice,
    and a miss is silent. Gate it on a bit-identity test.
-2. **`archive_io.rs` unification into a shared crate** — the only finding that is
+2. **`archive_io.rs` unification into a shared crate** — _done 2026-07-31 as
+   `sfmtool-archive-io`; see the status note on the finding above._ The only finding that is
    simultaneously a duplication fix (4 copies), a dead-code removal
    (`read_uint128_array`), and a measurable performance fix (51 whole-column clones
    in the two big writers, already avoided in `camrig-format` but unreachable by the
