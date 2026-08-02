@@ -48,7 +48,8 @@ impl ColumnLayout {
         let name = image + 50.0;
         let feat = name + 170.0;
         let size = feat + 55.0;
-        let error = size + 50.0;
+        // Wide enough for the two-extent "123.4x56.7" form, not just one number.
+        let error = size + 95.0;
         let angle = error + 60.0;
         Self {
             has_patch,
@@ -134,7 +135,7 @@ impl PointTrackDetail {
         let obs_feature_xy = obs.feature_xy;
         let obs_reproj_error = obs.reproj_error;
         let obs_ray_angle_deg = obs.ray_angle_deg;
-        let obs_feature_size = obs.feature_size;
+        let obs_feature_extents = obs.feature_extents;
         let obs_image_name = obs.image_name.clone();
         let obs_image_full_name = obs.image_full_name.clone();
         let is_hovered_image = hovered_image == Some(obs_image_index);
@@ -255,11 +256,7 @@ impl PointTrackDetail {
         );
 
         // Feature size
-        let size_text = if obs_feature_size > 0.0 {
-            format!("{:.1}", obs_feature_size)
-        } else {
-            "N/A".to_string()
-        };
+        let size_text = format_feature_size(obs_feature_extents);
         painter.text(
             egui::pos2(x0 + cols.size, cy),
             egui::Align2::LEFT_CENTER,
@@ -377,6 +374,26 @@ impl PointTrackDetail {
         );
         self.thumbnail_textures.insert(idx, texture);
     }
+}
+
+/// Render the Size column's text for one observation.
+///
+/// `extents` are the observation's two *full* feature widths in pixels, larger
+/// first — the span the drawn patch quad covers, not the half-axis radius the
+/// affine shape's column norms give directly.
+///
+/// Both extents are always printed, larger first (`20.3x7.7`, or `14.0x14.0`
+/// for a circular feature), so an obliquely-viewed patch reads as
+/// foreshortened rather than as a merely smaller feature and the reader never
+/// has to guess which form they are looking at. One decimal throughout; a
+/// degenerate (zero) shape prints `N/A`; a fully collapsed (edge-on) shape
+/// shows the collapse explicitly (`9.0x0.0`).
+pub(super) fn format_feature_size(extents: [f32; 2]) -> String {
+    let [major, minor] = extents;
+    if !major.is_finite() || major <= 0.0 {
+        return "N/A".to_string();
+    }
+    format!("{major:.1}x{minor:.1}")
 }
 
 /// Vertical scroll delta (in points) contributed by DirectManipulation pan
