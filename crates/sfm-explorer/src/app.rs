@@ -94,6 +94,15 @@ impl App {
         // lets `run_egui_pass` take a non-`Option` `&Window`.
         let window = self.window.clone().unwrap();
 
+        // Keep the window title in step with the loaded file. Compared against
+        // the last applied title rather than set unconditionally: `set_title`
+        // is a window-manager round-trip, and this runs every frame.
+        let title = self.state.window_title();
+        if title != self.applied_title {
+            window.set_title(&title);
+            self.applied_title = title;
+        }
+
         // Ensure scene texture and pipeline match the 3D panel size
         let [pw, ph] = self.viewer_3d.panel_size;
         if pw > 0 && ph > 0 {
@@ -370,6 +379,7 @@ impl App {
             &self.viewer_3d.camera,
             self.state.point_size_log2,
             self.state.infinity_point_px,
+            self.state.show_points_at_infinity,
             self.state.edl_line_thickness,
             self.viewer_3d.supernova_view_pos,
             self.viewer_3d.supernova_active,
@@ -485,6 +495,8 @@ impl App {
         let point_track_detail = &mut self.point_track_detail;
         let dock_state = &mut self.dock_state;
 
+        let mut quit_requested = false;
+
         let full_output = self.egui_ctx.run_ui(raw_input, |root_ui| {
             // Accumulate scroll events once per frame, with DM-aware suppression.
             let scroll_input = platform::ScrollInput::from_ctx(
@@ -511,79 +523,21 @@ impl App {
                         }
                         ui.separator();
                         if ui.button("Quit").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            // Not `send_viewport_cmd(ViewportCommand::Close)`:
+                            // this app drives its own winit loop and never
+                            // reads `full_output.viewport_output`, so the
+                            // command was silently dropped and Quit did
+                            // nothing. The flag is read straight after the
+                            // egui pass, where the event loop can act on it.
+                            quit_requested = true;
+                            ui.close();
                         }
                     });
-                    ui.menu_button("View", |ui| {
-                        ui.checkbox(&mut app_state.show_points, "Show Points");
-                        ui.checkbox(&mut app_state.show_camera_images, "Show Camera Images");
-                        ui.checkbox(&mut app_state.show_grid, "Show Grid");
-                        ui.separator();
-                        ui.label("Point Size");
-                        ui.add(
-                            egui::Slider::new(&mut app_state.point_size_log2, -3.0..=3.0)
-                                .text("log₂")
-                                .fixed_decimals(1),
-                        );
-                        if ui.button("Reset Size").clicked() {
-                            app_state.point_size_log2 = 0.0;
-                        }
-                        ui.separator();
-                        ui.label("Infinity Point Size");
-                        ui.add(
-                            egui::Slider::new(&mut app_state.infinity_point_px, 1.0..=16.0)
-                                .text("px")
-                                .fixed_decimals(1),
-                        );
-                        ui.separator();
-                        // Patch surfel controls — disabled unless the loaded
-                        // reconstruction carries patch frames with bitmaps.
-                        let has_patches = app_state.reconstruction.as_ref().is_some_and(|r| {
-                            r.patch_u_halfvec_xyz.is_some()
-                                && r.patch_v_halfvec_xyz.is_some()
-                                && r.patch_bitmaps_y_x_rgba.is_some()
-                        });
-                        ui.add_enabled_ui(has_patches, |ui| {
-                            ui.checkbox(&mut app_state.show_patches, "Show Patches");
-                            ui.label("Patch Opacity");
-                            ui.add(
-                                egui::Slider::new(&mut app_state.patch_opacity, 0.0..=1.0)
-                                    .fixed_decimals(2),
-                            );
-                            ui.label("Patch Size");
-                            ui.add(
-                                egui::Slider::new(&mut app_state.patch_size_log2, -3.0..=3.0)
-                                    .text("log₂")
-                                    .fixed_decimals(1),
-                            );
-                            ui.label("Patch Edge Cutoff");
-                            ui.add(
-                                egui::Slider::new(&mut app_state.patch_alpha_cutoff, 0.0..=1.0)
-                                    .fixed_decimals(2),
-                            );
-                        });
-                        ui.separator();
-                        ui.label("Length Scale");
-                        ui.add(
-                            egui::Slider::new(&mut app_state.length_scale, 0.001..=100.0)
-                                .logarithmic(true)
-                                .fixed_decimals(3),
-                        );
-                        ui.separator();
-                        ui.label("Field of View");
-                        let mut fov_degrees = viewer_3d.camera.fov.to_degrees();
-                        let response = ui.add(
-                            egui::Slider::new(&mut fov_degrees, 10.0..=120.0)
-                                .text("°")
-                                .fixed_decimals(0),
-                        );
-                        if response.changed() {
-                            viewer_3d.camera.fov = fov_degrees.to_radians();
-                        }
-                        if ui.button("Reset FOV").clicked() {
-                            viewer_3d.camera.fov = std::f64::consts::FRAC_PI_4;
-                        }
-                    });
+                    // No View menu: the display controls it used to hold belong
+                    // to the 3D viewport's own HUD (`viewer_3d/hud.rs`), on the
+                    // principle that a panel owns its controls, and the dock
+                    // panels are all permanent (`TabViewer::closeable` is
+                    // false), so there is nothing app-global left for it.
                 });
             });
 
@@ -620,6 +574,7 @@ impl App {
                 if load_clicked {
                     app_state.reconstruction =
                         Some(SfmrReconstruction::demo(app_state.demo_num_points));
+                    app_state.loaded_file_name = None;
                     app_state.status_message = None;
                     app_state.points_need_upload = true;
                     app_state.show_demo_dialog = false;
@@ -644,6 +599,8 @@ impl App {
                 DockArea::new(dock_state).show_inside(ui, &mut tab_context);
             });
         });
+
+        self.quit_requested |= quit_requested;
 
         egui_winit_state.handle_platform_output(window, full_output.platform_output);
 
