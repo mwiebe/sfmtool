@@ -64,18 +64,24 @@ impl PyPatchCloud {
     ///         point ids; ``None`` (default) localizes for every patch.
     ///     starting_keypoints: Optional explicit per-view seeds:
     ///         ``point_index -> [[x, y], ...]`` in **source-image** pixels,
-    ///         parallel to that point's (final) view set — one ``[x, y]`` per
-    ///         view, in order. Same shape as
-    ///         :meth:`refine_keypoints`'s parameter of the same name. A point
+    ///         parallel to that point's (final) view set — one entry per view, in
+    ///         order. Same shape as :meth:`refine_keypoints`'s parameter of the
+    ///         same name, with one addition: an entry may be ``None`` instead of
+    ///         an ``[x, y]`` pair, seeding **that** view at the point's own
+    ///         projection while its siblings keep their explicit seeds. A point
     ///         absent from the map (and every point when this is ``None``, the
     ///         default) seeds each of its views at the point's own projection
-    ///         ``project_i(X_p)``, which is exactly today's behaviour.
+    ///         ``project_i(X_p)``, which is exactly today's behaviour — as does an
+    ///         all-``None`` list.
     ///
     ///         Seeding localization around the caller's own keypoints rather
-    ///         than around the projection anchors both the search start and the
-    ///         ``max_shift_px`` gate on evidence the caller trusts — the way to
-    ///         localize a point whose stored position is off but whose
-    ///         observations are good.
+    ///         than around the projection starts the search from the appearance
+    ///         the caller trusts (the observation that was actually matched)
+    ///         rather than from a position carrying the point's reprojection
+    ///         residual. The per-view ``None`` is what makes that usable on a
+    ///         view set that mixes observed views with expansion candidates: the
+    ///         candidates have no observation, hence no keypoint, and take the
+    ///         projection.
     ///     search_resolution_multiplier: ``m`` for the discrete cross-view search;
     ///         the search runs at resolution ``R_s = round(m·R)``. ``m = 1.0``
     ///         (default) is the no-op; ``m > 1`` (the supersampled grid) resolves
@@ -144,7 +150,7 @@ impl PyPatchCloud {
         robust_iters: u32,
         convergence_px: f64,
         point_indexes: Option<Vec<u32>>,
-        starting_keypoints: Option<std::collections::HashMap<u32, Vec<[f64; 2]>>>,
+        starting_keypoints: Option<std::collections::HashMap<u32, Vec<Option<[f64; 2]>>>>,
         search_resolution_multiplier: f32,
         search_strategy: &str,
         basis_max_views: u32,
@@ -330,10 +336,11 @@ impl PyPatchCloud {
         // Per-patch explicit seeds, parallel to `sets`. A point absent from the map
         // gets an EMPTY list, which the kernel reads as "unseeded" — that patch's
         // views seed at the projection, i.e. exactly the historical behaviour that
-        // `starting_keypoints=None` keeps for the whole cloud. A length mismatch
-        // against the point's view set would silently mis-pair seeds with views, so
-        // reject it up front (mirroring `refine_keypoints`).
-        let seeds_per_patch: Option<Vec<Vec<[f64; 2]>>> = match &starting_keypoints {
+        // `starting_keypoints=None` keeps for the whole cloud; a `None` entry
+        // inside a listed point's seeds says the same thing for that one view. A
+        // length mismatch against the point's view set would silently mis-pair
+        // seeds with views, so reject it up front (mirroring `refine_keypoints`).
+        let seeds_per_patch: Option<Vec<Vec<Option<[f64; 2]>>>> = match &starting_keypoints {
             None => None,
             Some(map) => {
                 let pid_to_idx: std::collections::HashMap<u32, usize> = self

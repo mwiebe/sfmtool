@@ -467,6 +467,112 @@ def test_localize_keypoints_rejects_unknown_basis_pick(seoul_bull_workspace: Pat
         )
 
 
+def _seeded_run(cloud, recon, images, view_sets, sample, seeds):
+    return {
+        int(r["point_index"]): r
+        for r in cloud.localize_keypoints(
+            recon,
+            images,
+            view_sets=view_sets,
+            starting_keypoints=seeds,
+            point_indexes=sample,
+            resolution=12,
+        )
+    }
+
+
+def test_localize_keypoints_per_view_optional_seeds(seoul_bull_workspace: Path):
+    """``starting_keypoints`` takes a per-view ``None``: that view seeds at the
+    point's projection while its siblings keep their explicit seeds. An all-``None``
+    table therefore reproduces the unseeded run, and displacing one view's seed
+    moves only what a seed can move."""
+    recon = SfmrReconstruction.load(seoul_bull_workspace)
+    images = load_images(recon)
+    cloud = PatchCloud.from_reconstruction(
+        recon, normal="mean_viewing", extent_value=5.0
+    )
+    sample = sample_point_ids(cloud, n=80)
+    view_sets = _view_sets_from_selection(cloud, recon, images, sample)
+    sample = [pid for pid in sample if len(view_sets.get(pid, [])) >= 2]
+    assert sample, "no multi-view point in the sample"
+    positions = np.asarray(recon.positions, dtype=np.float64)
+
+    unseeded = _seeded_run(cloud, recon, images, view_sets, sample, None)
+
+    # 1. Every view unseeded via the table == no table at all.
+    all_none = _seeded_run(
+        cloud,
+        recon,
+        images,
+        view_sets,
+        sample,
+        {pid: [None] * len(view_sets[pid]) for pid in sample},
+    )
+    for pid, r in unseeded.items():
+        assert np.array_equal(
+            np.asarray(all_none[pid]["views"]), np.asarray(r["views"])
+        )
+        assert np.array_equal(
+            np.asarray(all_none[pid]["keypoints"]), np.asarray(r["keypoints"])
+        )
+
+    # 2. A mixed table: the first view of each point is seeded a few px off its
+    #    projection, every other view is left at `None`. The seeds must be read
+    #    (some point's result moves) and the un-seeded views must still be
+    #    localized (no point loses its whole view set to a length/parse error).
+    mixed: dict[int, list[list[float] | None]] = {}
+    for pid in sample:
+        views = view_sets[pid]
+        seeds: list[list[float] | None] = [None] * len(views)
+        p = _project(recon, positions[pid], int(views[0]))
+        if p is not None:
+            seeds[0] = [float(p[0]) + 2.0, float(p[1])]
+        mixed[pid] = seeds
+    seeded = _seeded_run(cloud, recon, images, view_sets, sample, mixed)
+
+    assert set(seeded) == set(unseeded)
+    moved = 0
+    for pid, r in seeded.items():
+        base = unseeded[pid]
+        kb = {
+            int(v): np.asarray(base["keypoints"])[i]
+            for i, v in enumerate(np.asarray(base["views"]).tolist())
+        }
+        for i, v in enumerate(np.asarray(r["views"]).tolist()):
+            b = kb.get(int(v))
+            if b is None:
+                moved += 1
+                continue
+            if np.hypot(*(np.asarray(r["keypoints"])[i] - b)) > 0.1:
+                moved += 1
+    assert moved > 0, "a displaced per-view seed changed nothing"
+
+
+def test_localize_keypoints_rejects_mismatched_starting_keypoints(
+    seoul_bull_workspace: Path,
+):
+    """The parallel-length check is unchanged by the per-view ``None``: a seed
+    list that is not parallel to the point's view set is still a clean
+    ValueError."""
+    import pytest
+
+    recon = SfmrReconstruction.load(seoul_bull_workspace)
+    images = load_images(recon)
+    cloud = PatchCloud.from_reconstruction(
+        recon, normal="mean_viewing", extent_value=5.0
+    )
+    pid = int(np.asarray(cloud.point_indexes)[0])
+    with pytest.raises(ValueError):
+        cloud.localize_keypoints(
+            recon,
+            images,
+            view_sets={pid: [0, 1]},
+            starting_keypoints={pid: [None]},
+            point_indexes=[pid],
+            resolution=12,
+        )
+
+
 def test_localize_keypoints_chunked_with_whole_cloud_view_scores(
     seoul_bull_workspace: Path,
 ):

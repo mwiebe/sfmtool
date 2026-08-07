@@ -489,8 +489,12 @@ pub struct BasisEvidence<'a> {
 /// `views` is one [`ProjectedImage`] per reconstruction image (indexed by image
 /// index); `view_set` lists the views to refine (the output of
 /// [view selection](super::view_selection)). `starting_keypoints`, when given, is
-/// one seed per `view_set` entry (source-image px); `None` seeds every view at the
-/// point's own projection `project_i(X_p)`. Returns the kept views and their
+/// one **optional** seed per `view_set` entry (source-image px), parallel to it:
+/// `Some([x, y])` seeds that view by unprojecting the keypoint onto the patch
+/// plane, `None` seeds it at the point's own projection `project_i(X_p)` — and so
+/// does `None` for the whole slice. A view set that mixes observed views (which
+/// have a stored keypoint) with expansion candidates (which do not) is therefore
+/// seeded per view rather than all-or-nothing. Returns the kept views and their
 /// refined keypoints; see [`KeypointLocalization`] and
 /// `specs/core/patch-keypoint-localization.md`.
 ///
@@ -501,7 +505,7 @@ pub fn localize_patch_keypoints(
     patch: &OrientedPatch,
     views: &[ProjectedImage<'_>],
     view_set: &[u32],
-    starting_keypoints: Option<&[[f64; 2]]>,
+    starting_keypoints: Option<&[Option<[f64; 2]>]>,
     params: &KeypointLocalizeParams,
 ) -> KeypointLocalization {
     localize_patch_keypoints_with_basis(
@@ -526,7 +530,7 @@ pub fn localize_patch_keypoints_with_basis(
     patch: &OrientedPatch,
     views: &[ProjectedImage<'_>],
     view_set: &[u32],
-    starting_keypoints: Option<&[[f64; 2]]>,
+    starting_keypoints: Option<&[Option<[f64; 2]>]>,
     evidence: BasisEvidence<'_>,
     params: &KeypointLocalizeParams,
 ) -> KeypointLocalization {
@@ -601,14 +605,17 @@ pub fn localize_patch_keypoints_with_basis(
             continue;
         };
         // Seed offset (in `R_s`-grid steps, since `wpp` is at `R_s`): unproject the
-        // starting keypoint onto the plane, else zero. Split into the integer read
-        // accumulator (clipped to the cache's drift bound) and a sub-pixel residual
-        // — the residual keeps a lone-view seed exact through `finalize` while the
-        // congealing read position stays integer.
-        let off = match starting_keypoints {
-            Some(seeds) => seed_offset(patch, view, seeds[k], wpp_u, wpp_v).unwrap_or([0.0, 0.0]),
-            None => [0.0, 0.0],
-        };
+        // starting keypoint onto the plane, else zero. A view with no seed of its
+        // own (`None` — the expansion candidate that has no observation to take a
+        // keypoint from) falls back to that same zero, i.e. to its projection, so
+        // an all-`None` table is bit-identical to passing no seeds at all. Split
+        // into the integer read accumulator (clipped to the cache's drift bound)
+        // and a sub-pixel residual — the residual keeps a lone-view seed exact
+        // through `finalize` while the congealing read position stays integer.
+        let off = starting_keypoints
+            .and_then(|seeds| seeds[k])
+            .and_then(|kp| seed_offset(patch, view, kp, wpp_u, wpp_v))
+            .unwrap_or([0.0, 0.0]);
         // `off = [u, v]` (u-axis, v-axis components, in `R_s`-grid steps). Split each
         // axis into the clamped integer read accumulator and a pure sub-pixel
         // residual — the residual keeps a lone-view seed exact through `finalize`; a
@@ -1294,10 +1301,12 @@ pub struct BasisInputs<'a> {
 /// Batch [`localize_patch_keypoints`] over a [`PatchCloud`], parallel across
 /// patches (rayon). `view_sets[i]` lists, for patch `i`, the views to refine
 /// (typically the output of view selection). `starting_keypoints`, when given, is
-/// parallel to `view_sets` (one seed per view); `None` seeds every view at the
-/// point's projection, and so does an **empty** per-patch entry — the batch form
-/// has no per-patch `Option`, so it says "this patch is unseeded" with an empty
-/// list, exactly as [`BasisInputs::view_scores`] says "unscored". `basis`, when
+/// parallel to `view_sets` in both dimensions (one **optional** seed per view);
+/// `None` seeds every view at the point's projection, and so does an **empty**
+/// per-patch entry — the batch form has no per-patch `Option`, so it says "this
+/// patch is unseeded" with an empty list, exactly as [`BasisInputs::view_scores`]
+/// says "unscored" — and so does a `None` for one view inside a seeded patch's
+/// list. `basis`, when
 /// given, carries the per-patch ranking
 /// evidence the [consensus-basis cap](KeypointLocalizeParams::basis_max_views)
 /// consumes (unread when the cap is off). Results are returned in cloud order.
@@ -1310,7 +1319,7 @@ pub fn localize_patch_cloud_keypoints(
     cloud: &PatchCloud,
     views: &[ProjectedImage<'_>],
     view_sets: &[Vec<u32>],
-    starting_keypoints: Option<&[Vec<[f64; 2]>]>,
+    starting_keypoints: Option<&[Vec<Option<[f64; 2]>>]>,
     basis: Option<&BasisInputs<'_>>,
     params: &KeypointLocalizeParams,
     progress: Option<&std::sync::atomic::AtomicUsize>,

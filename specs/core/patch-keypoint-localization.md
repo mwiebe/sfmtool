@@ -46,7 +46,13 @@ recovers it by unprojecting the keypoint onto the patch plane.
   refine.
 - A **starting keypoint** per view — it should already be approximately right,
   since the refinement only nudges it; the 3D point's projection
-  `project_i(X_p)` is a good seed.
+  `project_i(X_p)` is a good seed, and is the seed a view supplies no keypoint
+  for. The seed is **per view, independently optional**: a view set can mix views
+  that carry a keypoint (an observation's stored position — the appearance that
+  was actually matched) with views that carry none (a view added by [view
+  selection](patch-view-selection.md) observes nothing, so it has no keypoint),
+  and each is seeded from what it has. A view set in which no view carries a
+  keypoint is the all-projection case, identical to supplying no seeds at all.
 - **Drop thresholds** — the per-view gates the refiner uses to drop a view
   in-loop (below): `max_shift_px`, `min_relative_zncc`, and the grazing cutoff. The caller
   supplies them; the refiner stops dropping once only the LOO floor of two views
@@ -219,7 +225,8 @@ supplied starting keypoint is unprojected onto the plane to initialize `acc`. Th
 render → z-normalize → robust-consensus primitives are shared with `normal_refine`
 (widened to `pub(super)`), not duplicated. Defaults match the table above with
 `min_grazing_cos = 0.1`, `robust_iters = 3`, and `convergence_px = 0.05`. The
-starting-keypoint seed is a kernel-level input
-(`localize_patch_keypoints(..., starting_keypoints, ...)`); the v1 PyO3 binding
-does not expose it and always seeds at the projection, which is exactly the
-pipeline's "project starting keypoints" step._
+starting-keypoint seed is a per-view `Option` parallel to the view set
+(`localize_patch_keypoints(..., starting_keypoints, ...)`, exposed on the PyO3
+binding as `starting_keypoints={point_index: [[x, y] | None, ...]}`): `None` for
+one view seeds that view at its projection while its siblings keep their explicit
+seeds, and an all-`None` list is bit-identical to supplying no seeds._
