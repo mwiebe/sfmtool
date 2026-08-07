@@ -291,7 +291,12 @@ fn infinity_point_seed_offsets_congeal_back() {
     let views = scene.views();
     let patch = infinity_patch();
     let (cx, cy) = (IMG_W as f64 / 2.0, IMG_H as f64 / 2.0);
-    let seeds = [[cx, cy], [cx, cy], [cx, cy], [cx + 4.0, cy]];
+    let seeds = [
+        Some([cx, cy]),
+        Some([cx, cy]),
+        Some([cx, cy]),
+        Some([cx + 4.0, cy]),
+    ];
     let exhaustive = KeypointLocalizeParams {
         search_strategy: SearchStrategy::Exhaustive,
         ..params()
@@ -627,10 +632,10 @@ fn seed_keypoint_offset_round_trips() {
     let views = scene.views();
     let patch = plane_patch();
 
-    let seeds: Vec<[f64; 2]> = (0..3)
+    let seeds: Vec<Option<[f64; 2]>> = (0..3)
         .map(|i| {
             let (x, y) = project(&views[i], &patch.center, patch.w).unwrap();
-            [x, y]
+            Some([x, y])
         })
         .collect();
     let res = localize_patch_keypoints(&patch, &views, &[0, 1, 2], Some(&seeds), &params());
@@ -660,7 +665,7 @@ fn seed_offset_unprojection_round_trips_on_lone_view() {
 
     let proj = project(&views[0], &patch.center, patch.w).unwrap();
     let seed = [proj.0 + 5.0, proj.1 - 3.0]; // a few px off the projection
-    let res = localize_patch_keypoints(&patch, &views, &[0], Some(&[seed]), &params());
+    let res = localize_patch_keypoints(&patch, &views, &[0], Some(&[Some(seed)]), &params());
     assert_eq!(res.views, vec![0]);
     assert!(
         (res.keypoints[0][0] - seed[0]).abs() < 1e-6
@@ -671,6 +676,155 @@ fn seed_offset_unprojection_round_trips_on_lone_view() {
     // And the reported offset is the seed's distance from the projection.
     let want = ((seed[0] - proj.0).powi(2) + (seed[1] - proj.1).powi(2)).sqrt();
     assert!((res.offsets_px[0] - want).abs() < 1e-6);
+}
+
+#[test]
+fn all_none_seeds_match_the_unseeded_run() {
+    // A seed table of all `None` says "every view seeds at its projection", which
+    // is what passing no table at all means — so the two runs must agree to the
+    // bit, not merely closely. This is the contract a caller relies on when it
+    // builds one table for a view set where no view happens to have a keypoint.
+    let centers = [
+        [0.4, 0.0, 0.0],
+        [-0.4, 0.0, 0.0],
+        [0.0, 0.4, 0.0],
+        [0.0, -0.4, 0.0],
+    ];
+    let offs = [[0.0, 0.0], [0.6 * wpp(), 0.0], [0.0, -wpp()], [0.0; 2]];
+    let texs = vec![texture as fn(f64, f64) -> f64; 4];
+    let scene = Scene::new(&centers, &offs, &texs);
+    let views = scene.views();
+    let patch = plane_patch();
+
+    let unseeded = localize_patch_keypoints(&patch, &views, &[0, 1, 2, 3], None, &params());
+    let all_none =
+        localize_patch_keypoints(&patch, &views, &[0, 1, 2, 3], Some(&[None; 4]), &params());
+
+    assert_eq!(all_none.views, unseeded.views);
+    assert_eq!(all_none.keypoints, unseeded.keypoints);
+    assert_eq!(all_none.offsets_px, unseeded.offsets_px);
+    assert_eq!(all_none.loo_zncc, unseeded.loo_zncc);
+    assert_eq!(all_none.is_basis, unseeded.is_basis);
+}
+
+#[test]
+fn mixed_seeds_apply_per_view() {
+    // The mixed table: views 0-2 carry no seed (`None` — they anchor at their
+    // projections, as an expansion candidate with no observation does), view 3
+    // carries an explicit seed a few source px off the aligned content. The
+    // unseeded views pin the gauge and congealing pulls the seeded one home, so
+    // the run matches the equivalent all-`Some` table where 0-2 are seeded at
+    // their own projections. Pinned to `Exhaustive` for the same reason
+    // `infinity_point_seed_offsets_congeal_back` is: the long walk home from a
+    // multi-px seed is an `Exhaustive` guarantee.
+    let centers = [
+        [0.4, 0.0, 0.0],
+        [-0.4, 0.0, 0.0],
+        [0.0, 0.4, 0.0],
+        [0.0, -0.4, 0.0],
+    ];
+    let offs = [[0.0; 2]; 4];
+    let texs = vec![texture as fn(f64, f64) -> f64; 4];
+    let scene = Scene::new(&centers, &offs, &texs);
+    let views = scene.views();
+    let patch = plane_patch();
+    let exhaustive = KeypointLocalizeParams {
+        search_strategy: SearchStrategy::Exhaustive,
+        ..params()
+    };
+
+    let projs: Vec<[f64; 2]> = (0..4)
+        .map(|i| {
+            let (x, y) = project(&views[i], &patch.center, patch.w).unwrap();
+            [x, y]
+        })
+        .collect();
+    // Two source px off view 3's projection — well inside `search`, and enough
+    // that seeding it at the projection instead would be visible below.
+    let off_seed = [projs[3][0] + 2.0 * src_per_grid(), projs[3][1]];
+    let mixed = [None, None, None, Some(off_seed)];
+    let all_some = [
+        Some(projs[0]),
+        Some(projs[1]),
+        Some(projs[2]),
+        Some(off_seed),
+    ];
+
+    let res = localize_patch_keypoints(&patch, &views, &[0, 1, 2, 3], Some(&mixed), &exhaustive);
+    let ref_res =
+        localize_patch_keypoints(&patch, &views, &[0, 1, 2, 3], Some(&all_some), &exhaustive);
+
+    assert_eq!(res.views, vec![0, 1, 2, 3], "every view is kept");
+    assert_eq!(res.views, ref_res.views);
+    for (k, (a, b)) in res.keypoints.iter().zip(&ref_res.keypoints).enumerate() {
+        assert!(
+            (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6,
+            "view {k}: an unseeded entry must match a projection-seeded one, {a:?} vs {b:?}"
+        );
+    }
+    // The unseeded views started (and stay) at their projections; the seeded one
+    // congeals back onto the same aligned content.
+    for i in 0..3 {
+        let k = pos(&res, i).unwrap();
+        assert!(
+            res.offsets_px[k] < 0.6,
+            "unseeded view {i} should sit on its projection, got {}",
+            res.offsets_px[k]
+        );
+    }
+    let k3 = pos(&res, 3).unwrap();
+    assert!(
+        res.offsets_px[k3] < 0.6,
+        "the seeded view should congeal back onto the aligned content, got {}",
+        res.offsets_px[k3]
+    );
+}
+
+#[test]
+fn batch_mixed_seeds_match_the_single_patch_call() {
+    // The cloud entry point's per-patch seed lists carry the same per-view
+    // `Option`s: an empty list is an unseeded patch, and a `None` inside a
+    // seeded patch's list is an unseeded view.
+    let centers = [[0.4, 0.0, 0.0], [-0.4, 0.0, 0.0], [0.0, 0.4, 0.0]];
+    let offs = [[0.0; 2]; 3];
+    let texs = vec![texture as fn(f64, f64) -> f64; 3];
+    let scene = Scene::new(&centers, &offs, &texs);
+    let views = scene.views();
+    let cloud = PatchCloud {
+        patches: vec![plane_patch(), plane_patch()],
+        point_indexes: vec![0, 1],
+    };
+    let view_sets = vec![vec![0u32, 1, 2], vec![0u32, 1, 2]];
+    let proj0 = {
+        let (x, y) = project(&views[0], &cloud.patches[0].center, cloud.patches[0].w).unwrap();
+        [x + src_per_grid(), y]
+    };
+    // Patch 0 seeds only its first view; patch 1 is unseeded (empty list).
+    let seeds = vec![vec![Some(proj0), None, None], Vec::new()];
+
+    let batch = localize_patch_cloud_keypoints(
+        &cloud,
+        &views,
+        &view_sets,
+        Some(&seeds),
+        None,
+        &params(),
+        None,
+    );
+
+    let single0 = localize_patch_keypoints(
+        &cloud.patches[0],
+        &views,
+        &view_sets[0],
+        Some(&seeds[0]),
+        &params(),
+    );
+    let single1 =
+        localize_patch_keypoints(&cloud.patches[1], &views, &view_sets[1], None, &params());
+    assert_eq!(batch[0].views, single0.views);
+    assert_eq!(batch[0].keypoints, single0.keypoints);
+    assert_eq!(batch[1].views, single1.views);
+    assert_eq!(batch[1].keypoints, single1.keypoints);
 }
 
 #[test]
@@ -2075,7 +2229,7 @@ fn tail_without_a_basis_template_still_faces_the_shift_gate() {
     let patch = plane_patch();
     // Seed every view well off its projection.
     let (cx, cy) = (IMG_W as f64 / 2.0, IMG_H as f64 / 2.0);
-    let seeds: Vec<[f64; 2]> = (0..8).map(|_| [cx + 12.0, cy]).collect();
+    let seeds: Vec<Option<[f64; 2]>> = (0..8).map(|_| Some([cx + 12.0, cy])).collect();
 
     // Loose gate: the un-registered tail views survive, which is what proves
     // this scene really exercises the no-basis path.

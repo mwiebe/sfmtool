@@ -16,6 +16,7 @@ is a thin wrapper over it.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import numpy as np
@@ -177,6 +178,45 @@ def _localizations_from_recon(recon: SfmrReconstruction) -> list[dict[str, Any]]
         }
         for pid, d in sorted(by_pid.items())
     ]
+
+
+def _keypoint_anchoring_enabled() -> bool:
+    """Whether the photometric stages anchor a point's observed views on their
+    **stored** keypoints rather than on the point's reprojection.
+
+    A stored keypoint is the position an observation was actually matched at; the
+    reprojection carries the point's residual, so sampling there measures the
+    appearance shifted by that residual. The stages that already had a way to say
+    so (normal refinement, the sub-pixel refiner) have always been anchored; this
+    switch covers the two that gained one later — view selection and the discrete
+    localizer. ``SFMTOOL_EMBED_KEYPOINT_ANCHOR=0`` reverts both to projection
+    anchoring.
+    """
+    return os.environ.get("SFMTOOL_EMBED_KEYPOINT_ANCHOR", "1") != "0"
+
+
+def _stored_keypoints_by_image(
+    recon: SfmrReconstruction,
+) -> dict[int, dict[int, list[float]]]:
+    """``point_index -> {image_index: [x, y]}`` from an ``embedded_patches``
+    recon's inline observations — the stored keypoint each view was matched at.
+
+    First observation wins where a point is observed twice in one image, matching
+    the order-preserving dedup the kernels apply to a view set. A point (or a
+    whole recon) with no inline keypoints simply contributes no entries, so every
+    lookup misses and the caller falls back to the projection.
+    """
+    kxy = np.asarray(recon.keypoints_xy, dtype=np.float64).reshape(-1, 2)
+    if len(kxy) == 0:
+        return {}
+    pt = np.asarray(recon.track_point_indexes)
+    im = np.asarray(recon.track_image_indexes, dtype=np.uint32)
+    out: dict[int, dict[int, list[float]]] = {}
+    for k in range(len(pt)):
+        out.setdefault(int(pt[k]), {}).setdefault(
+            int(im[k]), [float(kxy[k, 0]), float(kxy[k, 1])]
+        )
+    return out
 
 
 def _patch_normals(cloud: PatchCloud) -> np.ndarray:
@@ -371,9 +411,12 @@ def embed_patches(
        tangent-sphere frame untouched.
     2. **Select the view set** per point: the track plus other views that
        geometrically see the surfel and clear ``min_relative_zncc`` against a
-       track-seeded template.
-    3. **Project + congeal** each view's keypoint to sub-pixel, dropping views that
+       track-seeded template — the track views again rendered at their stored
+       keypoints, both when fusing that template and when scoring against it.
+    3. **Congeal** each view's keypoint to sub-pixel, dropping views that
        won't co-register (grazing, out-of-frame, ``max_shift_px``, low LOO ZNCC).
+       Each observed view seeds at its stored keypoint; a view step 2 added has no
+       observation, so it seeds at the point's projection.
        The final round's sub-pixel pass also fuses each point's **consensus
        bitmap** at the final keypoints (points at infinity included — they render
        through the same ``w``-aware path) and reports per-point validity.
@@ -382,6 +425,12 @@ def embed_patches(
        signal, uniform for finite and infinity points), then renumber the
        survivors into a valid ``embedded_patches`` reconstruction carrying those
        bitmaps.
+
+    Every photometric stage samples an observed view at the keypoint that
+    observation was matched at rather than at the point's reprojection, so a
+    point's residual never shifts the appearance being measured. Setting
+    ``SFMTOOL_EMBED_KEYPOINT_ANCHOR=0`` reverts steps 2 and 3 to projection
+    anchoring.
 
     Args:
         recon: A ``sift_files`` reconstruction (the caller validates this).
@@ -489,6 +538,7 @@ def embed_patches(
     log = progress if callable(progress) else None
     half_extent = patch_size / 2.0
     cull_localizability = max_keypoint_uncertainty and max_keypoint_uncertainty > 0
+    keypoint_anchor = _keypoint_anchoring_enabled()
 
     # Decode every source image into its full pyramid ONCE. Each kernel call
     # below (six on a default two-round run) previously rebuilt all the
@@ -545,6 +595,11 @@ def embed_patches(
             min_relative_zncc=min_relative_zncc,
             resolution=resolution,
             sampler=sampler,
+            # Fuse the reference — and score the track views against it — at the
+            # keypoints those views were matched at, not at the point's
+            # reprojection. Candidates have no observation, so they keep the
+            # projection either way.
+            keypoint_anchor=keypoint_anchor,
             progress=counter,
         )
     # Keep the selection's per-view ZNCC and track-view split alongside the view
@@ -564,8 +619,23 @@ def embed_patches(
             view_scores[pid] = np.asarray(s["scores"], dtype=np.float64).tolist()
             track_view_counts[pid] = int(s["track_view_count"])
 
-    # 3. Discrete localizer (the seed): project starting keypoints and congeal them,
-    #    dropping views that won't co-register in-loop. Runs once, in round 1.
+    # 3. Discrete localizer (the seed): seed each view's starting keypoint and
+    #    congeal, dropping views that won't co-register in-loop. Runs once, in
+    #    round 1. An observed view seeds at its stored keypoint — the position it
+    #    was matched at — and a view selection added seeds at the point's
+    #    projection (it observes nothing, so it has no keypoint), which is the
+    #    per-view `None` the binding takes.
+    localize_seeds: dict[int, list[list[float] | None]] | None = None
+    if keypoint_anchor:
+        stored = _stored_keypoints_by_image(embedded)
+        localize_seeds = {}
+        for pid, views in view_sets.items():
+            by_image = stored.get(pid)
+            localize_seeds[pid] = (
+                [None] * len(views)
+                if by_image is None
+                else [by_image.get(int(v)) for v in views]
+            )
     with (
         _timed_step(
             log, f"  round 1/{rounds}: localizing keypoints ({len(cloud)} pts)..."
@@ -576,6 +646,7 @@ def embed_patches(
             embedded,
             pyramids,
             view_sets=view_sets,
+            starting_keypoints=localize_seeds,
             max_iters=max_iters,
             search=search,
             max_shift_px=max_shift_px,
