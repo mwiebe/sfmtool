@@ -1466,3 +1466,271 @@ fn test_cluster_archive_uses_stored_compression() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Every archive entry name, pinned against a literal.
+///
+/// `entries.rs` is the single source of truth for the three production paths,
+/// and that is exactly why this test is needed. A name that is wrong *there* is
+/// wrong **consistently**: `write`, `read` and `verify` all agree with each
+/// other, every round-trip test in this file still passes, and the only symptom
+/// is that the archive can no longer be exchanged with any other build of
+/// sfmtool. Before the names were centralized a typo broke the round trip
+/// loudly, because the writer's copy and the reader's copy disagreed; that
+/// safety net is gone. This list and `archive_entry_names_pin_call_sites`
+/// replace it between them — see the split of responsibilities below.
+///
+/// **What this pins and what it does not.** This test fixes the *spelling and
+/// shape* of each template. It does **not** fix which count a given call site
+/// passes — that decision lives in `read`/`write`/`verify` and is invisible
+/// here. `archive_entry_names_pin_call_sites` covers that.
+///
+/// Dimension values are distinct from each other **and** from every structural
+/// constant that appears in a template (`2`, `3`, `4`). That second part
+/// matters: with `pair_count = 3`, a template that hard-coded the count as
+/// `two_view_geometries/e_matrices.3.3.3.…` would render identically to the
+/// correct one and this test would not notice.
+///
+/// Renaming an on-disk entry is a format change and should require deliberately
+/// editing this list.
+#[test]
+fn entry_names_are_pinned() {
+    use crate::entries as e;
+
+    // Top level (no section prefix, not part of any section hash).
+    assert_eq!(e::metadata(), "metadata.json.zst");
+    assert_eq!(e::content_hash(), "content_hash.json.zst");
+
+    // Fixed-name JSON sections.
+    assert_eq!(e::images_metadata(), "images/metadata.json.zst");
+    assert_eq!(e::images_names(), "images/names.json.zst");
+    assert_eq!(e::image_pairs_metadata(), "image_pairs/metadata.json.zst");
+    assert_eq!(
+        e::two_view_geometries_metadata(),
+        "two_view_geometries/metadata.json.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_config_types(),
+        "two_view_geometries/config_types.json.zst"
+    );
+    assert_eq!(e::clusters_metadata(), "clusters/metadata.json.zst");
+    assert_eq!(
+        e::cluster_patches_metadata(),
+        "cluster_patches/metadata.json.zst"
+    );
+
+    // Images.  image_count = 11.
+    assert_eq!(
+        e::images_feature_counts(11),
+        "images/feature_counts.11.uint32.zst"
+    );
+    assert_eq!(
+        e::images_image_dims(11),
+        "images/image_dims.11.2.uint32.zst"
+    );
+    // `verify` matches this entry's presence on the prefix alone; keep the two
+    // spellings tied so a rename cannot turn that check into a silent no-op.
+    assert_eq!(e::images_image_dims_prefix(), "images/image_dims.");
+    assert!(e::images_image_dims(11).starts_with(e::images_image_dims_prefix()));
+    assert_eq!(
+        e::images_feature_tool_hashes(11),
+        "images/feature_tool_hashes.11.uint128.zst"
+    );
+    assert_eq!(
+        e::images_sift_content_hashes(11),
+        "images/sift_content_hashes.11.uint128.zst"
+    );
+
+    // Pairwise backbone.  pair_count = 13, match_count = 17.
+    assert_eq!(
+        e::image_pairs_image_index_pairs(13),
+        "image_pairs/image_index_pairs.13.2.uint32.zst"
+    );
+    assert_eq!(
+        e::image_pairs_match_counts(13),
+        "image_pairs/match_counts.13.uint32.zst"
+    );
+    assert_eq!(
+        e::image_pairs_match_feature_indexes(17),
+        "image_pairs/match_feature_indexes.17.2.uint32.zst"
+    );
+    assert_eq!(
+        e::image_pairs_match_descriptor_distances(17),
+        "image_pairs/match_descriptor_distances.17.float32.zst"
+    );
+
+    // Two-view geometries.  pair_count = 13, inlier_count = 19. The 3.3 in the
+    // matrix entries is the matrix shape, not a count.
+    assert_eq!(
+        e::two_view_geometries_config_indexes(13),
+        "two_view_geometries/config_indexes.13.uint8.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_e_matrices(13),
+        "two_view_geometries/e_matrices.13.3.3.float64.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_f_matrices(13),
+        "two_view_geometries/f_matrices.13.3.3.float64.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_h_matrices(13),
+        "two_view_geometries/h_matrices.13.3.3.float64.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_quaternions_wxyz(13),
+        "two_view_geometries/quaternions_wxyz.13.4.float64.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_translations_xyz(13),
+        "two_view_geometries/translations_xyz.13.3.float64.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_inlier_counts(13),
+        "two_view_geometries/inlier_counts.13.uint32.zst"
+    );
+    assert_eq!(
+        e::two_view_geometries_inlier_feature_indexes(19),
+        "two_view_geometries/inlier_feature_indexes.19.2.uint32.zst"
+    );
+
+    // Cluster backbone.  cluster_count = 23, member_count = 29. `cluster_starts`
+    // is sized `cluster_count + 1`, so 23 clusters must yield 24 CSR offsets.
+    assert_eq!(
+        e::clusters_cluster_starts(23),
+        "clusters/cluster_starts.24.uint32.zst"
+    );
+    assert_eq!(
+        e::clusters_member_images(29),
+        "clusters/member_images.29.uint32.zst"
+    );
+    assert_eq!(
+        e::clusters_member_features(29),
+        "clusters/member_features.29.uint32.zst"
+    );
+
+    // Cluster patches. `reference_members` is per-cluster; the rest per-member.
+    assert_eq!(
+        e::cluster_patches_reference_members(23),
+        "cluster_patches/reference_members.23.uint32.zst"
+    );
+    assert_eq!(
+        e::cluster_patches_member_status(29),
+        "cluster_patches/member_status.29.uint8.zst"
+    );
+    assert_eq!(
+        e::cluster_patches_member_affines(29),
+        "cluster_patches/member_affines.29.2.3.float64.zst"
+    );
+    assert_eq!(
+        e::cluster_patches_member_zncc(29),
+        "cluster_patches/member_zncc.29.float32.zst"
+    );
+    assert_eq!(
+        e::cluster_patches_member_shift_px(29),
+        "cluster_patches/member_shift_px.29.float32.zst"
+    );
+    assert_eq!(
+        e::cluster_patches_member_consistency_residual(29),
+        "cluster_patches/member_consistency_residual.29.float32.zst"
+    );
+}
+
+/// The archives a real write produces, pinned entry by entry.
+///
+/// `entry_names_are_pinned` fixes each template in `entries.rs`, but the choice
+/// of *which* count sizes a given entry lives at the call sites in `read`,
+/// `write` and `verify` — and that choice is invisible to it. Passing
+/// `member_count` where `cluster_patches/reference_members` wants
+/// `cluster_count`, at all three call sites, produces an archive no other build
+/// can read while leaving every other test in this file green.
+///
+/// Two archives, because no single `.matches` file carries every section: a
+/// file has either the pairwise backbone or the cluster backbone, never both.
+///
+/// The builders give `image_count = 3`, `pair_count = 2`, `match_count = 5`,
+/// `inlier_count = 3`, `cluster_count = 2`, `member_count = 5`. Those are
+/// distinct enough to catch the swaps that matter (pair/match, cluster/member),
+/// but note `inlier_count` and `cluster_starts`'s `cluster_count + 1` both
+/// happen to equal `image_count` here, so a swap involving those two would slip
+/// through — `entry_names_are_pinned` is what covers their spelling.
+#[test]
+fn archive_entry_names_pin_call_sites() {
+    let cases: [(&str, MatchesData, &[&str]); 2] = [
+        (
+            "tvg",
+            make_test_data_with_tvg(),
+            &[
+                "content_hash.json.zst",
+                "image_pairs/image_index_pairs.2.2.uint32.zst",
+                "image_pairs/match_counts.2.uint32.zst",
+                "image_pairs/match_descriptor_distances.5.float32.zst",
+                "image_pairs/match_feature_indexes.5.2.uint32.zst",
+                "image_pairs/metadata.json.zst",
+                "images/feature_counts.3.uint32.zst",
+                "images/feature_tool_hashes.3.uint128.zst",
+                "images/image_dims.3.2.uint32.zst",
+                "images/metadata.json.zst",
+                "images/names.json.zst",
+                "images/sift_content_hashes.3.uint128.zst",
+                "metadata.json.zst",
+                "two_view_geometries/config_indexes.2.uint8.zst",
+                "two_view_geometries/config_types.json.zst",
+                "two_view_geometries/e_matrices.2.3.3.float64.zst",
+                "two_view_geometries/f_matrices.2.3.3.float64.zst",
+                "two_view_geometries/h_matrices.2.3.3.float64.zst",
+                "two_view_geometries/inlier_counts.2.uint32.zst",
+                "two_view_geometries/inlier_feature_indexes.3.2.uint32.zst",
+                "two_view_geometries/metadata.json.zst",
+                "two_view_geometries/quaternions_wxyz.2.4.float64.zst",
+                "two_view_geometries/translations_xyz.2.3.float64.zst",
+            ],
+        ),
+        (
+            "cluster_patches",
+            make_cluster_patch_test_data(),
+            &[
+                "cluster_patches/member_affines.5.2.3.float64.zst",
+                "cluster_patches/member_consistency_residual.5.float32.zst",
+                "cluster_patches/member_shift_px.5.float32.zst",
+                "cluster_patches/member_status.5.uint8.zst",
+                "cluster_patches/member_zncc.5.float32.zst",
+                "cluster_patches/metadata.json.zst",
+                "cluster_patches/reference_members.2.uint32.zst",
+                "clusters/cluster_starts.3.uint32.zst",
+                "clusters/member_features.5.uint32.zst",
+                "clusters/member_images.5.uint32.zst",
+                "clusters/metadata.json.zst",
+                "content_hash.json.zst",
+                "images/feature_counts.3.uint32.zst",
+                "images/feature_tool_hashes.3.uint128.zst",
+                "images/image_dims.3.2.uint32.zst",
+                "images/metadata.json.zst",
+                "images/names.json.zst",
+                "images/sift_content_hashes.3.uint128.zst",
+                "metadata.json.zst",
+            ],
+        ),
+    ];
+
+    for (label, data, expected) in cases {
+        let dir = std::env::temp_dir().join(format!("matches_test_entry_name_pin_{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pin.matches");
+        write_matches(&path, &data, 3).unwrap();
+
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let mut got: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        got.sort();
+
+        assert_eq!(
+            got, expected,
+            "{label}: archive entry listing changed — a call site is passing a \
+             different count, or an entry was added, removed or renamed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
