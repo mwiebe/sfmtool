@@ -270,6 +270,16 @@ fn tangent_basis(d: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
 /// the caller); direction observations report `−(R·d)_z` (cheirality: any
 /// positive value is in front). Invalid observations report
 /// `INVALID_RESIDUAL` and a non-positive in-front measure.
+///
+/// **Model-aware in-front measure.** `−z_cam` is the perspective family's
+/// notion of "in front": its projection is only defined for `z_cam < 0`, so
+/// the sign of `−z` *is* the domain test. A ray-path model (fisheye /
+/// equirectangular) images directions all the way out to `θ = π`, where
+/// `−z_cam ≤ 0` for every observation past 90° off-axis — a real, in-domain
+/// observation of a >180° capture. For those models the in-front measure is
+/// the range `‖p_cam‖` instead, which keeps the floor doing the only job it
+/// can still do there (reject a point sitting on the camera centre, where the
+/// direction is undefined) and leaves the domain test to `ray_to_pixel`.
 #[allow(clippy::too_many_arguments)]
 fn residual_norms_depths(
     cam: &CameraIntrinsics,
@@ -284,6 +294,7 @@ fn residual_norms_depths(
     let n_obs = obs_img.len();
     let mut norms = vec![INVALID_RESIDUAL; n_obs];
     let mut depths = vec![f64::NEG_INFINITY; n_obs];
+    let ray_path = cam.model.needs_ray_path();
     for k in 0..n_obs {
         let pi = obs_pt[k] as usize;
         let p = points[pi];
@@ -293,7 +304,7 @@ fn residual_norms_depths(
         let i = obs_img[k] as usize;
         let rot = quats[i] * Vector3::new(p[0], p[1], p[2]);
         let c = if is_dir[pi] { rot } else { rot + trans[i] };
-        depths[k] = -c.z;
+        depths[k] = if ray_path { c.norm() } else { -c.z };
         if let Some((u, v)) = cam.ray_to_pixel([c.x, c.y, c.z]) {
             norms[k] = (u - uv[k][0]).hypot(v - uv[k][1]);
         }
@@ -881,9 +892,11 @@ fn bundle_adjust_staged(
         }
         let (norms, depths) =
             residual_norms_depths(&cam_now, quats, trans, points, is_dir, uv, obs_img, obs_pt);
-        // In-front: canonical depth over the 1e-3·f floor for finite
-        // observations; cheirality (R·d)_z < 0 for directions. Protected
-        // observations bypass the trim gates entirely.
+        // In-front: the model-aware measure from `residual_norms_depths`
+        // (canonical depth for the perspective family, range for a ray-path
+        // model) over the 1e-3·f floor for finite observations; cheirality
+        // (R·d)_z < 0 for directions. Protected observations bypass the trim
+        // gates entirely.
         let mut keep: Vec<bool> = (0..n_obs)
             .map(|k| {
                 let floor = if is_dir[obs_pt[k] as usize] {

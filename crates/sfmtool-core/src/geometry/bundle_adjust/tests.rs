@@ -1538,3 +1538,199 @@ fn untouched_images_pass_through() {
     assert!((s.trans[last] - spare_t).norm() < 1e-15);
     assert_eq!(s.points[n_pt_before], [7.0, 8.0, 9.0]);
 }
+
+// ── Model-genericity: fixed equidistant-fisheye intrinsics past 90° ────────
+//
+// Phase 1 of the fisheye-seed campaign (`scripts/notes-fisheye-seed.md`) runs
+// this kernel with FIXED `SimpleRadialFisheye { k1 = 0 }` intrinsics. Two
+// distinct pinhole assumptions could bite there, and the tests below pin
+// both:
+//
+//   * the projection/Jacobian path — covered by the central-difference
+//     fallback (`supports_pixel_jacobian` is false for the ray-path models);
+//   * the inter-round in-front gate. Until the model-aware measure landed it
+//     compared the canonical depth `−z_cam` against the `1e-3·f` floor, which
+//     DISCARDS every observation at `θ ≥ 90°` — the whole periphery of a
+//     >180° capture, i.e. exactly the part that carries the model
+//     information.
+
+/// The Phase-1 fisheye-seed camera: equidistant `θ = r/f`, `k1 = 0`.
+fn equidistant_seed(f: f64) -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimpleRadialFisheye {
+            focal_length: f,
+            principal_point_x: 240.0,
+            principal_point_y: 240.0,
+            radial_distortion_k1: 0.0,
+        },
+        width: 480,
+        height: 480,
+    }
+}
+
+/// A wide-FOV multi-view scene: cameras on an arc around a point cloud that
+/// SURROUNDS them, so a large share of every image's observations sit past
+/// 90° off-axis. Returns the scene and the number of `z_cam > 0`
+/// observations.
+fn make_fisheye_scene(n_img: usize, n_pt: usize) -> (Scene, usize) {
+    let cam = equidistant_seed(130.0);
+    let mut quats = Vec::new();
+    let mut trans = Vec::new();
+    for i in 0..n_img {
+        let ang = 0.25 * (i as f64 - (n_img as f64 - 1.0) / 2.0);
+        let center = Vector3::new(1.2 * ang.sin(), 0.3 * jitter(i, 11), 1.2 * ang.cos());
+        let r = UnitQuaternion::face_towards(&center, &Vector3::y()).inverse();
+        quats.push(r);
+        trans.push(-(r * center));
+    }
+    // Points on a shell of radius ~6 about the origin: the rig sits inside
+    // it, so each camera images a hemisphere-plus of them.
+    let mut points = Vec::new();
+    for p in 0..n_pt {
+        let theta = std::f64::consts::PI * (0.15 + 0.7 * (p as f64) / (n_pt as f64 - 1.0));
+        let phi = 2.399_963 * p as f64;
+        let rad = 6.0 + 1.5 * jitter(p, 3);
+        points.push([
+            rad * theta.sin() * phi.cos(),
+            rad * theta.cos(),
+            rad * theta.sin() * phi.sin(),
+        ]);
+    }
+    // Observations first, then keep only the points at least two images see
+    // (a one-view track is re-estimated to NaN by the staged loop, which has
+    // nothing to do with the camera model).
+    let mut per_pt: Vec<Vec<(u32, [f64; 2], bool)>> = vec![Vec::new(); points.len()];
+    for (p, x) in points.iter().enumerate() {
+        for i in 0..n_img {
+            let c = quats[i] * Vector3::new(x[0], x[1], x[2]) + trans[i];
+            let Some((u, v)) = cam.ray_to_pixel([c.x, c.y, c.z]) else {
+                continue;
+            };
+            // Keep the image circle out to θ = 105° (a 210° lens).
+            if (u - 240.0).hypot(v - 240.0) > 130.0 * 105.0_f64.to_radians() {
+                continue;
+            }
+            per_pt[p].push((i as u32, [u, v], c.z > 0.0));
+        }
+    }
+    let mut kept_points = Vec::new();
+    let mut uv = Vec::new();
+    let mut obs_img = Vec::new();
+    let mut obs_pt = Vec::new();
+    let mut n_behind = 0usize;
+    for (p, obs) in per_pt.iter().enumerate() {
+        if obs.len() < 2 {
+            continue;
+        }
+        let cp = kept_points.len() as u32;
+        kept_points.push(points[p]);
+        for &(i, px, behind) in obs {
+            n_behind += behind as usize;
+            uv.push(px);
+            obs_img.push(i);
+            obs_pt.push(cp);
+        }
+    }
+    (
+        Scene {
+            cam,
+            quats,
+            trans,
+            points: kept_points,
+            uv,
+            obs_img,
+            obs_pt,
+        },
+        n_behind,
+    )
+}
+
+#[test]
+fn fixed_fisheye_intrinsics_keep_observations_past_ninety_degrees() {
+    let (s, n_behind) = make_fisheye_scene(6, 90);
+    assert!(
+        n_behind >= 50,
+        "scene is not wide enough: {n_behind}/{} past 90°",
+        s.uv.len()
+    );
+    // The gate the staged loop applies, evaluated at the ground-truth state.
+    let (norms, depths) = residual_norms_depths(
+        &s.cam,
+        &s.quats,
+        &s.trans,
+        &s.points,
+        &vec![false; s.points.len()],
+        &s.uv,
+        &s.obs_img,
+        &s.obs_pt,
+    );
+    let f = s.cam.focal_lengths().0;
+    let kept = (0..s.uv.len())
+        .filter(|&k| norms[k] < 50.0 && depths[k] > 1e-3 * f)
+        .count();
+    assert_eq!(
+        kept,
+        s.uv.len(),
+        "the in-front gate dropped {} of {} exact fisheye observations",
+        s.uv.len() - kept,
+        s.uv.len()
+    );
+    // And the counterfactual that motivates the model-aware measure: the
+    // perspective family's `−z_cam` would have thrown the whole θ ≥ 90° band
+    // away at the very first trim.
+    let mut dropped_by_z = 0usize;
+    for k in 0..s.uv.len() {
+        let x = s.points[s.obs_pt[k] as usize];
+        let i = s.obs_img[k] as usize;
+        let c = s.quats[i] * Vector3::new(x[0], x[1], x[2]) + s.trans[i];
+        if -c.z <= 1e-3 * f {
+            dropped_by_z += 1;
+        }
+    }
+    assert!(
+        dropped_by_z >= n_behind,
+        "the `−z_cam` measure must drop at least the backward-of-image-plane \
+         band ({dropped_by_z} < {n_behind})"
+    );
+}
+
+#[test]
+fn fixed_fisheye_intrinsics_converge_from_a_perturbed_state() {
+    let (mut s, _) = make_fisheye_scene(6, 90);
+    let truth_pts = s.points.clone();
+    let truth_q = s.quats.clone();
+    for (i, q) in s.quats.iter_mut().enumerate() {
+        *q = UnitQuaternion::from_scaled_axis(Vector3::new(
+            0.01 * jitter(i, 21),
+            0.01 * jitter(i, 22),
+            0.01 * jitter(i, 23),
+        )) * *q;
+    }
+    for (p, x) in s.points.iter_mut().enumerate() {
+        for (c, v) in x.iter_mut().enumerate() {
+            *v += 0.05 * jitter(p * 3 + c, 31);
+        }
+    }
+    let out = run(&mut s, false, &DEFAULT_SCHEDULE);
+    assert_eq!(out.focal, 130.0, "fixed intrinsics must not move");
+    let finite = out.residual_norms.iter().filter(|r| r.is_finite()).count();
+    assert_eq!(
+        finite,
+        out.residual_norms.len(),
+        "some observations ended outside the model domain"
+    );
+    let worst = out.residual_norms.iter().cloned().fold(0.0f64, f64::max);
+    assert!(worst < 0.5, "worst reprojection {worst} px after BA");
+    // Structure and rotations came back to the planted values (the gauge is
+    // fixed by the unmoved translations of the perturbation-free init).
+    for (p, x) in s.points.iter().enumerate() {
+        let d = (0..3)
+            .map(|c| (x[c] - truth_pts[p][c]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(d < 0.05, "point {p} off by {d}");
+    }
+    for (i, q) in s.quats.iter().enumerate() {
+        assert!(q.angle_to(&truth_q[i]) < 5e-3, "image {i} rotation");
+    }
+}
