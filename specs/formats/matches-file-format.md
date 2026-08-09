@@ -497,14 +497,22 @@ vetting statuses and signals.
 **Field descriptions:**
 - `cluster_count` / `member_count`: Must equal the top-level `cluster_count` /
   `cluster_member_count` (and therefore the clusters section counts)
-- `refine_options`: The refinement parameters used
+- `refine_options`: The refinement parameters used. The patch extent appears
+  under one of two keys across writer generations: `patch_size` (the full
+  patch edge in pixels, current) or the legacy `radius` (a half-width).
+  Consumers needing the half-width normalize via the reader's
+  `refine_radius` accessor (`patch_size / 2`, or `radius` as-is)
 
 #### `cluster_patches/reference_members.{C}.uint32.zst`
 
 - **Shape**: `(C,)` where C = cluster_count
 - **Data type**: `uint32` (little-endian)
 - Global member index of each cluster's reference member; `0xFFFFFFFF` (`u32::MAX`)
-  when the cluster could not be refined (no usable reference)
+  when no reference member is present — the cluster could not be refined (no
+  usable reference). Only in a derived file (one carrying the
+  `matching_options["cluster_selection"]` provenance record) can the sentinel
+  also mean the reference member fell outside the selection; see
+  [Cluster Selection](#cluster-selection-derived-files) for the scoping
 - **Constraint**: When not `0xFFFFFFFF`, `reference_members[c]` lies in cluster `c`'s
   member range and that member's status is `0` (reference)
 
@@ -793,6 +801,52 @@ required ordering. They are an unordered set of correspondences.
 - `match_feature_indexes[m][0]` → feature index in `.sift` file for image `idx_i`
 - `match_feature_indexes[m][1]` → feature index in `.sift` file for image `idx_j`
 - `sift_content_hashes[i]` → verifies the `.sift` file hasn't changed
+
+## Cluster Selection (Derived Files)
+
+A cluster-backbone file may be a **derived file**: the result of selecting a
+subset of another cluster-backbone file's clusters and members. A derived
+file is an ordinary `.matches` file — every constraint in this specification
+applies unchanged, and it reads back through the ordinary reader. How the
+subset is chosen is not this specification's concern; the selection
+operation is specified in
+[cluster-selection.md](../core/cluster-selection.md). What this
+specification defines is the file-level contract a derived file carries.
+
+**Provenance record.** A derived file is identified by a record in the
+top-level metadata under `matching_options["cluster_selection"]`:
+
+```json
+{
+  "cluster_selection": {
+    "source_content_xxh128": "9a51...",
+    "min_span": 2,
+    "restrict_images": ["frames/frame_0010.jpg", "..."],
+    "accepted_statuses": ["reference", "kept"]
+  }
+}
+```
+
+`source_content_xxh128` names the source file (its whole-file
+`content_xxh128`); the remaining keys record the selection predicate and are
+defined by the operation. All other metadata — including the timestamp — is
+inherited from the source; the derived file's content hashes are its own,
+computed at write time. The source file is never modified.
+
+**Sentinel scoping.** Only in a file carrying the `cluster_selection`
+provenance record may `reference_members[c] = 0xFFFFFFFF` additionally mean
+"the cluster's reference member is not present in this selection": the
+cluster's members then carry real statuses, absolute positions and warps
+(still expressed relative to the absent reference patch). In a file without
+the record the sentinel retains its single meaning — the cluster could not
+be refined. Structural constraints are identical in both cases: the sentinel
+is always permitted, and a non-sentinel entry must point at an in-range
+member with status `0`.
+
+**Working view, not an archive.** A selection drops non-accepted members, so
+the per-member evidence that enables re-gating (rejected statuses and their
+measurements) is absent from a derived file. Consumers needing it return to
+the source named by `source_content_xxh128`.
 
 ## Design Rationale
 
