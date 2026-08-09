@@ -411,3 +411,106 @@ fn local_optimization_improves_or_equals() {
         lo.inliers.iter().filter(|&&b| b).count() >= raw.inliers.iter().filter(|&&b| b).count()
     );
 }
+
+// ── Model-genericity: equidistant fisheye bearings past 90° ────────────────
+//
+// The estimator is bearing-native, so a camera model reaches it only through
+// whatever produced the bearings. These pin that the *solver* has no hidden
+// perspective assumption: its only sign constraints are the depths `λ > 0`
+// along the observed rays and the angular consensus test, both of which are
+// satisfied by a point imaged at `θ > 90°` — genuinely in front of a >180°
+// lens but with canonical `z_cam > 0`.
+
+/// A scene whose points are deliberately spread past 90° off the optical
+/// axis: half the bearings have canonical `z > 0`.
+fn wide_fov_scene(n: usize, seed: u64) -> (Scene, usize) {
+    let mut rng = Lcg(seed);
+    let rotation = rng.rotation();
+    let translation = Vector3::new(
+        rng.uniform(-3.0, 3.0),
+        rng.uniform(-3.0, 3.0),
+        rng.uniform(-3.0, 3.0),
+    );
+    let mut points = Vec::with_capacity(n);
+    let mut bearings = Vec::with_capacity(n);
+    let mut n_behind = 0usize;
+    let r_inv = rotation.inverse();
+    for i in 0..n {
+        // Sweep θ over [5°, 140°] so a good share of the observations sit
+        // behind the image plane.
+        let theta = (5.0 + 135.0 * (i as f64) / (n as f64 - 1.0)).to_radians();
+        let phi = rng.uniform(0.0, std::f64::consts::TAU);
+        let range = rng.uniform(2.0, 8.0);
+        let dir = Vector3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            -theta.cos(),
+        );
+        if dir.z > 0.0 {
+            n_behind += 1;
+        }
+        let cam_pt = dir * range;
+        // World point from the camera-frame point: X = Rᵀ(x_cam − t).
+        let world = r_inv * (cam_pt - translation);
+        points.push(Point3::from(world));
+        bearings.push(dir);
+    }
+    (
+        Scene {
+            rotation,
+            translation,
+            points,
+            bearings,
+        },
+        n_behind,
+    )
+}
+
+#[test]
+fn p3p_solves_bearings_past_ninety_degrees() {
+    for seed in [1u64, 7, 19, 33] {
+        let (scene, n_behind) = wide_fov_scene(24, seed);
+        assert!(n_behind >= 8, "scene did not reach past 90° ({n_behind})");
+        // Pick a triple that includes at least one backward bearing.
+        let idx = [1usize, 12, 22];
+        assert!(idx.iter().any(|&i| scene.bearings[i].z > 0.0));
+        let b = [
+            scene.bearings[idx[0]],
+            scene.bearings[idx[1]],
+            scene.bearings[idx[2]],
+        ];
+        let x = [
+            scene.points[idx[0]],
+            scene.points[idx[1]],
+            scene.points[idx[2]],
+        ];
+        let sols = p3p_solve(&b, &x);
+        assert!(!sols.is_empty(), "no P3P solution (seed {seed})");
+        let best = sols
+            .iter()
+            .map(|(r, t)| r.angle_to(&scene.rotation) + (t - scene.translation).norm())
+            .fold(f64::INFINITY, f64::min);
+        assert!(best < 1e-9, "P3P missed the planted pose by {best}");
+    }
+}
+
+#[test]
+fn estimate_absolute_pose_recovers_a_wide_fov_pose() {
+    for seed in [3u64, 11, 29] {
+        let (scene, n_behind) = wide_fov_scene(60, seed);
+        assert!(n_behind >= 20);
+        let est = estimate_absolute_pose(
+            &scene.bearings,
+            &scene.points,
+            &AbsolutePoseOptions::default(),
+        )
+        .expect("no consensus on a clean wide-FOV scene");
+        assert_eq!(
+            est.inliers.iter().filter(|&&b| b).count(),
+            scene.points.len(),
+            "backward-of-image-plane observations were rejected as outliers"
+        );
+        assert!(est.rotation.angle_to(&scene.rotation) < 1e-9);
+        assert!((est.translation - scene.translation).norm() < 1e-9);
+    }
+}

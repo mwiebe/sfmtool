@@ -99,3 +99,94 @@ fn identity_stays_put_when_already_optimal() {
     assert!(out.inlier_fraction > 0.99);
     assert!(out.rotation.angle_to(&r_true) < 1e-6);
 }
+
+// ── Model-genericity: equidistant fisheye, including θ > 90° ───────────────
+//
+// The kernel takes the camera object and never touches `z` itself: its domain
+// test is whatever `ray_to_pixel` says, and its Jacobian falls back to a
+// central difference for models with no analytic one. These pin both under
+// the Phase-1 seed model `SimpleRadialFisheye { k1 = 0 }` with observations
+// deliberately past 90° off-axis (canonical `z_cam > 0`).
+
+/// The fisheye-seed camera: equidistant `θ = r/f`, centred principal point.
+fn equidistant_seed() -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimpleRadialFisheye {
+            focal_length: 130.0,
+            principal_point_x: 240.0,
+            principal_point_y: 240.0,
+            radial_distortion_k1: 0.0,
+        },
+        width: 480,
+        height: 480,
+    }
+}
+
+/// Wide-FOV scene: points spread over θ ∈ [5°, 130°] around the true pose,
+/// so a large share of the observations are behind the image plane. Returns
+/// the scene plus the count of `z_cam > 0` observations.
+fn make_fisheye_scene() -> (Scene, usize) {
+    let cam = equidistant_seed();
+    let r_true = UnitQuaternion::from_scaled_axis(Vector3::new(0.15, -0.1, 0.05));
+    let t_true = Vector3::new(0.3, -0.2, 0.4);
+    let r_inv = r_true.inverse();
+    let mut points = Vec::new();
+    let mut uv = Vec::new();
+    let mut n_behind = 0usize;
+    for i in 0..60 {
+        let theta = (5.0 + 125.0 * i as f64 / 59.0).to_radians();
+        let phi = 2.399_963 * i as f64; // golden-angle azimuth spread
+        let range = 4.0 + 2.0 * jitter(i, 5);
+        let c = Vector3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            -theta.cos(),
+        ) * range;
+        if c.z > 0.0 {
+            n_behind += 1;
+        }
+        let (u, v) = cam.ray_to_pixel([c.x, c.y, c.z]).expect("in domain");
+        let w = r_inv * (c - t_true);
+        points.push([w.x, w.y, w.z]);
+        uv.push([u, v]);
+    }
+    ((cam, r_true, t_true, points, uv), n_behind)
+}
+
+#[test]
+fn refines_a_wide_fov_fisheye_pose() {
+    let ((cam, r_true, t_true, points, uv), n_behind) = make_fisheye_scene();
+    assert!(
+        n_behind >= 18,
+        "scene not wide enough ({n_behind} past 90°)"
+    );
+    let r0 = UnitQuaternion::from_scaled_axis(Vector3::new(0.15 + 0.05, -0.1 - 0.04, 0.05 + 0.03));
+    let t0 = t_true + Vector3::new(0.08, -0.06, 0.09);
+    let out = refine_absolute_pose(&cam, &uv, &points, &r0, &t0, 5, 0.6, 3.0);
+    assert!(
+        out.inlier_fraction > 0.99,
+        "inlier fraction {} — backward observations are being dropped",
+        out.inlier_fraction
+    );
+    let ang = out.rotation.angle_to(&r_true);
+    assert!(ang < 1e-6, "rotation error {ang} rad");
+    assert!(
+        (out.translation - t_true).norm() < 1e-6,
+        "translation error {}",
+        (out.translation - t_true).norm()
+    );
+}
+
+#[test]
+fn fisheye_residuals_are_finite_past_ninety_degrees() {
+    // The failure mode this guards: a `z > 0` domain rejection turning every
+    // backward observation into INVALID_RESIDUAL, which the trim then removes.
+    let ((cam, r_true, t_true, points, uv), _) = make_fisheye_scene();
+    let axis = r_true.scaled_axis();
+    let p: Params = [axis.x, axis.y, axis.z, t_true.x, t_true.y, t_true.z];
+    let rn = residual_norms(&cam, &uv, &points, &p);
+    assert_eq!(rn.len(), uv.len());
+    for (i, r) in rn.iter().enumerate() {
+        assert!(*r < 1e-9, "observation {i} residual {r} at the true pose");
+    }
+}

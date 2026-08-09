@@ -154,3 +154,49 @@ fn multi_image_indexing() {
         assert!(r.abs() < 1e-9, "residual should be ~0, got {r}");
     }
 }
+
+// ── Model-genericity: equidistant fisheye, including θ > 90° ───────────────
+
+/// The Phase-1 fisheye-seed camera: equidistant `θ = r/f`, `k1 = 0`.
+fn equidistant_seed() -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimpleRadialFisheye {
+            focal_length: 130.0,
+            principal_point_x: 240.0,
+            principal_point_y: 240.0,
+            radial_distortion_k1: 0.0,
+        },
+        width: 480,
+        height: 480,
+    }
+}
+
+#[test]
+fn fisheye_residuals_are_zero_past_ninety_degrees() {
+    let cam = equidistant_seed();
+    // Camera-frame points at θ = 30°, 90°, 100° and 140° — the last three
+    // have canonical `z ≥ 0`, i.e. behind the image plane but inside a
+    // >180° lens' field.
+    let mut pts = Vec::new();
+    for deg in [30.0f64, 90.0, 100.0, 140.0] {
+        let th = deg.to_radians();
+        pts.push([3.0 * th.sin(), 0.0, -3.0 * th.cos()]);
+        pts.push([0.0, 4.0 * th.sin(), -4.0 * th.cos()]);
+    }
+    assert!(pts.iter().filter(|p| p[2] > 0.0).count() >= 4);
+    let uv = project(&cam, &pts);
+    let points: Vec<f64> = pts.iter().flatten().copied().collect();
+    let quats = [1.0, 0.0, 0.0, 0.0];
+    let t = [0.0, 0.0, 0.0];
+    let obs_img = vec![0u32; pts.len()];
+    let obs_pt: Vec<u32> = (0..pts.len() as u32).collect();
+
+    let res = reprojection_residuals(&cam, &quats, &t, &points, &uv, &obs_img, &obs_pt, 1e6);
+    for (k, chunk) in res.chunks(2).enumerate() {
+        assert!(
+            chunk[0].hypot(chunk[1]) < 1e-9,
+            "observation {k} (θ past 90°) residual {chunk:?}"
+        );
+    }
+    assert_eq!(inlier_fraction(&res, 1e-6), 1.0);
+}

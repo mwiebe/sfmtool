@@ -1885,3 +1885,209 @@ fn coarse_grid_jacobian_degradation() {
         "seam Jacobian error unexpectedly dominates interior (kink not averaged out)"
     );
 }
+
+// -----------------------------------------------------------------------
+// Equidistant seed model: `SimpleRadialFisheye { k1 = 0 }`
+//
+// The fisheye-seed campaign (`scripts/notes-fisheye-seed.md`, Phase 1)
+// represents the single-parameter equidistant map `θ = r/f` as
+// `SimpleRadialFisheye` with `k1 = 0`. These pin the two facts every
+// geometric kernel downstream leans on: the map is EXACTLY `θ = r/f` (no
+// small-angle or `z = 1` approximation anywhere in it), and it stays exact
+// for `θ ≥ 90°` — the backward-of-image-plane rays a >180° capture really
+// observes.
+// -----------------------------------------------------------------------
+
+/// The Phase-1 seed camera: one focal, centred principal point, `k1 = 0`.
+fn equidistant_seed(f: f64, w: u32, h: u32) -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimpleRadialFisheye {
+            focal_length: f,
+            principal_point_x: w as f64 / 2.0,
+            principal_point_y: h as f64 / 2.0,
+            radial_distortion_k1: 0.0,
+        },
+        width: w,
+        height: h,
+    }
+}
+
+/// Canonical-frame unit ray at incidence angle `theta` off the `−Z` axis,
+/// azimuth `phi` measured in the canonical (y-up) image plane.
+fn ray_at(theta: f64, phi: f64) -> [f64; 3] {
+    [
+        theta.sin() * phi.cos(),
+        theta.sin() * phi.sin(),
+        -theta.cos(),
+    ]
+}
+
+#[test]
+fn equidistant_seed_is_exactly_theta_over_f() {
+    let f = 130.0;
+    let cam = equidistant_seed(f, 480, 480);
+    let (cx, cy) = cam.principal_point();
+    // Sweep well past 90°: a 211° Insta360 capture reaches θ ≈ 105°.
+    for deg in [
+        0.0f64, 1.0, 30.0, 60.0, 89.0, 90.0, 91.0, 105.0, 130.0, 179.0,
+    ] {
+        let theta = deg.to_radians();
+        for phi_deg in [0.0f64, 37.0, 90.0, 180.0, 263.0] {
+            let phi = phi_deg.to_radians();
+            let ray = ray_at(theta, phi);
+            let (u, v) = cam
+                .ray_to_pixel(ray)
+                .unwrap_or_else(|| panic!("ray_to_pixel None at θ={deg}°, φ={phi_deg}°"));
+            // Forward: r = f·θ, and the pixel azimuth is the ray azimuth
+            // (pixel v grows DOWN, so the canonical +y ray lands at −v).
+            let r = ((u - cx).powi(2) + (v - cy).powi(2)).sqrt();
+            assert_relative_eq!(r, f * theta, epsilon = 1e-9);
+            if theta > 1e-9 {
+                assert_relative_eq!(u - cx, f * theta * phi.cos(), epsilon = 1e-9);
+                assert_relative_eq!(v - cy, -f * theta * phi.sin(), epsilon = 1e-9);
+            }
+            // Inverse: back to the same unit ray, exactly.
+            let back = cam.pixel_to_ray(u, v);
+            for c in 0..3 {
+                assert_relative_eq!(back[c], ray[c], epsilon = 1e-9);
+            }
+        }
+    }
+}
+
+#[test]
+fn equidistant_seed_round_trips_over_the_whole_sensor() {
+    // Pixel → ray → pixel over a dense grid of a 480² fisheye circle at a
+    // focal whose image circle (θ = 105°) is inscribed in the frame.
+    let f = 480.0 / 2.0 / 105.0_f64.to_radians();
+    let cam = equidistant_seed(f, 480, 480);
+    let mut worst = 0.0f64;
+    let mut n_past_90 = 0usize;
+    for iy in 0..48 {
+        for ix in 0..48 {
+            let (u, v) = (5.0 + 10.0 * ix as f64, 5.0 + 10.0 * iy as f64);
+            let ray = cam.pixel_to_ray(u, v);
+            assert_relative_eq!(
+                (ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]).sqrt(),
+                1.0,
+                epsilon = 1e-12
+            );
+            if ray[2] > 0.0 {
+                n_past_90 += 1; // canonical z > 0 ⇒ θ > 90°, behind the image plane
+            }
+            let (u2, v2) = cam.ray_to_pixel(ray).expect("ray_to_pixel None on-sensor");
+            worst = worst.max((u2 - u).hypot(v2 - v));
+        }
+    }
+    assert!(worst < 1e-9, "worst pixel round-trip {worst}");
+    assert!(
+        n_past_90 > 100,
+        "grid did not exercise θ > 90° (only {n_past_90} samples)"
+    );
+}
+
+#[test]
+fn equidistant_seed_has_no_analytic_pixel_jacobian_and_says_so() {
+    // The finite-difference fallback in `pose_refine` / `bundle_adjust` is
+    // selected by this flag; if the flag ever flips without an analytic
+    // fisheye Jacobian landing, those kernels silently lose their derivative
+    // past 90° (the analytic path returns None on rz ≤ 0).
+    let cam = equidistant_seed(130.0, 480, 480);
+    assert!(!cam.model.supports_pixel_jacobian());
+    assert!(cam
+        .ray_to_pixel_with_jacobian(ray_at(30.0_f64.to_radians(), 0.4))
+        .is_none());
+}
+
+#[test]
+fn equidistant_seed_central_difference_jacobian_survives_past_90_degrees() {
+    // What `project_with_jac`'s fallback actually does at a backward ray: the
+    // ±h probes must all stay in-domain, and the numeric derivative must
+    // match the analytic equidistant one.
+    let f = 130.0;
+    let cam = equidistant_seed(f, 480, 480);
+    let h = 1e-6;
+    for deg in [95.0f64, 105.0, 130.0] {
+        let d = ray_at(deg.to_radians(), 0.7);
+        // Place a point at range 3 along that direction.
+        let p = [3.0 * d[0], 3.0 * d[1], 3.0 * d[2]];
+        for c in 0..3 {
+            let mut pp = p;
+            let mut pm = p;
+            pp[c] += h;
+            pm[c] -= h;
+            assert!(
+                cam.ray_to_pixel(pp).is_some() && cam.ray_to_pixel(pm).is_some(),
+                "central-difference probe left the domain at θ={deg}°"
+            );
+        }
+        // ∂u/∂p against the closed form: u = f·θ·cos φ + cx with
+        // θ = atan2(√(x²+y²), −z) in canonical components.
+        let (u0, v0) = cam.ray_to_pixel(p).unwrap();
+        let mut pp = p;
+        pp[0] += h;
+        let (u1, v1) = cam.ray_to_pixel(pp).unwrap();
+        let du = (u1 - u0) / h;
+        let dv = (v1 - v0) / h;
+        // Numeric-vs-numeric at a 10× coarser step: a stable derivative.
+        let mut pc = p;
+        pc[0] += 10.0 * h;
+        let (u2, v2) = cam.ray_to_pixel(pc).unwrap();
+        assert_relative_eq!(du, (u2 - u0) / (10.0 * h), epsilon = 1e-3);
+        assert_relative_eq!(dv, (v2 - v0) / (10.0 * h), epsilon = 1e-3);
+        assert!(du.is_finite() && dv.is_finite());
+    }
+}
+
+#[test]
+fn equidistant_ray_at_the_exact_antipode_aliases_the_principal_point() {
+    // KNOWN, DOCUMENTED domain edge (audit finding, Phase 1): a ray exactly
+    // along +Z (θ = π, r_xy = 0) hits `distort_ray_equidistant`'s r_xy
+    // early-return and projects to the principal point — the same pixel as
+    // θ = 0. It is a measure-zero direction 75° outside any real capture's
+    // FOV, and the surrounding neighbourhood is correct, so nothing in the
+    // seed path can reach it; this test pins the behaviour so a future
+    // fisheye-native stage does not discover it by surprise.
+    let cam = equidistant_seed(130.0, 480, 480);
+    let (cx, cy) = cam.principal_point();
+    let (u, v) = cam.ray_to_pixel([0.0, 0.0, 1.0]).unwrap();
+    assert_relative_eq!(u, cx, epsilon = 1e-12);
+    assert_relative_eq!(v, cy, epsilon = 1e-12);
+    // One micro-radian off the antipode the map is already correct.
+    let near = ray_at(std::f64::consts::PI - 1e-6, 0.0);
+    let (u2, _v2) = cam.ray_to_pixel(near).unwrap();
+    assert_relative_eq!(
+        u2 - cx,
+        130.0 * (std::f64::consts::PI - 1e-6),
+        epsilon = 1e-6
+    );
+}
+
+#[test]
+fn equidistant_seed_batch_maps_match_the_scalar_ones_past_90_degrees() {
+    // `pixel_to_ray_batch` / `ray_to_pixel_batch` are what the seed scripts
+    // call; assert they are the scalar maps, including for backward rays.
+    let cam = equidistant_seed(130.0, 480, 480);
+    let mut pixels = Vec::new();
+    let mut rays = Vec::new();
+    for deg in [0.0f64, 45.0, 90.0, 100.0, 140.0] {
+        for phi_deg in [0.0f64, 120.0, 240.0] {
+            let r = ray_at(deg.to_radians(), phi_deg.to_radians());
+            rays.push(r);
+            let (u, v) = cam.ray_to_pixel(r).unwrap();
+            pixels.push([u, v]);
+        }
+    }
+    let back = cam.pixel_to_ray_batch(&pixels);
+    let fwd = cam.ray_to_pixel_batch(&rays);
+    for i in 0..rays.len() {
+        let s = cam.pixel_to_ray(pixels[i][0], pixels[i][1]);
+        for c in 0..3 {
+            assert_relative_eq!(back[i][c], s[c], epsilon = 0.0);
+            assert_relative_eq!(back[i][c], rays[i][c], epsilon = 1e-9);
+        }
+        let p = fwd[i].expect("ray_to_pixel_batch None on an in-domain ray");
+        assert_relative_eq!(p[0], pixels[i][0], epsilon = 0.0);
+        assert_relative_eq!(p[1], pixels[i][1], epsilon = 0.0);
+    }
+}
