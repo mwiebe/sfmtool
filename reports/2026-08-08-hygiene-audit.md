@@ -465,6 +465,31 @@ grown past the point where that judgement holds — `patch/keypoint_localize.rs`
   `point_track_detail/tests.rs:781` pins the current ramp.
 
 **A latent thumbnail panic, a third RGB→RGBA expansion, one dead `clear()`, and six repeated struct literals**
+
+> _Status (2026-08-11): (a) done; (b) and (c) untouched and still stand._
+> _All three RGB→RGBA expansions now go through `sfm-explorer/src/rgb_image.rs`
+> (`rgb_to_color_image` over a byte slice, `rgb_view_to_color_image` over an
+> `(y, x, rgb)` array view, which takes its extent from the view's own shape).
+> `image_browser::load_thumbnail` drops from 16 lines to one and no longer names
+> a size at all._
+>
+> _Two deviations from the proposed fix, both deliberate. First, **`THUMBNAIL_SIZE`
+> was not widened to `pub(crate)`**: once the browser reads the extent off the
+> array it has no use for the constant, and reading the data is strictly stronger
+> than naming the right constant — it also survives a stack whose thumbnails are
+> not square, which the constant does not describe. The `pub(super)` visibility is
+> therefore left alone. Second, the report scoped this to `load_thumbnail`, but
+> **`build_barcode` (same file) held the worse copy of the same bug** and is now
+> fixed too: it declared `const THUMB_H: usize = 128` and then used it as the
+> **column** bound (`for x in 0..THUMB_H`), so it indexed the width axis with the
+> height. At the stock 128×128 that is correct only by the coincidence of
+> squareness; on any non-square thumbnail it panics on an out-of-bounds ndarray
+> index before `load_thumbnail` is ever reached. It now reads both extents from
+> the stack._
+>
+> _Covered by `rgb_image/tests.rs` (5 tests), whose central case is a 4×7
+> thumbnail — the shape that trips
+> `ColorImage::from_rgba_unmultiplied`'s size assertion under the old code._
 - Location: `crates/sfm-explorer/src/image_browser.rs:757–773`,
   `point_track_detail/table.rs:362–384`, `image_detail/mod.rs` (691)
 - Problem: Re-verified at HEAD; the previous snapshot's `app.rs` half of this finding
@@ -1226,6 +1251,11 @@ hard-coded `128` in `image_browser.rs::load_thumbnail` (766, 770) will panic on 
 changes, while the sibling copy in `point_track_detail/table.rs` reads the array
 shape and would survive. Two-line fix, plus widening `THUMBNAIL_SIZE` from
 `pub(super)` to `pub(crate)` so the browser can actually name it.
+
+> _Status (2026-08-11): Done, via a shared `rgb_image.rs` rather than the
+> constant-widening sketched here — see the finding itself for why
+> `THUMBNAIL_SIZE` stayed `pub(super)`, and for the second, worse copy of the
+> same bug in `build_barcode` that this call-out missed._
 
 ---
 

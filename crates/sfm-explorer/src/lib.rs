@@ -21,6 +21,7 @@ mod image_browser;
 mod image_detail;
 mod platform;
 mod point_track_detail;
+mod rgb_image;
 mod scene;
 mod scene_graph;
 mod scene_renderer;

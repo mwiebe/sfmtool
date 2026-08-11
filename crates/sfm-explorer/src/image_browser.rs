@@ -13,6 +13,7 @@ use ndarray::Axis;
 use sfmtool_core::SfmrReconstruction;
 
 use crate::platform::GestureEvent;
+use crate::rgb_image::rgb_view_to_color_image;
 use crate::scene::ReconId;
 
 /// Response from the image browser (selection changes and hover state).
@@ -718,8 +719,15 @@ impl ImageBrowser {
     /// average color of the corresponding vertical eighth of the thumbnail.
     fn build_barcode(&mut self, ctx: &egui::Context, recon: &SfmrReconstruction) {
         const BANDS: usize = 8;
-        const THUMB_H: usize = 128;
-        let rows_per_band = THUMB_H / BANDS; // 16
+        // Read the thumbnail extent from the stack rather than assuming the
+        // 128×128 the reader writes today: indexing past either edge panics,
+        // and a non-square thumbnail would make a hard-coded edge length wrong
+        // on one axis even at the right total size.
+        let (thumb_h, thumb_w) = {
+            let shape = recon.thumbnails_y_x_rgb.shape();
+            (shape[1], shape[2])
+        };
+        let rows_per_band = thumb_h / BANDS; // 16 at the stock 128px thumbnail
 
         let num_images = recon.images.len();
         // Texture layout: width = num_images, height = BANDS, row-major (top to bottom).
@@ -730,11 +738,12 @@ impl ImageBrowser {
             let y_end = y_start + rows_per_band;
             for i in 0..num_images {
                 let rgb_slice = recon.thumbnails_y_x_rgb.index_axis(Axis(0), i);
-                // Shape is (128, 128, 3). Average the horizontal band [y_start..y_end].
+                // Shape is (thumb_h, thumb_w, 3). Average the horizontal band
+                // [y_start..y_end] across the full width.
                 let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
                 let mut count = 0u64;
                 for y in y_start..y_end {
-                    for x in 0..THUMB_H {
+                    for x in 0..thumb_w {
                         r_sum += rgb_slice[[y, x, 0]] as u64;
                         g_sum += rgb_slice[[y, x, 1]] as u64;
                         b_sum += rgb_slice[[y, x, 2]] as u64;
@@ -755,19 +764,7 @@ impl ImageBrowser {
 
     /// Load a single thumbnail into the texture cache.
     fn load_thumbnail(&mut self, ctx: &egui::Context, recon: &SfmrReconstruction, idx: usize) {
-        let rgb_slice = recon.thumbnails_y_x_rgb.index_axis(Axis(0), idx);
-        // The slice is (128, 128, 3) in C-order. Get contiguous data.
-        let rgb_data: Vec<u8> = if let Some(slice) = rgb_slice.as_slice() {
-            slice.to_vec()
-        } else {
-            rgb_slice.iter().copied().collect()
-        };
-
-        let mut rgba = Vec::with_capacity(128 * 128 * 4);
-        for pixel in rgb_data.chunks_exact(3) {
-            rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-        }
-        let image = egui::ColorImage::from_rgba_unmultiplied([128, 128], &rgba);
+        let image = rgb_view_to_color_image(recon.thumbnails_y_x_rgb.index_axis(Axis(0), idx));
         let texture = ctx.load_texture(format!("thumb_{idx}"), image, egui::TextureOptions::LINEAR);
         self.thumbnail_cache.insert(idx, texture);
     }
