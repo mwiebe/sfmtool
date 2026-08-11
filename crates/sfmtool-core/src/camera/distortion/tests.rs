@@ -2343,3 +2343,368 @@ fn equidistant_native_jacobian_is_scale_invariant_in_the_ray() {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// Local pixel scale and patch sizing (`min_pixel_scale`,
+// `pixel_radius_to_world`)
+// -----------------------------------------------------------------------
+
+/// A camera-frame point at incidence angle `deg` off the −Z axis and range
+/// `range`, at a generic azimuth so no expression is exercised only on an axis.
+fn point_at(deg: f64, range: f64) -> [f64; 3] {
+    let r = ray_at(deg.to_radians(), 0.37);
+    [r[0] * range, r[1] * range, r[2] * range]
+}
+
+/// `σ_min(∂(u, v)/∂p_cam)` computed independently of the production path:
+/// central-difference `ray_to_pixel`, then the smaller eigenvalue of the 2×2
+/// Gram matrix by the difference form (production uses `det/λ_max`).
+fn numeric_min_pixel_scale(cam: &CameraIntrinsics, p: [f64; 3]) -> f64 {
+    let h = 1e-6 * (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    let mut j = [[0.0f64; 3]; 2];
+    for col in 0..3 {
+        let (mut plus, mut minus) = (p, p);
+        plus[col] += h;
+        minus[col] -= h;
+        let (up, vp) = cam.ray_to_pixel(plus).unwrap();
+        let (um, vm) = cam.ray_to_pixel(minus).unwrap();
+        j[0][col] = (up - um) / (2.0 * h);
+        j[1][col] = (vp - vm) / (2.0 * h);
+    }
+    let a = j[0][0] * j[0][0] + j[0][1] * j[0][1] + j[0][2] * j[0][2];
+    let b = j[0][0] * j[1][0] + j[0][1] * j[1][1] + j[0][2] * j[1][2];
+    let c = j[1][0] * j[1][0] + j[1][1] * j[1][1] + j[1][2] * j[1][2];
+    let disc = ((a - c) * (a - c) + 4.0 * b * b).sqrt();
+    (0.5 * (a + c - disc)).max(0.0).sqrt()
+}
+
+#[test]
+fn pinhole_closed_form_scale_equals_the_numeric_min_singular_value() {
+    // σ_min = f/|z| is an identity, not an approximation: the two tangent
+    // scales are f·sec²θ/R (radial) and f·secθ/R (azimuthal), and the smaller
+    // is f·secθ/R = f/|z| at every θ.
+    let cam = simple_pinhole();
+    let f = cam.focal_lengths().0;
+    for &deg in &[0.0f64, 30.0, 60.0, 75.0, 89.0] {
+        for &range in &[0.02f64, 1.0, 9.5, 3100.0] {
+            let p = point_at(deg, range);
+            let closed = f / p[2].abs();
+            assert_relative_eq!(cam.min_pixel_scale(p).unwrap(), closed, max_relative = 1e-9);
+            assert_relative_eq!(
+                numeric_min_pixel_scale(&cam, p),
+                closed,
+                max_relative = 1e-9
+            );
+        }
+    }
+}
+
+#[test]
+fn equidistant_closed_form_scale_equals_the_numeric_min_singular_value() {
+    // σ_min = f/R, likewise exact: the tangent scales are f·(θ/sin θ)/R
+    // (azimuthal) and f/R (radial), and θ/sin θ ≥ 1 for every θ in (0, π).
+    let cam = equidistant_fisheye();
+    let f = cam.focal_lengths().0;
+    for &deg in &[0.0f64, 30.0, 60.0, 75.0, 89.0, 95.0, 110.0, 130.0] {
+        for &range in &[0.02f64, 1.0, 9.5, 3100.0] {
+            let p = point_at(deg, range);
+            let closed = f / range;
+            assert_relative_eq!(cam.min_pixel_scale(p).unwrap(), closed, max_relative = 1e-9);
+            assert_relative_eq!(
+                numeric_min_pixel_scale(&cam, p),
+                closed,
+                max_relative = 1e-9
+            );
+        }
+    }
+}
+
+#[test]
+fn pixel_radius_closed_forms_are_bit_identical_to_the_depth_and_range_forms() {
+    // The two fast paths must leave every existing caller untouched, so pin
+    // them against the literal pre-change expressions — `|z|` for the pinhole
+    // patch sizing, `‖p_cam‖` for the ray-path one — including the 1e-6 floor
+    // and the nalgebra norm the patch cloud computed it with.
+    use nalgebra::Vector3;
+    let pinhole_iso = CameraIntrinsics {
+        model: CameraModel::Pinhole {
+            focal_length_x: 500.0,
+            focal_length_y: 500.0,
+            principal_point_x: 320.0,
+            principal_point_y: 240.0,
+        },
+        width: 640,
+        height: 480,
+    };
+    let perspective = [simple_pinhole(), pinhole_iso];
+    let fisheye = equidistant_fisheye();
+    for &deg in &[0.0f64, 17.0, 30.0, 60.0, 75.0, 89.0, 95.0, 130.0, 179.0] {
+        for &range in &[0.0f64, 1e-9, 0.05, 1.0, 7.5, 1234.0] {
+            let p = point_at(deg, range);
+            let v = Vector3::new(p[0], p[1], p[2]);
+            for &radius_px in &[1.0f64, 4.0, 12.5] {
+                for cam in &perspective {
+                    let old = radius_px * v.z.abs().max(1e-6) / cam.focal_lengths().0;
+                    assert_eq!(
+                        cam.pixel_radius_to_world(p, radius_px).to_bits(),
+                        old.to_bits(),
+                        "perspective fast path moved at θ={deg}°, R={range}"
+                    );
+                }
+                let old = radius_px * v.norm().max(1e-6) / fisheye.focal_lengths().0;
+                assert_eq!(
+                    fisheye.pixel_radius_to_world(p, radius_px).to_bits(),
+                    old.to_bits(),
+                    "ray-path fast path moved at θ={deg}°, R={range}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn anisotropic_pinhole_sizes_by_the_smaller_focal_not_fx() {
+    // The fast path is gated on `fx == fy` because σ_min is `min(fx, fy)/|z|`
+    // on axis, not `fx/|z|` — an fy < fx camera resolves less vertically, so
+    // the same pixel budget buys a LARGER patch than the old fx expression.
+    let cam = CameraIntrinsics {
+        model: CameraModel::Pinhole {
+            focal_length_x: 500.0,
+            focal_length_y: 400.0,
+            principal_point_x: 320.0,
+            principal_point_y: 240.0,
+        },
+        width: 640,
+        height: 480,
+    };
+    let p = point_at(0.0, 6.0);
+    let old = 4.0 * p[2].abs() / 500.0;
+    let new = cam.pixel_radius_to_world(p, 4.0);
+    assert_relative_eq!(new, 4.0 * p[2].abs() / 400.0, max_relative = 1e-12);
+    assert!(
+        new > old,
+        "expected the smaller focal to win: {new} vs {old}"
+    );
+}
+
+#[test]
+fn simple_radial_sizes_through_the_local_distortion_scale() {
+    // `k1 > 0` magnifies off axis, so the local pixel scale exceeds the
+    // undistorted pinhole `f/|z|` and the patch is correspondingly SMALLER
+    // than the old `|z|/f` expression gave. The exact tangent scales for a
+    // radially symmetric model at `r = tan θ` are
+    //   radial    f·sec²θ·(1 + 3k₁r²)/R
+    //   azimuthal f·sec θ·(1 + k₁r²)/R
+    // and σ_min is whichever is smaller.
+    let cam = simple_radial();
+    let f = cam.focal_lengths().0;
+    let (range, radius_px, k1) = (6.0f64, 4.0, 0.1);
+    for &deg in &[15.0f64, 35.0, 50.0] {
+        let theta = deg.to_radians();
+        let p = point_at(deg, range);
+        let r2 = theta.tan() * theta.tan();
+        let sec = 1.0 / theta.cos();
+        let expect = (f / range) * (sec * sec * (1.0 + 3.0 * k1 * r2)).min(sec * (1.0 + k1 * r2));
+        let new = cam.pixel_radius_to_world(p, radius_px);
+        assert_relative_eq!(new, radius_px / expect, max_relative = 1e-9);
+        assert_relative_eq!(
+            new,
+            radius_px / numeric_min_pixel_scale(&cam, p),
+            max_relative = 1e-8
+        );
+        let old = radius_px * p[2].abs() / f;
+        assert!(
+            new < old,
+            "expected a smaller patch at θ={deg}°: {new} vs {old}"
+        );
+    }
+    // On axis the distortion is inert, so the rule reproduces the old value.
+    let axis = point_at(0.0, range);
+    assert_relative_eq!(
+        cam.pixel_radius_to_world(axis, radius_px),
+        radius_px * axis[2].abs() / f,
+        max_relative = 1e-12
+    );
+}
+
+#[test]
+fn simple_radial_fisheye_sizes_through_dr_dtheta_not_f() {
+    // The polynomial fisheye family maps θ to `r_d = θ·(1 + k₁θ²)`, so its
+    // radial pixel scale is `f·(1 + 3k₁θ²)/R`, not `f/R`; the azimuthal one is
+    // `f·θ(1 + k₁θ²)/(R·sin θ)`. With `k₁ > 0` both exceed `f/R`, so the patch
+    // is smaller than the plain range expression gave.
+    let cam = simple_radial_fisheye();
+    let f = cam.focal_lengths().0;
+    let (range, radius_px, k1) = (6.0f64, 4.0, 0.05);
+    for &deg in &[20.0f64, 50.0, 85.0] {
+        let theta = deg.to_radians();
+        let p = point_at(deg, range);
+        let radial = 1.0 + 3.0 * k1 * theta * theta;
+        let azimuthal = theta * (1.0 + k1 * theta * theta) / theta.sin();
+        let expect = (f / range) * radial.min(azimuthal);
+        let new = cam.pixel_radius_to_world(p, radius_px);
+        assert_relative_eq!(new, radius_px / expect, max_relative = 1e-6);
+        let old = radius_px * range / f;
+        assert!(
+            new < old,
+            "expected a smaller patch at θ={deg}°: {new} vs {old}"
+        );
+    }
+}
+
+#[test]
+fn min_pixel_scale_is_defined_for_every_model_on_a_visible_ray() {
+    // The rule must not have holes: every model this crate supports has a
+    // Jacobian (analytic or differenced) on a ray it can actually image, and
+    // the numeric reading agrees with it.
+    for cam in all_cameras() {
+        let p = point_at(20.0, 5.0);
+        let scale = cam
+            .min_pixel_scale(p)
+            .unwrap_or_else(|| panic!("no pixel scale for {}", cam.model_name()));
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "{}: σ_min = {scale}",
+            cam.model_name()
+        );
+        assert_relative_eq!(scale, numeric_min_pixel_scale(&cam, p), max_relative = 1e-6);
+    }
+}
+
+#[test]
+fn equidistant_angular_radius_is_bit_identical_to_radius_over_f() {
+    // The one model for which the naive angular reading is exact: the map is
+    // angle-linear, so `‖ray‖·σ_min = f` at every θ and the angle is
+    // `radius_px/f` outright. Pinned bit-for-bit — this is what every infinity
+    // patch used to get, regardless of model.
+    let cam = equidistant_fisheye();
+    let f = cam.focal_lengths().0;
+    for &deg in &[0.0f64, 17.0, 30.0, 60.0, 75.0, 89.0, 95.0, 130.0, 179.0] {
+        for &range in &[0.02f64, 1.0, 9.5, 3100.0] {
+            for &radius_px in &[1.0f64, 4.0, 12.5] {
+                assert_eq!(
+                    cam.pixel_radius_to_angle(point_at(deg, range), radius_px)
+                        .to_bits(),
+                    (radius_px / f).to_bits(),
+                    "equidistant angular radius moved at θ={deg}°"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pinhole_angular_radius_falls_off_as_cos_theta() {
+    // `‖ray‖·σ_min = f·secθ` for a pinhole, so a pixel budget buys `cosθ` LESS
+    // angle off axis. `radius_px/f` is the on-axis value only — using it at
+    // every θ oversizes a peripheral infinity patch by `1/cosθ` (2× at 60°).
+    let cams = [
+        simple_pinhole(),
+        CameraIntrinsics {
+            model: CameraModel::Pinhole {
+                focal_length_x: 500.0,
+                focal_length_y: 500.0,
+                principal_point_x: 320.0,
+                principal_point_y: 240.0,
+            },
+            width: 640,
+            height: 480,
+        },
+    ];
+    for cam in &cams {
+        let f = cam.focal_lengths().0;
+        for &deg in &[0.0f64, 15.0, 30.0, 45.0, 60.0, 75.0, 89.0] {
+            let theta = deg.to_radians();
+            for &range in &[0.02f64, 1.0, 9.5, 3100.0] {
+                let p = point_at(deg, range);
+                let got = cam.pixel_radius_to_angle(p, 6.0);
+                // Closed form, built independently of the implementation.
+                assert_relative_eq!(got, 6.0 * theta.cos() / f, max_relative = 1e-12);
+                // And the general rule it is a closed form OF: `radius_px`
+                // over the range-free pixels-per-radian `R·σ_min`.
+                let numeric = range * numeric_min_pixel_scale(cam, p);
+                assert_relative_eq!(got, 6.0 / numeric, max_relative = 1e-9);
+            }
+        }
+        // On axis the old `radius_px/f` reading is recovered exactly.
+        assert_relative_eq!(
+            cam.pixel_radius_to_angle(point_at(0.0, 5.0), 6.0),
+            6.0 / f,
+            max_relative = 1e-15
+        );
+    }
+}
+
+#[test]
+fn angular_radius_is_range_free_and_defined_for_every_model() {
+    // `σ_min ∝ 1/R`, so `R·σ_min` — and therefore the angle — depends only on
+    // the DIRECTION. Every model must produce it on a ray it can image.
+    for cam in all_cameras() {
+        let mut prev: Option<f64> = None;
+        for &range in &[0.05f64, 1.0, 250.0] {
+            let a = cam.pixel_radius_to_angle(point_at(25.0, range), 6.0);
+            assert!(
+                a.is_finite() && a > 0.0,
+                "{}: angular radius {a}",
+                cam.model_name()
+            );
+            if let Some(p) = prev {
+                assert_relative_eq!(a, p, max_relative = 1e-6);
+            }
+            prev = Some(a);
+        }
+    }
+}
+
+#[test]
+fn an_off_axis_pinhole_infinity_patch_subtends_the_requested_pixel_radius() {
+    // The end-to-end statement: size a tangent-plane patch at an off-axis
+    // bearing by the angular rule, project its corners, and the pixel footprint
+    // around the keypoint is `radius_px` in the least-magnified direction. The
+    // old `radius_px/f` angle overshoots by `1/cosθ`.
+    let cam = simple_pinhole();
+    let radius_px = 6.0;
+    for &deg in &[30.0f64, 60.0] {
+        let d = ray_at(deg.to_radians(), 0.37);
+        let angle = cam.pixel_radius_to_angle(d, radius_px);
+        // Orthonormal tangent basis at the bearing.
+        let a = if d[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let dot = a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
+        let mut u = [a[0] - dot * d[0], a[1] - dot * d[1], a[2] - dot * d[2]];
+        let un = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+        u = [u[0] / un, u[1] / un, u[2] / un];
+        let v = [
+            d[1] * u[2] - d[2] * u[1],
+            d[2] * u[0] - d[0] * u[2],
+            d[0] * u[1] - d[1] * u[0],
+        ];
+        let (cu, cv) = cam.ray_to_pixel(d).unwrap();
+        // Walk the tangent circle; the CLOSEST corner is the least-magnified
+        // direction, and that is what the rule pins to `radius_px`.
+        let mut min_r = f64::INFINITY;
+        for k in 0..64 {
+            let phi = (k as f64) * std::f64::consts::TAU / 64.0;
+            let (cs, sn) = (phi.cos() * angle, phi.sin() * angle);
+            let corner = [
+                d[0] + cs * u[0] + sn * v[0],
+                d[1] + cs * u[1] + sn * v[1],
+                d[2] + cs * u[2] + sn * v[2],
+            ];
+            let (x, y) = cam.ray_to_pixel(corner).unwrap();
+            min_r = min_r.min(((x - cu).powi(2) + (y - cv).powi(2)).sqrt());
+        }
+        // Second-order in the tangent step, so a loose relative bar.
+        assert_relative_eq!(min_r, radius_px, max_relative = 2e-3);
+        // The pre-change angle would have overshot by 1/cos θ.
+        let old_angle = radius_px / cam.focal_lengths().0;
+        assert_relative_eq!(
+            old_angle / angle,
+            1.0 / deg.to_radians().cos(),
+            max_relative = 1e-12
+        );
+    }
+}

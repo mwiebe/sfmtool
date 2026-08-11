@@ -10,6 +10,7 @@
 use nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use ndarray::Array2;
 
+use crate::camera::CameraIntrinsics;
 use crate::geometry::RigidTransform;
 use crate::reconstruction::SfmrReconstruction;
 use crate::spatial::PointCloud;
@@ -267,7 +268,7 @@ impl PatchCloud {
     /// When `exclude_points_at_infinity` is `false`, each point at infinity
     /// (`w = 0`) additionally gets a tangent-sphere frame (`w = 0` patch) around
     /// its direction `d` — outward normal `normalize(-d)`, `u, v ⊥ d`, with an
-    /// angular half-size from `extent` (the distance-free form of each policy);
+    /// angular half-size from `extent` (the range-free form of each policy);
     /// see the format's infinity-patch convention. Every patch operation handles
     /// these, so `false` is the default at the binding layer. Pass `true` to emit
     /// finite points only — needed by an operation that scatters per-point results
@@ -299,15 +300,16 @@ impl PatchCloud {
         // sorted by point then image, so `observation_offsets` groups it).
         let obs_images: Vec<u32> = recon.tracks.iter().map(|o| o.image_index).collect();
 
-        // Per-image pose + focal length (fx of the image's camera).
+        // Per-image pose + camera model (the image's camera, cloned per image so
+        // the shared routine indexes everything by image).
         let cam_quats: Vec<UnitQuaternion<f64>> =
             recon.images.iter().map(|im| im.quaternion_wxyz).collect();
         let cam_translations: Vec<Vector3<f64>> =
             recon.images.iter().map(|im| im.translation_xyz).collect();
-        let cam_focals: Vec<f64> = recon
+        let cam_intrinsics: Vec<CameraIntrinsics> = recon
             .images
             .iter()
-            .map(|im| recon.cameras[im.camera_index as usize].focal_lengths().0)
+            .map(|im| recon.cameras[im.camera_index as usize].clone())
             .collect();
 
         // FeatureSize is the one policy that reads the workspace `.sift` files:
@@ -354,7 +356,7 @@ impl PatchCloud {
             obs_scales: &obs_scales,
             cam_quats: &cam_quats,
             cam_translations: &cam_translations,
-            cam_focals: &cam_focals,
+            cam_intrinsics: &cam_intrinsics,
         };
         build_patch_cloud(&scene, normal, extent, exclude_points_at_infinity)
     }
@@ -371,8 +373,14 @@ impl PatchCloud {
     /// - `obs_offsets` (`P + 1`, prefix sum) groups the flat per-observation
     ///   `obs_images` (`M`) by point; point `p`'s observations are
     ///   `obs_images[obs_offsets[p]..obs_offsets[p + 1]]`.
-    /// - `cam_quats` / `cam_translations` / `cam_focals` (`N`) give each image's
-    ///   `cam_from_world` rotation, translation, and focal length (fx).
+    /// - `cam_quats` / `cam_translations` / `cam_intrinsics` (`N`) give each
+    ///   image's `cam_from_world` rotation, translation, and **camera model** —
+    ///   one entry per image, so a camera shared by several images is repeated.
+    ///   [`PatchExtent::PixelRadius`] differentiates the model
+    ///   ([`CameraIntrinsics::pixel_radius_to_world`]); every other policy reads
+    ///   only its focal. Taking the whole camera rather than a bare focal is what
+    ///   makes this entry point agree with [`Self::from_reconstruction`] on the
+    ///   same geometry — a focal alone cannot say how the lens magnifies.
     /// - `stored_normals` (`P`) is read only by [`PatchNormal::Stored`]; a
     ///   zero/missing row falls back to the mean viewing direction.
     /// - `obs_scales` (`M`, `NaN` = unreadable) supplies the keypoint scale that
@@ -391,7 +399,7 @@ impl PatchCloud {
         obs_scales: Option<&[f64]>,
         cam_quats: &[UnitQuaternion<f64>],
         cam_translations: &[Vector3<f64>],
-        cam_focals: &[f64],
+        cam_intrinsics: &[CameraIntrinsics],
         normal: PatchNormal,
         extent: PatchExtent,
         exclude_points_at_infinity: bool,
@@ -414,7 +422,7 @@ impl PatchCloud {
             obs_scales: &obs_scales_opt,
             cam_quats,
             cam_translations,
-            cam_focals,
+            cam_intrinsics,
         };
         build_patch_cloud(&scene, normal, extent, exclude_points_at_infinity)
     }
@@ -523,11 +531,19 @@ struct PatchScene<'a> {
     cam_quats: &'a [UnitQuaternion<f64>],
     /// Per-image `cam_from_world` translation. `N` entries.
     cam_translations: &'a [Vector3<f64>],
-    /// Per-image focal length (fx). `N` entries.
-    cam_focals: &'a [f64],
+    /// Per-image camera model. `N` entries — one per *image*, so a camera shared
+    /// by several images is repeated. [`PatchExtent::PixelRadius`] differentiates
+    /// it ([`CameraIntrinsics::pixel_radius_to_world`]); the other policies read
+    /// only its focal ([`Self::focal`]).
+    cam_intrinsics: &'a [CameraIntrinsics],
 }
 
 impl PatchScene<'_> {
+    /// Image `i`'s focal length (fx).
+    fn focal(&self, i: usize) -> f64 {
+        self.cam_intrinsics[i].focal_lengths().0
+    }
+
     /// In-plane "up" hint: the first observing camera's up axis (canonical camera
     /// `+y` — image up) rotated into world, or world `+y` when the point has no
     /// observation. Pins the in-plane rotation identically for finite and infinity
@@ -632,7 +648,7 @@ fn build_patch_cloud(
                 };
                 let d = (scene.cam_quats[img] * center.coords + scene.cam_translations[img]).norm();
                 if d > 1e-6 {
-                    sizes.push(sigma * d / scene.cam_focals[img]);
+                    sizes.push(sigma * d / scene.focal(img));
                 } else {
                     coincident_with_camera += 1;
                 }
@@ -710,8 +726,13 @@ fn build_patch_cloud(
                             let img = scene.obs_images[o] as usize;
                             let p_cam =
                                 scene.cam_quats[img] * center.coords + scene.cam_translations[img];
-                            let depth = p_cam.z.abs().max(1e-6);
-                            radius_px * depth / scene.cam_focals[img]
+                            // One rule for every model: the world size that
+                            // subtends `radius_px` in the view's least-magnified
+                            // direction, `radius_px / σ_min(∂(u,v)/∂p_cam)`. The
+                            // camera's own Jacobian carries the projection family
+                            // and the distortion, so nothing branches here.
+                            scene.cam_intrinsics[img]
+                                .pixel_radius_to_world([p_cam.x, p_cam.y, p_cam.z], radius_px)
                         })
                         .collect();
                     reduce(&mut hs, across)
@@ -750,14 +771,17 @@ fn build_patch_cloud(
 /// first observing camera's up, matching the finite path. The patch's `w` is `0`.
 ///
 /// The angular half-size (the tangent vectors' magnitude) follows `extent`:
-/// [`PatchExtent::FeatureSize`] and [`PatchExtent::PixelRadius`] have a natural
-/// distance-free angular form (`σ_i / f_i` and `radius_px / f_i` per view, reduced
-/// across views — the finite formulas with the ray distance dropped), while
+/// [`PatchExtent::FeatureSize`] and [`PatchExtent::PixelRadius`] are the finite
+/// rule with the range factored out — `pixels / (‖p_cam‖·σ_min)`, the local
+/// **pixels per radian** in the least-magnified tangent direction, per view and
+/// reduced across views ([`CameraIntrinsics::pixel_radius_to_angle`]) — while
 /// [`PatchExtent::Fixed`] and [`PatchExtent::RelativeToSpacing`] reuse their world
-/// half-size as the tangent magnitude. Errors with
-/// [`PatchCloudError::MissingFeatureScale`] under [`PatchExtent::FeatureSize`] if
-/// an infinity point has no readable keypoint scale in any view (its angular size
-/// is distance-free, so the coincident-camera cause never applies here).
+/// half-size as the tangent magnitude. The bearing is the point's direction
+/// rotated into each observing camera's frame (a `w = 0` anchor does not
+/// translate). Errors with [`PatchCloudError::MissingFeatureScale`] under
+/// [`PatchExtent::FeatureSize`] if an infinity point has no readable keypoint
+/// scale in any view (the angular size needs no viewing distance, so the
+/// coincident-camera cause never applies here).
 fn push_infinity_patches(
     cloud: &mut PatchCloud,
     scene: &PatchScene<'_>,
@@ -777,6 +801,13 @@ fn push_infinity_patches(
         let start = scene.obs_offsets[p];
         let end = scene.obs_offsets[p + 1];
 
+        // The anchor is a direction, so it rotates into each camera's frame
+        // without translating; the angular pixel scale reads off that bearing.
+        let bearing = |img: usize| {
+            let d = scene.cam_quats[img] * dir.coords;
+            [d.x, d.y, d.z]
+        };
+
         let half = match extent {
             PatchExtent::Fixed(w) => w,
             PatchExtent::RelativeToSpacing(_) => spacing_half,
@@ -785,7 +816,10 @@ fn push_infinity_patches(
                     radius_px
                 } else {
                     let mut angles: Vec<f64> = (start..end)
-                        .map(|o| radius_px / scene.cam_focals[scene.obs_images[o] as usize])
+                        .map(|o| {
+                            let img = scene.obs_images[o] as usize;
+                            scene.cam_intrinsics[img].pixel_radius_to_angle(bearing(img), radius_px)
+                        })
                         .collect();
                     reduce(&mut angles, across)
                 }
@@ -795,12 +829,14 @@ fn push_infinity_patches(
                 for obs in start..end {
                     let img = scene.obs_images[obs] as usize;
                     if let Some(sigma) = scene.obs_scales.get(obs).copied().flatten() {
-                        angles.push(sigma / scene.cam_focals[img]);
+                        angles.push(
+                            scene.cam_intrinsics[img].pixel_radius_to_angle(bearing(img), sigma),
+                        );
                     }
                 }
                 if angles.is_empty() {
-                    // An infinity patch's angular size is `σ/f` (no viewing
-                    // distance), so the only failure cause is an unreadable scale —
+                    // An infinity patch's angular size needs no viewing distance,
+                    // so the only failure cause is an unreadable scale —
                     // `coincident_with_camera` never applies here.
                     return Err(PatchCloudError::MissingFeatureScale {
                         point_index: p as u32,
@@ -855,6 +891,14 @@ pub enum PatchExtent {
     /// `radius_px` in the view where the point appears largest and smaller in the
     /// rest; `Max` is sized to the smallest-appearing view, so the patch can be
     /// much larger in close views.
+    ///
+    /// The per-view size is `radius_px / σ_min`, where `σ_min` is the smaller
+    /// singular value of that camera's pixel Jacobian `∂(u, v)/∂p_cam` at the
+    /// point — the pixels-per-world-unit in the view's least-magnified tangent
+    /// direction. One rule for every camera model; see
+    /// [`CameraIntrinsics::pixel_radius_to_world`], which also gives the exact
+    /// closed forms it reduces to for a pinhole (`radius_px·|z|/f`) and an
+    /// equidistant fisheye (`radius_px·‖p_cam‖/f`).
     PixelRadius { radius_px: f64, across: ViewReduce },
     /// `factor` × the projected world feature size: each observation's keypoint
     /// scale `sigma_i` back-projected to world (`sigma_i · z_i / f_i`), reduced
