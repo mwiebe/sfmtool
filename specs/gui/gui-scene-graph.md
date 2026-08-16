@@ -641,6 +641,12 @@ Where it applies:
   need it for the same reason: the viewport's **first-show framing** and the
   `Z` **zoom-to-fit** key, both of which frame point positions rather than GPU
   geometry (`scene::world_points`).
+- **The camera-view background image**: its mesh is ray directions in the
+  node's own coordinates, so it reaches world space through the same `model`
+  matrix, written into the BG uniform block from the viewed camera's node (see
+  [gui-camera-views.md](gui-camera-views.md), "Background mesh shader"). It is
+  the one geometry that would otherwise be left behind by an alignment while
+  the viewpoint moved with it.
 - **Points at infinity**: directions rotate; translation drops out and uniform
   scale is irrelevant to a direction. The `model × vec4(dir, 0)` path already
   handles this with no special-casing.
@@ -659,10 +665,13 @@ Computes the similarity mapping this node (source) onto the chosen node
 lands in the target's *currently displayed* frame, so aligning C→B after B→A
 chains as expected. The target node is never modified.
 
-The estimation machinery already exists in
-`sfmtool-core::analysis::alignment` and
-`sfmtool-core::reconstruction::point_correspondence`; the GUI adds only
-correspondence gathering and UI:
+The whole fit lives in
+`sfmtool-core::analysis::alignment::reconstructions::align_reconstructions` —
+correspondence gathering included — so the GUI adds only the popup and the
+status line, and any other caller aligning two loaded reconstructions gets the
+same answer. See
+[reconstruction-alignment.md](../core/reconstruction-alignment.md). What that
+fit does:
 
 - **Correspondences by cameras** (default): images matched by `name` across
   the two nodes; corresponded camera centers feed the fit. Works whenever the
@@ -697,7 +706,8 @@ correspondence gathering and UI:
   itself) is not rejected as all-outlier by `f64` rounding noise. 200 RANSAC
   rounds rather than `sfm align`'s 1000: the loop is scalar Rust on the UI
   thread rather than numpy, and the preliminary fit has already done most of
-  the work.
+  the work. Full detail in
+  [reconstruction-alignment.md](../core/reconstruction-alignment.md).
 
 Options are deliberately few (a small popup): correspondence source
 (Cameras / Points) and Similarity vs Rigid. Defaults: cameras, similarity. They
