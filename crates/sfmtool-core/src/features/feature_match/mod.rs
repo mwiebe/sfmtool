@@ -27,6 +27,22 @@ pub use sweep::{
     mutual_best_match_sweep_geometric,
 };
 
+/// Reorder rows of a flat row-major array according to `order`.
+///
+/// Each row is `stride` elements wide, and `order[i]` names the source row for
+/// output row `i`. Both sweep families gather this way before matching — the
+/// Y-sweep into Y-sorted order, the polar sweep into angular order — at three
+/// strides (positions, affines, descriptors) and two element types, so it is
+/// generic over the element and shared rather than written per module.
+fn gather_rows<T: Copy>(rows: &[T], stride: usize, order: &[usize]) -> Vec<T> {
+    let mut out = Vec::with_capacity(order.len() * stride);
+    for &src in order {
+        let start = src * stride;
+        out.extend_from_slice(&rows[start..start + stride]);
+    }
+    out
+}
+
 /// Match features between an image pair given camera poses and SIFT features.
 ///
 /// Internally:

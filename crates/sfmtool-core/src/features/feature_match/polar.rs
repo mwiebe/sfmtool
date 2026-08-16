@@ -27,6 +27,7 @@ use nalgebra::Matrix3;
 use crate::camera::epipolar;
 
 use super::descriptor::find_best_match_contiguous;
+use super::gather_rows;
 use super::geometric_filter::{
     two_stage_geometric_filter, GeometricFilterConfig, StereoPairGeometry,
 };
@@ -249,26 +250,6 @@ impl Wraparound {
     fn to_original(&self, ext_idx: usize) -> usize {
         ((ext_idx as isize - self.n_prepended as isize).rem_euclid(self.n as isize)) as usize
     }
-}
-
-/// Gather a payload array of `stride` elements per feature into angular order.
-///
-/// Composes two levels of indirection: `sort_idx` gives the angular ordering,
-/// `valid_indices` maps those back to original feature indices (some features
-/// may have been filtered by `min_radius`). The result is flat and contiguous,
-/// ready for the sweep matcher.
-fn gather_rows<T: Copy>(
-    rows: &[T],
-    stride: usize,
-    valid_indices: &[usize],
-    sort_idx: &[usize],
-) -> Vec<T> {
-    let mut out = Vec::with_capacity(sort_idx.len() * stride);
-    for &si in sort_idx {
-        let start = valid_indices[si] * stride;
-        out.extend_from_slice(&rows[start..start + stride]);
-    }
-    out
 }
 
 /// The extra per-feature data the geometric path needs, already in angular
@@ -536,14 +517,21 @@ fn polar_mutual_best_match_inner(
     let sorted_theta1: Vec<f64> = sort_idx1.iter().map(|&i| theta1[i]).collect();
     let sorted_theta2: Vec<f64> = sort_idx2.iter().map(|&i| theta2_aligned[i]).collect();
 
-    let sorted_descs1 = gather_rows(descriptors1, desc_len, &valid1, &sort_idx1);
-    let sorted_descs2 = gather_rows(descriptors2, desc_len, &valid2, &sort_idx2);
+    // The angular order expressed in *input* feature indices, composing the two
+    // levels of indirection once: `sort_idx` orders the radius-filtered
+    // features, `valid` maps those back to the caller's indices. Every gather
+    // below, and the final index mapping, reads it.
+    let order1: Vec<usize> = sort_idx1.iter().map(|&i| valid1[i]).collect();
+    let order2: Vec<usize> = sort_idx2.iter().map(|&i| valid2[i]).collect();
+
+    let sorted_descs1 = gather_rows(descriptors1, desc_len, &order1);
+    let sorted_descs2 = gather_rows(descriptors2, desc_len, &order2);
 
     let sorted_geometry = geometric.map(|(affines1, affines2, geom, config)| SortedGeometry {
-        positions1: gather_rows(positions1, 2, &valid1, &sort_idx1),
-        positions2: gather_rows(positions2, 2, &valid2, &sort_idx2),
-        affines1: gather_rows(affines1, 4, &valid1, &sort_idx1),
-        affines2: gather_rows(affines2, 4, &valid2, &sort_idx2),
+        positions1: gather_rows(positions1, 2, &order1),
+        positions2: gather_rows(positions2, 2, &order2),
+        affines1: gather_rows(affines1, 4, &order1),
+        affines2: gather_rows(affines2, 4, &order2),
         geom,
         geom_swapped: geom.swapped(),
         config,
@@ -582,8 +570,8 @@ fn polar_mutual_best_match_inner(
     for (&s_idx1, &(s_idx2, dist)) in &forward {
         if let Some(&(back_idx1, _)) = backward.get(&s_idx2) {
             if back_idx1 == s_idx1 {
-                let orig_idx1 = valid1[sort_idx1[s_idx1]];
-                let orig_idx2 = valid2[sort_idx2[s_idx2]];
+                let orig_idx1 = order1[s_idx1];
+                let orig_idx2 = order2[s_idx2];
                 mutual.push((orig_idx1, orig_idx2, dist));
             }
         }

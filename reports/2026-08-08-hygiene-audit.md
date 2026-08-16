@@ -88,8 +88,9 @@ grown past the point where that judgement holds — `patch/keypoint_localize.rs`
   `noop` backend and covers this.
 
 **Parallel plain/`_geometric` matcher families across `polar.rs` and `sweep.rs`**
-> _Status (2026-08-15): Partially done — all three `polar.rs` pairs are merged;
-> the two `sweep.rs` pairs remain open. `polar.rs` 844 → 722 lines. The three
+> _Status (2026-08-15): **Done** — all five pairs merged, `polar.rs` first and
+> `sweep.rs` in a follow-up (see the second status block below). `polar.rs`
+> 844 → 722 lines. The three
 > `_geometric` functions are gone: `extend_for_wraparound_geometric`,
 > `polar_match_one_way_geometric` and the duplicated body of
 > `polar_mutual_best_match_geometric`. Both public entry points survive
@@ -171,17 +172,53 @@ grown past the point where that judgement holds — `patch/keypoint_localize.rs`
 > `extended_payload_arrays_share_one_layout` test exercises and nothing else
 > enforced._
 >
-> _Two items the review raised that are **not** addressed here, carried forward:_
-> _`gather_rows` is now a near-duplicate of `sweep.rs`'s pre-existing
-> `gather_2d` (same body, different argument order, one extra index level) —
-> fold the two together when the `sweep.rs` half of this finding is done, rather
-> than trading three same-file duplicates for one cross-module one. And
+> _Two items the review raised that were **not** addressed in the polar pass:
+> `gather_rows` became a near-duplicate of `sweep.rs`'s pre-existing `gather_2d`
+> (same body, different argument order, one extra index level), and
 > `angular_order` still sorts with `partial_cmp().unwrap_or(Equal)`, three lines
-> from the copy that was fixed — a **ninth** instance of the pattern. It is
-> untouched because changing it is not a refactor: `total_cmp` would order
-> `−0.0` before `+0.0`, which can reorder two features whose angles are opposite
-> zeros and therefore change which matches come out. That needs its own measured
-> decision._
+> from the copy that was fixed — a **ninth** instance of the pattern. The first
+> is resolved below. The second stands: changing it is not a refactor, because
+> `total_cmp` would order `−0.0` before `+0.0` and so can reorder two features
+> whose angles are opposite zeros, changing which matches come out. It needs its
+> own measured decision, and is the last known instance of the pattern in this
+> crate._
+>
+> _**Status (2026-08-15), the `sweep.rs` half — this finding is now closed.**
+> Both remaining pairs are merged the same way: four public entry points
+> (**all four** PyO3-bound, unlike polar where the one-way pair was private) kept
+> byte-identical as thin wrappers over `match_one_way_sweep_inner` and
+> `mutual_best_match_sweep_inner`, with one `Option` parameter carrying the
+> filter. `sweep.rs` 451 → **506** lines: this one gets *longer*, and that is the
+> honest trade. Because all four entry points are public and must keep their
+> signatures and their doc comments, the wrappers cost more lines than the merge
+> saves. What went away is the duplication itself — two ~90-line matching loops
+> became one, and two ~50-line sort-and-gather setups became one — so a change to
+> the sweep now lands in a single place, at the price of boilerplate a reader can
+> see through at a glance. Judging this half on line count would get it exactly
+> backwards. It is simpler than the polar half: no
+> wraparound, so a window offset **is** a sorted index, and positions are already
+> parameters, so `GeometricInputs` carries only the affines and the filter._
+>
+> _`gather_2d` and polar's `gather_rows` are now one `gather_rows` in
+> `feature_match/mod.rs`, private to the module but reachable by both children.
+> Polar's version composed two index levels inline; it now precomputes that
+> composition once per side (`order1` / `order2`) instead of redoing it per
+> gather, which also replaces the final `valid1[sort_idx1[s_idx1]]` lookup with
+> `order1[s_idx1]`._
+>
+> _Verified with the same technique: an A/B harness over **320** configurations —
+> feature counts including 0 on either side, `window_size` ∈ {0, 1, 3, 5, 30}
+> (below, around and far above n), four thresholds from reject-all to accept-all,
+> and a tied-Y variant that forces the argsort tiebreak and window-slide
+> comparisons onto equal values — across all six affected entry points (both
+> sweep pairs plus both polar ones, since polar's gather changed too). 618
+> non-empty results, output **byte-identical** to the pre-change code. Plus
+> workspace 1750 passing, clippy and the doc gate clean._
+>
+> _The doc gate caught one thing worth noting for future work here: the new
+> module doc linked to the two private `*_inner` functions, which is an error
+> under `private_intra_doc_links` because `sweep` is a public module. Written as
+> plain code spans instead, exactly as `AGENTS.md` prescribes._
 - Location: `crates/sfmtool-core/src/features/feature_match/polar.rs` (844),
   `sweep.rs` (451)
 - Problem: Five pairs implement the same algorithm twice, differing only by whether a
