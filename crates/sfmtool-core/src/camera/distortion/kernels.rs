@@ -9,6 +9,7 @@
 //! module. Kept separate so `distortion.rs` holds only the two public
 //! `impl` blocks and the model dispatch.
 
+use super::bspline;
 use super::{FISHEYE_BLEND_END_RAD, FISHEYE_BLEND_START_RAD, UNDISTORT_EPS, UNDISTORT_MAX_ITER};
 
 /// OpenCV distortion: radial (k1, k2) + tangential (p1, p2).
@@ -713,6 +714,41 @@ pub(super) fn equidistant_fisheye_to_ray(
     blend_fisheye_ray(r_d, recovered, undistorted)
 }
 
+/// Convert `SIMPLE_RADIAL_FISHEYE` distorted coordinates to a unit ray
+/// direction — the same Newton recovery as the rest of the equidistant
+/// family, WITHOUT the wide-angle blend.
+///
+/// [`blend_fisheye_ray`] exists because a high-order distortion polynomial
+/// stops being trustworthy as it approaches its peak; past `r_d = 90°` it
+/// hands back the identity (`θ = r_d`) ray outright. With a single
+/// coefficient there is nothing to distrust — `θ_d = θ·(1 + k1·θ²)` is
+/// monotone over any field this model is used on, and the recovery is the
+/// exact inverse at every angle — while the blend would DROP the `k1` term
+/// exactly where it is largest: a 105° rim at `k1 = 0.02` comes back 6° off,
+/// which is a ray, not a rounding error. This is the inverse the bundle
+/// adjustment's retriangulation and direction re-estimation read.
+///
+/// `k1 = 0` short-circuits to [`equidistant_to_ray`], keeping the
+/// `SimpleRadialFisheye { k1 = 0 }` convention bit-identical to the native
+/// `EQUIDISTANT_FISHEYE` model at every radius. Past the fold (`r_d` above
+/// the map's peak, where Newton reports non-convergence) the identity
+/// extrapolation is kept: there is no inverse to return there.
+pub(super) fn simple_radial_fisheye_to_ray(x_d: f64, y_d: f64, k1: f64) -> [f64; 3] {
+    if k1 == 0.0 {
+        return equidistant_to_ray(x_d, y_d);
+    }
+    let r_d = (x_d * x_d + y_d * y_d).sqrt();
+    if r_d < 1e-15 {
+        return [0.0, 0.0, 1.0];
+    }
+    let (theta, converged) = recover_theta_equidistant(r_d, k1, 0.0, 0.0, 0.0);
+    if !converged {
+        return equidistant_to_ray(x_d, y_d);
+    }
+    let s = theta.sin() / r_d;
+    [x_d * s, y_d * s, theta.cos()]
+}
+
 /// Project a unit ray through the equidistant fisheye model, working in theta-space.
 ///
 /// Computes `theta = atan2(sqrt(rx² + ry²), rz)`, applies the distortion
@@ -798,7 +834,7 @@ pub(super) fn undistort_equidistant(x_d: f64, y_d: f64) -> (f64, f64) {
 /// and the result is always `Some`. A ray on the optical axis maps to the
 /// principal point; that includes the **antipode** (`θ = π`, `r_xy = 0`),
 /// where the map is not injective — every antipodal direction aliases onto
-/// `θ = 0`. See [`equidistant_ray_jacobian`], whose derivative is unbounded
+/// `θ = 0`. See [`radial_fisheye_ray_jacobian`], whose derivative is unbounded
 /// exactly there.
 pub(super) fn distort_ray_equidistant_exact(rx: f64, ry: f64, rz: f64) -> (f64, f64) {
     let r_xy = (rx * rx + ry * ry).sqrt();
@@ -809,23 +845,33 @@ pub(super) fn distort_ray_equidistant_exact(rx: f64, ry: f64, rz: f64) -> (f64, 
     (theta * rx / r_xy, theta * ry / r_xy)
 }
 
-/// Distorted coordinate and the analytic `∂(x_d, y_d)/∂(rx, ry, rz)` of
-/// [`distort_ray_equidistant_exact`], row-major, all in the optical frame.
+/// Distorted coordinate and the analytic `∂(x_d, y_d)/∂(rx, ry, rz)` of the
+/// one-coefficient equidistant map `θ_d = θ·(1 + k1·θ²)`, row-major, all in
+/// the optical frame.
 ///
-/// With `ρ = r_xy`, `n² = ρ² + rz²`, unit direction `(ux, uy) = (rx, ry)/ρ`
-/// and `θ = atan2(ρ, rz)`:
+/// `k1 = 0` is [`distort_ray_equidistant_exact`] (the `EQUIDISTANT_FISHEYE`
+/// model) and reproduces it bit for bit; a non-zero `k1` is
+/// `SIMPLE_RADIAL_FISHEYE`, whose forward map is
+/// [`distort_ray_equidistant`] with `k2 = k3 = k4 = 0`. Both are single-focal
+/// models whose distorted coordinate is `θ_d` times the unit 2D direction, so
+/// one derivative covers both.
+///
+/// With `ρ = r_xy`, `n² = ρ² + rz²`, unit direction `(ux, uy) = (rx, ry)/ρ`,
+/// `θ = atan2(ρ, rz)` and `θ_d' = dθ_d/dθ = 1 + 3·k1·θ²`:
 ///
 /// ```text
 /// ∂θ/∂rx = ux·rz/n²   ∂θ/∂ry = uy·rz/n²   ∂θ/∂rz = −ρ/n²
 /// ∂ux/∂rx = uy²/ρ     ∂ux/∂ry = −ux·uy/ρ  (and the mirror for uy)
 /// ```
 ///
-/// so, writing `c = rz/n² − θ/ρ` for the shared off-diagonal factor,
+/// so, chaining `x_d = θ_d(θ)·ux` and writing `c = θ_d'·rz/n² − θ_d/ρ` for
+/// the shared off-diagonal factor,
 ///
 /// ```text
-/// ∂x_d/∂rx = θ·uy²/ρ + ux²·rz/n²      ∂x_d/∂ry = ux·uy·c    ∂x_d/∂rz = −rx/n²
-/// ∂y_d/∂rx = ux·uy·c                  ∂y_d/∂ry = θ·ux²/ρ + uy²·rz/n²
-///                                                            ∂y_d/∂rz = −ry/n²
+/// ∂x_d/∂rx = θ_d·uy²/ρ + θ_d'·ux²·rz/n²   ∂x_d/∂ry = ux·uy·c
+///                                         ∂x_d/∂rz = −θ_d'·rx/n²
+/// ∂y_d/∂rx = ux·uy·c                      ∂y_d/∂ry = θ_d·ux²/ρ + θ_d'·uy²·rz/n²
+///                                         ∂y_d/∂rz = −θ_d'·ry/n²
 /// ```
 ///
 /// Nothing here is guarded on `rz`: the expressions are finite and correct
@@ -833,15 +879,25 @@ pub(super) fn distort_ray_equidistant_exact(rx: f64, ry: f64, rz: f64) -> (f64, 
 ///
 /// Two limits:
 ///
-/// - **On axis, in front** (`ρ → 0`, `rz > 0`): `θ/ρ → 1/rz`, the
-///   off-diagonal factor `c → 0` and the third column vanishes, leaving
-///   `diag(1/rz, 1/rz)` — the pinhole small-angle Jacobian, independent of
-///   the direction `(ux, uy)` that is undefined there.
+/// - **On axis, in front** (`ρ → 0`, `rz > 0`): `θ_d/ρ → 1/rz` and
+///   `θ_d' → 1`, so the off-diagonal factor `c → 0` and the third column
+///   vanishes, leaving `diag(1/rz, 1/rz)` — the pinhole small-angle
+///   Jacobian, independent of both `k1` and the direction `(ux, uy)` that is
+///   undefined there.
 /// - **At the antipode** (`ρ → 0`, `rz < 0`): `θ → π` while `ρ → 0`, so
-///   `θ/ρ` diverges and no finite Jacobian exists. Returns `None`; this is
+///   `θ_d/ρ` diverges and no finite Jacobian exists. Returns `None`; this is
 ///   the one measure-zero direction where the derivative is narrower than
 ///   [`distort_ray_equidistant_exact`]'s domain.
-pub(super) fn equidistant_ray_jacobian(rx: f64, ry: f64, rz: f64) -> Option<NormalizedRayJacobian> {
+///
+/// `None` also where the forward map itself is out of domain — a `k1` strong
+/// enough to fold `θ_d` non-positive at this `θ`, the same gate
+/// [`distort_ray_equidistant`] applies.
+pub(super) fn radial_fisheye_ray_jacobian(
+    rx: f64,
+    ry: f64,
+    rz: f64,
+    k1: f64,
+) -> Option<NormalizedRayJacobian> {
     let rho2 = rx * rx + ry * ry;
     let rho = rho2.sqrt();
     let n2 = rho2 + rz * rz;
@@ -857,15 +913,274 @@ pub(super) fn equidistant_ray_jacobian(rx: f64, ry: f64, rz: f64) -> Option<Norm
         return Some(((0.0, 0.0), [[inv, 0.0, 0.0], [0.0, inv, 0.0]]));
     }
     let theta = rho.atan2(rz);
+    let theta2 = theta * theta;
+    let theta_d = theta * (1.0 + k1 * theta2);
+    let dtheta_d = 1.0 + 3.0 * k1 * theta2;
+    // The forward map's domain gate (`distort_ray_equidistant`): past the
+    // fold there is no projection to differentiate.
+    if theta > 0.0 && theta_d <= 0.0 {
+        return None;
+    }
     let (ux, uy) = (rx / rho, ry / rho);
     let rz_n2 = rz / n2;
-    let theta_rho = theta / rho;
-    let cross = ux * uy * (rz_n2 - theta_rho);
+    let theta_rho = theta_d / rho;
+    let cross = ux * uy * (dtheta_d * rz_n2 - theta_rho);
     Some((
-        (theta * ux, theta * uy),
+        (theta_d * ux, theta_d * uy),
         [
-            [theta_rho * uy * uy + ux * ux * rz_n2, cross, -rx / n2],
-            [cross, theta_rho * ux * ux + uy * uy * rz_n2, -ry / n2],
+            [
+                theta_rho * uy * uy + dtheta_d * (ux * ux * rz_n2),
+                cross,
+                -dtheta_d * rx / n2,
+            ],
+            [
+                cross,
+                theta_rho * ux * ux + dtheta_d * (uy * uy * rz_n2),
+                -dtheta_d * ry / n2,
+            ],
+        ],
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// SFMTOOL_FISHEYE: equidistant base + monotone radial spline
+// ---------------------------------------------------------------------------
+
+/// Forward `SFMTOOL_FISHEYE` map in tangent-plane coordinates: `(x, y)` with
+/// `r = tan θ` in, `((θ + δ(θ))·x/r, (θ + δ(θ))·y/r)` out, `δ` the radial
+/// spline ([`bspline::delta`]).
+///
+/// An inactive spline ([`bspline::bspline_is_inactive`] — identity
+/// coefficients, or a degenerate domain end) short-circuits to
+/// [`distort_equidistant`], keeping the zero-spline model bit-identical to
+/// `EQUIDISTANT_FISHEYE`. Like [`distort_equidistant`], only meaningful for
+/// `θ < 90°`; the ray-space entry point is [`distort_ray_sfmtool_fisheye`].
+pub(super) fn distort_sfmtool_fisheye(
+    x: f64,
+    y: f64,
+    coeffs: &[f64],
+    theta_max: f64,
+) -> (f64, f64) {
+    if bspline::bspline_is_inactive(coeffs, theta_max) {
+        return distort_equidistant(x, y);
+    }
+    let r = (x * x + y * y).sqrt();
+    if r < 1e-15 {
+        return (x, y);
+    }
+    let theta = r.atan();
+    let theta_d = theta + bspline::delta(coeffs, theta_max, theta);
+    let scale = theta_d / r;
+    (x * scale, y * scale)
+}
+
+/// Inverse of [`distort_sfmtool_fisheye`]: `(x_d, y_d)` with `r_d = θ_d` in,
+/// tangent-plane `(x, y)` with `r = tan θ` out.
+///
+/// Inactive splines short-circuit to [`undistort_equidistant`] (bit-identity
+/// with `EQUIDISTANT_FISHEYE`).
+pub(super) fn undistort_sfmtool_fisheye(
+    x_d: f64,
+    y_d: f64,
+    coeffs: &[f64],
+    theta_max: f64,
+) -> (f64, f64) {
+    if bspline::bspline_is_inactive(coeffs, theta_max) {
+        return undistort_equidistant(x_d, y_d);
+    }
+    let r_d = (x_d * x_d + y_d * y_d).sqrt();
+    if r_d < 1e-15 {
+        return (x_d, y_d);
+    }
+    let (theta, _) = recover_theta_bspline(r_d, coeffs, theta_max);
+    let r = theta.tan();
+    let scale = r / r_d;
+    (x_d * scale, y_d * scale)
+}
+
+/// Recover the incidence angle `θ` from the distorted radial distance
+/// `r_d = θ + δ(θ)` for the spline map. Returns `(theta, converged)`.
+///
+/// Beyond the spline's domain the map is exactly linear
+/// (`r_d = θ + δ(θ_max)`), so `r_d ≥ θ_max + δ(θ_max)` inverts in closed
+/// form. Inside `[0, θ_max]` a safeguarded Newton iteration solves the
+/// monotone `θ_d(θ)` — monotonicity is the model's construction invariant, so
+/// the bracket `[0, θ_max]` always contains exactly one root; the bisection
+/// safeguard keeps the iteration well-defined even for a spline that
+/// violates the invariant (it converges to *a* root of the folded map).
+/// `converged` is `false` only when `θ_d(θ_max) ≤ 0` — a spline folded so
+/// far that no radius is representable — mirroring
+/// [`recover_theta_equidistant`]'s unreachable-`r_d` report.
+pub(super) fn recover_theta_bspline(r_d: f64, coeffs: &[f64], theta_max: f64) -> (f64, bool) {
+    if r_d <= 0.0 {
+        return (0.0, true);
+    }
+    let delta_end = bspline::delta(coeffs, theta_max, theta_max);
+    let rd_end = theta_max + delta_end;
+    if rd_end <= 0.0 {
+        return (0.0, false);
+    }
+    if r_d >= rd_end {
+        // Linear region: exact inverse, no iteration.
+        return (r_d - delta_end, true);
+    }
+    // Bracketed Newton on g(θ) = θ + δ(θ) − r_d over [0, θ_max]:
+    // g(0) = −r_d < 0 and g(θ_max) = rd_end − r_d > 0.
+    let (mut lo, mut hi) = (0.0f64, theta_max);
+    let mut theta = r_d.min(theta_max); // identity start, like the k-family
+    for _ in 0..UNDISTORT_MAX_ITER {
+        let (d, dp) = bspline::delta_and_deriv(coeffs, theta_max, theta);
+        let g = theta + d - r_d;
+        if g == 0.0 {
+            return (theta, true); // Newton landed on the exact root
+        }
+        if g > 0.0 {
+            hi = theta;
+        } else {
+            lo = theta;
+        }
+        let gp = 1.0 + dp;
+        let mut next = if gp > 0.0 { theta - g / gp } else { f64::NAN };
+        // Bracket safeguard (also catches NaN). Inclusive bounds: an
+        // underflowed Newton step may reproduce `theta` — that is
+        // convergence, not a reason to bisect away from the root.
+        if !(next >= lo && next <= hi) {
+            next = 0.5 * (lo + hi);
+        }
+        let step = next - theta;
+        theta = next;
+        if step.abs() < UNDISTORT_EPS {
+            break;
+        }
+    }
+    (theta, true)
+}
+
+/// Project an optical-frame ray through the spline map:
+/// `θ = atan2(r_xy, rz)`, `θ_d = θ + δ(θ)`, distorted coordinate `θ_d` times
+/// the unit 2D direction.
+///
+/// Inactive splines short-circuit to [`distort_ray_equidistant_exact`]
+/// (bit-identity with `EQUIDISTANT_FISHEYE`, domain the whole sphere).
+/// Otherwise the same fold gate as [`distort_ray_equidistant`]: a spline
+/// that drives `θ_d` non-positive at a positive `θ` has left its principal
+/// monotonic branch, and the projection is `None` there.
+pub(super) fn distort_ray_sfmtool_fisheye(
+    rx: f64,
+    ry: f64,
+    rz: f64,
+    coeffs: &[f64],
+    theta_max: f64,
+) -> Option<(f64, f64)> {
+    if bspline::bspline_is_inactive(coeffs, theta_max) {
+        return Some(distort_ray_equidistant_exact(rx, ry, rz));
+    }
+    let r_xy = (rx * rx + ry * ry).sqrt();
+    if r_xy < 1e-15 {
+        return Some((0.0, 0.0));
+    }
+    let theta = r_xy.atan2(rz);
+    let theta_d = theta + bspline::delta(coeffs, theta_max, theta);
+    if theta > 0.0 && theta_d <= 0.0 {
+        return None;
+    }
+    let (dx, dy) = (rx / r_xy, ry / r_xy);
+    Some((theta_d * dx, theta_d * dy))
+}
+
+/// Convert `SFMTOOL_FISHEYE` distorted coordinates to a unit ray direction —
+/// Newton recovery of the monotone `θ_d(θ)` with **no wide-angle blend**,
+/// exactly the [`simple_radial_fisheye_to_ray`] policy: the spline is
+/// largest at the periphery, which is where a blend would drop it.
+///
+/// Inactive splines short-circuit to [`equidistant_to_ray`] (bit-identity
+/// with `EQUIDISTANT_FISHEYE`). Past a fold (a spline violating the
+/// monotonicity invariant so badly that no radius is representable) the
+/// identity extrapolation is kept: there is no inverse to return there.
+pub(super) fn sfmtool_fisheye_to_ray(
+    x_d: f64,
+    y_d: f64,
+    coeffs: &[f64],
+    theta_max: f64,
+) -> [f64; 3] {
+    if bspline::bspline_is_inactive(coeffs, theta_max) {
+        return equidistant_to_ray(x_d, y_d);
+    }
+    let r_d = (x_d * x_d + y_d * y_d).sqrt();
+    if r_d < 1e-15 {
+        return [0.0, 0.0, 1.0];
+    }
+    let (theta, converged) = recover_theta_bspline(r_d, coeffs, theta_max);
+    if !converged {
+        return equidistant_to_ray(x_d, y_d);
+    }
+    let s = theta.sin() / r_d;
+    [x_d * s, y_d * s, theta.cos()]
+}
+
+/// Distorted coordinate and analytic `∂(x_d, y_d)/∂(rx, ry, rz)` of the
+/// spline map — [`radial_fisheye_ray_jacobian`]'s template with
+/// `θ_d = θ + δ(θ)` and `θ_d' = 1 + δ'(θ)` substituted for the polynomial
+/// pair. Same conventions throughout: optical frame, axis handling via
+/// [`EQUIDISTANT_AXIS_EPS`], `None` at the antipode and past the fold.
+///
+/// The on-axis forward limit is the same pinhole `diag(1/rz, 1/rz)` as the
+/// k-family's: the gauge pins `δ(0) = 0` and `δ'(0) = 0`, so `θ_d/ρ → 1/rz`
+/// and `θ_d' → 1` exactly as with `k1`.
+///
+/// Inactive splines short-circuit to
+/// `radial_fisheye_ray_jacobian(…, k1 = 0)`, the `EQUIDISTANT_FISHEYE`
+/// arithmetic, bit for bit.
+pub(super) fn sfmtool_fisheye_ray_jacobian(
+    rx: f64,
+    ry: f64,
+    rz: f64,
+    coeffs: &[f64],
+    theta_max: f64,
+) -> Option<NormalizedRayJacobian> {
+    if bspline::bspline_is_inactive(coeffs, theta_max) {
+        return radial_fisheye_ray_jacobian(rx, ry, rz, 0.0);
+    }
+    let rho2 = rx * rx + ry * ry;
+    let rho = rho2.sqrt();
+    let n2 = rho2 + rz * rz;
+    if n2 == 0.0 {
+        return None;
+    }
+    if rho <= EQUIDISTANT_AXIS_EPS * n2.sqrt() {
+        // On the optical axis: only the forward limit is finite.
+        if rz <= 0.0 {
+            return None;
+        }
+        let inv = 1.0 / rz;
+        return Some(((0.0, 0.0), [[inv, 0.0, 0.0], [0.0, inv, 0.0]]));
+    }
+    let theta = rho.atan2(rz);
+    let (d, dp) = bspline::delta_and_deriv(coeffs, theta_max, theta);
+    let theta_d = theta + d;
+    let dtheta_d = 1.0 + dp;
+    // The forward map's fold gate (`distort_ray_sfmtool_fisheye`): past it
+    // there is no projection to differentiate.
+    if theta > 0.0 && theta_d <= 0.0 {
+        return None;
+    }
+    let (ux, uy) = (rx / rho, ry / rho);
+    let rz_n2 = rz / n2;
+    let theta_rho = theta_d / rho;
+    let cross = ux * uy * (dtheta_d * rz_n2 - theta_rho);
+    Some((
+        (theta_d * ux, theta_d * uy),
+        [
+            [
+                theta_rho * uy * uy + dtheta_d * (ux * ux * rz_n2),
+                cross,
+                -dtheta_d * rx / n2,
+            ],
+            [
+                cross,
+                theta_rho * ux * ux + dtheta_d * (uy * uy * rz_n2),
+                -dtheta_d * ry / n2,
+            ],
         ],
     ))
 }
