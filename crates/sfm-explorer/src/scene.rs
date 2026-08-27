@@ -328,6 +328,15 @@ impl SceneNode {
         }
     }
 
+    /// A node derived in-session from another node (a resection, for one),
+    /// carrying `recon` under `label`. It came from no file — `Reload from
+    /// Disk` is greyed on it, exactly as it is on demo data — and everything
+    /// there is to know about where it came from is in its label and its
+    /// reconstruction's metadata.
+    pub fn derived(label: String, recon: SfmrReconstruction) -> Self {
+        Self::new(label, None, recon)
+    }
+
     /// A node for a reconstruction read from `path`, labeled with its file stem.
     pub fn from_path(path: &Path, recon: SfmrReconstruction) -> Self {
         Self::new(label_for_path(path), Some(path.to_path_buf()), recon)
