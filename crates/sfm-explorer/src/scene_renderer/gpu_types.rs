@@ -357,3 +357,114 @@ pub(super) fn mat4_to_cols(m: &Matrix4<f64>) -> [[f32; 4]; 4] {
 pub(super) fn vec3_to_f32(v: &Vector3<f64>) -> [f32; 3] {
     [v.x as f32, v.y as f32, v.z as f32]
 }
+// ---------------------------------------------------------------------------
+// The pass-1 render-target contract
+//
+// Pass 1 draws into a three-attachment G-buffer under a reversed-Z depth
+// buffer. Five pipelines write it — `points`, `frustum`, `image_quad`,
+// `patch`, `distorted_quad` — and [`super::sizing`] allocates the textures
+// they write into. Six independent declarations of one contract is six places
+// to change it and five places to forget: `wgpu` rejects a pipeline whose
+// targets disagree with the pass, so a missed one is a startup panic, and a
+// *reordered* one is worse — it type-checks and draws the pick ID into the
+// linear-depth attachment. Declaring it once here is the same move already
+// made for [`THUMBNAIL_SIZE`], and for the same reason.
+//
+// Pass 2 (`edl`, `target`, `track_ray`, `bg_distorted`) is deliberately not
+// covered: it has one colour attachment and no depth, so it shares only
+// [`COLOR_FORMAT`].
+// ---------------------------------------------------------------------------
+
+/// Format of every colour attachment in both passes.
+///
+/// sRGB so the passes get hardware gamma conversion; [`super::sizing`] creates
+/// a second non-sRGB view of the final texture for egui, which does its own
+/// colour management (see the note there).
+pub(super) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Format of the linear-depth attachment — `@location(1)` of pass 1.
+///
+/// Read by the EDL pass and copied back for the HUD and hover readout, so it
+/// is a full `f32` rather than a packed format.
+pub(super) const LINEAR_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+
+/// Format of the pick attachment — `@location(2)` of pass 1.
+///
+/// One `u32` per pixel carrying an entity tag plus an index; see
+/// [`super::picking`] for the packing.
+pub(super) const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+
+/// Format of the hardware depth buffer pass 1 tests against.
+pub(super) const HW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth state shared by every pass-1 pipeline.
+///
+/// **Reversed-Z**: the near plane maps to 1 and the far plane to 0, so the
+/// test is [`wgpu::CompareFunction::Greater`] and the pass clears depth to 0
+/// rather than 1. That convention buys the float depth buffer its precision
+/// where the scene is, and it is not local to one pipeline — the projection
+/// matrix in `viewer_3d::camera` is built for it. A pipeline that
+/// used `Less` here would compile, run, and draw the scene inside out.
+pub(super) const GBUFFER_DEPTH_STATE: wgpu::DepthStencilState = wgpu::DepthStencilState {
+    format: HW_DEPTH_FORMAT,
+    depth_write_enabled: Some(true),
+    depth_compare: Some(wgpu::CompareFunction::Greater),
+    stencil: wgpu::StencilState {
+        front: wgpu::StencilFaceState::IGNORE,
+        back: wgpu::StencilFaceState::IGNORE,
+        read_mask: 0,
+        write_mask: 0,
+    },
+    bias: wgpu::DepthBiasState {
+        constant: 0,
+        slope_scale: 0.0,
+        clamp: 0.0,
+    },
+};
+
+/// The three colour targets of pass 1, in attachment order.
+///
+/// `color_blend` is the only thing the five pipelines disagree on: the ones
+/// drawing translucent geometry pass
+/// [`wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING`], the ones drawing opaque
+/// imagery pass `None`. The other two attachments never blend — a blended pick
+/// ID is not an ID, and a blended depth is not a depth.
+pub(super) fn gbuffer_targets(
+    color_blend: Option<wgpu::BlendState>,
+) -> [Option<wgpu::ColorTargetState>; 3] {
+    [
+        // @location(0): colour
+        Some(wgpu::ColorTargetState {
+            format: COLOR_FORMAT,
+            blend: color_blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        // @location(1): linear depth
+        Some(wgpu::ColorTargetState {
+            format: LINEAR_DEPTH_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        // @location(2): pick ID
+        Some(wgpu::ColorTargetState {
+            format: PICK_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+    ]
+}
+
+/// Slot 0 of every billboard pipeline: the unit quad's corners, per-vertex.
+///
+/// Six pipelines bind the same four [`QuadVertex`] corners at
+/// `@location(0)`, so the stride is derived from the type rather than written
+/// out beside it.
+pub(super) const QUAD_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: std::mem::size_of::<QuadVertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &[wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 0,
+    }],
+};

@@ -8,7 +8,10 @@
 //! that the shaders parse and type-check — the one thing an edit to a `.wgsl`
 //! file cannot otherwise fail on until the GUI is launched on a real GPU.
 
-use super::super::gpu_types::{PointUniforms, ReconUniforms};
+use super::super::gpu_types::{
+    gbuffer_targets, PointUniforms, ReconUniforms, COLOR_FORMAT, GBUFFER_DEPTH_STATE,
+    LINEAR_DEPTH_FORMAT, PICK_FORMAT,
+};
 
 fn device() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -108,4 +111,57 @@ fn the_recon_uniforms_struct_matches_its_wgsl_layout() {
     // sized to satisfy *its* alignment; the trailing pad satisfies the struct's.
     assert_eq!(std::mem::size_of::<ReconUniforms>(), 112);
     device.poll(wgpu::PollType::Poll).expect("device poll");
+}
+
+/// [`GBUFFER_DEPTH_STATE`] is exactly the state the five pass-1 pipelines each
+/// wrote out before it existed.
+///
+/// The hoisted constant spells `stencil` and `bias` out in full, because
+/// neither `StencilState::default()` nor `DepthBiasState::default()` is a
+/// `const fn`. That makes it a *copy* of two `Default` impls owned by `wgpu`,
+/// and a `wgpu` upgrade that changed either one would leave the copy behind
+/// without failing to compile — the same hazard the entry-name and
+/// camera-registry pins were added for. This is that pin.
+#[test]
+fn gbuffer_depth_state_matches_the_defaults_it_replaced() {
+    assert_eq!(
+        GBUFFER_DEPTH_STATE,
+        wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }
+    );
+}
+
+/// [`gbuffer_targets`] emits the three attachments in the order the pass binds
+/// them, and blends only the colour one.
+///
+/// Order is the part worth pinning: the formats are distinct, so a *dropped*
+/// attachment fails pipeline creation loudly, but a **reordered** one is three
+/// well-formed targets in the wrong slots — the shader's `@location(2)` pick ID
+/// would be written into the linear-depth attachment, and nothing in the type
+/// system objects.
+#[test]
+fn gbuffer_targets_are_in_pass_attachment_order() {
+    let blend = wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING;
+    let targets = gbuffer_targets(Some(blend));
+    let formats: Vec<_> = targets.iter().map(|t| t.as_ref().unwrap().format).collect();
+    assert_eq!(
+        formats,
+        vec![COLOR_FORMAT, LINEAR_DEPTH_FORMAT, PICK_FORMAT]
+    );
+
+    // Only @location(0) blends; a blended pick ID is not an ID.
+    assert_eq!(targets[0].as_ref().unwrap().blend, Some(blend));
+    assert!(targets[1].as_ref().unwrap().blend.is_none());
+    assert!(targets[2].as_ref().unwrap().blend.is_none());
+
+    // The opaque pipelines pass None and must still get the same three formats.
+    let opaque = gbuffer_targets(None);
+    assert!(opaque[0].as_ref().unwrap().blend.is_none());
+    let opaque_formats: Vec<_> = opaque.iter().map(|t| t.as_ref().unwrap().format).collect();
+    assert_eq!(opaque_formats, formats);
 }

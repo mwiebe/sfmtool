@@ -205,6 +205,14 @@ correct mutual occlusion.
 | Pick ID | R32Uint | Entity identification (hover + click) |
 | HW depth | Depth32Float | Z-test during rendering |
 
+These formats are declared once, in `scene_renderer::gpu_types` — `COLOR_FORMAT`,
+`LINEAR_DEPTH_FORMAT`, `PICK_FORMAT`, `HW_DEPTH_FORMAT`, the `GBUFFER_DEPTH_STATE`
+carrying the reversed-Z configuration, and `gbuffer_targets()` returning the three
+colour attachments in binding order. The five pass-1 pipelines and the texture
+allocation in `scene_renderer::sizing` all read them from there, so the table above
+has one implementation rather than six. Pass 2 shares only `COLOR_FORMAT`: it has a
+single colour attachment and no depth.
+
 ### Pass Order
 
 ```
