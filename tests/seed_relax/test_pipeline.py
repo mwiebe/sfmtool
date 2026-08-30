@@ -277,14 +277,14 @@ def test_the_release_record_reads_as_an_unqualified_relaxed_member(relaxed):
     assert len(block["runaway"]["frames"]) == N_FRAMES
 
 
-def test_the_hand_over_holds_where_no_workspace_names_the_sift_files():
+def test_the_hand_over_holds_where_the_member_states_no_shapes():
     # The stage is on by default, but it reads the drawn footprint off the
-    # workspace's `.sift` files; with no workspace it refuses, and a refusal
-    # is the same chain as the switch being off.
+    # member's own affines; where the member states none it refuses, and a
+    # refusal is the same chain as the switch being off.
     off = pipeline.run_member(_member(), _source(), Options(evict=False))
     on = pipeline.run_member(_member(), _source(), Options())
     assert off.census["evict"] == {"held": "SFMTOOL_RELAX_EVICT"}
-    assert on.census["evict"]["refused"] == "no workspace given"
+    assert on.census["evict"]["refused"] == ("the member states no affine shapes")
     for key in ("frames", "clusters", "quats", "trans", "points", "at_inf"):
         assert (
             np.asarray(off.state[key]).tobytes() == np.asarray(on.state[key]).tobytes()
