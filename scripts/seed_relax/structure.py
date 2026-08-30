@@ -20,6 +20,11 @@ widest pair of rays subtends no more than the member's angular bound has no
 measured depth and becomes a bearing; so does one that lands behind a camera
 that sees it, one seen in a single view, and, where a bar is given, one whose
 median observation reprojects past it.
+
+The cheirality refusal is read per observation: a point whose rays agree but
+for a MINORITY that puts it behind their own cameras keeps its depth and loses
+those observations, which the state records so that nothing downstream --
+neither an adjustment nor the writer -- reads them again.
 """
 
 from __future__ import annotations
@@ -97,13 +102,47 @@ def triangulate_placed(m, per_frame, placed, tol_rad):
     return out, census
 
 
+def pruned_rows(state):
+    """The member rows a cheirality prune dropped, sorted and unique.
+
+    An empty array where nothing has been pruned, so a state from before the
+    prune existed reads the same as one that pruned nothing."""
+    got = state.get("pruned_rows")
+    if got is None:
+        return np.zeros(0, np.int64)
+    return np.asarray(got, np.int64)
+
+
+def drop_pruned(state, rows):
+    """``rows`` with the state's pruned observations removed, order kept."""
+    gone = pruned_rows(state)
+    if not len(gone):
+        return rows
+    return rows[~np.isin(rows, gone)]
+
+
+def with_pruned(state, rows):
+    """``state`` with ``rows`` added to the observations it has pruned.
+
+    The estimate refused those observations, so nothing downstream -- neither
+    an adjustment nor the writer -- reads them again."""
+    out = dict(state)
+    out["pruned_rows"] = np.unique(
+        np.concatenate([pruned_rows(state), np.asarray(rows, np.int64)])
+    ).astype(np.int64)
+    return out
+
+
 def state_rows(m, state):
-    """The admission rows the state's own frames and clusters index."""
+    """The admission rows the state's own frames and clusters index.
+
+    The observations the state has pruned are not among them."""
     frames = [int(f) for f in state["frames"]]
     clusters = [int(c) for c in state["clusters"]]
     cslot = {c: k for k, c in enumerate(clusters)}
     rows = m.rows_all[np.isin(m.obs_i[m.rows_all], frames)]
     rows = rows[np.array([int(c) in cslot for c in m.obs_c[rows]], bool)]
+    rows = drop_pruned(state, rows)
     fslot = {f: k for k, f in enumerate(frames)}
     slot_i = np.array([fslot[int(i)] for i in m.obs_i[rows]], np.int64)
     slot_c = np.array([cslot[int(c)] for c in m.obs_c[rows]], np.int64)
@@ -138,13 +177,29 @@ def _verdict_codes():
 
 
 def estimate_points_verdicts(
-    cam, quats, trans, uv, slot_i, slot_c, n_points, floor_rad, bar_px=None
+    cam,
+    quats,
+    trans,
+    uv,
+    slot_i,
+    slot_c,
+    n_points,
+    floor_rad,
+    bar_px=None,
+    prune_behind=False,
 ):
     """:func:`estimate_points` with the per-cluster verdict codes beside it.
 
-    Returns ``(points, at_inf, census, verdicts)``, where ``verdicts`` carries
-    one code per cluster naming the rule that decided it
-    (``sfmtool._sfmtool.reconstruction.VERDICT_CODES``)."""
+    Returns ``(points, at_inf, census, verdicts, pruned)``, where ``verdicts``
+    carries one code per cluster naming the rule that decided it
+    (``sfmtool._sfmtool.reconstruction.VERDICT_CODES``) and ``pruned`` one flag
+    per observation row.
+
+    ``prune_behind`` reads the cheirality refusal per observation: where the
+    observations that see the point behind them are a strict minority, they are
+    dropped and the survivors are solved again.  The rows it dropped are the
+    ones flagged in ``pruned``, and the caller removes them from its own
+    arrays."""
     from sfmtool._sfmtool.reconstruction import estimate_points as kernel
 
     slot_c = np.ascontiguousarray(np.asarray(slot_c, np.uint32))
@@ -158,6 +213,7 @@ def estimate_points_verdicts(
         n_points=int(n_points),
         floor_rad=float(floor_rad),
         cheirality=True,
+        prune_behind=bool(prune_behind),
         bar_px=None if bar_px is None else float(bar_px),
         few="bearing",
     )
@@ -168,7 +224,11 @@ def estimate_points_verdicts(
         # observation NAMED, which is not the kernel's `seen` (every cluster it
         # was given).
         "n_seen": int(len(np.unique(slot_c))),
-        "n_finite": int(c["finite"]),
+        # A rescued cluster is finite; the kernel keeps the two buckets apart
+        # so the verdicts still partition, and the record states both.
+        "n_finite": int(c["finite"]) + int(c["finite_pruned"]),
+        "n_finite_pruned": int(c["finite_pruned"]),
+        "n_pruned_obs": int(c["pruned_obs"]),
         "n_thin": int(c["thin"]),
         "n_behind": int(c["behind"]),
         "n_single": int(c["few"]),
@@ -182,11 +242,21 @@ def estimate_points_verdicts(
         xyzw[:, 3] == 0.0,
         census,
         np.asarray(out["verdicts"], np.uint8),
+        np.asarray(out["pruned"], bool),
     )
 
 
 def estimate_points(
-    cam, quats, trans, uv, slot_i, slot_c, n_points, floor_rad, bar_px=None
+    cam,
+    quats,
+    trans,
+    uv,
+    slot_i,
+    slot_c,
+    n_points,
+    floor_rad,
+    bar_px=None,
+    prune_behind=False,
 ):
     """Re-estimate every point from its own observations at one geometry.
 
@@ -200,11 +270,26 @@ def estimate_points(
     A cluster no observation names has no ray and comes back the canonical
     forward bearing, which is the relaxation's ``few = bearing`` setting.
 
-    Returns ``(points, at_inf, census)``."""
-    pts, inf, census, _v = estimate_points_verdicts(
-        cam, quats, trans, uv, slot_i, slot_c, n_points, floor_rad, bar_px
+    ``prune_behind`` reads a cheirality refusal per observation instead of per
+    cluster, so a cluster whose rays agree but for a minority that puts it
+    behind their own cameras keeps its depth and loses those observations.
+
+    Returns ``(points, at_inf, census, pruned)``, the last a flag per
+    observation row the cheirality prune dropped; all false with
+    ``prune_behind`` off."""
+    pts, inf, census, _v, pruned = estimate_points_verdicts(
+        cam,
+        quats,
+        trans,
+        uv,
+        slot_i,
+        slot_c,
+        n_points,
+        floor_rad,
+        bar_px,
+        prune_behind=prune_behind,
     )
-    return pts, inf, census
+    return pts, inf, census, pruned
 
 
 def build_ba_inputs(m, placed, pts):
