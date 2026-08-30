@@ -1,7 +1,7 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The seven stages of the relaxation, on one member.
+"""The eight stages of the relaxation, on one member.
 
 Provenance: the study's `v2/v2lib.run_pipeline` (557-692) with the fill-in
 inserted from `v2/densify/densify_run.run_member` (354-489), with the scoring,
