@@ -3,6 +3,7 @@
 
 """The hand-over: a coarse observation a finer tracked feature covers."""
 
+import inspect
 import types
 
 import numpy as np
@@ -15,9 +16,9 @@ REFINE_RADIUS = 8.0
 NAMES = ["cam/000.jpg", "cam/001.jpg", "cam/002.jpg"]
 
 #: ``(cluster, uv, scale)`` per feature, repeated on every image.  An isotropic
-#: affine of scale ``s`` reads as radius ``refine_radius * s`` and as keypoint
-#: scale ``s``, so the drawn footprint is ``2.5 s`` and the refine footprint
-#: ``8 s`` -- the two units the rule has to keep apart.
+#: affine of scale ``s`` reads as radius ``refine_radius * s``, so its refined
+#: unit scale is ``s``, its drawn footprint ``2.5 s`` and the disk the refine
+#: grid measured on ``8 s`` -- the two units the rule has to keep apart.
 FEATURES = [
     # A coarse feature with a fine one well inside its DRAWN disk (2.5 * 4 =
     # 10 px): the hand-over the stage exists for.
@@ -35,28 +36,26 @@ FEATURES = [
 ]
 
 
-def _rows(images=(0, 1, 2)):
-    """``(uv, r_px, sigma, slot_i, slot_c)`` over ``images`` x FEATURES."""
-    uv, sig, img, cl = [], [], [], []
+def _rows(images=(0, 1, 2), scale=1.0):
+    """``(uv, r_px, slot_i, slot_c)`` over ``images`` x FEATURES."""
+    uv, us, img, cl = [], [], [], []
     for i in images:
         for c, p, s in FEATURES:
             uv.append(p)
-            sig.append(s)
+            us.append(s * scale)
             img.append(i)
             cl.append(c)
-    sig = np.asarray(sig, float)
     return (
         np.asarray(uv, float),
-        REFINE_RADIUS * sig,
-        sig,
+        REFINE_RADIUS * np.asarray(us, float),
         np.asarray(img, np.int64),
         np.asarray(cl, np.int64),
     )
 
 
 def _flag(**kw):
-    uv, r, sig, i, c = _rows(**kw)
-    flag, census = evict.covered_by_finer(uv, r, sig, i, c, 2.0)
+    uv, r, i, c = _rows(**kw)
+    flag, census = evict.covered_by_finer(uv, r, REFINE_RADIUS, i, c, 2.0)
     return flag, census, c
 
 
@@ -71,6 +70,13 @@ def test_the_footprint_the_rule_reads_is_the_drawn_one():
     assert not flag[cl == 2].any()
 
 
+def test_the_footprint_is_the_refined_unit_scale_and_not_the_whole_radius():
+    r = np.array([8.0, 48.0])
+    assert evict.footprint(r, REFINE_RADIUS).tolist() == [2.5, 15.0]
+    # It always sits inside the disk the refine grid measured on.
+    assert (evict.footprint(r, REFINE_RADIUS) < r).all()
+
+
 def test_the_fine_feature_is_never_the_one_retired():
     flag, _census, cl = _flag()
     for fine in (1, 3, 5):
@@ -82,14 +88,17 @@ def test_a_same_scale_neighbour_retires_nothing():
     assert not flag[cl == 4].any()
     # And it is the SCALE test that spares it, not the distance: 2 px is well
     # inside the drawn disk.
-    uv, r, sig, i, c = _rows()
-    assert np.linalg.norm(uv[c == 4][0] - uv[c == 5][0]) < 2.5 * sig[c == 4][0]
+    uv, r, i, c = _rows()
+    d = np.linalg.norm(uv[c == 4][0] - uv[c == 5][0])
+    assert d < evict.footprint(r, REFINE_RADIUS)[c == 4][0]
 
 
 def test_the_rule_never_lets_a_feature_cover_itself():
     # One image, one feature: the only row in the disk is the row itself.
-    uv, r, sig, i, c = _rows(images=(0,))
-    flag, census = evict.covered_by_finer(uv[:1], r[:1], sig[:1], i[:1], c[:1], 2.0)
+    uv, r, i, c = _rows(images=(0,))
+    flag, census = evict.covered_by_finer(
+        uv[:1], r[:1], REFINE_RADIUS, i[:1], c[:1], 2.0
+    )
     assert not flag.any()
     assert census["n_pairs_contained"] == 0
 
@@ -105,15 +114,17 @@ def test_a_band_finer_is_the_ratio_the_band_grid_is_cut_on():
 
 def test_the_ratio_bar_is_read_where_the_band_edge_is():
     uv = np.array([[0.0, 0.0], [1.0, 0.0]])
-    sig = np.array([4.0, 2.0])
+    us = np.array([4.0, 2.0])
     i = np.zeros(2, np.int64)
     c = np.array([0, 1], np.int64)
     # Exactly one band apart: the radius ratio is 2, which the rule admits.
-    flag, _ = evict.covered_by_finer(uv, REFINE_RADIUS * sig, sig, i, c, 2.0)
+    flag, _ = evict.covered_by_finer(uv, REFINE_RADIUS * us, REFINE_RADIUS, i, c, 2.0)
     assert flag.tolist() == [True, False]
     # A hair under one band, and nothing is retired.
-    sig_near = np.array([4.0, 2.0000001])
-    flag, _ = evict.covered_by_finer(uv, REFINE_RADIUS * sig_near, sig_near, i, c, 2.0)
+    us_near = np.array([4.0, 2.0000001])
+    flag, _ = evict.covered_by_finer(
+        uv, REFINE_RADIUS * us_near, REFINE_RADIUS, i, c, 2.0
+    )
     assert not flag.any()
 
 
@@ -173,13 +184,6 @@ def test_the_switch_is_an_option_the_chain_carries():
 # ---------------------------------------------------------------- the refusals
 
 
-def _source(prefix="features/sift-x"):
-    return types.SimpleNamespace(
-        metadata={"workspace": {"contents": {"feature_prefix_dir": prefix}}},
-        refine_radius=REFINE_RADIUS,
-    )
-
-
 def _member_stub():
     return types.SimpleNamespace(
         names=list(NAMES),
@@ -203,57 +207,46 @@ def _state():
     }
 
 
-def test_without_a_workspace_the_stage_refuses_and_changes_nothing():
-    m, st = _member_stub(), _state()
-    out, census = evict.evict_stage(m, None, st, _source(), None, REFINE_RADIUS, 1.0)
-    assert out is st
-    assert census["refused"] == "no workspace given"
-
-
-def test_without_a_feature_directory_the_stage_refuses():
-    m, st = _member_stub(), _state()
-    out, census = evict.evict_stage(
-        m, None, st, _source(prefix=""), "C:/nowhere", REFINE_RADIUS, 1.0
-    )
-    assert out is st
-    assert "feature directory" in census["refused"]
-
-
-def test_an_unreadable_sift_file_is_a_refusal_and_not_a_guess():
-    m, st = _member_stub(), _state()
-    out, census = evict.evict_stage(
-        m, None, st, _source(), "C:/no/such/workspace", REFINE_RADIUS, 1.0
-    )
-    assert out is st
-    assert census["refused"] and "no workspace given" not in census["refused"]
-
-
-def test_a_scale_that_could_not_be_read_retires_nothing():
-    m, st = _member_stub(), _state()
-    out, census = evict.evict_covered(
-        m, None, st, np.array([np.nan]), REFINE_RADIUS, 1.0
-    )
-    assert out is st
-    assert census["refused"] == "a keypoint scale could not be read"
-
-
 def test_a_member_without_a_refine_radius_refuses():
     m, st = _member_stub(), _state()
-    out, census = evict.evict_covered(m, None, st, np.array([1.0]), None, 1.0)
+    out, census = evict.evict_covered(m, None, st, None, 1.0)
     assert out is st
     assert "refine radius" in census["refused"]
 
 
-# ---------------------------------------------------------------- the layout
+def test_a_member_without_affine_shapes_refuses():
+    m, st = _member_stub(), _state()
+    m.obs_shape = None
+    out, census = evict.evict_covered(m, None, st, REFINE_RADIUS, 1.0)
+    assert out is st
+    assert "affine shapes" in census["refused"]
 
 
-def test_the_sift_file_is_the_one_beside_the_image():
-    got = evict.sift_path("C:/ws", "features/sift-x", "images/left/frame_1.jpg")
-    assert got.as_posix() == "C:/ws/images/left/features/sift-x/frame_1.jpg.sift"
-    # A rig keeps one feature directory per camera, so two cameras of one
-    # capture resolve to two directories.
-    other = evict.sift_path("C:/ws", "features/sift-x", "images/right/frame_1.jpg")
-    assert other.parent != got.parent
+# --------------------------------------------------------- no workspace at all
+
+
+def test_the_stage_asks_for_no_workspace_and_reads_no_second_file():
+    # Everything the stage is handed is the state and the member's own arrays.
+    assert list(inspect.signature(evict.evict_stage).parameters) == [
+        "mx",
+        "cam",
+        "state",
+        "refine_radius",
+        "floor_px",
+        "trace",
+    ]
+    assert "workspace" not in inspect.signature(evict.evict_covered).parameters
+    # And nothing in the module's CODE opens a second file.
+    code = inspect.getsource(evict).split(evict.__doc__)[-1]
+    assert ".sift" not in code
+    assert "read_sift" not in code
+    assert "Path" not in code
+    # The stage runs on the member and the state alone.
+    m = _e2e_member()
+    st = _e2e_state(m)
+    out, census = evict.evict_stage(m, m.camera, st, REFINE_RADIUS, None)
+    assert census["n_obs_evicted"] == 6
+    assert len(out["clusters"]) == 5
 
 
 # --------------------------------------------------------------- determinism
@@ -269,17 +262,18 @@ def test_the_pair_batch_size_cannot_change_the_flag(monkeypatch):
     want, census, _cl = _flag()
     for chunk in (1, 2, 3, 7):
         monkeypatch.setattr(evict, "_PAIR_CHUNK", chunk)
-        got, got_census = evict.covered_by_finer(*_rows(), 2.0)
+        uv, r, i, c = _rows()
+        got, got_census = evict.covered_by_finer(uv, r, REFINE_RADIUS, i, c, 2.0)
         assert got.tobytes() == want.tobytes()
         assert got_census == census
 
 
 def test_the_order_the_rows_arrive_in_cannot_change_the_flag():
-    uv, r, sig, i, c = _rows()
-    want, _ = evict.covered_by_finer(uv, r, sig, i, c, 2.0)
+    uv, r, i, c = _rows()
+    want, _ = evict.covered_by_finer(uv, r, REFINE_RADIUS, i, c, 2.0)
     order = np.arange(len(uv))[::-1]
     got, _ = evict.covered_by_finer(
-        uv[order], r[order], sig[order], i[order], c[order], 2.0
+        uv[order], r[order], REFINE_RADIUS, i[order], c[order], 2.0
     )
     assert got[np.argsort(order)].tobytes() == want.tobytes()
 
@@ -299,7 +293,7 @@ E2E = (
 N_CL_E2E = 8
 
 
-def _e2e_member(rows=E2E, n_cl=N_CL_E2E):
+def _e2e_member(rows=E2E, n_cl=N_CL_E2E, scale=1.0):
     import seed_candidate_eval as EV
     from sfmtool._sfmtool.geometry import CameraIntrinsics
 
@@ -321,7 +315,7 @@ def _e2e_member(rows=E2E, n_cl=N_CL_E2E):
         obs_c.append(c)
         obs_f.append(k)
         uv.append(p)
-        shapes.append(np.array([[s, 0.0], [0.0, s]]))
+        shapes.append(np.array([[s * scale, 0.0], [0.0, s * scale]]))
     pts = np.tile(np.array([0.0, 0.0, -20.0]), (n_cl, 1))
     return EV.Member(
         0,
@@ -356,13 +350,9 @@ def _e2e_state(m, n_cl=N_CL_E2E):
 
 @pytest.fixture(name="handed_over")
 def _handed_over():
-    from seed_relax import structure
-
     m = _e2e_member()
     st = _e2e_state(m)
-    rows, _si, _sc = structure.state_rows(m, st)
-    sigma = np.asarray(m.obs_shape, float)[rows][:, 0, 0]
-    out, census = evict.evict_covered(m, m.camera, st, sigma, REFINE_RADIUS, None)
+    out, census = evict.evict_covered(m, m.camera, st, REFINE_RADIUS, None)
     return m, st, out, census
 
 
@@ -401,15 +391,11 @@ def test_the_adjustment_runs_with_the_lens_held(handed_over):
 
 
 def test_the_stage_is_a_function_of_its_inputs():
-    from seed_relax import structure
-
     got = []
     for _ in range(2):
         m = _e2e_member()
         st = _e2e_state(m)
-        rows, _si, _sc = structure.state_rows(m, st)
-        sig = np.asarray(m.obs_shape, float)[rows][:, 0, 0]
-        out, _c = evict.evict_covered(m, m.camera, st, sig, REFINE_RADIUS, None)
+        out, _c = evict.evict_covered(m, m.camera, st, REFINE_RADIUS, None)
         got.append(out)
     for key in ("frames", "clusters", "quats", "trans", "points", "at_inf"):
         assert np.asarray(got[0][key]).tobytes() == np.asarray(got[1][key]).tobytes()
@@ -421,15 +407,12 @@ E2E_FULL = [(i, c, p, s) for i in (0, 1, 2) for c, p, s in FEATURES]
 
 
 def test_nothing_covered_leaves_the_state_untouched():
-    from seed_relax import structure
-
-    m = _e2e_member(E2E_FULL, len(FEATURES))
+    # The same six clusters at a fortieth of their scale: every drawn footprint
+    # is then below a pixel, no centre falls inside another, and the rule fires
+    # nowhere even though every radius RATIO is what it was.
+    m = _e2e_member(E2E_FULL, len(FEATURES), scale=0.025)
     st = _e2e_state(m, len(FEATURES))
-    rows, _si, _sc = structure.state_rows(m, st)
-    # Every drawn footprint below a pixel: no centre falls inside another, so
-    # the rule fires nowhere.
-    sigma = np.full(len(rows), 0.1)
-    out, census = evict.evict_covered(m, m.camera, st, sigma, REFINE_RADIUS, None)
+    out, census = evict.evict_covered(m, m.camera, st, REFINE_RADIUS, None)
     assert out is st
     assert census["n_obs_covered"] == 0
     assert census["n_obs_evicted"] == 0
