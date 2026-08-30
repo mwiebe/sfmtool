@@ -252,6 +252,60 @@ rotation-only member is taken on -- is unchanged. Their cluster ids are the
 extended member's own and continue after the member's; they are not ids of the
 source selection.
 
+## Retire a coarse observation a finer tracked one covers
+
+Once the bands are in, the features that carried the bootstrap are no longer
+the best evidence at the place they sit. A feature whose support spans many
+image pixels averages over whatever detail lies under it, and where that detail
+is at more than one depth its own triangulated depth is a blend of them. The
+finer features the fill-in brought in state that detail directly, so the member
+is handed over to them.
+
+The reading is per OBSERVATION and not per cluster, because a footprint is a
+thing in one image: the same cluster is a wide feature on the frame that sees
+it close and a narrow one on the frame that sees it far. An observation's
+FEATURE RADIUS is the fill-in's own reading of its stored affine, the refine
+radius times the mean of the affine's two column norms. Its FOOTPRINT is the
+disk the patch cloud sizes a surfel at, the keypoint scale of its `.sift`
+affine times that policy's own half-extent multiplier. Those are two different
+units: the refine grid measures on a wider disk than the surfel occupies, and
+the footprint the rule judges is the one the surfel occupies, so a feature that
+sits outside everything a reader can see never retires anything.
+
+An observation is retired where another observation, in the SAME image and on
+another cluster the state holds, has its centre inside that footprint and a
+feature radius at least ONE BAND finer. One band is the ratio the band grid is
+already cut on, so the bar costs no constant of its own. The scale test is what
+makes this a statement about evidence rather than about crowding: once the fine
+bands are in they are dense enough that nearly every feature has something
+smaller somewhere inside it, so a containment rule without it fires almost
+everywhere and takes the fill-in with the bootstrap.
+
+The flag is read once, against the state as it stands, and a row is flagged by
+the EXISTENCE of a cover rather than by any particular one, so the order the
+rows are visited in cannot change what is retired and a cover that is itself
+retired is no less a cover.
+
+A point whose surviving observations then number fewer than two is dropped, and
+its survivors with it, which is the writer's own rule restated here so that
+nothing downstream reads a row whose point the writer would not keep. The
+retired observations leave the member's admission on the same footing as the
+ones a point estimation refused: neither the adjustments below nor the writer
+reads them again.
+
+One adjustment over what is left closes the stage, with the LENS HELD, so the
+geometry absorbs the hand-over before the lens is asked on all of the evidence.
+Where nothing was retired there is nothing to absorb and the state is handed
+straight back.
+
+The keypoint scale is read from the workspace's own `.sift` files, at the
+feature directory the source file names, once per image and capped at the
+highest feature index the state's rows use. Where no workspace is given, where
+the source file names no feature directory, or where a file the rows name
+cannot be read, the stage REFUSES: the footprint is then unknown, and a guess
+at it would retire evidence on a number nobody measured. A refusal changes
+nothing and says why.
+
 ## Release the lens when the finite count clears the settling bar
 
 The late release is one adjustment over the filled-in state with the focal and
@@ -336,11 +390,13 @@ the bearings, with the bearings stated homogeneously at `w = 0`. The
 observations a point estimation pruned are not in it. Its metadata
 records the released and chart focals, the spline and its domain, the early
 release's verdict, the orientation and the two readings behind it, the fill-in
-per band, the late release's verdict with its knot count, the finite and
-at-infinity point counts, and the runaway aggregates. The writer keeps a point
-only where at least two of its observations survive, so a single-view bearing
-from the re-estimation is not in the file; the record states how many those
-were.
+per band, the hand-over's counts where it ran, the late release's verdict with
+its knot count, the finite and at-infinity point counts, and the runaway
+aggregates. A member the hand-over held or refused on carries the metadata it
+would have carried without the stage, and the manifest entry is where the
+holding or the refusal is recorded. The writer keeps a point only where at
+least two of its observations survive, so a single-view bearing from the
+re-estimation is not in the file; the record states how many those were.
 
 The relaxed member is measured by the candidate battery on the FINITE channels,
 beside its rotation-only source, so a selection pass arbitrates between the two
@@ -354,6 +410,9 @@ ordering is stable -- edges in frame order, candidates by radius with the
 cluster id breaking ties, bands coarsest first.
 
 The rung has a kill switch, and with it off every product is byte-identical to
-a run from before the rung existed. An absolute count per band, the fisheye
-knot count and a per-stage trace are the only other options; the band grid and
-the settling bar are fleet-derived constants and are not tunable.
+a run from before the rung existed. The hand-over has one of its own, and with
+that off every product is byte-identical to a run from before the stage
+existed. An absolute count per band, the fisheye knot count and a per-stage
+trace are the only other options; the band grid and the settling bar are
+fleet-derived constants and are not tunable, and the footprint multiplier is
+the patch cloud's own sizing policy rather than a reading of this chain's.
