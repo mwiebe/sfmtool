@@ -1,15 +1,16 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The eight stages of the relaxation, on one member.
+"""The nine stages of the relaxation, on one member.
 
 Provenance: the study's `v2/v2lib.run_pipeline` (557-692) with the fill-in
 inserted from `v2/densify/densify_run.run_member` (354-489), with the scoring,
 the reference readings, the per-stage timings and the isolation switches
-removed, and the reconciliation (`reconcile.py`) and the hand-over stage
-(`evict.py`) between the fill-in and the release.  What is left is the chain as
-it ships: gate, relax, fill in, reconcile, hand over, release, re-estimate,
-report.
+removed, the reconciliation (`reconcile.py`) and the hand-over stage
+(`evict.py`) between the fill-in and the release, and the depth reading
+(`depth.py`) after the re-estimation.  What is left is the chain as it ships:
+gate, relax, fill in, reconcile, hand over, release, re-estimate, state the
+depths that were measured, report.
 
 Nothing here reads a clock into the record.  The per-stage census is a count of
 what the stage decided, not how long it took.
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import evict, fill, lens, reconcile, relaxation, report, structure
+from . import depth, evict, fill, lens, reconcile, relaxation, report, structure
 from .fleet_constants import SETTLING_FINITE_COUNT
 
 
@@ -274,11 +275,19 @@ def run_member(m, source, opts=None):
     census["retri"] = retri
     census["f_eq_final"] = float(f_eq_final)
     census["tol_final_deg"] = math.degrees(float(tol_final))
-    census["n_points_final"] = int(len(at_inf))
-    census["n_finite_final"] = int((~at_inf).sum())
-    census["n_infinity_final"] = int(at_inf.sum())
 
-    # -- stage 7: the runaway report ---------------------------------------
+    # -- stage 7: the depth the release states -----------------------------
+    if opts.depth:
+        state, dcens = depth.depth_stage(mx, cam, state, f_eq_final, say)
+    else:
+        dcens = {"held": "SFMTOOL_RELAX_DEPTH"}
+    census["depth"] = dcens
+    final_inf = np.asarray(state["at_inf"], bool)
+    census["n_points_final"] = int(len(final_inf))
+    census["n_finite_final"] = int((~final_inf).sum())
+    census["n_infinity_final"] = int(final_inf.sum())
+
+    # -- stage 8: the runaway report ---------------------------------------
     frows, agg = report.runaway_report(mx, state)
     census["runaway"] = agg
     if say:

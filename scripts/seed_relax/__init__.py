@@ -28,8 +28,9 @@ Module map (each module carries its own provenance comment):
 * :mod:`pairs` -- candidate row pairs in one image, within a per-row reach.
 * :mod:`reconcile` -- the tracked points that rest on one measurement.
 * :mod:`evict` -- the coarse observations a finer tracked feature covers.
+* :mod:`depth` -- the points whose depth error swallows their own depth.
 * :mod:`report` -- the runaway-frame report.
-* :mod:`pipeline` -- the seven stages on one member.
+* :mod:`pipeline` -- the nine stages on one member.
 * :mod:`release` -- the arrays and manifest blocks the writer needs.
 
 Nothing here samples, and nothing reads a clock into a record: same inputs,
@@ -73,14 +74,16 @@ class Options:
     the population the band already states.  ``knots_fisheye`` and
     ``knots_pinhole`` are the late release's knot counts, one per radial
     chart.  ``reconcile`` runs the reconciliation between the fill-in and the
-    hand-over and ``evict`` the hand-over itself; with either off the chain is
-    what it was before that stage existed."""
+    hand-over, ``evict`` the hand-over itself and ``depth`` the depth reading
+    that closes the chain; with any of them off the chain is what it was before
+    that stage existed."""
 
     ring_cap: int = 0
     knots_fisheye: int = DEFAULT_KNOTS_FISHEYE
     knots_pinhole: int = DEFAULT_KNOTS_PINHOLE
     reconcile: bool = True
     evict: bool = True
+    depth: bool = True
     trace: bool = False
 
 
@@ -101,9 +104,11 @@ def options():
     positive integer is an absolute count per ring),
     ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count),
     ``SFMTOOL_RELAX_RECONCILE`` (``0`` holds the reconciliation),
-    ``SFMTOOL_RELAX_EVICT`` (``0`` holds the hand-over stage) and
+    ``SFMTOOL_RELAX_EVICT`` (``0`` holds the hand-over stage),
+    ``SFMTOOL_RELAX_DEPTH`` (``0`` holds the depth reading) and
     ``SFMTOOL_RELAX_TRACE``.  The pinhole chart's knot count is not tunable:
     it is the seed's own."""
+    from .depth import depth_on
     from .evict import evict_on
     from .reconcile import reconcile_on
 
@@ -113,6 +118,7 @@ def options():
         knots_pinhole=DEFAULT_KNOTS_PINHOLE,
         reconcile=reconcile_on(os.environ),
         evict=evict_on(os.environ),
+        depth=depth_on(os.environ),
         trace=trace_on(),
     )
 
