@@ -44,7 +44,7 @@ def test_a_finite_point_comes_back_where_it_was(cam):
     centres = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
     points = np.array([[0.3, -0.2, -8.0]])
     q, uv, si, sc = _observations(cam, centres, points, [(0, 0), (1, 0), (2, 0)])
-    pts, at_inf, census = estimate_points(
+    pts, at_inf, census, _pruned = estimate_points(
         cam, q, -centres, uv, si, sc, 1, np.radians(0.02)
     )
     assert not at_inf[0]
@@ -57,7 +57,7 @@ def test_a_single_view_point_is_a_bearing(cam):
     centres = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     points = np.array([[0.3, -0.2, -8.0]])
     q, uv, si, sc = _observations(cam, centres, points, [(0, 0)])
-    pts, at_inf, census = estimate_points(
+    pts, at_inf, census, _pruned = estimate_points(
         cam, q, -centres, uv, si, sc, 1, np.radians(0.02)
     )
     assert at_inf[0]
@@ -69,7 +69,7 @@ def test_a_pair_inside_the_floor_is_a_bearing(cam):
     centres = np.array([[0.0, 0.0, 0.0], [1.0e-3, 0.0, 0.0]])
     points = np.array([[0.0, 0.0, -400.0]])
     q, uv, si, sc = _observations(cam, centres, points, [(0, 0), (1, 0)])
-    pts, at_inf, census = estimate_points(
+    pts, at_inf, census, _pruned = estimate_points(
         cam, q, -centres, uv, si, sc, 1, np.radians(0.5)
     )
     assert at_inf[0]
@@ -85,7 +85,7 @@ def test_a_point_behind_a_camera_is_a_bearing(cam):
     # rays still cross but the crossing is behind that camera.
     moved = centres.copy()
     moved[2] = np.array([0.3, -0.2, -20.0])
-    pts, at_inf, census = estimate_points(
+    pts, at_inf, census, _pruned = estimate_points(
         cam, q, -moved, uv, si, sc, 1, np.radians(0.02)
     )
     assert at_inf[0]
@@ -118,7 +118,7 @@ def test_the_state_the_poses_were_given_in_is_left_alone(cam):
     )
     trans = -centres
     before = (q.tobytes(), trans.tobytes(), uv.tobytes())
-    pts, at_inf, census = estimate_points(
+    pts, at_inf, census, _pruned = estimate_points(
         cam, q, trans, uv, si, sc, 2, np.radians(0.02)
     )
     assert (q.tobytes(), trans.tobytes(), uv.tobytes()) == before
