@@ -445,6 +445,64 @@ The pass, and the per-ring estimation of the fill-in, are the point
 estimation operation with the relaxation's settings
 ([point-estimation.md](../reconstruction/point-estimation.md)).
 
+## State a depth only where one was measured
+
+The re-estimation asks whether a point's rays cross at all. Its angular floor
+states that two rays are DISTINGUISHABLE, which is not the same as saying that
+the crossing is placed: a ray pair barely past the floor crosses at a depth the
+same pixel bar moves by most of the distance to the point, so the member would
+ship a position it cannot tell from any other position along the ray. This
+stage reads that error and withdraws the depth claim wherever the error
+swallows the depth. It is the last of the geometry stages, so what it reads are
+the poses, the lens and the depths the member ships.
+
+Per finite point, at the final geometry:
+
+* `theta_max` is the widest angle between any pair of its own world rays, the
+  statistic the floor rule already reads;
+* `eps` is the point's own median reprojection residual in pixels, floored at
+  the member's median over its finite points, so a two-observation track that
+  happens to fit is not trusted below what the member as a whole achieves;
+* `u = eps / (f_eq * sin theta_max)` is the RELATIVE depth uncertainty, the
+  pixel error carried through the equivalent focal of the camera in use and
+  divided by the parallax that has to resolve it;
+* `du = u * |Z|` is that error at the point's own depth `Z`, its median depth
+  over the cameras that see it.
+
+The comparison is made at the point's own depth and not at any population
+depth. Two points of equal relative uncertainty at different distances carry
+different absolute errors, and it is the absolute one that decides whether a
+point can be placed.
+
+The bound is the member's own local support radius. The CONFIDENT HALF is the
+finite points whose `u` is at or below its median; the radius is the median
+distance to the TWELFTH nearest neighbour inside that half, and twelve is the
+neighbourhood count the patch embed and the ARS normal estimator already read a
+point's local surface in, so the length costs no constant of its own and means
+here what it means wherever else a neighbourhood is read. That radius is the
+size of the patch of surface a point belongs to, measured where depth is best
+determined. A point whose depth error is larger than it cannot be placed inside
+its own neighbourhood: whatever surface it samples, it is not a sample of that
+surface at a known position.
+
+A point past the bound becomes a BEARING, at `w = 0` and pointing along the
+normalised mean of its own world rays. Nothing is deleted. Every point and
+every observation the state holds is still in it, the point keeps its direction
+and still constrains rotation, and what is withdrawn is the depth claim alone,
+so a reading that later measures the point again finds all of its evidence
+where it was.
+
+Everything the rule reads is the member's own: its residuals, its rays, its
+equivalent focal and the spacing of its own confident points. No absolute
+length and no capture-level constant enters it, and the bound moves with the
+member because the population it is read on is the member's.
+
+Where the state holds no observations, where it states no finite point, where
+the member states no equivalent focal, or where the confident half is smaller
+than the neighbourhood the radius is read in, the stage REFUSES: the bound is
+then unstated, and a guess at it would withdraw a measurement on a number
+nobody made. A refusal changes nothing and says why.
+
 ## Report the runaway frames
 
 Per frame, the distance to its nearest other centre, read WITHIN its own
@@ -472,9 +530,10 @@ the bearings, with the bearings stated homogeneously at `w = 0`. The
 observations a point estimation pruned are not in it. Its metadata
 records the released and chart focals, the spline and its domain, the early
 release's verdict, the orientation and the two readings behind it, the fill-in
-per band, the reconciliation's counts and the hand-over's counts where they
-ran, the late release's verdict with
-its knot count, the finite and at-infinity point counts, and the runaway
+per band, the reconciliation's counts, the hand-over's counts and the depth
+reading's counts where they ran, the late release's verdict with
+its knot count, the finite and at-infinity point counts as the depth reading
+left them, and the runaway
 aggregates. A member either stage held or refused on carries the metadata it
 would have carried without that stage, and the manifest entry is where the
 holding or the refusal is recorded. The writer keeps a point only where at
@@ -493,11 +552,13 @@ ordering is stable -- edges in frame order, candidates by radius with the
 cluster id breaking ties, bands coarsest first.
 
 The rung has a kill switch, and with it off every product is byte-identical to
-a run from before the rung existed. The reconciliation and the hand-over have
-one each of their own, and with either off every product is byte-identical to a
+a run from before the rung existed. The reconciliation, the hand-over and the
+depth reading have one each of their own, and with any of them off every
+product is byte-identical to a
 run from before that stage existed. An absolute count per band, the fisheye
 knot count and a per-stage trace are the only other options; the band grid, the
 settling bar and the reconciliation's positional fraction are derived constants
-and are not tunable, and the footprint multiplier is the patch cloud's own
+and are not tunable, the footprint multiplier is the patch cloud's own
 sizing policy, read in refined unit scales, rather than a reading of this
-chain's.
+chain's, and the depth reading's neighbourhood is the same neighbourhood the
+patch embed and the ARS normals read.
