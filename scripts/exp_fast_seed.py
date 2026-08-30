@@ -3926,7 +3926,7 @@ def relax_far_layers(rung, data_full):
             keep=layer["keep"],
         )
         try:
-            result = seed_relax.run(m, rung.handle, opts)
+            result = seed_relax.run(m, rung.handle, opts, workspace=WS)
         except Exception as exc:  # noqa: BLE001 -- a rung never kills the run
             print(f"  [relaxation FAILED: {type(exc).__name__}: {exc}]")
             result = seed_relax.pipeline.RelaxResult(
