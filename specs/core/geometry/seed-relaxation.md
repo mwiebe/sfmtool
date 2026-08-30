@@ -293,6 +293,18 @@ does one that lands behind a camera that sees it, and so does a single-view
 point -- whose direction is nonetheless measured, and is its own observation's
 ray.
 
+A point lands behind a camera when the observations that state it disagree, and
+that disagreement is usually one observation's: a revisit frame's wrong match
+puts the point behind itself while every other view of it agrees. The refusal is
+therefore read PER OBSERVATION. Where the observations that see the point behind
+them are a strict minority, they are dropped and the survivors are re-read; the
+point keeps the depth its agreeing views measured, and the observations it
+refused leave the member's admission. Nothing downstream reads them again: not
+the adjustment held between the bands, not the late release, and not the writer,
+so the released file states a point over the observations it was solved on and
+no others. Where they are not a minority the point is the bearing it always was
+and its observations stand.
+
 The pass, and the per-ring estimation of the fill-in, are the point
 estimation operation with the relaxation's settings
 ([point-estimation.md](../reconstruction/point-estimation.md)).
@@ -320,7 +332,8 @@ rotation-only entry gains a back-pointer to it, or, where the chain refused,
 the reason.
 
 The release carries the relaxed camera, the placed poses, the finite points and
-the bearings, with the bearings stated homogeneously at `w = 0`. Its metadata
+the bearings, with the bearings stated homogeneously at `w = 0`. The
+observations a point estimation pruned are not in it. Its metadata
 records the released and chart focals, the spline and its domain, the early
 release's verdict, the orientation and the two readings behind it, the fill-in
 per band, the late release's verdict with its knot count, the finite and

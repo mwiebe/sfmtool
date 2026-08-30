@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import quat
+from . import quat, structure
 
 #: The two radial-spline models and the parameter naming their domain end, by
 #: the BASE model they promote.
@@ -403,6 +403,7 @@ def final_release(m, state, knots=SEED_KNOTS, schedule=None, max_iters=30):
     fslot = {f: k for k, f in enumerate(frames)}
     rows = m.rows_all[np.isin(m.obs_i[m.rows_all], frames)]
     rows = rows[np.array([int(c) in cslot for c in m.obs_c[rows]], bool)]
+    rows = structure.drop_pruned(state, rows)
     cam_in = m.camera
     d_max = spline_domain(cam_in)
     if d_max is not None:
@@ -455,6 +456,7 @@ def final_release(m, state, knots=SEED_KNOTS, schedule=None, max_iters=30):
         "trans": np.asarray(out["translations"], float),
         "points": np.asarray(out["points"], float),
         "at_inf": np.asarray(state["at_inf"], bool),
+        "pruned_rows": structure.pruned_rows(state),
     }
     return rec, cam, new_state
 

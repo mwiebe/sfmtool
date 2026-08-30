@@ -179,7 +179,7 @@ def compare(cam, geom, uv, slot_i, slot_c, n_points, floor_rad, bar_px=None):
     want_pts, want_inf, want_census = reference(
         cam, rot, cen, uv, slot_i, slot_c, points, at_inf, floor_rad, bar_px
     )
-    got_pts, got_inf, got_census, _verdicts = estimate_points_verdicts(
+    got_pts, got_inf, got_census, _verdicts, _pruned = estimate_points_verdicts(
         cam, quats, trans, uv, slot_i, slot_c, n_points, floor_rad, bar_px
     )
     np.testing.assert_array_equal(got_inf, want_inf)
@@ -290,7 +290,7 @@ def test_an_empty_batch_is_answered_rather_than_raised(cam):
             np.array([True]),
             math.radians(0.5),
         )
-    pts, at_inf, census, verdicts = estimate_points_verdicts(
+    pts, at_inf, census, verdicts, _pruned = estimate_points_verdicts(
         cam, quats, -cen, empty_uv, empty_i, empty_i, 1, math.radians(0.5)
     )
     # Nothing names the cluster, so it has no ray and reads as the relaxation's
@@ -315,7 +315,7 @@ def test_a_cluster_no_observation_names_becomes_the_fallback_bearing(cam):
     does not arise there; it is stated here so it is not discovered later."""
     geom, uv, si, sc, world, floor = _synthetic(cam, 11, n_points=40)
     n = len(world) + 2
-    pts, at_inf, census, verdicts = estimate_points_verdicts(
+    pts, at_inf, census, verdicts, _pruned = estimate_points_verdicts(
         cam, geom[0], geom[1], uv, si, sc, n, floor
     )
     np.testing.assert_array_equal(pts[-2:], [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
@@ -327,7 +327,7 @@ def test_a_cluster_no_observation_names_becomes_the_fallback_bearing(cam):
 
 def test_the_verdicts_name_the_partition(cam):
     geom, uv, si, sc, world, floor = _synthetic(cam, 5)
-    _pts, at_inf, census, verdicts = estimate_points_verdicts(
+    _pts, at_inf, census, verdicts, _pruned = estimate_points_verdicts(
         cam, geom[0], geom[1], uv, si, sc, len(world), floor, bar_px=0.35
     )
     assert len(verdicts) == len(world)
