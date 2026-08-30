@@ -61,17 +61,15 @@ def _trace(opts):
     return None
 
 
-def run_member(m, source, opts=None, workspace=None):
+def run_member(m, source, opts=None):
     """Relax one rotation-only member into a finite sibling.
 
     ``m`` is the member's own arrays, ``source`` the selection handle the run
-    already holds (the fill-in reads its clusters from it), ``opts`` an
-    :class:`seed_relax.Options`, ``workspace`` the capture's workspace
-    directory -- the hand-over stage reads its `.sift` files for the keypoint
-    scale the drawn footprint is stated in, and refuses without it.  The member
-    is mutated in place by the lens stage, exactly as the study's chain mutates
-    it, so a caller that needs the original arrays afterwards holds its own
-    copy.
+    already holds (the fill-in reads its clusters from it, and the hand-over
+    stage its refine radius) and ``opts`` an :class:`seed_relax.Options`.  The
+    member is mutated in place by the lens stage, exactly as the study's chain
+    mutates it, so a caller that needs the original arrays afterwards holds its
+    own copy.
 
     Returns a :class:`RelaxResult`."""
     from . import options as default_options
@@ -174,8 +172,6 @@ def run_member(m, source, opts=None, workspace=None):
             mx,
             cam,
             state,
-            source,
-            workspace,
             getattr(source, "refine_radius", None),
             fill_census.get("adm_floor_px"),
             say,
