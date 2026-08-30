@@ -275,3 +275,22 @@ def test_the_release_record_reads_as_an_unqualified_relaxed_member(relaxed):
     block = release.relaxation_block(relaxed)
     assert block["n_baselines"] == relaxed.census["n_baselines"]
     assert len(block["runaway"]["frames"]) == N_FRAMES
+
+
+def test_the_hand_over_holds_where_no_workspace_names_the_sift_files():
+    # The stage is on by default, but it reads the drawn footprint off the
+    # workspace's `.sift` files; with no workspace it refuses, and a refusal
+    # is the same chain as the switch being off.
+    off = pipeline.run_member(_member(), _source(), Options(evict=False))
+    on = pipeline.run_member(_member(), _source(), Options())
+    assert off.census["evict"] == {"held": "SFMTOOL_RELAX_EVICT"}
+    assert on.census["evict"]["refused"] == "no workspace given"
+    for key in ("frames", "clusters", "quats", "trans", "points", "at_inf"):
+        assert (
+            np.asarray(off.state[key]).tobytes() == np.asarray(on.state[key]).tobytes()
+        )
+    assert release.relaxation_block(off)["evict"] == {"held": "SFMTOOL_RELAX_EVICT"}
+    # A member the stage did not touch carries the metadata it always did, so
+    # the released file is what it was before the stage existed.
+    assert "evict" not in release.tool_options(off, 0)
+    assert "evict" not in release.tool_options(on, 0)
