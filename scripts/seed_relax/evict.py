@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import fill, rings, structure
+from . import fill, pairs, rings, structure
 from .fleet_constants import RING_RATIO_P1
 
 #: The half-extent multiplier the footprint is read at, in units of the
@@ -74,12 +74,6 @@ FOOTPRINT_FACTOR_PROVENANCE = {
         "carries rather than off a second file."
     ),
 }
-
-#: How many candidate (large, small) row pairs one pass of the containment
-#: expansion holds at a time.  A memory bound on a batched computation, not a
-#: threshold: the pairs are the same pairs and the flag is the same flag at any
-#: value of it.
-_PAIR_CHUNK = 1 << 22
 
 
 def evict_on(env):
@@ -128,7 +122,8 @@ def covered_by_finer(uv, r_px, refine_radius, slot_i, slot_c, ratio):
     ``flag`` is one bool per row.  A row is flagged where another row in the
     same image, on another cluster, has its centre inside the row's drawn
     footprint (:func:`footprint`) and a feature radius at least ``ratio`` times
-    finer.
+    finer.  The candidates of a footprint are
+    :func:`seed_relax.pairs.image_candidates`'s.
 
     The enumeration is per image and the disk is the coarse row's own
     footprint, so the order rows are visited in cannot change the flag: a row
@@ -142,29 +137,18 @@ def covered_by_finer(uv, r_px, refine_radius, slot_i, slot_c, ratio):
     flag = np.zeros(len(uv), bool)
     n_pairs = 0
     n_octave = 0
-    for img in np.unique(slot_i):
-        sel = np.nonzero(slot_i == img)[0]
+    for _img, sel in pairs.image_slices(slot_i):
         if len(sel) < 2:
             continue
-        x = np.ascontiguousarray(uv[sel, 0])
-        y = np.ascontiguousarray(uv[sel, 1])
         r = r_px[sel]
         c = slot_c[sel]
         rch = reach[sel]
-        # The rows of this image ordered by x, so the candidates of a disk are
-        # a contiguous run: a disk of radius `rch` cannot reach past a column
-        # further than `rch` away.
-        xo = np.argsort(x, kind="stable")
-        xs = x[xo]
-        lo = np.searchsorted(xs, x - rch, side="left")
-        hi = np.searchsorted(xs, x + rch, side="right")
-        cnt = (hi - lo).astype(np.int64)
-        cnt[~np.isfinite(rch)] = 0
-        for a, b in _chunks(cnt):
-            got = _pairs(x, y, r, c, rch, xo, lo, cnt, a, b, ratio)
-            n_pairs += int(got[0])
-            n_octave += int(got[1])
-            flag[sel[got[2]]] = True
+        for big, small, d in pairs.image_candidates(uv[sel, 0], uv[sel, 1], rch):
+            inside = (d <= rch[big]) & (r[small] < r[big]) & (c[small] != c[big])
+            finer = inside & (r[big] >= ratio * r[small])
+            n_pairs += int(inside.sum())
+            n_octave += int(finer.sum())
+            flag[sel[np.unique(big[finer])]] = True
     census = {
         "n_rows": int(len(uv)),
         "n_pairs_contained": int(n_pairs),
@@ -172,35 +156,6 @@ def covered_by_finer(uv, r_px, refine_radius, slot_i, slot_c, ratio):
         "n_obs_covered": int(flag.sum()),
     }
     return flag, census
-
-
-def _chunks(cnt):
-    """``(start, stop)`` row ranges whose candidate pairs fit one pass."""
-    ends = np.cumsum(cnt)
-    a = 0
-    while a < len(cnt):
-        base = ends[a - 1] if a else 0
-        b = int(np.searchsorted(ends, base + _PAIR_CHUNK, side="right"))
-        b = max(b, a + 1)
-        yield a, min(b, len(cnt))
-        a = b
-
-
-def _pairs(x, y, r, c, rch, xo, lo, cnt, a, b, ratio):
-    """One chunk of the expansion: ``(n_pairs, n_finer, flagged rows)``."""
-    take = cnt[a:b]
-    total = int(take.sum())
-    if not total:
-        return 0, 0, np.zeros(0, np.int64)
-    big = np.repeat(np.arange(a, b, dtype=np.int64), take)
-    offs = np.arange(total, dtype=np.int64) - np.repeat(np.cumsum(take) - take, take)
-    small = xo[np.repeat(lo[a:b].astype(np.int64), take) + offs]
-    dx = x[small] - x[big]
-    dy = y[small] - y[big]
-    d = np.sqrt(dx * dx + dy * dy)
-    inside = (d <= rch[big]) & (r[small] < r[big]) & (c[small] != c[big])
-    finer = inside & (r[big] >= ratio * r[small])
-    return int(inside.sum()), int(finer.sum()), np.unique(big[finer])
 
 
 def two_observation_sweep(slot_c, keep_obs, n_points):
