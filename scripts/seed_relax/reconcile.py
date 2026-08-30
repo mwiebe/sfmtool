@@ -202,7 +202,8 @@ def knot_components(slot_c, gid, pair_a, pair_b, n_points):
         shared[pair_b] = True
         edges.append(np.stack([slot_c[pair_a], slot_c[pair_b]], axis=1))
 
-    for a, b in np.concatenate(edges) if edges else ():
+    joins = np.concatenate(edges) if edges else np.zeros((0, 2), np.int64)
+    for a, b in joins:
         ra, rb = int(a), int(b)
         while parent[ra] != ra:
             ra = int(parent[ra])
