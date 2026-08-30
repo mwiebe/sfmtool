@@ -252,6 +252,87 @@ rotation-only member is taken on -- is unchanged. Their cluster ids are the
 extended member's own and continue after the member's; they are not ids of the
 source selection.
 
+## Reconcile the points that rest on one measurement
+
+A feature detector emits one stored feature per dominant orientation it finds
+at a detection, so one corner at one scale enters the feature file two, three
+or four times at the same pixel and the same affine scale. The matching gives
+every descriptor to at most one cluster, so those rows are matched into
+DIFFERENT clusters, and the state then tracks several points resting on one
+physical measurement. Nothing below can tell them apart: each reads as an
+independent track, so a rule that thins observations sees several fragile
+points where the evidence states one.
+
+The relation is read per image. Two rows are ONE DETECTION when their stored
+pixels are bit-identical, which is the detector's own statement that it found
+one place twice, and it needs no tolerance. Two rows of DIFFERENT clusters at
+distinct pixels are one place when their centres are within a fraction of the
+SMALLER row's refined unit scale and their feature radii agree to a tenth of
+the larger. Both readings are the ones the hand-over already takes: the feature
+radius off the stored affine, the refined unit scale that radius over the
+refine radius. A fixed pixel bar would not be a scale statement, since the same
+bar is a fraction of a coarse feature's unit scale and several times a fine
+one's; stated in unit scales the relation reads the same in every band. The
+fraction is read off a measured population and ships with that derivation, so a
+later reading re-derives it rather than re-tuning it, and the radius agreement
+is the bar that keeps the relation about one place rather than about a feature
+sitting inside a coarser one, which is the hand-over's relation and not this
+one.
+
+A KNOT is a connected component over that relation, and its UNION TRACK is one
+ray per distinct detection over every row of every member. The union is solved
+at the state's own poses and lens, floored at the member's angular consensus
+bound with the cheirality refusal on, which is the same point estimation every
+other stage takes. Deduplicating by detection is what makes it one ray: the
+several rows at one detection are one measurement under several orientations,
+and left in they would vote two or three times for the same ray.
+
+Each knot is then decided on what the union says against what the state already
+held:
+
+* Where the union's rays are one ray to within the member's own bound it
+  measures a direction and no depth. The knot MERGES to that bearing, and doing
+  so costs nothing, because there was no depth to disagree about.
+* Where the union solves finite, explains the union's own rows at least as well
+  as the separate points did, and leaves every finite member within its own
+  depth uncertainty of it, the knot MERGES to that point. The residual test is
+  PAIRED against the state's own fit with the member's consensus tolerance in
+  pixels as its floor, and the position test is that same tolerance carried to
+  depth through each member's own widest ray pair, `depth * tol / sin(theta)`.
+  Neither is an absolute bound and neither is set here.
+* Where the union fails one of those, each member's EXCLUSIVE detections are
+  dropped in turn and the rest resolved. Where a removal restores a finite
+  union under the bar the union was judged on, that member is what the
+  arithmetic votes against: it is CULLED and the rest merge. This is
+  drop-one-and-resolve, the shape the cheirality-minority prune already uses,
+  and the best such removal is the one taken.
+* Where no single removal reconciles the union the knot is REFUSED. It is left
+  exactly as it stood and counted, so the stages below read it as they would
+  have. A knot the arithmetic cannot settle is not a knot to guess at.
+
+A merged knot keeps ONE point, the member with the most observations, and that
+point takes the union's own solution. Every row of the knot names it, so the
+merged track carries the union of the members' observations; the duplicate rows
+on one detection leave the member's admission, keeping the row on the largest
+cluster, because they are the same measurement and not further evidence. A
+culled member's rows leave the admission too. The retired rows leave on the
+same footing as the ones a point estimation refused: neither the adjustments
+below nor the writer reads them again.
+
+The stage runs between the fill-in and the hand-over, so everything below reads
+merged tracks. The hand-over's two-observation sweep judges a track that
+carries every detection its members held rather than several short ones; the
+re-estimation's cheirality refusal takes its minority vote over more evidence;
+and a knot of three points is thinned as one point rather than as three
+unchecked pairs.
+
+Every reading comes off the state's own rows and the affine the member already
+carries, so the stage reads the member and the state alone. Where the state
+holds no observations, where the member states no affine shapes, or where the
+source file states no refine radius, it REFUSES: the unit scale the relation is
+stated in is then unstated, and a guess at it would merge tracks on a number
+nobody measured. A refusal changes nothing and says why.
+
 ## Retire a coarse observation a finer tracked one covers
 
 Once the bands are in, the features that carried the bootstrap are no longer
@@ -391,10 +472,11 @@ the bearings, with the bearings stated homogeneously at `w = 0`. The
 observations a point estimation pruned are not in it. Its metadata
 records the released and chart focals, the spline and its domain, the early
 release's verdict, the orientation and the two readings behind it, the fill-in
-per band, the hand-over's counts where it ran, the late release's verdict with
+per band, the reconciliation's counts and the hand-over's counts where they
+ran, the late release's verdict with
 its knot count, the finite and at-infinity point counts, and the runaway
-aggregates. A member the hand-over held or refused on carries the metadata it
-would have carried without the stage, and the manifest entry is where the
+aggregates. A member either stage held or refused on carries the metadata it
+would have carried without that stage, and the manifest entry is where the
 holding or the refusal is recorded. The writer keeps a point only where at
 least two of its observations survive, so a single-view bearing from the
 re-estimation is not in the file; the record states how many those were.
@@ -411,10 +493,11 @@ ordering is stable -- edges in frame order, candidates by radius with the
 cluster id breaking ties, bands coarsest first.
 
 The rung has a kill switch, and with it off every product is byte-identical to
-a run from before the rung existed. The hand-over has one of its own, and with
-that off every product is byte-identical to a run from before the stage
-existed. An absolute count per band, the fisheye knot count and a per-stage
-trace are the only other options; the band grid and the settling bar are
-fleet-derived constants and are not tunable, and the footprint multiplier is
-the patch cloud's own sizing policy, read in refined unit scales, rather than a
-reading of this chain's.
+a run from before the rung existed. The reconciliation and the hand-over have
+one each of their own, and with either off every product is byte-identical to a
+run from before that stage existed. An absolute count per band, the fisheye
+knot count and a per-stage trace are the only other options; the band grid, the
+settling bar and the reconciliation's positional fraction are derived constants
+and are not tunable, and the footprint multiplier is the patch cloud's own
+sizing policy, read in refined unit scales, rather than a reading of this
+chain's.
