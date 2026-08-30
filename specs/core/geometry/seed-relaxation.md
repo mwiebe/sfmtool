@@ -279,7 +279,7 @@ is the bar that keeps the relation about one place rather than about a feature
 sitting inside a coarser one, which is the hand-over's relation and not this
 one.
 
-A KNOT is a connected component over that relation, and its UNION TRACK is one
+A TANGLE is a connected component over that relation, and its UNION TRACK is one
 ray per distinct detection over every row of every member. The union is solved
 at the state's own poses and lens, floored at the member's angular consensus
 bound with the cheirality refusal on, which is the same point estimation every
@@ -287,15 +287,15 @@ other stage takes. Deduplicating by detection is what makes it one ray: the
 several rows at one detection are one measurement under several orientations,
 and left in they would vote two or three times for the same ray.
 
-Each knot is then decided on what the union says against what the state already
+Each tangle is then decided on what the union says against what the state already
 held:
 
 * Where the union's rays are one ray to within the member's own bound it
-  measures a direction and no depth. The knot MERGES to that bearing, and doing
+  measures a direction and no depth. The tangle MERGES to that bearing, and doing
   so costs nothing, because there was no depth to disagree about.
 * Where the union solves finite, explains the union's own rows at least as well
   as the separate points did, and leaves every finite member within its own
-  depth uncertainty of it, the knot MERGES to that point. The residual test is
+  depth uncertainty of it, the tangle MERGES to that point. The residual test is
   PAIRED against the state's own fit with the member's consensus tolerance in
   pixels as its floor, and the position test is that same tolerance carried to
   depth through each member's own widest ray pair, `depth * tol / sin(theta)`.
@@ -306,12 +306,12 @@ held:
   arithmetic votes against: it is CULLED and the rest merge. This is
   drop-one-and-resolve, the shape the cheirality-minority prune already uses,
   and the best such removal is the one taken.
-* Where no single removal reconciles the union the knot is REFUSED. It is left
+* Where no single removal reconciles the union the tangle is REFUSED. It is left
   exactly as it stood and counted, so the stages below read it as they would
-  have. A knot the arithmetic cannot settle is not a knot to guess at.
+  have. A tangle the arithmetic cannot settle is not a tangle to guess at.
 
-A merged knot keeps ONE point, the member with the most observations, and that
-point takes the union's own solution. Every row of the knot names it, so the
+A merged tangle keeps ONE point, the member with the most observations, and that
+point takes the union's own solution. Every row of the tangle names it, so the
 merged track carries the union of the members' observations; the duplicate rows
 on one detection leave the member's admission, keeping the row on the largest
 cluster, because they are the same measurement and not further evidence. A
@@ -323,7 +323,7 @@ The stage runs between the fill-in and the hand-over, so everything below reads
 merged tracks. The hand-over's two-observation sweep judges a track that
 carries every detection its members held rather than several short ones; the
 re-estimation's cheirality refusal takes its minority vote over more evidence;
-and a knot of three points is thinned as one point rather than as three
+and a tangle of three points is thinned as one point rather than as three
 unchecked pairs.
 
 Every reading comes off the state's own rows and the affine the member already

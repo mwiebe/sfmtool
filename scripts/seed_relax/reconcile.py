@@ -15,10 +15,10 @@ points where the evidence states one.
 This stage reads the state's own rows, groups the ones that measure one place
 in one image, and asks the arithmetic what to do with each group:
 
-* a KNOT is a connected component over "these two points share a measurement";
+* a TANGLE is a connected component over "these two points share a measurement";
 * its UNION TRACK is one ray per distinct detection over every row of every
   member, solved at the member's own poses and lens;
-* the knot is merged into one point, thinned by the one member the resolve
+* the tangle is merged into one point, thinned by the one member the resolve
   votes against, or left exactly as it stood.
 
 Every bar is the member's own.  The estimation floors at the member's angular
@@ -171,14 +171,14 @@ def _settled(parent):
         parent = nxt
 
 
-def knot_components(slot_c, gid, pair_a, pair_b, n_points):
-    """``(knot per point, knot count, shared row flag)`` over the relation.
+def tangle_components(slot_c, gid, pair_a, pair_b, n_points):
+    """``(tangle per point, tangle count, shared row flag)`` over the relation.
 
-    A point is in a knot when one of its rows shares a detection with a row of
+    A point is in a tangle when one of its rows shares a detection with a row of
     another point, or is a near pair's partner.  Every union carries the lower
-    point id upward, and knots are then numbered in point order, so the
+    point id upward, and tangles are then numbered in point order, so the
     numbering is a function of the state and not of the order the pairs arrived
-    in.  ``-1`` marks a point outside every knot."""
+    in.  ``-1`` marks a point outside every tangle."""
     slot_c = np.asarray(slot_c, np.int64)
     gid = np.asarray(gid, np.int64)
     parent = np.arange(int(n_points), dtype=np.int64)
@@ -215,14 +215,14 @@ def knot_components(slot_c, gid, pair_a, pair_b, n_points):
 
     involved = np.zeros(int(n_points), bool)
     involved[slot_c[shared]] = True
-    knot = np.full(int(n_points), -1, np.int64)
+    tangle = np.full(int(n_points), -1, np.int64)
     seen = {}
     for p in np.nonzero(involved)[0]:
         r = int(parent[p])
         if r not in seen:
             seen[r] = len(seen)
-        knot[p] = seen[r]
-    return knot, len(seen), shared
+        tangle[p] = seen[r]
+    return tangle, len(seen), shared
 
 
 # -------------------------------------------------------------- the union solve
@@ -305,12 +305,12 @@ def widest_angles(cam, state, uv, slot_i, slot_c, want, n_points):
     return theta
 
 
-def knot_readings(
-    cam, state, uv, slot_i, slot_c, gid, shared, knot, n_knots, tol_rad, tol_px
+def tangle_readings(
+    cam, state, uv, slot_i, slot_c, gid, shared, tangle, n_tangles, tol_rad, tol_px
 ):
-    """What each knot's union track says, against what the state already held.
+    """What each tangle's union track says, against what the state already held.
 
-    Per knot: the knot's own rows, its union track (one row per detection), the
+    Per tangle: the tangle's own rows, its union track (one row per detection), the
     union's verdict and median reprojection, the same rows' median under the
     separate points floored at the member's own tolerance in pixels, the
     largest member distance to the union in units of that member's own depth
@@ -326,12 +326,12 @@ def knot_readings(
     rep_of_gid = np.zeros(int(gid.max()) + 1 if len(gid) else 1, np.int64)
     rep_of_gid[gid[rep]] = rep
 
-    kr = np.nonzero(knot[slot_c] >= 0)[0]
-    kr = kr[np.argsort(knot[slot_c[kr]], kind="stable")]
-    kb = np.searchsorted(knot[slot_c[kr]], np.arange(n_knots + 1))
-    knot_rows = [kr[kb[k] : kb[k + 1]] for k in range(n_knots)]
-    knot_points = [np.unique(slot_c[r]) for r in knot_rows]
-    union_rows = [np.unique(rep_of_gid[gid[r]]) for r in knot_rows]
+    kr = np.nonzero(tangle[slot_c] >= 0)[0]
+    kr = kr[np.argsort(tangle[slot_c[kr]], kind="stable")]
+    kb = np.searchsorted(tangle[slot_c[kr]], np.arange(n_tangles + 1))
+    tangle_rows = [kr[kb[k] : kb[k + 1]] for k in range(n_tangles)]
+    tangle_points = [np.unique(slot_c[r]) for r in tangle_rows]
+    union_rows = [np.unique(rep_of_gid[gid[r]]) for r in tangle_rows]
 
     xyzw, verdicts, union_med = solve_tracks(
         cam, state, uv, slot_i, union_rows, tol_rad
@@ -348,17 +348,17 @@ def knot_readings(
         slot_c,
     )
     theta = widest_angles(
-        cam, state, uv, slot_i, slot_c, np.nonzero(knot >= 0)[0], n_pts
+        cam, state, uv, slot_i, slot_c, np.nonzero(tangle >= 0)[0], n_pts
     )
     pts_state = np.asarray(state["points"], float)
     inf_state = np.asarray(state["at_inf"], bool)
 
-    ok = np.zeros(n_knots, bool)
-    thin = np.zeros(n_knots, bool)
-    ref_px = np.full(n_knots, np.nan)
-    own_med = np.full(n_knots, np.nan)
-    z_max = np.full(n_knots, np.nan)
-    for k in range(n_knots):
+    ok = np.zeros(n_tangles, bool)
+    thin = np.zeros(n_tangles, bool)
+    ref_px = np.full(n_tangles, np.nan)
+    own_med = np.full(n_tangles, np.nan)
+    z_max = np.full(n_tangles, np.nan)
+    for k in range(n_tangles):
         u = union_rows[k]
         o = own[u]
         o = o[np.isfinite(o)]
@@ -369,7 +369,7 @@ def knot_readings(
             sh = u[shared[u]]
             c0 = cen[slot_i[int(sh[0]) if len(sh) else int(u[0])]]
             vals = []
-            for p in knot_points[k]:
+            for p in tangle_points[k]:
                 if inf_state[p] or not np.isfinite(theta[p]) or theta[p] <= 0.0:
                     continue
                 dep = float(np.linalg.norm(pts_state[p] - c0))
@@ -387,8 +387,8 @@ def knot_readings(
         )
     return {
         "n_obs_pt": n_obs_pt,
-        "knot_rows": knot_rows,
-        "knot_points": knot_points,
+        "tangle_rows": tangle_rows,
+        "tangle_points": tangle_points,
         "union_rows": union_rows,
         "xyzw": xyzw,
         "verdicts": verdicts,
@@ -402,9 +402,9 @@ def knot_readings(
 
 
 def drop_one(cam, state, uv, slot_i, slot_c, shared, rd, tol_rad):
-    """``{knot: (culprit, reprojection, solved point)}`` where one removal helps.
+    """``{tangle: (culprit, reprojection, solved point)}`` where one removal helps.
 
-    For every knot whose union contradicts, each member's EXCLUSIVE detections
+    For every tangle whose union contradicts, each member's EXCLUSIVE detections
     are dropped in turn and the rest resolved.  Where a removal restores a
     finite union under the same bar the union was judged on, that member is
     what the arithmetic votes against; the best such removal is taken, with the
@@ -414,7 +414,7 @@ def drop_one(cam, state, uv, slot_i, slot_c, shared, rd, tol_rad):
     for k in np.nonzero(~rd["ok"] & ~rd["thin"])[0]:
         u = rd["union_rows"][k]
         su = shared[u]
-        for p in rd["knot_points"][k]:
+        for p in rd["tangle_points"][k]:
             drop = (slot_c[u] == p) & ~su
             keep = u[~drop]
             if len(keep) >= 2 and drop.any():
@@ -437,11 +437,11 @@ def drop_one(cam, state, uv, slot_i, slot_c, shared, rd, tol_rad):
 
 
 def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
-    """``(member, state, census)`` with every knot the arithmetic settles.
+    """``(member, state, census)`` with every tangle the arithmetic settles.
 
     The member that comes back carries the merged tracks: an absorbed point's
     rows name the surviving cluster, the duplicate rows on one detection leave
-    the admission, and a culled member's rows leave it too.  A knot no single
+    the admission, and a culled member's rows leave it too.  A tangle no single
     removal reconciles is left exactly as it stood, and counted.
 
     The stage REFUSES, and changes nothing, where the state holds no
@@ -471,32 +471,32 @@ def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
     r_px = evict.feature_radius(np.asarray(mx.obs_shape, float)[rows], refine_radius)
     gid = detection_groups(slot_i, uv)
     pair_a, pair_b = near_rows(slot_i, slot_c, uv, r_px, refine_radius)
-    knot, n_knots, shared = knot_components(slot_c, gid, pair_a, pair_b, len(clusters))
+    tangle, n_tangles, shared = tangle_components(slot_c, gid, pair_a, pair_b, len(clusters))
     census.update(
         {
             "n_detections": int(gid.max() + 1),
             "n_near_pairs": int(len(pair_a)),
             "n_obs_shared": int(shared.sum()),
-            "n_points_in_knot": int((knot >= 0).sum()),
-            "n_knots": int(n_knots),
+            "n_points_in_tangle": int((tangle >= 0).sum()),
+            "n_tangles": int(n_tangles),
             "merged": 0,
             "merged_bearing": 0,
             "culled": 0,
-            "refused_knots": 0,
+            "refused_tangles": 0,
             "rows_deduped": 0,
             "n_points_dropped": 0,
             "n_points_after": int(len(clusters)),
         }
     )
-    if not n_knots:
+    if not n_tangles:
         if trace is not None:
-            trace("    reconcile: no knot, nothing rests on one measurement")
+            trace("    reconcile: no tangle, nothing rests on one measurement")
         return mx, state, census
 
     tol_px = float(tol_rad) * float(f_eq)
     census["tol_px"] = tol_px
-    rd = knot_readings(
-        cam, state, uv, slot_i, slot_c, gid, shared, knot, n_knots, tol_rad, tol_px
+    rd = tangle_readings(
+        cam, state, uv, slot_i, slot_c, gid, shared, tangle, n_tangles, tol_rad, tol_px
     )
     best = drop_one(cam, state, uv, slot_i, slot_c, shared, rd, tol_rad)
 
@@ -507,16 +507,16 @@ def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
     at_inf = np.asarray(state["at_inf"], bool).copy()
     n_obs_pt = rd["n_obs_pt"]
     n_merge = n_bearing = n_cull = n_refuse = 0
-    for k in range(n_knots):
+    for k in range(n_tangles):
         culprit = None
         if rd["thin"][k] or rd["ok"][k]:
-            survivors = rd["knot_points"][k]
+            survivors = rd["tangle_points"][k]
             keep_rows = rd["union_rows"][k]
             solved = rd["xyzw"][k]
         elif k in best:
             culprit = best[k][0]
-            survivors = rd["knot_points"][k][rd["knot_points"][k] != culprit]
-            sel = rd["knot_rows"][k][slot_c[rd["knot_rows"][k]] != culprit]
+            survivors = rd["tangle_points"][k][rd["tangle_points"][k] != culprit]
+            sel = rd["tangle_rows"][k][slot_c[rd["tangle_rows"][k]] != culprit]
             _g, reps = representatives(gid, slot_c, n_obs_pt, sel)
             keep_rows = np.sort(reps)
             solved = best[k][2]
@@ -527,7 +527,7 @@ def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
             n_refuse += 1
             continue
         head = int(survivors[np.lexsort((survivors, -n_obs_pt[survivors]))[0]])
-        mine = rd["knot_rows"][k]
+        mine = rd["tangle_rows"][k]
         kept = np.isin(mine, keep_rows)
         new_obs_c[rows[keep_rows]] = int(clusters[head])
         prune[mine[~kept]] = True
@@ -548,7 +548,7 @@ def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
             "merged": int(n_merge),
             "merged_bearing": int(n_bearing),
             "culled": int(n_cull),
-            "refused_knots": int(n_refuse),
+            "refused_tangles": int(n_refuse),
             "rows_deduped": int(prune.sum()),
             "n_points_dropped": int(drop_pt.sum()),
             "n_points_after": int(len(clusters) - drop_pt.sum()),
@@ -556,7 +556,7 @@ def reconcile_points(mx, cam, state, refine_radius, tol_rad, f_eq, trace=None):
     )
     if trace is not None:
         trace(
-            f"    reconcile: {n_knots} knots over {census['n_points_in_knot']} "
+            f"    reconcile: {n_tangles} tangles over {census['n_points_in_tangle']} "
             f"points, {n_merge} merged, {n_bearing} as bearings, {n_cull} "
             f"culled, {n_refuse} refused, {census['rows_deduped']} rows deduped"
         )
