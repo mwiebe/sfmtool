@@ -4,7 +4,7 @@
 
 The staged robust bundle adjustment used by the cluster pinhole bootstrap
 (`specs/core/geometry/cluster-pinhole-bootstrap.md`,
-`scripts/exp_fast_pinhole.py` / `scripts/exp_pinhole_bootstrap.py`): given
+`scripts/exp_fast_seed.py` / `scripts/exp_pinhole_bootstrap.py`): given
 images sharing one camera model, camera poses, world points, and pixel
 observations tying them together, jointly refine the poses and points (and
 optionally the shared focal length and the shared distortion release — a
