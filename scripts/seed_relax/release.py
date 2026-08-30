@@ -196,11 +196,52 @@ def relaxation_block(result):
                 for r in fill.get("rings", [])
             ],
         },
+        "reconcile": _reconcile(c.get("reconcile")),
         "evict": _evict(c.get("evict")),
         "late_release": c.get("late_release"),
         "retri": c.get("retri"),
         "runaway": {**(c.get("runaway") or {}), "frames": result.runaway_frames},
     }
+
+
+def _reconcile(r):
+    """The reconciliation's own counts, or its refusal."""
+    if not r:
+        return None
+    if r.get("held"):
+        return {"held": r["held"]}
+    if r.get("refused"):
+        return {"refused": r["refused"]}
+    return {
+        "unit_frac": r.get("unit_frac"),
+        "radius_frac": r.get("radius_frac"),
+        "n_rows": r.get("n_rows"),
+        "n_obs_shared": r.get("n_obs_shared"),
+        "n_knots": r.get("n_knots"),
+        "n_points_in_knot": r.get("n_points_in_knot"),
+        "merged": r.get("merged"),
+        "merged_bearing": r.get("merged_bearing"),
+        "culled": r.get("culled"),
+        "refused_knots": r.get("refused_knots"),
+        "rows_deduped": r.get("rows_deduped"),
+        "n_points": r.get("n_points"),
+        "n_points_after": r.get("n_points_after"),
+    }
+
+
+def _reconcile_option(r):
+    """The reconciliation in one metadata string, where it ran.
+
+    ``None`` where it did not: a member the stage held or refused on carries
+    the metadata it carried before the stage existed, and the manifest is
+    where the holding or the refusal is recorded."""
+    if not r or r.get("held") or r.get("refused"):
+        return None
+    return (
+        f"{r.get('merged')}+{r.get('merged_bearing')} merged, "
+        f"{r.get('culled')} culled, {r.get('refused_knots')} refused of "
+        f"{r.get('n_knots')} knots, {r.get('rows_deduped')} rows deduped"
+    )
 
 
 def _evict(e):
@@ -288,6 +329,9 @@ def tool_options(result, idx, paired_with=None, scope=None, f_source=None):
         "confidence_flags": "relaxed",
         "qualified": "False",
     }
+    reconciled = _reconcile_option(c.get("reconcile"))
+    if reconciled is not None:
+        opts["reconcile"] = reconciled
     evicted = _evict_option(c.get("evict"))
     if evicted is not None:
         opts["evict"] = evicted

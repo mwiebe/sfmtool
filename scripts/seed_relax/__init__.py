@@ -25,6 +25,8 @@ Module map (each module carries its own provenance comment):
 * :mod:`lens` -- the lens released on bearings and on the relaxed state.
 * :mod:`rings` -- the radius bands the fill-in admits clusters in.
 * :mod:`fill` -- the source clusters the admission never held, by radius.
+* :mod:`pairs` -- candidate row pairs in one image, within a per-row reach.
+* :mod:`reconcile` -- the tracked points that rest on one measurement.
 * :mod:`evict` -- the coarse observations a finer tracked feature covers.
 * :mod:`report` -- the runaway-frame report.
 * :mod:`pipeline` -- the seven stages on one member.
@@ -70,12 +72,14 @@ class Options:
     ``0`` meaning no count at all: a ring then admits its whole band, which is
     the population the band already states.  ``knots_fisheye`` and
     ``knots_pinhole`` are the late release's knot counts, one per radial
-    chart.  ``evict`` runs the hand-over stage between the fill-in and the late
-    release; with it off the chain is what it was before the stage existed."""
+    chart.  ``reconcile`` runs the reconciliation between the fill-in and the
+    hand-over and ``evict`` the hand-over itself; with either off the chain is
+    what it was before that stage existed."""
 
     ring_cap: int = 0
     knots_fisheye: int = DEFAULT_KNOTS_FISHEYE
     knots_pinhole: int = DEFAULT_KNOTS_PINHOLE
+    reconcile: bool = True
     evict: bool = True
     trace: bool = False
 
@@ -96,15 +100,18 @@ def options():
     ``SFMTOOL_RELAX_RING_CAP`` (0, the default, admits a ring's whole band; a
     positive integer is an absolute count per ring),
     ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count),
+    ``SFMTOOL_RELAX_RECONCILE`` (``0`` holds the reconciliation),
     ``SFMTOOL_RELAX_EVICT`` (``0`` holds the hand-over stage) and
     ``SFMTOOL_RELAX_TRACE``.  The pinhole chart's knot count is not tunable:
     it is the seed's own."""
     from .evict import evict_on
+    from .reconcile import reconcile_on
 
     return Options(
         ring_cap=max(0, _int_env("SFMTOOL_RELAX_RING_CAP", 0)),
         knots_fisheye=max(1, _int_env("SFMTOOL_RELAX_KNOTS", DEFAULT_KNOTS_FISHEYE)),
         knots_pinhole=DEFAULT_KNOTS_PINHOLE,
+        reconcile=reconcile_on(os.environ),
         evict=evict_on(os.environ),
         trace=trace_on(),
     )
