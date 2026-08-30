@@ -200,6 +200,7 @@ def relaxation_block(result):
         "evict": _evict(c.get("evict")),
         "late_release": c.get("late_release"),
         "retri": c.get("retri"),
+        "depth": _depth(c.get("depth")),
         "runaway": {**(c.get("runaway") or {}), "frames": result.runaway_frames},
     }
 
@@ -265,6 +266,49 @@ def _evict(e):
         "reproj_med_px": e.get("ba_reproj_med_px"),
         "bands": e.get("bands"),
     }
+
+
+def _depth(d):
+    """The depth reading's own counts, or its refusal."""
+    if not d:
+        return None
+    if d.get("held"):
+        return {"held": d["held"]}
+    if d.get("refused"):
+        return {"refused": d["refused"], "n_finite_before": d.get("n_finite_before")}
+    return {
+        "k_support": d.get("k_support"),
+        "f_eq_px": d.get("f_eq_px"),
+        "eps_member_px": d.get("eps_member_px"),
+        "n_points": d.get("n_points"),
+        "n_confident": d.get("n_confident"),
+        "support_r12": d.get("support_r12"),
+        "depth_med_confident": d.get("depth_med_confident"),
+        "support_scalar": d.get("support_scalar"),
+        "u_p10": d.get("u_p10"),
+        "u_p50": d.get("u_p50"),
+        "u_p90": d.get("u_p90"),
+        "n_finite_before": d.get("n_finite_before"),
+        "n_finite_after": d.get("n_finite_after"),
+        "n_bearings_before": d.get("n_bearings_before"),
+        "n_bearings_after": d.get("n_bearings_after"),
+        "n_demoted": d.get("n_demoted"),
+        "bins": d.get("bins"),
+    }
+
+
+def _depth_option(d):
+    """The depth reading in one metadata string, where it ran.
+
+    ``None`` where it did not: a member the stage held or refused on carries
+    the metadata it carried before the stage existed, and the manifest is
+    where the holding or the refusal is recorded."""
+    if not d or d.get("held") or d.get("refused"):
+        return None
+    return (
+        f"{d.get('n_demoted')} demoted of {d.get('n_finite_before')} finite, "
+        f"r12 {float(d.get('support_r12', 0.0)):.6g}"
+    )
 
 
 def _head(c):
@@ -335,6 +379,9 @@ def tool_options(result, idx, paired_with=None, scope=None, f_source=None):
     evicted = _evict_option(c.get("evict"))
     if evicted is not None:
         opts["evict"] = evicted
+    depthed = _depth_option(c.get("depth"))
+    if depthed is not None:
+        opts["depth"] = depthed
     if lens_d:
         opts["focal_chart_px"] = f"{float(lens_d['f_chart']):.3f}"
         opts["bspline"] = ",".join(f"{c_:.8f}" for c_ in lens_d["coeffs"])
