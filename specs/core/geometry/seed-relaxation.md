@@ -265,12 +265,13 @@ The reading is per OBSERVATION and not per cluster, because a footprint is a
 thing in one image: the same cluster is a wide feature on the frame that sees
 it close and a narrow one on the frame that sees it far. An observation's
 FEATURE RADIUS is the fill-in's own reading of its stored affine, the refine
-radius times the mean of the affine's two column norms. Its FOOTPRINT is the
-disk the patch cloud sizes a surfel at, the keypoint scale of its `.sift`
-affine times that policy's own half-extent multiplier. Those are two different
-units: the refine grid measures on a wider disk than the surfel occupies, and
-the footprint the rule judges is the one the surfel occupies, so a feature that
-sits outside everything a reader can see never retires anything.
+radius times the mean of the affine's two column norms. Its REFINED UNIT SCALE
+is that radius divided by the refine radius, one unit of the grid the matching
+refined the affine on, and its FOOTPRINT is the patch cloud's own half-extent
+multiplier of that unit scale. Those are two different units: the refine grid
+measures on a wider disk than the surfel occupies, and the footprint the rule
+judges is the one the surfel occupies, so a feature that sits outside
+everything a reader can see never retires anything.
 
 An observation is retired where another observation, in the SAME image and on
 another cluster the state holds, has its centre inside that footprint and a
@@ -298,13 +299,13 @@ geometry absorbs the hand-over before the lens is asked on all of the evidence.
 Where nothing was retired there is nothing to absorb and the state is handed
 straight back.
 
-The keypoint scale is read from the workspace's own `.sift` files, at the
-feature directory the source file names, once per image and capped at the
-highest feature index the state's rows use. Where no workspace is given, where
-the source file names no feature directory, or where a file the rows name
-cannot be read, the stage REFUSES: the footprint is then unknown, and a guess
-at it would retire evidence on a number nobody measured. A refusal changes
-nothing and says why.
+Both units come off the affine the state already carries, so the stage reads
+the member and the state alone: no workspace, no feature directory and no
+second file enter it, and the same member relaxes the same way wherever its
+arrays are held. Where the state holds no observations, where the member states
+no affine shapes, or where the source file states no refine radius, the stage
+REFUSES: the footprint is then unstated, and a guess at it would retire
+evidence on a number nobody measured. A refusal changes nothing and says why.
 
 ## Release the lens when the finite count clears the settling bar
 
@@ -415,4 +416,5 @@ that off every product is byte-identical to a run from before the stage
 existed. An absolute count per band, the fisheye knot count and a per-stage
 trace are the only other options; the band grid and the settling bar are
 fleet-derived constants and are not tunable, and the footprint multiplier is
-the patch cloud's own sizing policy rather than a reading of this chain's.
+the patch cloud's own sizing policy, read in refined unit scales, rather than a
+reading of this chain's.
