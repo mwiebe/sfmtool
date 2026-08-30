@@ -205,7 +205,7 @@ def run_member(m, source, opts=None):
     before = structure.reprojection(
         cam, rot, cen, state["points"], state["at_inf"], uv, slot_i, slot_c
     )
-    pts, at_inf, retri = structure.estimate_points(
+    pts, at_inf, retri, pruned = structure.estimate_points(
         cam,
         state["quats"],
         state["trans"],
@@ -214,11 +214,18 @@ def run_member(m, source, opts=None):
         slot_c,
         len(state["clusters"]),
         tol_final,
+        prune_behind=True,
     )
     state = dict(state)
     state["points"] = pts
     state["at_inf"] = at_inf
-    after = structure.reprojection(cam, rot, cen, pts, at_inf, uv, slot_i, slot_c)
+    # The observations the estimate refused leave the admission, so the writer
+    # states a point over the rows it was solved on and nothing else.
+    state = structure.with_pruned(state, rows[pruned])
+    keep = ~pruned
+    after = structure.reprojection(
+        cam, rot, cen, pts, at_inf, uv[keep], slot_i[keep], slot_c[keep]
+    )
     retri.update(
         {
             "floor_deg": math.degrees(float(tol_final)),
@@ -229,6 +236,7 @@ def run_member(m, source, opts=None):
             "reproj_med_px": _med(after),
             "reproj_p90_px": _p90(after),
             "n_obs_final": int(len(after)),
+            "n_pruned_obs_total": int(len(structure.pruned_rows(state))),
         }
     )
     census["retri"] = retri

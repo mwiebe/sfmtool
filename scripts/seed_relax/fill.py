@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import lens, rings
+from . import lens, rings, structure
 from .fleet_constants import RING_RATIO_P1
 from .structure import estimate_points
 
@@ -148,16 +148,22 @@ def extend_member(m, src, add_cl):
     return mx, slot
 
 
-def ring_rows(mx, frames, want):
-    """``(uv, slot_i, slot_c)`` over the clusters ``want`` on ``frames``."""
+def ring_rows(mx, frames, want, state=None):
+    """``(uv, slot_i, slot_c, rows)`` over the clusters ``want`` on ``frames``.
+
+    ``rows`` are the member rows behind them, which is what a prune flag has to
+    be read against.  Where a ``state`` is given, the observations it has
+    already pruned are not among them."""
     fslot = {int(f): k for k, f in enumerate(frames)}
     want = np.asarray(want, np.int64)
     cslot = {int(c): k for k, c in enumerate(want)}
     rows = mx.rows_all[np.isin(mx.obs_i[mx.rows_all], frames)]
     rows = rows[np.isin(mx.obs_c[rows], want)]
+    if state is not None:
+        rows = structure.drop_pruned(state, rows)
     slot_i = np.array([fslot[int(i)] for i in mx.obs_i[rows]], np.int64)
     slot_c = np.array([cslot[int(c)] for c in mx.obs_c[rows]], np.int64)
-    return mx.obs_uv[rows], slot_i, slot_c
+    return mx.obs_uv[rows], slot_i, slot_c, rows
 
 
 def adjust_held(mx, cam, state, schedule=None, max_iters=30):
@@ -173,6 +179,7 @@ def adjust_held(mx, cam, state, schedule=None, max_iters=30):
     cslot = {c: k for k, c in enumerate(clusters)}
     rows = mx.rows_all[np.isin(mx.obs_i[mx.rows_all], frames)]
     rows = rows[np.isin(mx.obs_c[rows], np.asarray(clusters, np.int64))]
+    rows = structure.drop_pruned(state, rows)
     out = bundle_adjust(
         cam,
         np.ascontiguousarray(np.asarray(state["quats"], float)),
@@ -194,6 +201,7 @@ def adjust_held(mx, cam, state, schedule=None, max_iters=30):
         "trans": np.asarray(out["translations"], float),
         "points": np.asarray(out["points"], float),
         "at_inf": np.asarray(state["at_inf"], bool),
+        "pruned_rows": structure.pruned_rows(state),
     }
     rec = {
         "n_obs": int(len(resid)),
@@ -257,8 +265,8 @@ def fill_in(m, source, cam, state, tol_rad, opts, trace=None):
         added.append(cl_new)
         mx, slot = extend_member(m, src, np.concatenate(added))
         new_slots = np.array([slot[int(c)] for c in cl_new], np.int64)
-        uv, slot_i, slot_c = ring_rows(mx, frames, new_slots)
-        pts_new, inf_new, tri = estimate_points(
+        uv, slot_i, slot_c, ring_row_idx = ring_rows(mx, frames, new_slots, state)
+        pts_new, inf_new, tri, pruned = estimate_points(
             cam,
             state["quats"],
             state["trans"],
@@ -268,6 +276,7 @@ def fill_in(m, source, cam, state, tol_rad, opts, trace=None):
             len(new_slots),
             tol_rad,
             bar_px=RING_REPROJ_BAR,
+            prune_behind=True,
         )
         for k, v in tri.items():
             row[f"tri_{k}"] = v
@@ -280,7 +289,12 @@ def fill_in(m, source, cam, state, tol_rad, opts, trace=None):
             "trans": state["trans"],
             "points": np.concatenate([np.asarray(state["points"], float), pts_new]),
             "at_inf": np.concatenate([np.asarray(state["at_inf"], bool), inf_new]),
+            "pruned_rows": structure.pruned_rows(state),
         }
+        # The observations the ring's estimate refused leave the admission, so
+        # the held adjustment below and every later stage read the rows the
+        # estimate was actually solved on.
+        state = structure.with_pruned(state, ring_row_idx[pruned])
         state, barec = adjust_held(mx, cam, state)
         row["ba_reproj_med_px"] = barec["reproj_med_px"]
         row["ba_reproj_p90_px"] = barec["reproj_p90_px"]
@@ -298,4 +312,5 @@ def fill_in(m, source, cam, state, tol_rad, opts, trace=None):
     census["n_added"] = int(len(all_add))
     census["n_points_after_fill"] = int(len(state["clusters"]))
     census["n_finite_after_fill"] = int((~np.asarray(state["at_inf"], bool)).sum())
+    census["n_pruned_obs"] = int(len(structure.pruned_rows(state)))
     return mx, state, census
