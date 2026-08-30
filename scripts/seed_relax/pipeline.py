@@ -6,9 +6,10 @@
 Provenance: the study's `v2/v2lib.run_pipeline` (557-692) with the fill-in
 inserted from `v2/densify/densify_run.run_member` (354-489), with the scoring,
 the reference readings, the per-stage timings and the isolation switches
-removed, and the hand-over stage (`evict.py`) between the fill-in and the
-release.  What is left is the chain as it ships: gate, relax, fill in, hand
-over, release, re-estimate, report.
+removed, and the reconciliation (`reconcile.py`) and the hand-over stage
+(`evict.py`) between the fill-in and the release.  What is left is the chain as
+it ships: gate, relax, fill in, reconcile, hand over, release, re-estimate,
+report.
 
 Nothing here reads a clock into the record.  The per-stage census is a count of
 what the stage decided, not how long it took.
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import evict, fill, lens, relaxation, report, structure
+from . import evict, fill, lens, reconcile, relaxation, report, structure
 from .fleet_constants import SETTLING_FINITE_COUNT
 
 
@@ -165,6 +166,21 @@ def run_member(m, source, opts=None):
             f"  relax: filled in +{fill_census.get('n_added', 0)} clusters, "
             f"{fill_census.get('n_finite_after_fill')} finite"
         )
+
+    # -- stage 3b: the points that rest on one measurement ------------------
+    if opts.reconcile:
+        mx, state, rcens = reconcile.reconcile_stage(
+            mx,
+            cam,
+            state,
+            getattr(source, "refine_radius", None),
+            tol_rad,
+            f_eq,
+            say,
+        )
+    else:
+        rcens = {"held": "SFMTOOL_RELAX_RECONCILE"}
+    census["reconcile"] = rcens
 
     # -- stage 4: the hand-over to the fill-in's own features --------------
     if opts.evict:
