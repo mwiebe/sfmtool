@@ -156,6 +156,14 @@ def centres_of(state):
     return rot, cen
 
 
+def world_rays(cam, rot, uv, slot_i):
+    """Unit world-frame rays of the observations, through ``cam``."""
+    local = np.asarray(cam.pixel_to_ray_batch(np.ascontiguousarray(uv, float)), float)
+    n = np.linalg.norm(local, axis=1, keepdims=True)
+    local = local / np.maximum(n, 1e-12)
+    return np.einsum("nji,nj->ni", rot[slot_i], local)
+
+
 def reprojection(cam, rot, cen, points, at_inf, uv, slot_i, slot_c):
     """Residual norms of every observation under a state, in pixels."""
     p = np.asarray(points, float)[slot_c]
