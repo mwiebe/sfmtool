@@ -217,12 +217,12 @@ def _reconcile(r):
         "radius_frac": r.get("radius_frac"),
         "n_rows": r.get("n_rows"),
         "n_obs_shared": r.get("n_obs_shared"),
-        "n_knots": r.get("n_knots"),
-        "n_points_in_knot": r.get("n_points_in_knot"),
+        "n_tangles": r.get("n_tangles"),
+        "n_points_in_tangle": r.get("n_points_in_tangle"),
         "merged": r.get("merged"),
         "merged_bearing": r.get("merged_bearing"),
         "culled": r.get("culled"),
-        "refused_knots": r.get("refused_knots"),
+        "refused_tangles": r.get("refused_tangles"),
         "rows_deduped": r.get("rows_deduped"),
         "n_points": r.get("n_points"),
         "n_points_after": r.get("n_points_after"),
@@ -239,8 +239,8 @@ def _reconcile_option(r):
         return None
     return (
         f"{r.get('merged')}+{r.get('merged_bearing')} merged, "
-        f"{r.get('culled')} culled, {r.get('refused_knots')} refused of "
-        f"{r.get('n_knots')} knots, {r.get('rows_deduped')} rows deduped"
+        f"{r.get('culled')} culled, {r.get('refused_tangles')} refused of "
+        f"{r.get('n_tangles')} tangles, {r.get('rows_deduped')} rows deduped"
     )
 
 

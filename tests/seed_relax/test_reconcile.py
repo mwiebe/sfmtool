@@ -102,12 +102,12 @@ def test_exact_duplicates_join_without_a_tolerance():
     uv = np.array([[10.0, 20.0], [10.0, 20.0]])
     gid = reconcile.detection_groups(slot_i, uv)
     # The near relation returns nothing (the pair is not two distinct places),
-    # and the knot exists anyway.
+    # and the tangle exists anyway.
     a, b = reconcile.near_rows(slot_i, slot_c, uv, np.array([8.0, 80.0]), REFINE_RADIUS)
     assert len(a) == 0
-    knot, n_knots, shared = reconcile.knot_components(slot_c, gid, a, b, 2)
-    assert n_knots == 1
-    assert knot.tolist() == [0, 0]
+    tangle, n_tangles, shared = reconcile.tangle_components(slot_c, gid, a, b, 2)
+    assert n_tangles == 1
+    assert tangle.tolist() == [0, 0]
     assert shared.all()
 
 
@@ -172,30 +172,30 @@ def test_a_row_never_pairs_with_its_own_cluster():
     assert len(a) == 0
 
 
-def test_a_knot_is_the_connected_component_over_the_relation():
+def test_a_tangle_is_the_connected_component_over_the_relation():
     # Three points in one chain: A shares with B, B shares with C, and A and C
     # share nothing.
     slot_i = np.array([0, 0, 1, 1], np.int64)
     slot_c = np.array([0, 1, 1, 2], np.int64)
     uv = np.array([[5.0, 5.0], [5.0, 5.0], [9.0, 9.0], [9.0, 9.0]])
     gid = reconcile.detection_groups(slot_i, uv)
-    knot, n_knots, _shared = reconcile.knot_components(
+    tangle, n_tangles, _shared = reconcile.tangle_components(
         slot_c, gid, np.zeros(0, np.int64), np.zeros(0, np.int64), 4
     )
-    assert n_knots == 1
-    assert knot.tolist() == [0, 0, 0, -1]
+    assert n_tangles == 1
+    assert tangle.tolist() == [0, 0, 0, -1]
 
 
-def test_the_knot_numbering_does_not_depend_on_the_pair_order():
+def test_the_tangle_numbering_does_not_depend_on_the_pair_order():
     slot_i = np.array([0, 0, 1, 1], np.int64)
     slot_c = np.array([2, 3, 0, 1], np.int64)
     uv = np.array([[5.0, 5.0], [5.0, 5.0], [9.0, 9.0], [9.0, 9.0]])
     gid = reconcile.detection_groups(slot_i, uv)
     z = np.zeros(0, np.int64)
-    knot, n, _s = reconcile.knot_components(slot_c, gid, z, z, 4)
+    tangle, n, _s = reconcile.tangle_components(slot_c, gid, z, z, 4)
     assert n == 2
-    # Numbered in point order: the knot of points 0 and 1 comes first.
-    assert knot.tolist() == [0, 0, 1, 1]
+    # Numbered in point order: the tangle of points 0 and 1 comes first.
+    assert tangle.tolist() == [0, 0, 1, 1]
 
 
 # ------------------------------------------------------- the classifications
@@ -226,11 +226,11 @@ def _shared_pair_rows(bad_image=None, bad_offset=0.0):
     return rows
 
 
-def test_a_clean_knot_merges_into_one_point():
+def test_a_clean_tangle_merges_into_one_point():
     m, st = _build(_shared_pair_rows(), 2)
     m2, st2, census = _run(m, st)
-    assert census["n_knots"] == 1
-    assert (census["merged"], census["culled"], census["refused_knots"]) == (1, 0, 0)
+    assert census["n_tangles"] == 1
+    assert (census["merged"], census["culled"], census["refused_tangles"]) == (1, 0, 0)
     # One point, three rays, and the duplicate row on the shared detection is
     # gone from the admission.
     assert np.asarray(st2["clusters"]).tolist() == [0]
@@ -260,7 +260,7 @@ def test_a_thin_union_merges_as_one_bearing():
 def test_a_single_removal_that_reconciles_culls_that_member():
     m, st = _build(_shared_pair_rows(bad_image=1), 2)
     m2, st2, census = _run(m, st)
-    assert (census["merged"], census["culled"], census["refused_knots"]) == (0, 1, 0)
+    assert (census["merged"], census["culled"], census["refused_tangles"]) == (0, 1, 0)
     # Cluster 1 is what the arithmetic voted against, and every row of it has
     # left the admission.
     assert np.asarray(st2["clusters"]).tolist() == [0]
@@ -269,7 +269,7 @@ def test_a_single_removal_that_reconciles_culls_that_member():
     assert np.allclose(np.asarray(st2["points"])[0], P, atol=1e-6)
 
 
-def test_a_knot_no_removal_reconciles_is_left_alone():
+def test_a_tangle_no_removal_reconciles_is_left_alone():
     cam = _cam()
     p0 = _project(cam, P, 0)
     rows = [(0, c, tuple(p0), 2.0) for c in range(3)]
@@ -278,9 +278,9 @@ def test_a_knot_no_removal_reconciles_is_left_alone():
         rows.append((2, c, tuple(_project(cam, P, 2) + np.array([off, 0.0])), 2.0))
     m, st = _build(rows, 3)
     m2, st2, census = _run(m, st)
-    assert census["n_knots"] == 1
+    assert census["n_tangles"] == 1
     assert (census["merged"], census["merged_bearing"], census["culled"]) == (0, 0, 0)
-    assert census["refused_knots"] == 1
+    assert census["refused_tangles"] == 1
     # Nothing moved: the same points, the same rows, the same member.
     assert m2 is m
     assert st2 is st
@@ -341,7 +341,7 @@ def test_the_stage_refuses_where_the_unit_scale_is_unstated(kw, reason):
     assert m2 is m and st2 is st
 
 
-def test_a_state_with_no_knot_is_handed_straight_back():
+def test_a_state_with_no_tangle_is_handed_straight_back():
     cam = _cam()
     rows = [
         (i, c, tuple(_project(cam, P + np.array([3.0 * c, 0.0, 0.0]), i)), 2.0)
@@ -350,7 +350,7 @@ def test_a_state_with_no_knot_is_handed_straight_back():
     ]
     m, st = _build(rows, 2, points=np.stack([P, P + np.array([3.0, 0.0, 0.0])]))
     m2, st2, census = _run(m, st)
-    assert census["n_knots"] == 0
+    assert census["n_tangles"] == 0
     assert census["merged"] == 0
     assert m2 is m and st2 is st
 
@@ -493,12 +493,12 @@ def test_the_seam_reconciles_the_duplicates_the_fill_in_brought_in(relaxed):
     rec = relaxed.census["reconcile"]
     assert rec.get("refused") is None
     assert rec["unit_frac"] == reconcile.NEAR_UNIT_FRAC
-    # Every duplicate is one knot of two points, and every one of them merges.
-    assert rec["n_knots"] == N_DUP
-    assert rec["n_points_in_knot"] == 2 * N_DUP
+    # Every duplicate is one tangle of two points, and every one of them merges.
+    assert rec["n_tangles"] == N_DUP
+    assert rec["n_points_in_tangle"] == 2 * N_DUP
     assert rec["merged"] + rec["merged_bearing"] == N_DUP
     assert rec["culled"] == 0
-    assert rec["refused_knots"] == 0
+    assert rec["refused_tangles"] == 0
     assert rec["n_points_after"] == rec["n_points"] - N_DUP
 
 
@@ -506,7 +506,7 @@ def test_the_manifest_block_states_what_the_stage_decided(relaxed):
     from seed_relax import release
 
     block = release.relaxation_block(relaxed)["reconcile"]
-    for key in ("n_knots", "merged", "culled", "refused_knots", "rows_deduped"):
+    for key in ("n_tangles", "merged", "culled", "refused_tangles", "rows_deduped"):
         assert block[key] == relaxed.census["reconcile"][key]
     opts = release.tool_options(relaxed, 0)
     assert "merged" in opts["reconcile"]
