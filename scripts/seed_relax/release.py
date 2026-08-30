@@ -196,9 +196,33 @@ def relaxation_block(result):
                 for r in fill.get("rings", [])
             ],
         },
+        "evict": _evict(c.get("evict")),
         "late_release": c.get("late_release"),
         "retri": c.get("retri"),
         "runaway": {**(c.get("runaway") or {}), "frames": result.runaway_frames},
+    }
+
+
+def _evict(e):
+    """The hand-over stage's own counts, or its refusal."""
+    if not e:
+        return None
+    if e.get("held"):
+        return {"held": e["held"]}
+    if e.get("refused"):
+        return {"refused": e["refused"]}
+    return {
+        "footprint_factor": e.get("footprint_factor"),
+        "n_rows": e.get("n_rows"),
+        "n_obs_covered": e.get("n_obs_covered"),
+        "n_obs_evicted": e.get("n_obs_evicted"),
+        "n_obs_kept": e.get("n_obs_kept"),
+        "n_points": e.get("n_points"),
+        "n_points_kept": e.get("n_points_kept"),
+        "n_points_dropped": e.get("n_points_dropped"),
+        "n_points_dropped_by_two_obs": e.get("n_points_dropped_by_two_obs"),
+        "reproj_med_px": e.get("ba_reproj_med_px"),
+        "bands": e.get("bands"),
     }
 
 
@@ -212,6 +236,20 @@ def _head(c):
         "n_edges": c.get("n_edges"),
         "n_baselines": c.get("n_baselines"),
     }
+
+
+def _evict_option(e):
+    """The hand-over stage in one metadata string, where it ran.
+
+    ``None`` where it did not: a member the stage held or refused on carries
+    the metadata it carried before the stage existed, and the manifest is
+    where the holding or the refusal is recorded."""
+    if not e or e.get("held") or e.get("refused"):
+        return None
+    return (
+        f"{e.get('n_obs_evicted')}/{e.get('n_rows')} obs, "
+        f"{e.get('n_points_kept')}/{e.get('n_points')} points"
+    )
 
 
 def tool_options(result, idx, paired_with=None, scope=None, f_source=None):
@@ -250,6 +288,9 @@ def tool_options(result, idx, paired_with=None, scope=None, f_source=None):
         "confidence_flags": "relaxed",
         "qualified": "False",
     }
+    evicted = _evict_option(c.get("evict"))
+    if evicted is not None:
+        opts["evict"] = evicted
     if lens_d:
         opts["focal_chart_px"] = f"{float(lens_d['f_chart']):.3f}"
         opts["bspline"] = ",".join(f"{c_:.8f}" for c_ in lens_d["coeffs"])

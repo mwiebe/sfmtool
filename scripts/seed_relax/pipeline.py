@@ -1,13 +1,14 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The six stages of the relaxation, on one member.
+"""The seven stages of the relaxation, on one member.
 
 Provenance: the study's `v2/v2lib.run_pipeline` (557-692) with the fill-in
 inserted from `v2/densify/densify_run.run_member` (354-489), with the scoring,
 the reference readings, the per-stage timings and the isolation switches
-removed.  What is left is the chain as it ships: gate, relax, fill in, release,
-re-estimate, report.
+removed, and the hand-over stage (`evict.py`) between the fill-in and the
+release.  What is left is the chain as it ships: gate, relax, fill in, hand
+over, release, re-estimate, report.
 
 Nothing here reads a clock into the record.  The per-stage census is a count of
 what the stage decided, not how long it took.
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import fill, lens, relaxation, report, structure
+from . import evict, fill, lens, relaxation, report, structure
 from .fleet_constants import SETTLING_FINITE_COUNT
 
 
@@ -60,14 +61,17 @@ def _trace(opts):
     return None
 
 
-def run_member(m, source, opts=None):
+def run_member(m, source, opts=None, workspace=None):
     """Relax one rotation-only member into a finite sibling.
 
     ``m`` is the member's own arrays, ``source`` the selection handle the run
     already holds (the fill-in reads its clusters from it), ``opts`` an
-    :class:`seed_relax.Options`.  The member is mutated in place by the lens
-    stage, exactly as the study's chain mutates it, so a caller that needs the
-    original arrays afterwards holds its own copy.
+    :class:`seed_relax.Options`, ``workspace`` the capture's workspace
+    directory -- the hand-over stage reads its `.sift` files for the keypoint
+    scale the drawn footprint is stated in, and refuses without it.  The member
+    is mutated in place by the lens stage, exactly as the study's chain mutates
+    it, so a caller that needs the original arrays afterwards holds its own
+    copy.
 
     Returns a :class:`RelaxResult`."""
     from . import options as default_options
@@ -164,7 +168,23 @@ def run_member(m, source, opts=None):
             f"{fill_census.get('n_finite_after_fill')} finite"
         )
 
-    # -- stage 4: the late lens release ------------------------------------
+    # -- stage 4: the hand-over to the fill-in's own features --------------
+    if opts.evict:
+        state, ecens = evict.evict_stage(
+            mx,
+            cam,
+            state,
+            source,
+            workspace,
+            getattr(source, "refine_radius", None),
+            fill_census.get("adm_floor_px"),
+            say,
+        )
+    else:
+        ecens = {"held": "SFMTOOL_RELAX_EVICT"}
+    census["evict"] = ecens
+
+    # -- stage 5: the late lens release ------------------------------------
     n_finite = int((~np.asarray(state["at_inf"], bool)).sum())
     family = lens.family_of(base_cam.model)
     knots = opts.knots_fisheye if family == "fisheye" else opts.knots_pinhole
@@ -193,7 +213,7 @@ def run_member(m, source, opts=None):
             f"at {knots} knots"
         )
 
-    # -- stage 5: every point re-estimated ---------------------------------
+    # -- stage 6: every point re-estimated ---------------------------------
     f_eq_final = lens.equivalent_focal(cam, thetas)
     if not (np.isfinite(f_eq_final) and f_eq_final > 0):
         f_eq_final = float(m.f_eq)
@@ -246,7 +266,7 @@ def run_member(m, source, opts=None):
     census["n_finite_final"] = int((~at_inf).sum())
     census["n_infinity_final"] = int(at_inf.sum())
 
-    # -- stage 6: the runaway report ---------------------------------------
+    # -- stage 7: the runaway report ---------------------------------------
     frows, agg = report.runaway_report(mx, state)
     census["runaway"] = agg
     if say:
