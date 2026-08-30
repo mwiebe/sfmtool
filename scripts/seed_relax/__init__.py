@@ -25,8 +25,9 @@ Module map (each module carries its own provenance comment):
 * :mod:`lens` -- the lens released on bearings and on the relaxed state.
 * :mod:`rings` -- the radius bands the fill-in admits clusters in.
 * :mod:`fill` -- the source clusters the admission never held, by radius.
+* :mod:`evict` -- the coarse observations a finer tracked feature covers.
 * :mod:`report` -- the runaway-frame report.
-* :mod:`pipeline` -- the six stages on one member.
+* :mod:`pipeline` -- the seven stages on one member.
 * :mod:`release` -- the arrays and manifest blocks the writer needs.
 
 Nothing here samples, and nothing reads a clock into a record: same inputs,
@@ -69,11 +70,13 @@ class Options:
     ``0`` meaning no count at all: a ring then admits its whole band, which is
     the population the band already states.  ``knots_fisheye`` and
     ``knots_pinhole`` are the late release's knot counts, one per radial
-    chart."""
+    chart.  ``evict`` runs the hand-over stage between the fill-in and the late
+    release; with it off the chain is what it was before the stage existed."""
 
     ring_cap: int = 0
     knots_fisheye: int = DEFAULT_KNOTS_FISHEYE
     knots_pinhole: int = DEFAULT_KNOTS_PINHOLE
+    evict: bool = True
     trace: bool = False
 
 
@@ -92,19 +95,23 @@ def options():
 
     ``SFMTOOL_RELAX_RING_CAP`` (0, the default, admits a ring's whole band; a
     positive integer is an absolute count per ring),
-    ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count) and
+    ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count),
+    ``SFMTOOL_RELAX_EVICT`` (``0`` holds the hand-over stage) and
     ``SFMTOOL_RELAX_TRACE``.  The pinhole chart's knot count is not tunable:
     it is the seed's own."""
+    from .evict import evict_on
+
     return Options(
         ring_cap=max(0, _int_env("SFMTOOL_RELAX_RING_CAP", 0)),
         knots_fisheye=max(1, _int_env("SFMTOOL_RELAX_KNOTS", DEFAULT_KNOTS_FISHEYE)),
         knots_pinhole=DEFAULT_KNOTS_PINHOLE,
+        evict=evict_on(os.environ),
         trace=trace_on(),
     )
 
 
-def run(member, source, opts=None):
+def run(member, source, opts=None, workspace=None):
     """Relax one rotation-only member.  See :func:`pipeline.run_member`."""
     from .pipeline import run_member
 
-    return run_member(member, source, opts)
+    return run_member(member, source, opts, workspace=workspace)
