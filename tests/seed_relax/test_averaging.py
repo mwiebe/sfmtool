@@ -176,19 +176,23 @@ def test_one_frame_off_the_line_leaves_the_rest_nearly_degenerate():
     # A single frame lifted off the line makes the form non-singular, but the
     # spacing of the five that stayed on it is still carried by almost nothing:
     # the form's second eigenvalue is orders below a general graph's.
+    # Read at the token disagreement, not at exactly none: the reweighting
+    # divides each residual by the median residual, so a graph that agrees to
+    # round-off reweights on round-off and the eigenvalue it leaves is the
+    # arithmetic's rather than the geometry's.
     off = COLINEAR.copy()
     off[3] = off[3] + np.array([0.0, 0.02, 0.0])
     frames = list(range(len(off)))
     pairs = _all_pairs(len(off))
-    dirs, weights = _edges(off, pairs, jitter=0.0)
+    dirs, weights = _edges(off, pairs)
     _cen, _lam, _res, read = centres_by_averaging(frames, dirs, weights)
     general = centres_by_averaging(
         list(range(len(TRUE_CENTRES))),
-        *_edges(TRUE_CENTRES, _all_pairs(len(TRUE_CENTRES)), jitter=0.0),
+        *_edges(TRUE_CENTRES, _all_pairs(len(TRUE_CENTRES))),
     )[3]
-    assert read["lam2_rel"] < 0.001 * general["lam2_rel"]
+    assert read["lam2_rel"] < 0.01 * general["lam2_rel"]
     # The lengths the pairs carry put it back where the general graph sits.
     ell = _lengths(off, pairs)
     cen, _l, _r, with_len = centres_by_averaging(frames, dirs, weights, ell, weights)
     assert with_len["lam2_rel"] > read["lam2_rel"]
-    assert float(np.abs(_shape(cen) - _shape(off)).max()) < 1e-6
+    assert float(np.abs(_shape(cen) - _shape(off)).max()) < 10 * JITTER
