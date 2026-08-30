@@ -1022,7 +1022,9 @@ image, similar to how the 3D viewer navigates the point cloud but in 2D.
 
 - `pan: egui::Vec2` — offset of image center from panel center, in panel pixels
 - `zoom: f32` — zoom level (1.0 = fit to panel, max 32×)
-- `prev_selected_image: Option<usize>` — for detecting changes and resetting
+- `last_display_size: Option<egui::Vec2>` — the displayed image extent `pan` was
+  measured against, recorded at the end of each frame that drew an image and
+  cleared by a view reset. See "View persistence" below.
 
 **Navigation controls** (sign conventions match the 3D viewer):
 
@@ -1047,7 +1049,7 @@ image, similar to how the 3D viewer navigates the point cloud but in 2D.
   under the cursor stays fixed: `pan = pan * ratio + cursor_rel * (1 - ratio)`.
 - **Zoom limits**: Minimum = 1.0 (fit-to-panel). Maximum = 32×.
 - **Pan limits**: Clamped so the image overlaps the panel by at least 50px.
-- **Auto-reset**: When `selected_image` changes, pan and zoom reset to fit.
+- **View persistence**: The view outlives the image it was set on — see below.
 
 **Rendering** (`image_detail/`):
 - `base_scale = min(panel_w / tex_w, panel_h / tex_h)` fits the image to panel
@@ -1056,6 +1058,66 @@ image, similar to how the 3D viewer navigates the point cloud but in 2D.
 - Feature overlays use `image_to_panel(px, py)` and `panel_to_image(pos)`
   transforms derived from `image_rect` and `effective_scale` each frame
 - Features outside the visible panel are culled for performance when zoomed in
+- The panel rect is `ui.available_rect_before_wrap()`, which is only the panel's
+  own if nothing above it has overflowed — see "The toolbar may not widen the
+  panel" below
+
+#### The toolbar may not widen the panel
+
+egui grows a `Ui`'s `max_rect` to include any widget that overflowed it
+(`Placer::advance_after_rects`). The overlay toolbar is a single unwrapped row
+of controls — roughly 730 px with a feature mode active — so in a dock cell
+narrower than that it overflows, and the `available_rect_before_wrap()` the
+panel reads below it then describes a rectangle reaching into the
+**neighbouring** dock cell. A 400 px cell reported 726 px.
+
+That rect is load-bearing twice over: the image is fitted and centred in it, and
+`platform::pointer_in_rect` tests it to decide whether a trackpad gesture is
+addressed to this panel (see
+[viewport-navigation.md](viewport-navigation.md#which-panel-a-gesture-is-addressed-to)).
+An overhang therefore both mis-lays-out the image and steals gestures aimed at
+whatever sits to the right — scrolling the Intrinsics panel beside it panned the
+image, for exactly as far into that panel as the overhang reached, which is why
+widening the Image Detail panel made the symptom disappear.
+
+So `show_overlay_toolbar` draws its row into a child `Ui` and allocates back only
+the space it was *offered*, leaving the parent's `max_rect` alone. What does not
+fit stays clipped by the `ScrollArea` egui_dock wraps every tab body in. The
+panel is the only one that reads its rect *after* drawing something — every other
+tab takes `available_rect_before_wrap()` as its first act, which is pristine by
+construction.
+
+#### View persistence across image, reconstruction and panel changes
+
+The panel is used to *compare*: flipping between two images with `,` / `.`,
+between reconstructions with `[` / `]`, clicking a thumbnail in the strip, or
+selecting a different image in the Scene Graph. Comparing a detail — a feature
+that moves, a blur, a mis-registered edge — means being zoomed in on it while
+the switch happens, so the view is **not** reset on any of those. Only the
+explicit `Z` / double-click Fit resets it. Animation playback needs no special
+case for this: it is the same image switch as any other.
+
+What is held fixed is the *region of the image*, not the raw `pan`. `pan` is in
+panel pixels, so the same value frames a different part of an image of another
+resolution. The invariant is the normalized image coordinate at the panel
+centre:
+
+```
+anchor = 0.5 - pan / display_size          (per axis)
+```
+
+Each frame computes `display_size` from the current texture, panel rect and
+zoom, then rescales `pan` by the ratio against `last_display_size` before
+anything else uses it, and re-clamps to the pan limits. A change of image
+resolution, of aspect ratio, or of panel size therefore all keep the same
+region framed; two images of equal size in an unchanged panel give a ratio of
+1 and carry the view over untouched, so a `,` / `.` flip is pixel-stable.
+
+`zoom` is relative to fit, so it needs no rescale: at 8× two images of different
+resolutions each show one eighth of their own frame. The rescale runs *before*
+input handling and `last_display_size` is recorded *after* it, so a zoom gesture
+within a frame is never mistaken for a change of extent. `reset_view` clears
+`last_display_size` for the same reason — a fit view has nothing to carry.
 
 ### Navigation minibar
 
