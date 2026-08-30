@@ -9,7 +9,7 @@ import types
 import numpy as np
 import pytest
 
-from seed_relax import Options, evict, rings
+from seed_relax import Options, evict, pairs, rings
 from seed_relax.fleet_constants import RING_RATIO_P1
 
 REFINE_RADIUS = 8.0
@@ -261,7 +261,7 @@ def test_two_passes_produce_the_same_flag():
 def test_the_pair_batch_size_cannot_change_the_flag(monkeypatch):
     want, census, _cl = _flag()
     for chunk in (1, 2, 3, 7):
-        monkeypatch.setattr(evict, "_PAIR_CHUNK", chunk)
+        monkeypatch.setattr(pairs, "PAIR_CHUNK", chunk)
         uv, r, i, c = _rows()
         got, got_census = evict.covered_by_finer(uv, r, REFINE_RADIUS, i, c, 2.0)
         assert got.tobytes() == want.tobytes()
