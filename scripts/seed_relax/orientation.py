@@ -16,13 +16,17 @@ the cameras is the one physical statement that separates the two, and a
 cluster's cheirality statement is worth exactly the parallax it was measured
 with: a cluster inside the member's bound is a bearing whose depth sign is a
 coin toss.
+
+The vote itself is the core's
+``sfmtool_core::geometry::translation_averaging`` kernel, reached through
+``sfmtool._sfmtool.geometry.orientation_reading``; what is here is the world
+rays the member's rotations produce.  See
+``specs/core/geometry/translation-averaging.md``.
 """
 
 from __future__ import annotations
 
 import numpy as np
-
-from .structure import angular_lsq
 
 
 def angw_bit(m, per_frame, placed, tol):
@@ -37,44 +41,28 @@ def angw_bit(m, per_frame, placed, tol):
     The reading is exactly antisymmetric under ``c -> -c``, so one pass
     describes both orientations and the second is arithmetic that is already
     known."""
+    from sfmtool._sfmtool.geometry import orientation_reading
+
     frames = sorted(placed)
-    rows = {}
+    slot = {f: k for k, f in enumerate(frames)}
+    rays, point_of_ray, frame_of_ray = [], [], []
     for f in frames:
-        cl, rays, _rr = per_frame[f]
-        for k, c in enumerate(cl):
-            rows.setdefault(int(c), []).append((f, rays[k]))
-    n_pts = n_thin = n_behind = 0
-    obs_front = obs_total = 0
-    angw = 0.0
-    for _c, obs in rows.items():
-        if len(obs) < 2:
-            continue
-        dirs = np.stack([m.rot[f].T @ r for f, r in obs])
-        cs = np.stack([placed[f] for f, _r in obs])
-        widest = float(np.arccos(np.clip(float(np.min(dirs @ dirs.T)), -1.0, 1.0)))
-        p = angular_lsq(cs, dirs)
-        if p is None:
-            continue
-        z = np.einsum("ij,ij->i", p[None, :] - cs, dirs)
-        front = z > 0
-        obs_front += int(front.sum())
-        obs_total += int(len(front))
-        angw += widest * float(int(front.sum()) - int((~front).sum()))
-        if widest <= tol:
-            n_thin += 1
-        elif not front.all():
-            n_behind += 1
-        else:
-            n_pts += 1
-    obs_frac = obs_front / max(1, obs_total)
-    return {
-        "angw": float(angw),
-        "obs_front": int(obs_front),
-        "obs_total": int(obs_total),
-        "obs_frac": float(obs_frac),
-        "angw_per_obs": float(angw / max(1, obs_total)),
-        "margin_frac": float(abs(2.0 * obs_frac - 1.0)),
-        "pts": int(n_pts),
-        "thin": int(n_thin),
-        "behind": int(n_behind),
-    }
+        cl, local, _rows = per_frame[f]
+        # The rays are emitted frame by frame in this order, so a cluster is
+        # first seen from the lowest-numbered frame that saw it and its own
+        # rays stay in frame order -- the grouping the vote reads.
+        rays.append(np.asarray(local, float) @ np.asarray(m.rot[f], float))
+        point_of_ray.append(np.asarray(cl, np.int64))
+        frame_of_ray.append(np.full(len(cl), slot[f], np.int64))
+    empty = np.zeros((0, 3))
+    return dict(
+        orientation_reading(
+            np.ascontiguousarray(np.stack([placed[f] for f in frames]), float)
+            if frames
+            else empty,
+            np.ascontiguousarray(np.concatenate(rays)) if rays else empty,
+            np.concatenate(point_of_ray) if point_of_ray else np.zeros(0, np.int64),
+            np.concatenate(frame_of_ray) if frame_of_ray else np.zeros(0, np.int64),
+            float(tol),
+        )
+    )
