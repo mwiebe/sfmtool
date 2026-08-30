@@ -12,18 +12,17 @@ its own triangulated depth is a blend of them.  This stage hands the member
 over from the features that carried the bootstrap to the features the fill-in
 brought in.
 
-The rule reads three things the member already holds and one the workspace
-does:
+The rule reads three things the member already holds, and nothing else:
 
 * the observation's **feature radius**, ``0.5 * refine_radius * (|S c0| + |S
   c1|)`` over its stored affine ``S`` -- the reading `fill.source_clusters`
   takes, per OBSERVATION here rather than per cluster, because a footprint is a
   thing in one image: the same cluster is wide on the frame that sees it close
   and narrow on the frame that sees it far;
-* the observation's **keypoint scale** ``sigma``, the column-0 norm of its
-  `.sift` affine, which is what the patch cloud sizes a surfel by;
-* its **footprint**, the disk of radius ``2.5 sigma`` at its pixel position --
-  the support the detector measured, at the extent the patch cloud states it;
+* its **footprint**, the disk of radius ``2.5 * r / refine_radius`` at its
+  pixel position: two and a half of the cluster's own REFINED UNIT SCALES,
+  which is the extent the patch cloud states a surfel at, read off the affine
+  the matching already refined rather than off a second file;
 * the cluster ids, so a feature never covers itself.
 
 A coarse observation is retired where another observation in the SAME image,
@@ -41,23 +40,24 @@ survivors with it, because that is the writer's own rule
 such a point either.  One adjustment with the LENS HELD follows, so the
 geometry absorbs the hand-over before the lens is asked.
 
-The stage refuses, and changes nothing, where the workspace's `.sift` files
-cannot be read: the footprint is then unknown and a guess at it would retire
-evidence on a number nobody measured.
+The stage reads the state and the member's own arrays alone; no workspace and
+no `.sift` file enter it.  It refuses, and changes nothing, where the state
+holds no observations, where the member states no affine shapes, or where the
+source file states no refine radius: the footprint is then unstated and a guess
+at it would retire evidence on a number nobody measured.
 """
 
 from __future__ import annotations
-
-from pathlib import Path, PurePosixPath
 
 import numpy as np
 
 from . import fill, rings, structure
 from .fleet_constants import RING_RATIO_P1
 
-#: The half-extent multiplier the footprint is read at.  Not a tuned number and
-#: not a fleet reading: it is the extent the patch cloud states a keypoint's
-#: support at, so the disk this rule reads is the disk the surfel occupies.
+#: The half-extent multiplier the footprint is read at, in units of the
+#: cluster's own refined unit scale.  Not a tuned number and not a fleet
+#: reading: it is the extent the patch cloud states a keypoint's support at, so
+#: the disk this rule reads is the disk the surfel occupies.
 FOOTPRINT_FACTOR = 2.5
 
 FOOTPRINT_FACTOR_PROVENANCE = {
@@ -65,12 +65,13 @@ FOOTPRINT_FACTOR_PROVENANCE = {
     "source_file": "crates/sfmtool-core/src/patch/cloud.rs",
     "rule": (
         "`PatchExtent::FeatureSize { factor: 2.5, across: Median }` is the "
-        "default sizing policy of the patch cloud: a keypoint of scale sigma "
-        "carries a patch of half-extent 2.5 sigma, sigma being the column-0 "
-        "norm of the `.sift` affine shape.  The eviction reads containment at "
-        "that same half-extent, so the footprint it judges is the footprint "
-        "the surfel occupies rather than the wider disk the refine grid "
-        "measured on."
+        "default sizing policy of the patch cloud: a keypoint carries a patch "
+        "of half-extent 2.5 unit scales.  The eviction reads containment at "
+        "that same half-extent, stated in the cluster's OWN refined unit "
+        "scale `r / refine_radius`, so the footprint it judges is the "
+        "footprint the surfel occupies rather than the wider disk the refine "
+        "grid measured on, and it is read off the affine the state already "
+        "carries rather than off a second file."
     ),
 }
 
@@ -111,60 +112,33 @@ def feature_radius(obs_shape, refine_radius):
     )
 
 
-def sift_path(workspace, feature_prefix_dir, name):
-    """The `.sift` file beside an image, in the workspace's own layout.
+def footprint(r_px, refine_radius):
+    """The observation's drawn footprint in image pixels.
 
-    ``{workspace}/{image parent}/{feature_prefix_dir}/{image name}.sift``, the
-    path :meth:`SfmrReconstruction::sift_path_for_image` states, so a rig
-    capture whose frames sit under one directory per camera resolves each
-    camera's own feature directory."""
-    rel = PurePosixPath(str(name).replace("\\", "/"))
-    return Path(workspace) / rel.parent / str(feature_prefix_dir) / f"{rel.name}.sift"
-
-
-def keypoint_scales(names, obs_i, obs_f, workspace, feature_prefix_dir):
-    """``sigma`` per observation: the column-0 norm of its `.sift` affine.
-
-    The same reading the patch cloud takes.  Each image's file is read once,
-    capped at the highest feature index the rows name.  Returns ``None`` where
-    the workspace does not state a feature directory; raises where a file the
-    rows name cannot be read."""
-    if not workspace or not feature_prefix_dir:
-        return None
-    from sfmtool._sfmtool.io import read_sift_partial
-
-    obs_i = np.asarray(obs_i, np.int64)
-    obs_f = np.asarray(obs_f, np.int64)
-    sig = np.full(len(obs_i), np.nan)
-    for img in np.unique(obs_i):
-        sel = obs_i == img
-        need = int(obs_f[sel].max()) + 1
-        path = sift_path(workspace, feature_prefix_dir, names[int(img)])
-        data = read_sift_partial(str(path), need)
-        aff = np.asarray(data["affine_shapes"], float)
-        sig[sel] = np.hypot(aff[obs_f[sel], 0, 0], aff[obs_f[sel], 1, 0])
-    return sig
+    :data:`FOOTPRINT_FACTOR` of the observation's own refined unit scale, ``r /
+    refine_radius``, which is the extent the patch cloud states its support at.
+    The refine grid measures on the whole radius ``r``, so a footprint always
+    sits inside the disk the pair is read within."""
+    return FOOTPRINT_FACTOR * np.asarray(r_px, float) / float(refine_radius)
 
 
-def covered_by_finer(uv, r_px, sigma, slot_i, slot_c, ratio):
+def covered_by_finer(uv, r_px, refine_radius, slot_i, slot_c, ratio):
     """``(flag, census)``: which observations a finer tracked one covers.
 
     ``flag`` is one bool per row.  A row is flagged where another row in the
     same image, on another cluster, has its centre inside the row's drawn
-    footprint (``2.5 sigma``, and inside the feature radius, which is the
-    support the pair is read within) and a feature radius at least ``ratio``
-    times finer.
+    footprint (:func:`footprint`) and a feature radius at least ``ratio`` times
+    finer.
 
-    The enumeration is per image and the disk is the smaller of the two radii,
-    so the pair set is the conjunction of both containments and the order rows
-    are visited in cannot change the flag: a row is flagged by the existence of
-    a cover, and every cover is measured against the state as it stands."""
+    The enumeration is per image and the disk is the coarse row's own
+    footprint, so the order rows are visited in cannot change the flag: a row
+    is flagged by the existence of a cover, and every cover is measured against
+    the state as it stands."""
     uv = np.ascontiguousarray(np.asarray(uv, float))
     r_px = np.asarray(r_px, float)
-    sigma = np.asarray(sigma, float)
     slot_i = np.asarray(slot_i, np.int64)
     slot_c = np.asarray(slot_c, np.int64)
-    reach = np.minimum(r_px, FOOTPRINT_FACTOR * sigma)
+    reach = footprint(r_px, refine_radius)
     flag = np.zeros(len(uv), bool)
     n_pairs = 0
     n_octave = 0
@@ -268,12 +242,13 @@ def band_census(ring, keep_obs, slot_c, keep_pt):
     return out
 
 
-def evict_covered(mx, cam, state, sigma, refine_radius, floor_px):
+def evict_covered(mx, cam, state, refine_radius, floor_px):
     """``(state, census)`` with the covered coarse observations retired.
 
-    ``sigma`` is one keypoint scale per row of ``structure.state_rows``, in
-    that order.  The state comes back with those rows pruned, with the points
-    the two-observation rule dropped removed, and adjusted once with the lens
+    Everything the rule reads is the state's own: the rows
+    ``structure.state_rows`` names, their stored affines and their cluster ids.
+    The state comes back with the covered rows pruned, with the points the
+    two-observation rule dropped removed, and adjusted once with the lens
     held."""
     rows, _slot_i, slot_c = structure.state_rows(mx, state)
     n_pts = len(np.asarray(state["clusters"]))
@@ -287,10 +262,6 @@ def evict_covered(mx, cam, state, sigma, refine_radius, floor_px):
     if not refine_radius:
         census["refused"] = "the source file states no refine radius"
         return state, census
-    sigma = np.asarray(sigma, float)
-    if len(sigma) != len(rows) or not np.isfinite(sigma).all():
-        census["refused"] = "a keypoint scale could not be read"
-        return state, census
 
     edges = rings.octave_edges(RING_RATIO_P1)
     ratio = octave_ratio(edges)
@@ -298,7 +269,7 @@ def evict_covered(mx, cam, state, sigma, refine_radius, floor_px):
     flag, pair_census = covered_by_finer(
         np.asarray(mx.obs_uv, float)[rows],
         r_px,
-        sigma,
+        refine_radius,
         np.asarray(mx.obs_i, np.int64)[rows],
         np.asarray(mx.obs_c, np.int64)[rows],
         ratio,
@@ -348,44 +319,9 @@ def evict_covered(mx, cam, state, sigma, refine_radius, floor_px):
     return state, census
 
 
-def source_scales(mx, state, source, workspace):
-    """``(sigma, refused)`` for the state's own rows, off the workspace.
-
-    The feature directory is the `.matches` file's own record of it, so the
-    scales come from the files the capture was matched on rather than from a
-    directory guessed at."""
-    if not workspace:
-        return None, "no workspace given"
-    meta = getattr(source, "metadata", None) or {}
-    prefix = ((meta.get("workspace") or {}).get("contents") or {}).get(
-        "feature_prefix_dir"
-    )
-    if not prefix:
-        return None, "the source file names no feature directory"
-    rows, _slot_i, _slot_c = structure.state_rows(mx, state)
-    try:
-        sig = keypoint_scales(
-            list(mx.names),
-            np.asarray(mx.obs_i, np.int64)[rows],
-            np.asarray(mx.obs_f, np.int64)[rows],
-            workspace,
-            prefix,
-        )
-    except Exception as exc:  # noqa: BLE001 -- an unreadable file is a refusal
-        return None, f"{type(exc).__name__}: {exc}"
-    return sig, None
-
-
-def evict_stage(mx, cam, state, source, workspace, refine_radius, floor_px, trace=None):
-    """The stage as the pipeline runs it: scales, rule, sweep, adjustment."""
-    sig, why = source_scales(mx, state, source, workspace)
-    if sig is None:
-        why = why or "the keypoint scales could not be read"
-        census = {"footprint_factor": FOOTPRINT_FACTOR, "refused": why}
-        if trace is not None:
-            trace(f"    evict: refused ({why})")
-        return state, census
-    state, census = evict_covered(mx, cam, state, sig, refine_radius, floor_px)
+def evict_stage(mx, cam, state, refine_radius, floor_px, trace=None):
+    """The stage as the pipeline runs it: rule, sweep, adjustment."""
+    state, census = evict_covered(mx, cam, state, refine_radius, floor_px)
     if trace is not None:
         if census.get("refused"):
             trace(f"    evict: refused ({census['refused']})")

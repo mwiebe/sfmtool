@@ -110,8 +110,8 @@ def options():
     )
 
 
-def run(member, source, opts=None, workspace=None):
+def run(member, source, opts=None):
     """Relax one rotation-only member.  See :func:`pipeline.run_member`."""
     from .pipeline import run_member
 
-    return run_member(member, source, opts, workspace=workspace)
+    return run_member(member, source, opts)
