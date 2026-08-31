@@ -121,6 +121,18 @@ PASS (content-identical `candidate_solves/` products).
 Gates: `derive-gates` over the fleet-chain run's 42 releases, written
 beside the study harness; the population must match the 9-stage chain.
 
+> _Status (2026-08-30): Commits landed -- d823e5a6 (per-member claim /
+> measurement / far-layer seams in exp_fast_seed.py) + 1075fac2 (`drive`
+> mode in exp_seed_rung2.py, specs/core/geometry/seed-drive.md, the pull
+> contract in seed-hypothesis-loop.md). Branch rebased onto upstream
+> ea110409 (8-point solver null-space fix) with the bindings rebuilt.
+> Parity postphase1 vs postphase2 on the two default workspaces: VERDICT
+> PASS (PARITY-postphase1-vs-postphase2.txt), certifying commit 1 neutral
+> on the default driver path and the upstream solver fix inert on these
+> captures. Gates derived: shipped/gates-chain.json (42 releases, 1064
+> members, 3 model families). Open: the specimen drive runs and their
+> human Explorer verdicts, then the 42-entry fleet A/B._
+
 Acceptance, in order (per the house validation rules):
 - Specimens one at a time with human Explorer verdicts between: the
   20250906 entry, KerryPark360, and one capture the old loop demonstrably
