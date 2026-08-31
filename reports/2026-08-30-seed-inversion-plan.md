@@ -55,6 +55,16 @@ controller (rung 2's drive loop):
   `select` / `derive-gates` / `channels` modes stay for stored releases.
 - No gates file means refusals off: the controller degenerates to
   coverage-driven pulls only, which is the safe default for a bare run.
+- EVERYTHING IS REVIEWABLE. Every candidate the run ever committed keeps
+  its `.sfmr` in the product, refused members included, so a rejected
+  candidate can be opened in the Explorer exactly like a kept one. Its
+  classification travels with it: the manifest entry carries the verdict
+  (keep / trim / refuse), the named readings it was taken on, and the
+  drive round the member arrived in; the full selection report
+  (`rung2.json`) is written into the product directory beside the
+  manifest. A trimmed member keeps BOTH artifacts, the original and the
+  trimmed core, cross-referenced. The verdicts annotate the set; they
+  never delete from it.
 
 ## Phase 1: extraction (content-neutral)
 
@@ -96,7 +106,10 @@ PASS (content-identical `candidate_solves/` products).
    surviving-claims complement did not shrink), which restores the
    termination guarantee that claim withdrawal alone would break.
 6. Product: everything ships in `sfmr/candidate_solves/`, refused members
-   included; the verdicts and the coverage report ride in the manifest.
+   included; the verdicts, per-member rounds and the coverage report ride
+   in the manifest, `rung2.json` lands beside it, and trimmed members keep
+   original and core as sibling files (see EVERYTHING IS REVIEWABLE
+   above).
 
 Gates: `derive-gates` over the fleet-chain run's 42 releases, written
 beside the study harness; the population must match the 9-stage chain.
