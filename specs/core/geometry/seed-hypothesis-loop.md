@@ -93,9 +93,37 @@ budget. The budget is a resource bound, not a judgment: the generator
 has no opinion about which candidates are worth keeping, and the cap
 only bounds what a pathological capture can cost.
 
-Termination is structural: a committed candidate claims at least the
-clusters whose members it retained, so the complement strictly shrinks
-with every committed pass.
+Termination is structural while the claim map only accumulates: a
+committed candidate claims at least the clusters whose members it
+retained, so the complement strictly shrinks with every committed pass.
+
+### Pull contract
+
+Candidate production is a SOURCE, and the loop above is what a consumer
+that pulls from it without judging sees. The source yields one PASS at
+a time: that pass's committed candidates, in commit order. The
+accumulated set, the accumulated claims and the pass index are the
+source's own state, which a consumer reads between pulls. The coverage
+complement is formed at the HEAD of a pull rather than at the tail of
+the pass that stamped the claims it stands on, so a consumer that stops
+pulling never pays for an admission it does not explore.
+
+Each committed candidate's claim stands on its own: the per-image grid
+map is derivable from that candidate's retained clusters alone, and the
+working claim map is the union of a chosen set of such maps. The
+cluster test ORs over every grid an image carries, so the map answers
+the same question whichever order the members' claims entered it. A
+consumer therefore withdraws a member's claim by leaving that member
+out of the union it hands back, and a member whose frames were cut
+restates its claim by re-counting its retained clusters on the frames
+the cut left: a cluster the surviving frames no longer see twice is no
+longer an explained point, and stops claiming.
+
+The budget is a parameter of the source with the semantics above. A
+consumer that passes no budget gets an uncapped source and owns the
+stop, including the termination guarantee claim withdrawal costs; the
+driving consumer and its stopping rules are
+[seed-drive.md](seed-drive.md).
 
 ## Group-local re-admission
 

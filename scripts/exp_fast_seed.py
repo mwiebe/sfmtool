@@ -4400,7 +4400,7 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
     finish_evaluation(rung, hyps, by_idx, peers, f_vote, t0)
 
 
-def write_candidate_solves(rung, win, f_vote, n_votes):
+def write_candidate_solves(rung, win, f_vote, n_votes, extra=None):
     """Swap the rung's product into place at ``sfmr/candidate_solves/``.
 
     THE DIRECTORY IS THE PRODUCT: a manifest naming every committed hypothesis
@@ -4412,7 +4412,10 @@ def write_candidate_solves(rung, win, f_vote, n_votes):
     they were committed, the manifest joins them there, and only then is the
     destination removed and the staging directory renamed onto it.  A reader
     therefore sees the previous product, or nothing, or this one -- never a
-    partial set, and never a manifest naming a release that is not there."""
+    partial set, and never a manifest naming a release that is not there.
+
+    ``extra`` are manifest fields a driver adds about how the set was
+    produced.  The default driver adds none."""
     manifest = {
         "stamp": rung.stamp,
         "top_n": rung.n,
@@ -4436,6 +4439,7 @@ def write_candidate_solves(rung, win, f_vote, n_votes):
         "ladder_first": int(win),
         "elapsed_s": round(elapsed(), 3),
     }
+    manifest.update(extra or {})
     (rung.stage / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )

@@ -12,6 +12,7 @@ Pose estimation, epipolar geometry, and optimization. Implemented in
 | [cluster-pinhole-bootstrap.md](cluster-pinhole-bootstrap.md) | Bootstrapping a coarse reconstruction from cluster patches alone, with no prior intrinsics and no two-view geometry. |
 | [seed-hypothesis-loop.md](seed-hypothesis-loop.md) | Developing and committing the whole set of seed candidates a capture's cluster evidence supports; the set is the product. |
 | [seed-candidate-evaluation.md](seed-candidate-evaluation.md) | The gauge-free battery every committed seed candidate is measured by before release. |
+| [seed-drive.md](seed-drive.md) | Judging the candidate set while it is still being produced: pull, complete, judge, and form the next complement from the survivors' claims. |
 | [seed-relaxation.md](seed-relaxation.md) | Relaxing a rotation-only member into finite geometry: baselines from its refused rows, fill-in from its source clusters, a lens read on the result. |
 | [rotation-locked-resection.md](rotation-locked-resection.md) | Translation-only resection with the rotation held fixed. |
 | [epipolar-estimation.md](epipolar-estimation.md) | Fundamental matrix from 2D-2D correspondences: 7-point with RANSAC, and Bougnoux focal recovery. |
