@@ -1,236 +1,184 @@
 # Seed Hypothesis Loop
 
-The seed stage develops structure hypotheses while the ones it commits
-stay trustworthy and their coverage claims leave real evidence
-unexplained, then ships the one best supported by capture-level
-measurements. A hypothesis is one full seed exploration — probe, widen,
-photometric verify, focal scan, release — over an admitted cluster
-selection. The first hypothesis admits the whole selection; each later
-hypothesis admits the coverage complement of everything the committed
-hypotheses before it claimed. A capture that one hypothesis explains
-produces exactly the single-hypothesis result; a capture whose cluster
-evidence describes more than one rigid world produces one committed
-hypothesis per world, and the arbitration picks the one the
-capture-level measurements support.
+The seed stage develops and commits a SET of candidate reconstructions.
+A candidate is one full seed exploration (probe, widen, photometric
+verify, focal scan, release) over an admitted cluster selection. The
+first pass admits the whole selection; each later pass admits the
+coverage complement of everything the candidates before it claimed.
+Every distinct finalist of every pass commits, and the loop chooses
+between none of them: the product is the set.
+
+## Coarse admission
+
+The loader admits the N coarsest clusters of the file's selection, N
+being the cluster budget (`SFMTOOL_SEED_RUNG1`, default 3000; an
+explicit `0` keeps every cluster). A cluster's coarseness is its widest
+member's patch half-extent in image pixels, read off the stored member
+affines with no `.sift` access: half the file's refine radius times the
+mean of the member affine's two column norms. Any member over the bar
+qualifies the cluster.
+
+The bar is stated as a POPULATION, not a threshold: rank by radius
+descending with cluster id ascending among ties, keep the first N. A
+threshold lets the kept population span orders of magnitude across a
+fleet, so runs at one bar are not one working set. When N is at least
+the cluster count the cut is a no-op and the handle stays exactly as
+loaded.
+
+Coarse features are the alias-free evidence. On a repeating scene
+texture (a tiled floor, a brick wall, a railing) fine features match
+self-consistently at false lattice offsets, and the aliased basin is
+internally clean and can outnumber the true one. A feature wider than
+the repeat period cannot alias that way, so the coarse admission is the
+admission on which basin structure is legible.
 
 ## Capture-level measurements
 
-The pairwise focal vote — and, where escalation confirms one, the
-camera-model verdict — is computed once, over the full admitted
-selection's pair graph, before any hypothesis runs. Every hypothesis
-reads the same vote. The vote is a property of the capture, not of a
-hypothesis: it is the independent referee the arbitration measures each
-hypothesis's release against, so no hypothesis re-derives it from its
-own (restricted) pair graph.
+The pairwise focal vote, and where escalation confirms one the
+camera-model verdict, is computed once over the FULL admission's pair
+graph (the population as it stood before the coarse cut), before any
+pass runs. Every candidate reads the same vote. The vote is a property
+of the capture, not of a candidate: it is the independent referee each
+release is measured against, so no pass re-derives it from its own
+restricted pair graph.
 
 ## Coverage claim
 
-A committed hypothesis claims the image area its retained structure
+A committed candidate claims the image area its retained structure
 samples, at the resolution the evidence itself samples it.
 
 The retained structure is every cluster with a finite triangulated
 position in the released geometry's full triangulation. The claim is
 TRANSITIVE over cluster membership: a retained cluster is an explained
-3D point, so its members stamp in **every** image they appear in —
-posed or not. A hypothesis that poses a handful of a long capture's
-frames still claims its structure's footprint capture-wide.
+3D point, so its members stamp in **every** image they appear in, posed
+or not. A candidate that poses a handful of a long capture's frames
+still claims its structure's footprint capture-wide.
 
 The claim is an occupancy grid per image, not a pixel bitmap. Each
 image's cell size is the median nearest-neighbour distance among the
-retained members' keypoints in that image — coverage measured at the
+retained members' keypoints in that image: coverage measured at the
 spacing the matcher actually sampled the scene, fine on dense texture
 and coarse on sparse, with the pixel scale of the capture divided out.
 A cell holding at least one retained member's keypoint is claimed.
 Images with fewer than two retained members claim nothing (no spacing
-exists to measure). Claims accumulate across committed hypotheses as a
-per-image union of claimed cells (each hypothesis stamps into its own
+exists to measure). Claims accumulate across committed candidates as a
+per-image union of claimed cells (each candidate stamps into its own
 grid geometry; a later test evaluates against every accumulated grid).
 
 ## Complement admission
 
-The next hypothesis admits the source selection minus the claimed
-clusters. A cluster is claimed when more than half of its members fall
-in claimed cells of their images. The complement is expressed as a
-cluster-id restriction of the stage's selection handle
-(`select_clusters` with `restrict_cluster_ids` — see
-[cluster-selection.md](../../formats/cluster-selection.md)), so a complement is
-itself an ordinary derived selection: it carries provenance, and the
-downstream stages — the seed's restriction stage, the finalization —
-read it exactly like the unrestricted one. No stage applies a claim
-predicate of its own; the selection file is the admission.
-
-## Materiality
-
-A complement is explored only when the claim actually bit: when it
-retains less than half of the clusters the previous pass admitted. A
-complement that is most of the admission again means the committed
-hypothesis's structure barely overlaps the evidence pool — on a
-single-world capture that is the signature of an under-posed seed, and
-exploring it enumerates independently-seedable frame windows of the
-same world rather than finding another one.
-
-The one exception is rescue: when the hypothesis just committed does
-NOT qualify (the arbitration's gates below), its complement is explored
-regardless of materiality — an untrusted hypothesis's claim is not
-evidence about the rest of the capture, and the capture still gets its
-look at the other world. The exception is spent once per capture: one
-rescue exploration, not a chain of them — a run of untrusted
-hypotheses says the capture seeds poorly everywhere, and enumerating
-its windows is not development.
+The next pass admits the source selection minus the claimed clusters. A
+cluster is claimed when more than half of its members fall in claimed
+cells of their images. The complement is expressed as a cluster-id
+restriction of the stage's selection handle (`select_clusters` with
+`restrict_cluster_ids`, see
+[cluster-selection.md](../../formats/cluster-selection.md)), so a
+complement is itself an ordinary derived selection: it carries
+provenance, and every stage downstream reads it exactly like the
+unrestricted one. No stage applies a claim predicate of its own; the
+selection file is the admission.
 
 ## Loop
 
 The first pass explores the full admission. The loop then derives the
-committed hypothesis's claim, forms the complement selection, and —
-when the complement is material or the rescue exception holds —
-reruns the exploration on it. A pass that commits no seed — no seed
-group, or a release that poses no image — ends the loop, as does an
-immaterial complement under a qualified hypothesis, an empty
-complement, or a claim that claimed nothing. Termination is
-structural: a committed hypothesis claims at least the clusters whose
-members it retained, so the complement strictly shrinks with every
-committed pass.
+claims of every candidate that pass committed, forms the complement
+selection, and explores it. The claim ORDERS the complement queue and
+never gates it: it decides where the next admission starts, not whether
+there is one, so no candidate's footprint can veto a group.
 
-## Arbitration
+The loop ends when the complement is not a new admission (it is empty,
+or nothing was claimed at all), when a pass produces no reconstruction
+(no seed group, or every release posed no image), or at the candidate
+budget. The budget is a resource bound, not a judgment: the generator
+has no opinion about which candidates are worth keeping, and the cap
+only bounds what a pathological capture can cost.
 
-Each committed hypothesis records its released focal, released inlier
-fraction, coverage reach, scan spread, confidence flags, and the
-log-focal distance between its release and the bias-corrected
-capture-level vote. A hypothesis qualifies when the existing
-structure-trust gates all hold: the commit bar (posed count, reach,
-scan spread), the release inside the corrected vote band, and no
-flat-scan or edge-scan verdict. Coverage reach is measured on the
-CAPTURE-LEVEL covisibility graph — the full admission's — for every
-hypothesis alike: reach asks how much of the capture a solve connects
-to, and a complement's smaller admission must not deflate the answer
-for a solve that genuinely spans it.
+Termination is structural: a committed candidate claims at least the
+clusters whose members it retained, so the complement strictly shrinks
+with every committed pass.
 
-Two hypotheses are DISTINCT when they share at least two posed images
-and disagree about the geometry there: over the image pairs posed in
-both, the median difference between the two hypotheses' relative
-rotations exceeds 5° — above the seed stage's own pose-noise scale.
-Hypotheses with disjoint posed sets, or shared frames in agreement,
-are provisionally the same world seeded from different windows.
-Combination's cross-resection certificates (below) are a second source
-of the same verdict, for the world-split the shared-frame test cannot
-see: a pair whose linking frames systematically resect into one
-structure but not the other is two FRAME-DISJOINT worlds, whatever
-their posed sets said — the reclassification stops the weld and feeds
-the flag, but never re-runs the arbitration (the incumbent already won
-among the qualified). Neither test sees a CONTENT-SPLIT pair — two
-structure populations visible from the same viewpoints, sky against
-ground — because a frame of such a capture genuinely resects into both
-worlds; there the shared-frame rotation disagreement is the only
-detector, and a certificate that passes both ways is not evidence of
-one world.
+## Group-local re-admission
 
-The shipping rule:
+Each attempt re-admits clusters for its own image set: the seed groups'
+frames plus everything covisible with them in the attempt's own graph.
+A group of five frames on its own would rank coarseness off five
+viewpoints and leave the widen ladder nothing beyond them; its covisible
+neighbourhood is the part of the capture the seed can grow into.
 
-- The earliest qualified hypothesis is the incumbent. A qualified
-  challenger displaces it only when the two are DISTINCT and the
-  challenger ranks higher (released inlier fraction, coverage reach as
-  tiebreak). A non-distinct challenger never displaces a qualified
-  incumbent, whatever its numbers — inlier fractions measured on
-  different admissions of the same world reward the smaller solve.
-- When no hypothesis qualifies, the first hypothesis ships with its
-  confidence flags — the single-hypothesis behavior, unchanged.
-- When only a later hypothesis qualifies, it ships (rescue).
+Over that image set the `n_local` coarsest clusters are kept, with
+coarseness measured ON THOSE IMAGES (a cluster's widest member there,
+which is the question the window's own solve depends on), eligibility
+the loader's span bar counted on the same images, and the same stable
+ordering the capture-wide cut uses. The selection is derived from the
+PRE-cut handle, so a group can reach clusters the capture-wide cut
+dropped. Admitted clusters keep their FULL member lists, so a frame
+outside the neighbourhood still contributes wherever it sees one: the
+neighbourhood bounds what the ranking is measured on, not what the solve
+may reach. `n_local` is the capture budget unless
+`SFMTOOL_SEED_LOCAL_ADMISSION` overrides it. An image set that carries
+nothing eligible leaves the attempt on its own working set.
 
-`confidence_flags` gains `multiple_hypotheses` only when two or more
-hypotheses qualify AND at least one qualified pair is distinct — the
-capture's cluster evidence supports more than one rigid world, and the
-unchosen one is real structure, not noise.
+## Ladder dedup
 
-## Combination
+A pass runs its exploration over successively thinned working sets and
+ends with several finalists. They are ranked by score (scan spread,
+floored to zero below the observability bar, then coverage: posed count
+times capture reach, saturated at 60%) and de-duplicated: a finalist
+whose relative rotations agree with an already-kept one within the
+pose-noise scale (median relative-rotation disagreement at or below 5°
+over the frames they both pose) collapses into it, and the better-scored
+copy stands for both. Finalists with disjoint posed sets, or fewer than
+two shared frames, never collapse.
 
-Losing hypotheses are working capital, not waste. Their point clouds
-are never merged across gauges: same-world hypotheses agree about
-rotations and disagree only about the depth their narrow windows never
-observed, so shared structure carries too little triangulation angle to
-fix a similarity transform and a cross-gauge alignment imports exactly
-that unobserved freedom. Their FRAMES, though, are certified-seedable
-viewpoints of the winner's own world.
+That is dedup, not judgment: it removes one answer found twice and never
+chooses between two different ones. Everything surviving it commits.
 
-After arbitration, the winner grows by resection over one pool of
-certified frames — the other committed non-distinct hypotheses' posed
-frames, plus BRIDGES. A bridge is a frame posed by neither hypothesis
-that is covisible with both retained cluster sets (found by membership
-counting over the full admission, no solving), at the growth ladder's
-own pool floor on each side: a frame that cannot clear the floor
-toward a structure cannot resect there, so counting membership is the
-whole pre-filter and no candidate costs a solve until it has cleared
-it twice. It earns its place in the pool by resecting into BOTH
-structures, with asymmetric roles. The DONOR-side resection is a
-CERTIFICATE only — it proves the frame genuinely views the donor's
-world, and its donor-gauge pose orders the walk (donor frames nearest
-an accepted bridge first) — and is then discarded; the donor's
-depths never contribute a measurement. That certificate is what admits
-the frame to the pool. The winner-side resection is the load-bearing
-one and the WALK makes it, against the structure the walk currently
-has and through the same gate and verification as every rung: a
-candidate the released structure cannot reach yet is exactly what a
-rung of growth is for, so a winner-side resection taken against the
-release admits nothing and refuses nothing. Donor-posed frames carry
-their certificate already: the donor posed them.
+## Rank
 
-The walk is one growth loop over the pool: each rung takes the best
-candidate that clears the ladder's observation floor against the
-CURRENT structure, and between rungs the structure grows — clusters
-that gain a second winner-gauge view triangulate in, which is what
-lets a bridge open a window whose frames saw none of the winner's
-original structure. Frames covisible with neither hypothesis are not
-in the pool: welding committed hypotheses is this stage's job,
-growing the capture is the completion's. When the frames that count
-well toward both structures systematically fail one side's
-certificate, the pair is reclassified DISTINCT (see the arbitration)
-and the weld aborts, withdrawing that donor's frames.
+Each committed candidate records its released focal, released inlier
+fraction, capture-level coverage reach, scan spread, confidence flags,
+and the log-focal distance between its release and the bias-corrected
+capture-level vote. A candidate QUALIFIES when the structure-trust gates
+all hold: the commit bar (posed count, reach, scan spread), the release
+inside the corrected vote band, and no flat-scan, edge-scan or
+near-static-seed verdict. Coverage reach is measured on the
+CAPTURE-LEVEL covisibility graph, the full admission's, for every
+candidate alike: reach asks how much of the capture a solve connects to,
+and a complement's smaller admission must not deflate the answer for a
+solve that genuinely spans it.
 
-The population that verdict reads is every frame clearing the floor
-toward both structures — the bridge candidates and the donor's own
-frames alike, since a donor frame holds its donor-side certificate
-already and only its winner side is open. A frame certifying into one
-structure and not the other is a DISCORDANT trial. SYSTEMATIC means
-TOTAL: one side certifies NOTHING while the other certifies, over
-enough discordants for the one-sidedness itself to beat chance. A
-rate DIFFERENCE cannot carry the verdict, because the two sides are
-not exchangeable trials — a complement hypothesis's thin structure
-certifies a candidate more readily than the full admission's rich one,
-so same-world pairs produce lopsided rates of their own.
-
-Every acceptance runs the gate scaled by the winner's own consensus
-(the widen ladder's rule) with per-rung verification; the grown state
-is retriangulated and bundle-adjusted at the winner's released focal,
-with the release basin guard unchanged. The combination must leave the
-winner no worse on the gates: the additions are reverted whole
-(keep-best) when a gate that held before stops holding, or when the
-combined release raises a confidence flag the winner did not carry — a
-collapse that keeps the focal inside its basin registers on the
-consensus flag and nowhere else. Frames of DISTINCT hypotheses are
-never resected into the winner: they belong to another world.
+The rank is the recorded order of the set: the first qualified candidate
+first, commit order otherwise. It is ADVISORY and decides nothing.
+Ranking, refusal and trimming belong to the selection pass that reads
+the stored evaluation evidence, see
+[seed-candidate-evaluation.md](seed-candidate-evaluation.md).
 
 ## Product
 
-The winning hypothesis — after combination — finalizes through the
-restriction stage against its own selection handle, with the
-restriction covering the combined posed set, and writes
-`sfmr/seed-final.sfmr`; losing hypotheses are not finalized.
+`sfmr/candidate_solves/` is the product: one `h<NN>.sfmr` per committed
+member and a `manifest.json` naming them, self-contained, with no other
+file to read and no stamp in any path. Members are the finite
+candidates, the rotation-only far-field layers, and the relaxed siblings
+those layers commit (see
+[seed-relaxation.md](seed-relaxation.md)), in commit order.
 
-Every committed hypothesis's released estimate — winner included — is
-written as a release-grade reconstruction (poses and points, no
-bitmaps) under `sfmr/seed-hypotheses/<stamp>-h<k>.sfmr`, so the
-developed alternatives stay inspectable after every run. A new run
-under a new stamp accumulates alongside old ones, like the round
-snapshots. The artifacts are written under the capture's own camera
-model: a fisheye capture's hypotheses densify and reproject through
-the equidistant context, never the pinhole default.
+A member's release is release-grade: poses and points, no consensus
+bitmaps and no patch frames. The artifacts are written under the
+capture's own camera model, so a fisheye capture's members densify and
+reproject through the equidistant context, never the pinhole default,
+and a member carrying a released lens stamps that lens.
 
-Every committed rotation-only hypothesis also commits a relaxed sibling,
-a finite member built from the observations its rotation model refused
-(see [seed-relaxation.md](seed-relaxation.md)); the rotation-only entry
-and its release file are unchanged by it.
+The manifest carries the run's stamp, the coarse admission's population
+figures, the vote block with the admission the referee measured on, the
+advisory rank's first entry, and one entry per member: its model, its
+camera and focals, its metrics and flags, the admission its solve ran
+on, the frames it was seeded from and the frames it posed, and the
+evaluation block the battery attached (see
+[seed-candidate-evaluation.md](seed-candidate-evaluation.md)).
 
-`tool_options` gains hypothesis records only when more than one
-hypothesis committed, so a single-hypothesis capture's metadata is
-byte-identical to a run without the loop: `hypothesis_count`, the
-winner's index, and per-hypothesis released focal, inlier fraction,
-posed count, and flags.
+The directory is replaced whole. Releases are written into a staging
+sibling as they are committed, the manifest joins them there, and only
+then is the destination removed and the staging directory renamed onto
+it. A reader therefore sees the previous product, or nothing, or this
+one, and never a partial set or a manifest naming a release that is not
+there.
