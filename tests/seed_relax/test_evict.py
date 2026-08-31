@@ -258,14 +258,22 @@ def test_two_passes_produce_the_same_flag():
     assert a.tobytes() == b.tobytes()
 
 
-def test_the_pair_batch_size_cannot_change_the_flag(monkeypatch):
-    want, census, _cl = _flag()
-    for chunk in (1, 2, 3, 7):
-        monkeypatch.setattr(pairs, "PAIR_CHUNK", chunk)
-        uv, r, i, c = _rows()
-        got, got_census = evict.covered_by_finer(uv, r, REFINE_RADIUS, i, c, 2.0)
-        assert got.tobytes() == want.tobytes()
-        assert got_census == census
+def test_the_enumeration_hands_back_only_pairs_inside_the_asking_disk():
+    """The kernel filters the run by true Euclidean distance, so the stage's
+    own ``d <= reach[big]`` restates the containment rather than narrowing it.
+    Batching is the kernel's own and its invariance is stated there
+    (`sfmtool_core::spatial::keypoint_reach`)."""
+    uv, r, i, _c = _rows()
+    reach = evict.footprint(r, REFINE_RADIUS)
+    seen = 0
+    for _img, sel in pairs.image_slices(i):
+        rch = reach[sel]
+        for big, small, d in pairs.image_candidates(uv[sel, 0], uv[sel, 1], rch):
+            assert (d <= rch[big]).all()
+            # Every row holds its own centre, once.
+            assert int((big == small).sum()) == len(sel)
+            seen += len(big)
+    assert seen
 
 
 def test_the_order_the_rows_arrive_in_cannot_change_the_flag():
