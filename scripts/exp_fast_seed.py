@@ -4697,7 +4697,62 @@ def explore(hyp, args):
     return out
 
 
-def main():
+@dataclasses.dataclass
+class CaptureContext:
+    """What one capture IS, read once, before any hypothesis exists.
+
+    The cluster admission, the pairwise focal vote and the capture-level
+    covisibility graph are properties of the capture rather than of a pass:
+    every hypothesis reads them and none re-derives them.  Holding them in one
+    value is what lets candidate production be a resumable source -- a driver
+    builds the context, pulls passes for as long as it wants more candidates,
+    and reads the same fields the tail phases read.
+
+    The moving fields (``data``, ``handle``, the observation arrays, ``n_cl``,
+    ``npass``, ``hyps``, ``claims``) are the exploration's own state, rebound by
+    ``candidate_source`` as it forms each coverage complement.  ``data_full``
+    never moves: the far-field layers and the evaluation battery are readings of
+    the WHOLE capture, not of whatever the last complement left."""
+
+    #: The full admission the loader returned, held past every complement.
+    data_full: dict
+    #: The admission the next pass explores; each complement rebinds it.
+    data: dict
+    #: The pipeline carrier the loader built.
+    rung: object
+    #: The selection handle every complement admission is derived from.
+    handle: object
+    #: The current admission's observation arrays (cluster, image, uv).
+    obs_c: object
+    obs_i: object
+    u: object
+    n_img: int
+    n_cl: int
+    #: Core images per scan try.
+    cap: int
+    #: The focal stage 1 probes at, with the scan grid around it.
+    f_probe: float
+    #: The referee's focal, ``None`` when the pair graph was too sparse.
+    f_vote: object
+    f_grid: object
+    #: The vote as ``(focal, n_votes)``, or ``None``.
+    vote: object
+    #: THE CANDIDATE SET: every distinct finalist of every pass, in commit
+    #: order.  The source appends to it; a driver reads it.
+    hyps: list = dataclasses.field(default_factory=list)
+    #: The accumulated coverage claims, keyed by image.
+    claims: dict = dataclasses.field(default_factory=dict)
+    #: Passes explored so far.
+    npass: int = 0
+
+
+def capture_context():
+    """Everything read ONCE per capture, before the first hypothesis: the
+    cluster admission, the pairwise focal vote with its fisheye routing, and
+    the capture-level covisibility graph.
+
+    Sets the module-level camera dimensions and per-observation admission rank,
+    which every stage below reads."""
     global _CAM_WH, _RANK_O
     data, rung = load_clusters()
     # The FULL admission, held past the loop's complement rebinds: the
@@ -4784,30 +4839,96 @@ def main():
         )
     cap = min(n_img, SCAN_CAP)
 
-    # The hypothesis loop.  Explore the admission; every distinct finalist of
-    # the pass commits, and the committed candidates' coverage claims order the
-    # complement admission the next pass explores
-    # (`specs/core/geometry/seed-hypothesis-loop.md`).  The capture-level vote
-    # above is measured ONCE over the full admission's pair graph and read by
-    # every hypothesis -- it is the independent referee each release is measured
-    # against, so no hypothesis re-derives it from its own restricted pair
-    # graph.
-    # THE CANDIDATE SET: every distinct finalist of every pass, in commit order.
-    hyps = []
-    npass = 0
-    claims = {}
-    handle = _SEL_MATCHES
-    # ONE generator: each PASS explores one admitted selection and commits
-    # every distinct finalist its ladder produced.
-    label = "pass"
     # The capture-level covisibility graph, built ONCE from the full admission
     # (as the vote above is measured once over the full pair graph), so every
     # hypothesis's coverage reach is measured against the same capture.
     capture_covisibility(obs_c, obs_i, n_img, n_cl)
+
+    return CaptureContext(
+        data_full=data_full,
+        data=data,
+        rung=rung,
+        # The cluster SELECTION the exploration solves on; every complement
+        # admission is derived from it.
+        handle=_SEL_MATCHES,
+        obs_c=obs_c,
+        obs_i=obs_i,
+        u=u,
+        n_img=n_img,
+        n_cl=n_cl,
+        cap=cap,
+        f_probe=f_probe,
+        f_vote=f_vote,
+        f_grid=f_grid,
+        vote=vote,
+    )
+
+
+def candidate_source(ctx, budget=None):
+    """Candidate production as a resumable generator: ONE PASS per pull.
+
+    Each pull explores one admitted selection; every distinct finalist of that
+    pass commits, and the committed candidates' coverage claims order the
+    complement admission the next pass explores
+    (`specs/core/geometry/seed-hypothesis-loop.md`).  The capture-level vote is
+    measured once over the full admission's pair graph and read by every
+    hypothesis -- it is the independent referee each release is measured
+    against, so no hypothesis re-derives it from its own restricted pair graph.
+
+    What a pull yields is the pass's committed members, in commit order; the
+    same dicts accumulate in ``ctx.hyps``, which is the set.  The coverage
+    complement is formed at the HEAD of the next pull rather than at the tail of
+    this one, so a driver that stops pulling never pays for an admission it will
+    not explore, while a driver that drains the source sees the order it always
+    had: explore, commit, claims, complement, explore.
+
+    ``budget`` caps the accumulated set -- the source stops at the top of a pass
+    once ``ctx.hyps`` holds that many candidates, and a pass that crosses the cap
+    mid-batch releases no further member (the uncommitted remainder is recorded
+    ``budget_overflow``).  ``None`` is an UNCAPPED source: the consumer decides
+    when it has enough.
+
+    The source ends when the complement is not a new admission, when a pass
+    produces no reconstruction, or at the budget."""
+    global _RANK_O
+    hyps, claims = ctx.hyps, ctx.claims
+    data, handle = ctx.data, ctx.handle
+    obs_c, obs_i, u = ctx.obs_c, ctx.obs_i, ctx.u
+    n_img, n_cl, cap = ctx.n_img, ctx.n_cl, ctx.cap
+    f_probe, f_vote, f_grid = ctx.f_probe, ctx.f_vote, ctx.f_grid
+    rung = ctx.rung
+    npass = ctx.npass
+    # ONE generator: each PASS explores one admitted selection and commits
+    # every distinct finalist its ladder produced.
+    label = "pass"
     while True:
-        if len(hyps) >= CANDIDATE_BUDGET:
+        if npass:
+            # THE COMPLEMENT of everything claimed so far, formed here rather
+            # than at the tail of the pass that stamped those claims: it is the
+            # next pass's admission, and nothing but a pull needs it.
+            survivors, n_claimed = unclaimed_clusters(data, claims)
+            n_cl = data["n_cl"]
             print(
-                f"\ncandidate budget reached ({CANDIDATE_BUDGET} finite "
+                f"coverage complement: {n_claimed}/{len(data['obs_c'])} members in "
+                f"claimed cells; clusters {n_cl} -> {len(survivors)} "
+                f"({100 * len(survivors) / max(n_cl, 1):.1f}% retained) "
+                f"[{elapsed():.1f}s]"
+            )
+            if not len(survivors) or len(survivors) == n_cl:
+                # Nothing left, or nothing claimed at all — either way the
+                # complement is not a new admission and the generator is done.
+                print("the complement is not a new admission; the generator stops")
+                break
+            handle, data = complement_selection(handle, survivors)
+            obs_c, obs_i, u = data["obs_c"], data["obs_i"], data["obs_uv"]
+            n_cl = data["n_cl"]
+            _RANK_O = data["adm_rank"][obs_c]
+            ctx.handle, ctx.data = handle, data
+            ctx.obs_c, ctx.obs_i, ctx.u = obs_c, obs_i, u
+            ctx.n_cl = n_cl
+        if budget is not None and len(hyps) >= budget:
+            print(
+                f"\ncandidate budget reached ({budget} finite "
                 f"candidates); the generator stops [{elapsed():.1f}s]"
             )
             break
@@ -4836,9 +4957,10 @@ def main():
         # EVERY candidate this pass generated commits.  The ladder's rank rides
         # along as metadata and decides nothing; what used to be a winner and a
         # runner-up is just the first two entries of a list.
+        n0 = len(hyps)
         first = None
         for n_got, res in enumerate(got):
-            if len(hyps) >= CANDIDATE_BUDGET:
+            if budget is not None and len(hyps) >= budget:
                 print(
                     f"candidate budget reached; {len(got) - len(hyps)} further "
                     f"candidates from this pass are not released"
@@ -4930,24 +5052,23 @@ def main():
             if res.get("claim_pts") is not None:
                 claim_coverage(res, data, claims)
             res.pop("claim_pts", None)
-        survivors, n_claimed = unclaimed_clusters(data, claims)
-        n_cl = data["n_cl"]
-        print(
-            f"coverage complement: {n_claimed}/{len(data['obs_c'])} members in "
-            f"claimed cells; clusters {n_cl} -> {len(survivors)} "
-            f"({100 * len(survivors) / max(n_cl, 1):.1f}% retained) "
-            f"[{elapsed():.1f}s]"
-        )
-        if not len(survivors) or len(survivors) == n_cl:
-            # Nothing left, or nothing claimed at all — either way the
-            # complement is not a new admission and the generator is done.
-            print("the complement is not a new admission; the generator stops")
-            break
-        handle, data = complement_selection(handle, survivors)
-        obs_c, obs_i, u = data["obs_c"], data["obs_i"], data["obs_uv"]
-        n_cl = data["n_cl"]
-        _RANK_O = data["adm_rank"][obs_c]
+        ctx.npass = npass
+        # The pass, as the consumer sees it: what committed, in commit order.
+        yield hyps[n0:]
 
+
+def main():
+    """The default driver: build the capture context, drain the candidate source
+    under the standing budget, then run the tail phases over the accumulated set
+    -- the far-field layers, the relaxation rung, the rank, the evaluation
+    battery and the product write."""
+    ctx = capture_context()
+    for _batch in candidate_source(ctx, CANDIDATE_BUDGET):
+        # This driver judges nothing between pulls: it takes every pass the
+        # source will give it, exactly as the single loop did.
+        pass
+    data_full, rung, hyps = ctx.data_full, ctx.rung, ctx.hyps
+    f_probe, f_vote, vote = ctx.f_probe, ctx.f_vote, ctx.vote
     # THE FAR-FIELD LAYERS.  The exploration above is finite by construction:
     # every pass triangulates, so whatever a set of images holds beyond the
     # reach of its own baseline is either dropped or stamped at a fictitious
