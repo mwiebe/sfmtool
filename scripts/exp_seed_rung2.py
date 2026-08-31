@@ -110,6 +110,21 @@ A "release directory" is a workspace's `sfmr/candidate_solves/`: a
 `.sfmr` per committed member.  `select` writes `<release-dir>/rung2/` (or
 `--out`) holding `rung2.json` and any trimmed members; it never modifies the
 release.
+
+DRIVE a run instead of reading one, judging between passes rather than after
+the door has closed (`specs/core/geometry/seed-drive.md`)::
+
+    pixi run -e dev python scripts/exp_seed_rung2.py drive \\
+        [--gates gates.json] [--budget N] <workspace>
+
+The drive loop pulls one exploration pass at a time from rung 1's candidate
+source, completes and measures the members that pass produced, judges the
+accumulated set with the same machinery `select` uses, and forms the next
+pass's coverage complement from the SURVIVING members' claims alone.  It
+writes the ordinary product -- every member the run committed, refused ones
+included -- with each entry's verdict, its named readings and the round it
+arrived in, plus `rung2.json` beside the manifest.  Without `--gates`,
+refusals are off and the pulls are ordered by coverage alone.
 """
 
 from __future__ import annotations
@@ -118,6 +133,7 @@ import argparse
 import datetime as _dt
 import json
 import math
+import shutil
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -2522,7 +2538,7 @@ def take_trim(cut, ctx, hyp, row):
 
 
 def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
-    """Rank, refuse and trim one committed candidate set."""
+    """Rank, refuse and trim one committed candidate set, off its release."""
     release_dir = Path(release_dir)
     man, hyps = load_release(release_dir)
     out_dir = Path(out_dir) if out_dir else release_dir / "rung2"
@@ -2530,6 +2546,42 @@ def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
     # against.  Both are the release's own.
     arrays = member_arrays_of(release_dir)
     f_vote = _num((man.get("vote") or {}).get("f"))
+    return judge_set(
+        hyps,
+        gates,
+        arrays,
+        f_vote,
+        release_dir,
+        out_dir,
+        capture_frames=capture_frames,
+        entry=entry_name(release_dir),
+        source_stamp=man.get("stamp"),
+        write=write,
+    )
+
+
+def judge_set(
+    hyps,
+    gates,
+    arrays,
+    f_vote,
+    release_dir,
+    out_dir,
+    capture_frames=None,
+    entry=None,
+    source_stamp=None,
+    write=True,
+):
+    """Rank, refuse and trim a committed candidate set.
+
+    ``hyps`` are the manifest entries, each carrying its ``evaluation`` block;
+    ``arrays`` are the members' own finished arrays by index, which is what a
+    trimmed core is stated from; ``release_dir`` holds the members' ``.sfmr``
+    files and ``out_dir`` receives the trimmed cores and the report.  A driver
+    that has not written its manifest yet passes the set it is holding and the
+    directory the releases are accumulating in."""
+    release_dir = Path(release_dir)
+    out_dir = Path(out_dir)
 
     rows, by_idx = [], {}
     for hyp in hyps:
@@ -2756,8 +2808,8 @@ def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
         "schema": "seed-rung2/1",
         "generated": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "release_dir": str(release_dir),
-        "entry": entry_name(release_dir),
-        "source_stamp": man.get("stamp"),
+        "entry": entry if entry is not None else entry_name(release_dir),
+        "source_stamp": source_stamp,
         "gates": gates,
         "capture": {
             "families": families,
@@ -2797,6 +2849,361 @@ def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
             json.dumps(out, indent=2) + "\n", encoding="utf-8"
         )
     return out
+
+
+# ── The drive loop ──────────────────────────────────────────────────────────
+#
+# Rung 1's candidate production is a SOURCE: a generator yielding one
+# exploration pass at a time, with the coverage complement formed at the head of
+# the next pull out of whatever claims stand then
+# (`specs/core/geometry/seed-hypothesis-loop.md`).  The drive loop is the
+# consumer that judges between pulls.  It completes each pass's members, reads
+# this pass's own verdicts over the accumulated set, and rebuilds the claim map
+# from the SURVIVORS -- so a refused member stops suppressing exploration
+# exactly where its garbage structure claimed
+# (`specs/core/geometry/seed-drive.md`).
+
+
+def seed_module(workspace):
+    """`exp_fast_seed`, bound to ``workspace``.
+
+    That module reads the workspace off ``sys.argv`` at import and every stage
+    below reads it out of the module global, so the binding is made for the
+    import and then restated on the module.  ``REF`` -- the reference solve the
+    default driver compares a release against -- has no argument here, and is
+    cleared rather than left holding whatever stood in argv's second slot."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    argv = sys.argv
+    sys.argv = [str(Path(here) / "exp_fast_seed.py"), str(workspace)]
+    try:
+        import exp_fast_seed as FS
+    finally:
+        sys.argv = argv
+    FS.WS = Path(workspace)
+    FS.REF = None
+    return FS
+
+
+def surviving_claims(FS, hyps, verdicts):
+    """The claim map the next complement is formed from: the SURVIVORS' claims.
+
+    A refused member withdraws its claim whole, so the complement re-opens
+    where it claimed.  A trimmed member restates its claim on the frames its
+    core kept: the clusters its core no longer sees ``MIN_POINT_OBS`` times
+    stop being explained points and stop claiming, which is the same cull the
+    trim itself applies (`exp_fast_seed.core_claim`).  Only finite candidates
+    ever stamped a claim, so only they are read here."""
+    by_idx = {int(h["idx"]): h for h in hyps}
+    grids = []
+    for v in verdicts:
+        res = by_idx.get(int(v["idx"]))
+        if res is None or v["verdict"] == "refuse" or res.get("claim_grids") is None:
+            continue
+        trim = v.get("trim") or {}
+        kept_names = trim.get("frames_kept") if trim.get("ok") else None
+        if not kept_names:
+            grids.append(res["claim_grids"])
+            continue
+        want = {str(n).replace("\\", "/") for n in kept_names}
+        data = res["data"]
+        keep = [
+            k for k, n in enumerate(data["names"]) if str(n).replace("\\", "/") in want
+        ]
+        grids.append(FS.core_claim(res, data, keep, MIN_POINT_OBS)[0])
+    return FS.claims_union(grids)
+
+
+def sufficient(verdicts, complement_is_new):
+    """Whether the surviving set answers the capture.
+
+    Two conditions, both read off the loop's own evidence: at least one member
+    the gates do not refuse, and a complement that is not a new admission --
+    the source's own exhaustion test, applied to the survivors' claims rather
+    than to every claim the run ever stamped."""
+    return any(v["verdict"] != "refuse" for v in verdicts) and not complement_is_new
+
+
+def _keep_all(hyps, reason):
+    """Verdicts for a run with no gates: refusals are off, so every member
+    stands and the pulls are ordered by coverage alone."""
+    return [
+        {
+            "idx": int(h["idx"]),
+            "model": h.get("model"),
+            "release_file": h.get("release_file"),
+            "verdict": "keep",
+            "verdict_reason": reason,
+            "evidence": [],
+            "conditioning_limited": [],
+        }
+        for h in hyps
+    ]
+
+
+def drive(workspace, gates=None, budget=None, capture_frames=None):
+    """Pull candidates under judgement until the surviving set answers the
+    capture.
+
+    EVERYTHING IS REVIEWABLE: every member the run ever committed ships, its
+    verdict, the readings it was taken on and the round it arrived in recorded
+    beside it, and the selection report written into the product directory.
+    The verdicts annotate the set; they never delete from it."""
+    FS = seed_module(workspace)
+    import seed_candidate_eval as EV
+
+    ctx = FS.capture_context()
+    rung = ctx.rung
+    budget = FS.CANDIDATE_BUDGET if budget is None else budget
+    n_img = int(ctx.data_full["n_img"])
+    capture_frames = n_img if capture_frames is None else int(capture_frames)
+    entry = Path(workspace).resolve().name
+    f_rot, f_src = FS.far_field_focal(ctx.f_probe, ctx.f_vote)
+    f_vote = None if ctx.f_vote is None else float(ctx.f_vote)
+    # The witness's evidence, read ONCE and held: every round measures against
+    # the same capture-level pair graph, not against a graph that shrinks with
+    # the complement.
+    t_eval = FS.elapsed()
+    pair_obs = FS.eval_pair_obs(rung, ctx.data_full) if EV.eval_on() else None
+    # Where a round's trial trims are written.  Beside the staging directory,
+    # never inside it, so nothing a round tried can reach the product.
+    scratch = rung.stage.parent / (rung.stage.name + ".rounds")
+
+    blocks, arrays, measured, floors = {}, {}, [], None
+    eval_error = None
+    round_of = {}
+
+    def measure(new_hyps, layers, relaxed):
+        """Measure a round's new members, or record why the battery could
+        not."""
+        nonlocal floors, eval_error
+        if pair_obs is None or eval_error is not None:
+            return
+        try:
+            got, mem = FS.measure_members(
+                rung,
+                new_hyps,
+                ctx.data_full,
+                f_vote,
+                pair_obs,
+                layers=layers,
+                relaxed_layers=relaxed,
+                floors=floors,
+            )
+        except Exception as exc:  # noqa: BLE001 -- evidence never kills the run
+            print(f"  [candidate evaluation FAILED: {type(exc).__name__}: {exc}]")
+            eval_error = f"{type(exc).__name__}: {exc}"
+            return
+        blocks.update(got)
+        measured.extend(mem)
+        for m in mem:
+            d = EV.member_arrays(m)
+            arrays[int(d["idx"])] = d
+        # The capture's conditioning floors, drawn on the FIRST population that
+        # resolved them and inherited by every round after: a floor re-derived
+        # per round would be a quantile of that round's members, and would move
+        # the readings of every member already measured.
+        floors = FS.capture_floors(blocks)
+        FS.attach_blocks(rung, blocks, f_vote)
+
+    def judge(out_dir, write):
+        """The verdicts over the accumulated set, or the reason there are
+        none.
+
+        A judgement that cannot be taken never costs the run its candidates:
+        the set stands unrefused for that round, exactly as it does when no
+        gates were supplied at all."""
+        if gates is None:
+            return None, _keep_all(rung.hypotheses, "no gates supplied; refusals off")
+        try:
+            out = judge_set(
+                rung.hypotheses,
+                gates,
+                arrays,
+                f_vote,
+                rung.stage,
+                out_dir,
+                capture_frames=capture_frames,
+                entry=entry,
+                source_stamp=rung.stamp,
+                write=write,
+            )
+        except Exception as exc:  # noqa: BLE001 -- a verdict never kills the run
+            print(f"  [selection FAILED: {type(exc).__name__}: {exc}]")
+            return None, _keep_all(
+                rung.hypotheses, f"selection failed: {type(exc).__name__}: {exc}"
+            )
+        return out, out["members"]
+
+    source = FS.candidate_source(ctx, budget)
+    n_round = 0
+    stop = "source exhausted"
+    while True:
+        try:
+            batch = next(source)
+        except StopIteration:
+            break
+        n_round += 1
+        print(f"\n=== drive round {n_round}: {len(batch)} candidates pulled ===")
+        for res in batch:
+            round_of[int(res["idx"])] = n_round
+        # COMPLETE the new members.  A far-field sibling is fit independently
+        # of the candidate it pairs with and of every other candidate, and a
+        # relaxation reads one layer, so both are per-member work and a batch
+        # is completed without waiting for the rest of the set.
+        n_far, n_rel = len(rung.far_layers), len(rung.relaxed_layers)
+        FS.far_field_layers(
+            rung,
+            [(int(r["idx"]), r) for r in batch],
+            ctx.data_full,
+            f_rot,
+            f_src,
+            len(rung.hypotheses),
+        )
+        new_layers = rung.far_layers[n_far:]
+        if FS.relax_on():
+            FS.relax_far_layers(rung, ctx.data_full, new_layers)
+        new_relaxed = rung.relaxed_layers[n_rel:]
+        for h in rung.hypotheses:
+            round_of.setdefault(int(h["idx"]), n_round)
+        # THE BATTERY, on the NEW members only.  Everything already measured
+        # keeps the readings it was measured with; nothing is re-measured
+        # because the set grew.
+        measure(batch, new_layers, new_relaxed)
+        # JUDGE THE WHOLE SET, every round.  A member's capture-relative
+        # readings are taken over its own capture's median, so a member's
+        # verdict is a statement about the set it stands in and cannot be
+        # settled once and carried.
+        report, verdicts = judge(scratch, write=False)
+        # THE NEXT COMPLEMENT stands on the SURVIVORS' claims alone.
+        ctx.claims.clear()
+        ctx.claims.update(surviving_claims(FS, ctx.hyps, verdicts))
+        left, _n_claimed = FS.unclaimed_clusters(ctx.data, ctx.claims)
+        # The source's own exhaustion test, read here so the loop can answer
+        # `sufficient` and its own no-progress question before it pulls again.
+        complement_is_new = bool(len(left)) and len(left) != ctx.data["n_cl"]
+        refused = {int(v["idx"]) for v in verdicts if v["verdict"] == "refuse"}
+        counts = {
+            v: sum(1 for r in verdicts if r["verdict"] == v)
+            for v in ("keep", "trim", "refuse")
+        }
+        print(
+            f"drive round {n_round}: {len(rung.hypotheses)} members "
+            + " ".join(f"{k}={v}" for k, v in counts.items())
+            + f"; the surviving claims leave {len(left)}/{ctx.data['n_cl']} "
+            f"clusters unexplained [{FS.elapsed():.1f}s]"
+        )
+        # A CONTROLLER MOVE would slot here, between the verdicts and the next
+        # pull: a both-orientations request for a member whose mirror bit the
+        # evidence cannot settle, a merge of two members that agree where they
+        # overlap, a runaway gate that refuses a member before its relaxation
+        # is paid for.  Each is an instruction handed to the source or to the
+        # completion above; none of them is implemented here.
+        if sufficient(verdicts, complement_is_new):
+            stop = "sufficient"
+            break
+        if len(ctx.hyps) >= budget:
+            stop = "budget"
+            break
+        if batch and all(int(r["idx"]) in refused for r in batch):
+            # NO PROGRESS: a pass whose members were all refused, whose claims
+            # were therefore all withdrawn, and whose complement is back to the
+            # admission that produced it.  Pulling again would explore the same
+            # admission, so the withdrawal that keeps a garbage claim from
+            # suppressing exploration cannot cost the loop its termination.
+            if not complement_is_new:
+                stop = "no progress"
+                break
+
+    # THE CAPTURE'S OWN far-field layer and its relaxation: readings of no
+    # single candidate, so they are taken once, on the final set.
+    n_far, n_rel = len(rung.far_layers), len(rung.relaxed_layers)
+    FS.capture_far_layer(rung, len(rung.hypotheses), ctx.data_full, f_rot, f_src)
+    new_layers = rung.far_layers[n_far:]
+    if FS.relax_on():
+        FS.relax_far_layers(rung, ctx.data_full, new_layers)
+    new_relaxed = rung.relaxed_layers[n_rel:]
+    for h in rung.hypotheses:
+        round_of.setdefault(int(h["idx"]), n_round)
+    measure([], new_layers, new_relaxed)
+    # PEERS AND THE SUMMARY, over the final set: peer corroboration is each
+    # member against its rivals, so it can only be taken once nothing more is
+    # coming.
+    if pair_obs is not None and eval_error is None:
+        FS.finish_evaluation(
+            rung, ctx.hyps, blocks, FS.peer_records(ctx.hyps), f_vote, t_eval
+        )
+        FS.write_member_arrays(rung.stage, measured)
+    else:
+        for h in rung.hypotheses:
+            h["evaluation"] = (
+                {"enabled": True, "error": eval_error}
+                if eval_error
+                else EV.disabled_block()
+            )
+
+    # THE FINAL VERDICTS, taken on the finished evidence and written into the
+    # product: `rung2.json` beside the manifest, and a trimmed member's core
+    # beside the member it was cut from.
+    report, verdicts = judge(rung.stage, write=True)
+    by_verdict = {int(v["idx"]): v for v in verdicts}
+    for h in rung.hypotheses:
+        v = by_verdict.get(int(h["idx"]), {})
+        trim = v.get("trim") or {}
+        block = {
+            "round": round_of.get(int(h["idx"])),
+            "verdict": v.get("verdict", "keep"),
+            "verdict_reason": v.get("verdict_reason"),
+            # THE NAMED READINGS the verdict was taken on, so a reviewer
+            # opening this member knows what was said about it without
+            # opening the report.
+            "readings": v.get("evidence") or [],
+            "conditioning_limited": v.get("conditioning_limited") or [],
+            "rank": v.get("rank"),
+        }
+        if trim.get("ok"):
+            # BOTH ARTIFACTS SHIP, cross-referenced: the member as it was
+            # committed, and the core the trim states, each naming the other.
+            block["trimmed_release_file"] = trim.get("output")
+            block["trimmed_from"] = h.get("release_file")
+            block["frames_dropped"] = trim.get("frames_dropped")
+        h["drive"] = block
+
+    win = next((int(h["idx"]) for h in ctx.hyps if FS.qualifies(h)), 0)
+    n_qual = sum(1 for h in ctx.hyps if FS.qualifies(h))
+    counts = {
+        v: sum(1 for r in verdicts if r["verdict"] == v)
+        for v in ("keep", "trim", "refuse")
+    }
+    path = FS.write_candidate_solves(
+        rung,
+        win,
+        f_vote,
+        None if ctx.vote is None else ctx.vote[1],
+        extra={
+            "drive": {
+                "rounds": n_round,
+                "stopped_on": stop,
+                "budget": int(budget),
+                "gates": bool(gates),
+                "counts": counts,
+                "coverage": (report or {}).get("coverage"),
+                "report_file": "rung2.json" if report is not None else None,
+            }
+        },
+    )
+    shutil.rmtree(scratch, ignore_errors=True)
+    FS.write_evolution(
+        ctx, rung, win, n_qual, budget=budget, drive_rounds=n_round, drive_stop=stop
+    )
+    print(
+        f"\nDRIVE COMPLETE: {n_round} rounds, stopped on {stop}; "
+        f"{len(rung.hypotheses)} members "
+        + " ".join(f"{k}={v}" for k, v in counts.items())
+        + f"; {path.relative_to(FS.WS).as_posix()} [{FS.elapsed():.1f}s]"
+    )
+    return report
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -2841,6 +3248,12 @@ def main(argv=None):
     p.add_argument("--capture-frames", type=int)
     p.add_argument("release")
 
+    p = sub.add_parser("drive", help="pull candidates under judgement")
+    p.add_argument("--gates", help="fleet gates; without them refusals are off")
+    p.add_argument("--budget", type=int, help="total candidates (default: rung 1's)")
+    p.add_argument("--capture-frames", type=int)
+    p.add_argument("workspace")
+
     args = ap.parse_args(argv)
     if args.mode == "channels":
         members, frames = collect_population(args.release)
@@ -2867,6 +3280,14 @@ def main(argv=None):
             f"({pop['n_clean_members']} clean), "
             f"{len(pop['majority_defective_groups'])} majority-defective groups"
         )
+        return 0
+    if args.mode == "drive":
+        gates = (
+            json.loads(Path(args.gates).read_text(encoding="utf-8"))
+            if args.gates
+            else None
+        )
+        drive(args.workspace, gates, args.budget, args.capture_frames)
         return 0
     gates = json.loads(Path(args.gates).read_text(encoding="utf-8"))
     out = select(args.release, gates, args.out, args.capture_frames)
