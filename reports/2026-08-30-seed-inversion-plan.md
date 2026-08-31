@@ -87,6 +87,13 @@ Acceptance: the standing parity bar. `run_arm` arm `postphase1` against the
 `postlegacy` baseline on the two default workspaces, `parity.py` VERDICT
 PASS (content-identical `candidate_solves/` products).
 
+> _Status (2026-08-30): Done -- commit 88af6988 (`CaptureContext` /
+> `capture_context()` / `candidate_source(ctx, budget)` generator, `main()`
+> as the draining driver). AST neutrality audit: identical statement
+> sequences except the parameterized budget test. Parity postlegacy vs
+> postphase1 on KerryPark360 + 20250906_211742965: VERDICT PASS
+> (PARITY-postlegacy-vs-postphase1.txt)._
+
 ## Phase 2: the controller (behavior change, human-validated)
 
 `exp_seed_rung2.py drive <workspace>`:
