@@ -33,8 +33,7 @@ def image_candidates(x, y, reach):
     own query radius; a row whose reach is not finite asks nothing.  ``d`` is
     the pair's separation in pixels, so a caller testing against ``reach[i]``,
     against ``reach[j]``, or against both reads one distance.  Row ``i`` is
-    always its own candidate: a caller drops the self pair with the same test
-    it uses for everything else it does not want.
+    never its own candidate.
 
     The rows handed in are one image's, so the indices that come back are
     positions in these arrays.  The stream is read as a stream because the
