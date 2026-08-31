@@ -1,36 +1,48 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experiment: rapid pinhole-camera estimate from cluster patches.
+"""Experiment: rapid basin exploration from cluster patches.
 
-The first stage of a divide-and-conquer bootstrap: from a workspace holding
-a `*-clusters-patches.matches` file, get to a good shared SIMPLE_PINHOLE
-estimate (focal + a small set of posed views) as fast as possible.
+The first stage of a divide-and-conquer bootstrap: from a workspace holding a
+`*-clusters-patches.matches` file, find the camera basins the capture's
+geometry supports as fast as possible, and commit every one of them.
 
-  1. Pairwise focal vote: wide-baseline image pairs each estimate a
-     fundamental matrix (native RANSAC) and cast a Bougnoux focal vote;
-     the median picks the BASIN — no structure, so no bas-relief trap.
-  2. Covisibility seed groups (parallax-gated: a video's most-covisible
+  1. Coarse admission: the N widest clusters, stated as a POPULATION
+     (`SFMTOOL_SEED_RUNG1`, default 3000, 0 = uncapped).  A feature wider
+     than a repeating texture's period cannot alias to a false lattice
+     offset, so this is the admission on which basin structure is legible.
+  2. Pairwise focal vote, measured once over the FULL admission: wide-
+     baseline image pairs each estimate a fundamental matrix (native RANSAC)
+     and cast a Bougnoux focal vote; the median picks the BASIN -- no
+     structure, so no bas-relief trap.  The same pool carries the
+     equidistant-fisheye camera-model verdict.
+  3. The hypothesis loop.  Each PASS explores one admitted selection:
+     covisibility seed groups (parallax-gated: a video's most-covisible
      frames are its most static ones) -> affine ALS factorization +
-     Tomasi-Kanade metric upgrade; grow an 8-image core by P3P resection
-     at a probe focal from the vote.
-  3. Ladder-widen (far-first verified resections), then one photometric
-     verification pass (feature-scaled patch localization) that un-poses
-     junk rungs the geometric gates missed.
-  4. Fixed-focal scan across a vote-centred grid on the widened geometry
-     (coarse ranking + heavy refits, arbitrated toward the bias-corrected
-     vote when the structure has no opinion), then an iterated release
-     with an anti-affine basin guard.
-  5. When the best consensus stays below the healthy band (non-rigid or
-     f-degenerate capture), report the structure-free vote instead of the
-     structure estimate — the flagged cases are exactly where structure
-     is a lottery and the vote is not.
+     Tomasi-Kanade metric upgrade -> an 8-image core grown by P3P resection
+     at a probe focal from the vote -> ladder-widen by far-first verified
+     resections, with an optional photometric verification pass that un-poses
+     junk rungs the geometric gates missed -> a fixed-focal scan across a
+     vote-centred grid -> an iterated release under an anti-affine basin
+     guard, and a b-spline radial correction on top of the released focal.
+     EVERY distinct finalist of the pass commits.  The committed candidates'
+     coverage claims order the complement queue the next pass explores; the
+     loop ends when the complement is not a new admission, when a pass
+     produces no reconstruction, or at the candidate budget.
+  4. Far-field layers: a rotation-only sibling of each committed candidate
+     and one of the whole capture, so the observations a finite pass cannot
+     price are priced by the model that can -- bearing without range.  The
+     relaxation rung then commits a finite sibling of each such layer.
+  5. The evaluation battery measures every committed member and attaches
+     the evidence to its manifest entry and its corpus record.
 
 Run: pixi run -e dev python scripts/exp_fast_seed.py <workspace> [ref.sfmr]
 
-Prints the focal + camera errors vs the reference solve (when one exists)
-and writes `<workspace>/fast-pinhole.json` with the estimate for later
-stages to consume.
+Prints the focal + camera errors vs the reference solve (when one exists) and
+writes `<workspace>/sfmr/candidate_solves/`: one release per committed member
+plus a manifest carrying each member's record and evaluation block.  That
+directory is the product -- the whole set, nothing discarded, no winner
+stamped.
 """
 
 import dataclasses
@@ -58,11 +70,10 @@ from sfmtool._sfmtool.geometry import (
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 _T0 = time.perf_counter()
-# The cluster SELECTION stage 1 actually solves on — the derivation
-# `load_clusters` admitted (reference/kept members, optional thinning
-# restriction, span filter).  The seed's restriction stage narrows THIS handle
-# to the seed images, so the restricted file's clusters are a subsequence of
-# the ones stage 1 certified evidence against.
+# The cluster SELECTION the exploration actually solves on: the derivation
+# `load_clusters` admitted (reference/kept members, the coarse top-N cut,
+# optional thinning restriction, span filter).  The hypothesis loop derives
+# every complement admission from it.
 _SEL_MATCHES = None
 # The loader's own context (image table, admission span, warp passthrough), so
 # the hypothesis loop can repackage a derived selection exactly like the
@@ -515,12 +526,12 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
 # the basin structure is legible.
 #
 # The rung's OUTPUT IS THE HYPOTHESIS SET.  Every committed hypothesis is
-# written and kept; the arbitration ranks them and names a winner for whatever
-# runs next, but it discards nothing, because the set is worth more than the
-# stamped winner: on this fleet the winner is unqualified far more often than
-# the set is empty, and the losing hypothesis is repeatedly the one that
-# explains the part of the capture the winner cannot reach.  A rung that threw
-# the alternatives away would be spending the coarse admission's whole point.
+# written and kept; the rank orders them for whatever runs next, but it
+# discards nothing, because the set is worth more than a stamped winner: on
+# this fleet the first-ranked candidate is unqualified far more often than the
+# set is empty, and another member is repeatedly the one that explains the
+# part of the capture the first cannot reach.  A rung that threw the
+# alternatives away would be spending the coarse admission's whole point.
 #
 # N = 3000 is the fleet's SEEDABILITY floor, measured, not chosen: sweeping the
 # fraction bars first showed a scene-scale threshold lets the kept population
@@ -535,18 +546,17 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
 class Rung:
     """Everything rung 1 carries between its phases, in one object.
 
-    The rung used to live in three module dicts that each phase reached into,
-    which made the order the phases ran in part of the contract and invisible.
-    It is one value now, created by the loader when the rung is armed, passed
-    to the seams that need it, and None everywhere the rung is not.
+    The carrier of the pipeline, not a mode of it: the loader builds exactly
+    one and hands it to every seam that needs a phase's state -- the coarse
+    admission's population figures, the referee's full observation arrays, the
+    group-local re-admission's pre-restriction handle and radii, the far-field
+    and relaxed layers the evaluation battery reads, the staging directory the
+    product is swapped in from, and the committed set itself.  Holding them in
+    one value is what keeps the order the phases run in out of the contract.
 
-    ``SFMTOOL_SEED_RUNG1=N`` arms the WHOLE validated stack: the coarse top-N
-    admission, the vote measured on the full admission, the per-group local
-    re-admission at the same N, the far-field layers, the evidence ranking with
-    its runner-up commits, the stage-1 stop, and the ``candidate_solves``
-    product.  There are no sub-switches: the pieces were separated while each
-    was being validated, and separately switchable pieces of one validated
-    stack are combinations nobody measured."""
+    ``SFMTOOL_SEED_RUNG1=N`` tunes the coarse cluster budget (and, unless
+    ``SFMTOOL_SEED_LOCAL_ADMISSION`` overrides it, the per-group one).  ``0``
+    means uncapped.  There is no switch that removes the rung."""
 
     #: The cluster budget, capture-wide and (unless overridden) per group.
     n: int
@@ -609,11 +619,6 @@ class Rung:
     #: fine-feature rungs, so ``skip`` is the COARSE rung's default and the
     #: machinery stays for the rungs that need it.
     verify: str = "skip"
-    #: Cap on the covisibility-thinning ladder's levels (0 = uncapped, which is
-    #: the measured behaviour).  A cap trades later, thinner working sets for
-    #: time; whether those levels still find basins the earlier ones miss is a
-    #: measurement, not an assumption.
-    max_levels: int = 0
     # ── the committed set ──
     hypotheses: list = dataclasses.field(default_factory=list)
     # ── memoization across hypothesis explorations ──
@@ -949,14 +954,25 @@ def copy_probe(cand):
     return (inl, par, rvec.copy(), tvec.copy(), pts.copy(), posed.copy(), med_inl)
 
 
+#: The coarse cluster budget when ``SFMTOOL_SEED_RUNG1`` says nothing.  It is
+#: the fleet's measured seedability floor (see the `Rung` preamble).
+RUNG1_DEFAULT_N = 3000
+
+
 def rung1_n():
-    """The rung-1 cluster budget (``SFMTOOL_SEED_RUNG1``), or 0 when the rung is
-    not armed.  Unset, every path the rung touches is the one that ran before it
-    existed."""
+    """The coarse cluster budget (``SFMTOOL_SEED_RUNG1``).
+
+    Unset, empty or unreadable it is ``RUNG1_DEFAULT_N``.  An explicit ``0``
+    means UNCAPPED -- the coarse admission keeps every cluster.  The variable
+    tunes the budget and nothing else: it cannot turn the rung off, because
+    the rung IS the pipeline."""
+    raw = os.environ.get("SFMTOOL_SEED_RUNG1", "")
+    if not raw:
+        return RUNG1_DEFAULT_N
     try:
-        return int(os.environ.get("SFMTOOL_SEED_RUNG1", "0") or 0)
+        return max(int(raw), 0)
     except ValueError:
-        return 0
+        return RUNG1_DEFAULT_N
 
 
 def make_rung(
@@ -969,7 +985,10 @@ def make_rung(
     it is scratch, never evidence."""
     from datetime import datetime
 
-    n = rung1_n()
+    # An explicit budget of 0 is UNCAPPED: the budget becomes the whole
+    # population, so the coarse cut takes its no-op branch and the group-local
+    # re-admission ranks over everything the capture holds.
+    n = rung1_n() or n_full
     try:
         override = int(os.environ.get("SFMTOOL_SEED_LOCAL_ADMISSION", "0") or 0)
     except ValueError:
@@ -1060,92 +1079,87 @@ def load_clusters():
     # magnitude across a fleet, which means runs at "one bar" were never one
     # working set; they were the instruments of the sweep that found N, and the
     # sweep is done.
-    rung = None
-    if rung1_n() > 0:
-        aff_s = np.asarray(sel_h.member_affines)
-        radius = (
-            0.5
-            * float(mfile.refine_radius)
-            * (
-                np.linalg.norm(aff_s[:, :, 0], axis=1)
-                + np.linalg.norm(aff_s[:, :, 1], axis=1)
-            )
+    aff_s = np.asarray(sel_h.member_affines)
+    radius = (
+        0.5
+        * float(mfile.refine_radius)
+        * (
+            np.linalg.norm(aff_s[:, :, 0], axis=1)
+            + np.linalg.norm(aff_s[:, :, 1], axis=1)
         )
-        starts_s = np.asarray(sel_h.cluster_starts, dtype=np.int64)
-        m_cl = np.repeat(
-            np.arange(len(starts_s) - 1, dtype=np.int64), np.diff(starts_s)
+    )
+    starts_s = np.asarray(sel_h.cluster_starts, dtype=np.int64)
+    m_cl = np.repeat(np.arange(len(starts_s) - 1, dtype=np.int64), np.diff(starts_s))
+    m_img = np.asarray(sel_h.member_images, dtype=np.int64)
+    n_before = len(starts_s) - 1
+    # The cluster's own coarseness: its widest member.
+    cl_radius = np.zeros(n_before)
+    np.maximum.at(cl_radius, m_cl, radius)
+    # The rung carries the UNRESTRICTED handle and these radii, because two
+    # of its phases read them: the referee reads the full observation arrays
+    # (the vote must not shrink with the solve's working set), and a
+    # group-local re-admission re-derives the coarse population over its own
+    # images out of the whole capture rather than out of stage A's survivors
+    # (which could only ever narrow it further).
+    rung = make_rung(
+        sel_h,
+        m_cl,
+        m_img,
+        radius,
+        n_before,
+        names,
+        dims,
+        min_span,
+        want_warp,
+        mfile.refine_radius,
+    )
+    rung.n_clusters_total = n_before
+    rung.vote_clusters = n_before
+    print(
+        f"group-local admission armed: top {rung.n_local} per attempt image "
+        f"set, drawn from {n_before} clusters"
+    )
+    if rung.n >= n_before:
+        # Nothing to drop: the whole admission IS the top N.  Skip the
+        # re-selection entirely so the handle stays the one an unfiltered
+        # run would carry, bit for bit.
+        rung.n_clusters_kept = n_before
+        rung.min_kept_radius_px = float(cl_radius.min())
+        print(
+            f"coarse admission: top {rung.n} -> kept {n_before}/{n_before} "
+            f"(min radius in kept set: {cl_radius.min():.1f} px) "
+            f"[no-op: N >= cluster count]"
         )
-        m_img = np.asarray(sel_h.member_images, dtype=np.int64)
-        n_before = len(starts_s) - 1
-        # The cluster's own coarseness: its widest member.
-        cl_radius = np.zeros(n_before)
-        np.maximum.at(cl_radius, m_cl, radius)
-        # The rung carries the UNRESTRICTED handle and these radii, because two
-        # of its phases read them: the referee reads the full observation arrays
-        # (the vote must not shrink with the solve's working set), and a
-        # group-local re-admission re-derives the coarse population over its own
-        # images out of the whole capture rather than out of stage A's survivors
-        # (which could only ever narrow it further).
-        rung = make_rung(
-            sel_h,
+    else:
+        # Radius descending, cluster id ascending among ties: a stable sort
+        # of the negated radii is exactly that, so the kept set is a
+        # function of the file and N alone.
+        keep = np.sort(np.argsort(-cl_radius, kind="stable")[: rung.n])
+        rung.vote_obs = (
             m_cl,
             m_img,
-            radius,
-            n_before,
-            names,
-            dims,
-            min_span,
-            want_warp,
-            mfile.refine_radius,
+            np.ascontiguousarray(aff_s[:, :, 2], dtype=np.float64),
         )
-        rung.n_clusters_total = n_before
-        rung.vote_clusters = n_before
+        # Restrict the HANDLE, not the file: `restrict_cluster_ids` names
+        # ids of the file it is called on, and the radii above are in
+        # `sel_h`'s own dense numbering.  Re-selecting also re-runs the full
+        # admission derivation, so the narrowed handle is an ordinary
+        # selection that the hypothesis loop reads exactly like the
+        # unrestricted one.
+        sel_h = sel_h.select_clusters(
+            min_span=min_span, restrict_cluster_ids=[int(c) for c in keep]
+        )
+        n_kept = len(np.asarray(sel_h.cluster_starts)) - 1
+        rung.n_clusters_kept = n_kept
+        rung.min_kept_radius_px = float(cl_radius[keep].min())
         print(
-            f"group-local admission armed: top {rung.n_local} per attempt image "
-            f"set, drawn from {n_before} clusters"
+            f"coarse admission: top {rung.n} -> kept {n_kept}/{n_before} "
+            f"(min radius in kept set: {cl_radius[keep].min():.1f} px)"
         )
-        if rung.n >= n_before:
-            # Nothing to drop: the whole admission IS the top N.  Skip the
-            # re-selection entirely so the handle stays the one an unfiltered
-            # run would carry, bit for bit.
-            rung.n_clusters_kept = n_before
-            rung.min_kept_radius_px = float(cl_radius.min())
-            print(
-                f"coarse admission: top {rung.n} -> kept {n_before}/{n_before} "
-                f"(min radius in kept set: {cl_radius.min():.1f} px) "
-                f"[no-op: N >= cluster count]"
-            )
-        else:
-            # Radius descending, cluster id ascending among ties: a stable sort
-            # of the negated radii is exactly that, so the kept set is a
-            # function of the file and N alone.
-            keep = np.sort(np.argsort(-cl_radius, kind="stable")[: rung.n])
-            rung.vote_obs = (
-                m_cl,
-                m_img,
-                np.ascontiguousarray(aff_s[:, :, 2], dtype=np.float64),
-            )
-            # Restrict the HANDLE, not the file: `restrict_cluster_ids` names
-            # ids of the file it is called on, and the radii above are in
-            # `sel_h`'s own dense numbering.  Re-selecting also re-runs the full
-            # admission derivation, so the narrowed handle is an ordinary
-            # selection that the hypothesis loop and the restriction stage read
-            # exactly like the unrestricted one.
-            sel_h = sel_h.select_clusters(
-                min_span=min_span, restrict_cluster_ids=[int(c) for c in keep]
-            )
-            n_kept = len(np.asarray(sel_h.cluster_starts)) - 1
-            rung.n_clusters_kept = n_kept
-            rung.min_kept_radius_px = float(cl_radius[keep].min())
-            print(
-                f"coarse admission: top {rung.n} -> kept {n_kept}/{n_before} "
-                f"(min radius in kept set: {cl_radius[keep].min():.1f} px)"
-            )
 
-    # The selection stage 1 solves on: the seed's restriction stage narrows
-    # this handle, so every cluster id stage 1 produces is an id in it.  The
-    # hypothesis loop derives its complements FROM this handle, and the winning
-    # hypothesis's handle is the one the restriction stage sees.
+    # The selection the exploration solves on: every cluster id a candidate
+    # produces is an id in it, and the hypothesis loop derives its complements
+    # FROM this handle.
     global _SEL_MATCHES, _LOAD_CTX
     _SEL_MATCHES = sel_h
     _LOAD_CTX = {
@@ -2285,10 +2299,10 @@ def seed_snap(tag, data, keep, f, rvec, tvec, pts, posed, extra=None):
 # serial is allocated when its PROBE lands and never reused, so the same number
 # names it whether it went on to commit or was dropped two lines later.
 #
-# The dump is instrumentation: it never steers.  It requires the rung (there is
-# no candidate set off it), it does not touch `snapshots_on()` (which disables
-# the memos and turns on the warp passthrough), and with the variable unset
-# every hook returns before it reads anything.
+# The dump is instrumentation: it never steers.  It does not touch
+# `snapshots_on()` (which disables the memos and turns on the warp
+# passthrough), and with the variable unset every hook returns before it
+# reads anything.
 _EVO = {"resolved": False, "dir": None, "serial": 0, "cands": {}, "order": []}
 
 
@@ -2296,7 +2310,7 @@ def evo_dir():
     """The evolution-dump directory, or None when the corpus is not armed."""
     if not _EVO["resolved"]:
         d = os.environ.get("SFMTOOL_SEED_EVO_DUMP")
-        out = Path(d) if (d and rung1_n()) else None
+        out = Path(d) if d else None
         if out is not None:
             out.mkdir(parents=True, exist_ok=True)
         _EVO["dir"] = out
@@ -3264,25 +3278,20 @@ def compare_to_reference(names, rvec, tvec, f_est, mask):
 
 # ── Seed hypothesis loop ─────────────────────────────────────────────────────
 #
-# The seed stage develops structure hypotheses while the ones it commits stay
-# trustworthy AND their coverage claims leave real evidence unexplained, then
-# commits the one the capture-level measurements support.  A hypothesis is one
-# full exploration (probe -> widen -> verify -> scan -> release) over an
-# admitted cluster selection; the first admits the whole selection, each later
-# one admits the COVERAGE COMPLEMENT of everything the committed hypotheses
-# before it claimed.  See `specs/core/geometry/seed-hypothesis-loop.md`.
+# The seed stage develops a SET of structure hypotheses and commits every one
+# of them.  A hypothesis is one full exploration (probe -> widen -> verify ->
+# scan -> release) over an admitted cluster selection; the first admits the
+# whole selection, each later one admits the COVERAGE COMPLEMENT of everything
+# the committed hypotheses before it claimed.  The claim ORDERS that queue and
+# never gates it.  See `specs/core/geometry/seed-hypothesis-loop.md`.
 #
-# A capture one hypothesis explains produces exactly the single-hypothesis
-# result: its complement retains most of the admission, the materiality gate
-# refuses to explore it, and the loop ends leaving h0 alone with the metadata
-# it wrote before the loop existed.
+# A capture one hypothesis explains commits exactly one candidate: its
+# complement is empty, or nothing was claimed at all, and the generator stops
+# with h0 alone.
 
 # The pose-noise scale two hypotheses must disagree by, over the frames they
 # both pose, to be two WORLDS rather than one world seeded from two windows.
 POSE_DISAGREE_DEG = 5.0
-# A complement is explored only when the claim bit: it must retain less than
-# this fraction of the clusters the pass that produced it admitted.
-MATERIAL_RETENTION = 0.5
 
 # How many FINITE candidates one capture may commit.  A resource cap, not a
 # judgment: the generator has no opinion about which candidates are worth
@@ -3290,23 +3299,6 @@ MATERIAL_RETENTION = 0.5
 # fleet evidence -- if captures routinely hit it, the cap is what is wrong, not
 # the set.
 CANDIDATE_BUDGET = 8
-
-# The run's round identity, resolved once (see `round_stamp`).
-_ROUND_STAMP = {}
-
-
-def round_stamp():
-    """The run's round identity: one ``SFMTOOL_ROUND_STAMP`` across a fleet
-    invocation, or a self-stamp for a bare run.  Resolved ONCE, so every
-    artifact a run accumulates — the per-hypothesis releases and the round copy
-    of the final — carries the same stamp."""
-    if "v" not in _ROUND_STAMP:
-        from datetime import datetime
-
-        _ROUND_STAMP["v"] = os.environ.get("SFMTOOL_ROUND_STAMP") or (
-            datetime.now().strftime("%Y%m%dT%H%M")
-        )
-    return _ROUND_STAMP["v"]
 
 
 def image_rows(data):
@@ -3459,17 +3451,10 @@ def complement_selection(handle, survivors):
 
 
 def release_path(rung, idx):
-    """Where a committed hypothesis's release is written.
-
-    Under the rung it is ``h<NN>.sfmr`` in the STAGING directory, so the
-    product's file names carry no stamp and a crashed run cannot leave a
-    half-written product where a reader looks.  Off the rung it is the legacy
-    stamped path, untouched."""
-    if rung is not None:
-        return rung.stage / f"h{idx:02d}.sfmr"
-    out = WS / "sfmr" / "seed-hypotheses" / f"{round_stamp()}-h{idx}.sfmr"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    return out
+    """Where a committed hypothesis's release is written: ``h<NN>.sfmr`` in
+    the STAGING directory, so the product's file names carry no stamp and a
+    crashed run cannot leave a half-written product where a reader looks."""
+    return rung.stage / f"h{idx:02d}.sfmr"
 
 
 def write_finite_release(idx, res, data, out):
@@ -3708,14 +3693,10 @@ def commit_hypothesis(rung, idx, res, write, model="finite", f_source=None, extr
     and (for the far layers) its scope and the sibling it pairs with, its
     camera, its metrics and flags, the admission its solve ran on, and the
     PROVENANCE of its geometry -- the frames it was seeded from and the frames
-    it actually posed.  ``f`` stays beside the camera block for one transition.
-
-    A no-op off the rung except for the release itself: the point count costs a
-    read of the artifact that a legacy run has no reason to pay."""
+    it actually posed.  ``f`` stays beside the camera block for one
+    transition."""
     out = release_path(rung, idx)
     release = write(out)
-    if rung is None:
-        return release
     points = None
     if release is not None:
         try:
@@ -4157,7 +4138,7 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
         # THE FAR-FIELD LAYERS, measured on their own model.  A rotation-only
         # member is a candidate like any other -- on a panorama capture it is
         # the RIGHT one -- so it is judged, not waved through.
-        for layer in rung.far_layers if rung is not None else ():
+        for layer in rung.far_layers:
             ld = layer["data"]
             members.append(
                 EV.Member(
@@ -4181,7 +4162,7 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
         # are stated as no finite position, so a channel that reads structure
         # reads only what the member actually placed.
         relaxed = []
-        for rl in rung.relaxed_layers if rung is not None else ():
+        for rl in rung.relaxed_layers:
             r = rl["res"]
             d = r["data"]
             pts = np.asarray(r["release_pts"], dtype=np.float64).copy()
@@ -4259,9 +4240,8 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
                 blk["peer_corroboration"] = peers[k]
                 c["evaluation"] = _jsonable(blk)
                 c["peers"] = _jsonable(peers[k]["peers"])
-    if rung is not None:
-        rung.far_layers = []
-        rung.relaxed_layers = []
+    rung.far_layers = []
+    rung.relaxed_layers = []
     n_ok = sum(
         1
         for h in rung.hypotheses
@@ -4590,7 +4570,7 @@ def rotation_only_hypothesis(
     # rung, never written: `commit_hypothesis` builds the manifest entry from
     # named fields, so nothing here reaches the product.  The RELAXATION rung
     # reads the same arrays, so the layer is held whenever either wants it.
-    if (seed_eval_on() or relax_on()) and rung is not None:
+    if seed_eval_on() or relax_on():
         rung.far_layers.append(
             {
                 "idx": int(idx),
@@ -4639,10 +4619,10 @@ def rotation_only_hypothesis(
 
 
 def qualifies(res):
-    """Whether a committed hypothesis clears the structure-trust gates the
-    arbitration ranks on: the commit bar (posed count, coverage reach, focal
-    observability), a release inside the corrected vote band, and no
-    flat-scan / edge-scan / near-static-seed verdict."""
+    """Whether a committed hypothesis clears the structure-trust gates the rank
+    reads: the commit bar (posed count, coverage reach, focal observability), a
+    release inside the corrected vote band, and no flat-scan / edge-scan /
+    near-static-seed verdict."""
     if res["kept"] < 8 or res["reach"] < 0.60 or res["spread"] < 0.05:
         return False
     blocking = {
@@ -4688,655 +4668,9 @@ def rotation_disagreement(a, b):
     )
 
 
-def distinct(a, b):
-    """Two hypotheses are DISTINCT when they share at least two posed images
-    and disagree about the geometry there — median relative-rotation
-    disagreement over the shared image pairs above the seed stage's own
-    pose-noise scale.  Hypotheses with disjoint posed sets, or shared frames in
-    agreement, are the same world seeded from different windows."""
-    _, deg = rotation_disagreement(a, b)
-    return deg is not None and deg > POSE_DISAGREE_DEG
-
-
-def arbitrate(hyps):
-    """``(shipping index, number qualified, any qualified pair distinct)``.
-
-    The earliest qualified hypothesis is the INCUMBENT; a qualified challenger
-    displaces it only when the two are distinct AND the challenger ranks higher
-    (released inlier fraction, coverage reach as the tiebreak).  A non-distinct
-    challenger never displaces a qualified incumbent, whatever its numbers —
-    inlier fractions measured on different admissions of the same world reward
-    the smaller solve.  With no qualifier at all the first hypothesis ships
-    with its confidence flags (the single-hypothesis behavior, unchanged); when
-    only a later one qualifies, it ships (rescue)."""
-    ok = [i for i, h in enumerate(hyps) if qualifies(h)]
-    if not ok:
-        return 0, 0, False
-    pairs = {}
-    if len(ok) > 1:
-        print()
-    for a, b in itertools.combinations(ok, 2):
-        n_shared, deg = rotation_disagreement(hyps[a], hyps[b])
-        pairs[(a, b)] = deg is not None and deg > POSE_DISAGREE_DEG
-        print(
-            f"  distinctness h{a} vs h{b}: {n_shared} shared posed images, "
-            + (
-                "no pair to measure"
-                if deg is None
-                else f"median relative-rotation disagreement {deg:.1f} deg"
-            )
-            + f" -> {'distinct' if pairs[(a, b)] else 'same world'}"
-        )
-    win = ok[0]
-    for c in ok[1:]:
-        if pairs[(win, c)] and (hyps[c]["inl"], hyps[c]["reach"]) > (
-            hyps[win]["inl"],
-            hyps[win]["reach"],
-        ):
-            win = c
-    return win, len(ok), any(pairs.values())
-
-
-# ── Combination ──────────────────────────────────────────────────────────────
-#
-# Losing hypotheses are working capital.  Their point clouds are never merged
-# across gauges — the prototype measured why: the clusters two same-world
-# hypotheses share carry 0.2-6.6 deg of triangulation angle inside each window,
-# a 12-dof affine fits them no better than a 7-dof similarity, and forcing the
-# highest-link sibling in took one seed from 66.2% inliers to 43.7% and 22.7 deg
-# of camera-rotation error.  There is no depth agreement to align because
-# neither narrow window measures depth.  Their FRAMES are a different matter:
-# they are viewpoints another exploration certified by POSING them, and
-# resecting them into the winner's own structure needs no cross-gauge alignment
-# at all (the prototype's arm C: 10 -> 43 posed at 66% -> 79% inliers with the
-# camera errors against a full solve flat).
-
-# The acceptance gate as a fraction of the base's OWN consensus — the widen
-# ladder's rule (`gate = 0.35 * med_inl`), reused rather than restated, because
-# a constant gate is what fails: 0.5 admits cleanly on a pinhole capture and
-# over-admits into collapse (76.3% -> 11.3% inliers) on a fisheye one.
-COMBINE_GATE = 0.35
-
 # The ladder's pool floor: the observation count a frame needs against a
-# structure before a resection into it is attempted at all (`widen`).  The
-# combination reads it on BOTH sides — a candidate that cannot clear it toward
-# a structure cannot resect there — so membership counting alone is the whole
-# pre-filter on the bridge candidates, and no candidate costs a solve until it
-# has cleared it twice.
+# structure before a resection into it is attempted at all (`widen`).
 POOL_FLOOR = 30
-
-# How many bridge candidates one donor pair certifies.  Candidates are ranked
-# by the WEAKER of their two membership counts (most bridge-like first) and the
-# budget bounds the certification stage's cost at two resections each.
-BRIDGE_ATTEMPTS = 48
-
-# Significance of the one-sidedness test that reclassifies a pair DISTINCT.
-# The test is the exact McNemar over the DISCORDANT certificates: a candidate
-# that clears the floor toward both structures and resects into one but not the
-# other is one discordant trial, and two windows of ONE world have no reason to
-# put them all on the same side (p = 0.5 under that null, so the population
-# floor is the test's own — six all-one-sided discordants are the first count
-# that reaches this alpha two-sided).  It fires only when one side certified
-# NOTHING; see `certify_bridges` for why a rate difference cannot.
-BRIDGE_ALPHA = 0.05
-
-
-def base_consensus(rvec, tvec, pts, posed, f, obs_c, obs_i, u):
-    """The base's own resection consensus: the median, over its posed images,
-    of the fraction of that image's observations of the base's structure
-    reprojecting within 3 px.
-
-    This is the quantity the widen ladder's ``med_inl`` is a median of (there,
-    over the resections the core growth accepted), measured on a released state
-    instead of a growing one — so the combination's gate scales with the base
-    exactly as the ladder's does."""
-    cam = make_cam(f)
-    valid = ~np.isnan(pts[obs_c, 0])
-    frac = []
-    for j in np.nonzero(posed)[0]:
-        s = (obs_i == j) & valid
-        if int(s.sum()) < 12:
-            continue
-        res = reproj_res_one(cam, rvec[j], tvec[j], pts[obs_c[s]], u[s])
-        frac.append(_inlier_fraction(res, 3.0))
-    return float(np.median(frac)) if frac else 1.0
-
-
-def _certificate(data, pts, j, f, gate):
-    """Resect one frame against one hypothesis's structure, in that
-    hypothesis's own gauge and at its own released focal.
-
-    ``(passed, inlier fraction, rvec, tvec)`` from exactly the ladder's rung
-    measurement — p3p, trimmed pose refine, 3 px consensus against the
-    consensus-scaled gate — so a certificate and a rung are the same test made
-    against different structure.  A frame carrying fewer than the pool floor of
-    finite points, a p3p that finds no consensus, or a refined pose under the
-    gate all fail."""
-    order, bounds = image_rows(data)
-    rows = order[bounds[j] : bounds[j + 1]]
-    rows = rows[np.isfinite(pts[data["obs_c"][rows], 0])]
-    if len(rows) < POOL_FLOOR:
-        return False, 0.0, None, None
-    uv, x = data["obs_uv"][rows], pts[data["obs_c"][rows]]
-    p3p = p3p_resect(uv, x, f)
-    if p3p is None or int(p3p[2].sum()) < 12:
-        return False, 0.0, None, None
-    rv0, tv0, mask = p3p
-    rv, tv, _ = pose_refine(uv[mask], x[mask], rv0, tv0, f)
-    frac = _inlier_fraction(reproj_res_one(make_cam(f), rv, tv, x, uv), 3.0)
-    return bool(frac >= gate), float(frac), rv, tv
-
-
-def camera_centres(rvec, tvec, idx):
-    """``-R^T t`` for the given images, in the poses' own gauge."""
-    rot = Rotation.from_rotvec(rvec[idx]).as_matrix()
-    return -np.einsum("nji,nj->ni", rot, tvec[idx])
-
-
-def certify_bridges(w, pts_w, gate_w, h, posed_any):
-    """The BRIDGES of one (winner, donor) pair, and the pair's distinctness
-    verdict from their certificates.
-
-    A bridge is a frame posed by NEITHER hypothesis that is covisible with both
-    retained cluster sets.  Candidacy is membership counting and nothing else:
-    a frame must carry the ladder's pool floor of observations of each
-    hypothesis's retained structure, because a frame that cannot clear the
-    floor toward a structure cannot resect there whatever a solve would say.
-    Candidates are then ranked by the WEAKER of the two counts — the most
-    bridge-like first — and the strongest ``BRIDGE_ATTEMPTS`` of them are
-    resected into BOTH structures, in each structure's own gauge and at its own
-    focal.
-
-    The roles are asymmetric.  The donor-side resection is a CERTIFICATE: it
-    proves the frame genuinely views the donor's world, its donor-gauge pose
-    orders the walk, and it is then discarded — the donor's depths never
-    contribute a measurement.  That certificate is what puts the frame in the
-    pool.  The winner-side resection is the LOAD-BEARING one and the walk makes
-    it itself, against the current structure and through the ladder's own gate
-    and per-rung verification; the copy taken here is a measurement for the
-    test below, never a pose, because a candidate the released structure cannot
-    reach yet is exactly what a rung of growth is for.
-
-    The certificates are also the pair's second, stronger distinctness test,
-    and the DONOR'S OWN FRAMES are in that population: a donor frame carries the
-    donor-side certificate already (the donor posed it), so one that clears the
-    winner-side floor is a candidate whose two certificates can disagree exactly
-    like a bridge's.  Every member of the population cleared the floor toward
-    both structures, so a member that resects into one and not the other is a
-    DISCORDANT trial.  The verdict needs one side to certify NOTHING while the
-    other certifies — systematic failure is TOTAL failure, because a frame that
-    does not view a world resects into it never rather than rarely — with the
-    discordants numerous enough for the one-sidedness to beat chance (exact
-    McNemar, p = 0.5, two-sided at ``BRIDGE_ALPHA``, so six).  A rate
-    DIFFERENCE cannot carry the verdict at any threshold: the two sides are not
-    exchangeable trials, and the fleet measures the asymmetry a same-world pair
-    produces on its own (a complement's thin structure certifies more readily
-    than the full admission's rich one).
-
-    Returns ``(bridges, donor-gauge centres, distinct, stats)``."""
-    from scipy.stats import binom
-
-    data_w, data_d = w["data"], h["data"]
-    n_img = data_w["n_img"]
-    f_w, f_d = float(w["f_released"]), float(h["f_released"])
-    # The donor's own released geometry, retriangulated in the DONOR's gauge at
-    # the DONOR's focal: the structure its certificates are measured against.
-    pts_d = triangulate(
-        data_d["obs_c"],
-        data_d["obs_i"],
-        data_d["obs_uv"],
-        Rotation.from_rotvec(h["rvec_full"]).as_matrix(),
-        h["tvec_full"],
-        h["posed_full"],
-        data_d["n_cl"],
-        f_d,
-    )
-    med_d = base_consensus(
-        h["rvec_full"],
-        h["tvec_full"],
-        pts_d,
-        h["posed_full"],
-        f_d,
-        data_d["obs_c"],
-        data_d["obs_i"],
-        data_d["obs_uv"],
-    )
-    gate_d = COMBINE_GATE * med_d
-    seen_w = np.bincount(
-        data_w["obs_i"][np.isfinite(pts_w[data_w["obs_c"], 0])], minlength=n_img
-    )
-    seen_d = np.bincount(
-        data_d["obs_i"][np.isfinite(pts_d[data_d["obs_c"], 0])], minlength=n_img
-    )
-    cand = np.nonzero((seen_w >= POOL_FLOOR) & (seen_d >= POOL_FLOOR) & ~posed_any)[0]
-    n_cand = len(cand)
-    cand = cand[np.argsort(-np.minimum(seen_w[cand], seen_d[cand]), kind="stable")]
-    cand = cand[:BRIDGE_ATTEMPTS]
-
-    bridges, centres = [], {}
-    n_w = n_d = only_w = only_d = 0
-    for j in cand:
-        j = int(j)
-        ok_w = _certificate(data_w, pts_w, j, f_w, gate_w)[0]
-        ok_d, _, rv_d, tv_d = _certificate(data_d, pts_d, j, f_d, gate_d)
-        n_w += ok_w
-        n_d += ok_d
-        only_w += ok_w and not ok_d
-        only_d += ok_d and not ok_w
-        if ok_d:
-            # The DONOR-side certificate is what a bridge carries into the pool.
-            # Its winner side is the load-bearing resection, and the walk makes
-            # that one itself against the CURRENT structure — measured here for
-            # the one-sidedness test above, but never spent: a candidate the
-            # winner's released structure cannot reach yet is exactly what a
-            # rung or two of growth is for.
-            bridges.append(j)
-            centres[j] = camera_centres(rv_d[None, :], tv_d[None, :], [0])[0]
-    # The DONOR'S OWN FRAMES, on the same population.  Their donor-side
-    # certificate is the donor's pose — a certificate the donor already issued —
-    # so the winner side is all there is to measure, and a donor frame that
-    # clears the winner-side floor and does not resect there is a discordant
-    # trial of exactly the same kind as a bridge's.
-    d_pool = np.nonzero(h["posed_full"] & ~w["posed_full"] & (seen_w >= POOL_FLOOR))[0]
-    d_only_w = 0
-    for j in d_pool:
-        d_only_w += not _certificate(data_w, pts_w, int(j), f_w, gate_w)[0]
-    # The population's certificates per side: a donor frame's donor-side one is
-    # the donor's own pose, so it never fails there.
-    pass_w = n_w + len(d_pool) - d_only_w
-    pass_d = n_d + len(d_pool)
-    only_d += d_only_w
-    disc = only_w + only_d
-    p = (
-        1.0
-        if not disc
-        else float(min(1.0, 2 * binom.cdf(min(only_w, only_d), disc, 0.5)))
-    )
-    # SYSTEMATIC means TOTAL.  The two sides' certificates are not exchangeable
-    # trials — the fleet measures a complement hypothesis's thin structure
-    # certifying a candidate more readily than the full admission's rich one
-    # (41/41 against 35/41 on one healthy same-world pair), because an inlier
-    # fraction over a hundred points is a looser test than the same fraction
-    # over thousands.  A rate DIFFERENCE therefore cannot carry this verdict at
-    # any threshold.  Total failure can: a frame that does not view a world
-    # resects into it never, not rarely.  So the verdict needs one side to
-    # certify NOTHING while the other certifies, with the discordants numerous
-    # enough for the one-sidedness itself to beat chance.
-    one_sided = (pass_w == 0) != (pass_d == 0)
-    stats = {
-        "candidates": n_cand,
-        "attempted": len(cand),
-        "cert_w": n_w,
-        "cert_d": n_d,
-        "both": n_w - only_w,
-        "bridges": len(bridges),
-        "donor_frames": len(d_pool),
-        "donor_frames_failing": d_only_w,
-        "pass_w": pass_w,
-        "pass_d": pass_d,
-        "discordant_w": only_w,
-        "discordant_d": only_d,
-        "p": p,
-        "gate_d": gate_d,
-        "consensus_d": med_d,
-    }
-    return bridges, centres, one_sided and p < BRIDGE_ALPHA, stats
-
-
-def combine(hyps, win):
-    """Grow the winning hypothesis by resection over ONE pool of certified
-    frames: the other committed non-distinct hypotheses' posed frames, plus the
-    BRIDGES that weld them on.  Returns ``(release, reclassified)`` — the
-    combined release or None when the stage added nothing (in which case it
-    left no trace at all: no BA runs and the winner ships exactly as it was
-    arbitrated), and the hypothesis indexes the certificates reclassified
-    DISTINCT.
-
-    Every frame posed by a NON-DISTINCT committed hypothesis and not by the
-    winner is donor fuel — it carries its certificate already, since the donor
-    posed it.  Distinct hypotheses' frames are never resected in, because they
-    belong to another world.  A bridge is a frame posed by neither hypothesis
-    that resects into both structures (`certify_bridges`), and it is what opens
-    a donor window the winner's own structure never reaches: the walk is one
-    growth loop, and the structure GROWS between rungs, so a bridge's clusters
-    triangulate in and the donor frames behind it clear the floor a rung later.
-    Frames covisible with neither hypothesis are not in the pool at all —
-    welding committed hypotheses is this stage's job, growing the capture is
-    the completion's.
-
-    Frames the winner's own exploration blacklisted stay blacklisted: the pool
-    is what another hypothesis certified, not the winner's own rejects.  The
-    ladder's machinery does the work — resection into the current structure,
-    the consensus-scaled gate, and the per-rung accept/BA/verify/revert — and
-    the grown state is then retriangulated and released at the winner's own
-    focal under the unchanged basin guard.  The winner must still qualify
-    afterwards; it keeps the better of the two states otherwise."""
-    global _RANK_O
-    w = hyps[win]
-    data_w = w["data"]
-    obs_c, obs_i, u = data_w["obs_c"], data_w["obs_i"], data_w["obs_uv"]
-    n_img, n_cl = data_w["n_img"], data_w["n_cl"]
-    rank = data_w["adm_rank"][obs_c]
-    _RANK_O = rank
-
-    others = []
-    for k, h in enumerate(hyps):
-        if k == win:
-            continue
-        if distinct(w, h):
-            print(
-                f"combination: hypothesis {k} is DISTINCT from the winner; its "
-                f"{int(h['posed_full'].sum())} frames belong to another world "
-                f"and are not resected in"
-            )
-            continue
-        others.append((k, h))
-    donors = np.zeros(n_img, bool)
-    for _, h in others:
-        donors |= h["posed_full"]
-    donors &= ~w["posed_full"]
-    n_donor = int(donors.sum())
-    if not n_donor:
-        print(
-            f"combination: no donor frames (0 frames posed by a non-distinct "
-            f"committed hypothesis and not by hypothesis {win}); the winner "
-            f"ships as arbitrated"
-        )
-        return None, []
-
-    f0 = float(w["f_released"])
-    rvec, tvec = w["rvec_full"].copy(), w["tvec_full"].copy()
-    posed = w["posed_full"].copy()
-    pts = triangulate(
-        obs_c, obs_i, u, Rotation.from_rotvec(rvec).as_matrix(), tvec, posed, n_cl, f0
-    )
-    med_inl = base_consensus(rvec, tvec, pts, posed, f0, obs_c, obs_i, u)
-    gate = COMBINE_GATE * med_inl
-    # How many donors the ladder can even LOOK at: a candidate needs POOL_FLOOR
-    # observations of the base's triangulated structure.  Two windows of one
-    # world that never overlap leave this at zero — that is what the bridges
-    # below are for, and it is worth reading in the log either way.
-    seen = np.bincount(obs_i[donors[obs_i] & ~np.isnan(pts[obs_c, 0])], minlength=n_img)
-    # The same count with the triangulation dropped: how many members of the
-    # winner's ADMISSION a donor frame carries at all.  Growth can triangulate a
-    # cluster the winner's structure is missing; it cannot admit one the
-    # winner's selection never contained, so this is the ceiling the floor is
-    # being measured against — and on a complement winner it is the whole story.
-    members = np.bincount(obs_i, minlength=n_img)[donors]
-    print(
-        f"\ncombination: {n_donor} donor frames from {len(hyps) - 1} other "
-        f"committed hypotheses, resecting into hypothesis {win}'s structure at "
-        f"f {f0:.1f} px; base consensus {100 * med_inl:.1f}%, gate "
-        f"{100 * gate:.1f}%; {int((seen[donors] >= POOL_FLOOR).sum())} donors "
-        f"carry >= {POOL_FLOOR} observations of it (median "
-        f"{int(np.median(seen[donors]))} of a median {int(np.median(members))} "
-        f"members of the winner's ADMISSION — the ceiling growth can reach) "
-        f"[{elapsed():.1f}s]"
-    )
-
-    # BRIDGES.  One certification pass per (winner, donor) pair, over the frames
-    # neither hypothesis posed.
-    posed_any = np.zeros(n_img, bool)
-    for h in hyps:
-        posed_any |= h["posed_full"]
-    reclassified, ctx = [], []
-    bridge_mask = np.zeros(n_img, bool)
-    for k, h in others:
-        bridges, centres, is_distinct, st = certify_bridges(w, pts, gate, h, posed_any)
-        d_frames = h["posed_full"] & ~w["posed_full"]
-        print(
-            f"bridges h{k}: {st['candidates']} candidates carry >= {POOL_FLOOR} "
-            f"observations of BOTH retained structures, {st['attempted']} "
-            f"resected both ways (donor gate {100 * st['gate_d']:.1f}% of a "
-            f"{100 * st['consensus_d']:.1f}% consensus); winner side "
-            f"{st['cert_w']}, donor side {st['cert_d']}, both {st['both']}; "
-            f"{st['donor_frames']} donor frames clear the winner-side floor, "
-            f"{st['donor_frames_failing']} of them fail it; population "
-            f"certificates {st['pass_w']} winner / {st['pass_d']} donor, "
-            f"discordant {st['discordant_w']}/{st['discordant_d']} "
-            f"(winner-only/donor-only), McNemar p {st['p']:.4f}"
-        )
-        if is_distinct:
-            # SYSTEMATIC one-sided certificate failure.  The pair is two worlds
-            # whatever the shared-frame rotation test said; the weld aborts for
-            # it, its frames are withdrawn, and the verdict feeds the flag —
-            # the arbitration is NOT re-run (the incumbent already won among
-            # the qualified).
-            reclassified.append(k)
-            print(
-                f"bridges h{k}: one side certified NOTHING and the other "
-                f"certified, over {st['discordant_w'] + st['discordant_d']} "
-                f"discordants (p < {BRIDGE_ALPHA}); hypothesis {k} is "
-                f"RECLASSIFIED DISTINCT "
-                f"from the winner — its {int(d_frames.sum())} frames are "
-                f"withdrawn and its bridges are not welded"
-            )
-            continue
-        # At most one bridge per donor frame: a bridge earns its rung by
-        # opening the donor's window, and beyond the size of that window the
-        # additions are capture growth, which is the completion's job.
-        keep = bridges[: int(d_frames.sum())]
-        bridge_mask[keep] = True
-        idx = np.nonzero(d_frames)[0]
-        ctx.append(
-            {
-                "frames": d_frames,
-                "cen": dict(
-                    zip(
-                        (int(j) for j in idx),
-                        camera_centres(h["rvec_full"], h["tvec_full"], idx),
-                    )
-                ),
-                "bridge_centres": {j: centres[j] for j in keep},
-            }
-        )
-    if reclassified:
-        donors[:] = False
-        for k, h in others:
-            if k not in reclassified:
-                donors |= h["posed_full"]
-        donors &= ~w["posed_full"]
-        n_donor = int(donors.sum())
-    if not n_donor:
-        print(
-            f"combination: every donor pair was reclassified DISTINCT; the weld "
-            f"is abandoned and the winner ships as arbitrated [{elapsed():.1f}s]"
-        )
-        return None, reclassified
-    n_bridge = int(bridge_mask.sum())
-    pool = donors | bridge_mask
-    print(
-        f"combination: pool {int(pool.sum())} frames = {n_donor} donor + "
-        f"{n_bridge} bridge [{elapsed():.1f}s]"
-    )
-
-    def walk_order(pool_j, cnt, posed_now):
-        """The ladder's rung ordering under the certificates: donor frames
-        NEAREST an already-accepted bridge first (donor-gauge distance, the one
-        thing the discarded donor-side pose is kept for), then the ladder's own
-        farthest-first order over everything else."""
-        key = np.full(len(pool_j), np.inf)
-        for c in ctx:
-            acc = [v for j, v in c["bridge_centres"].items() if posed_now[j]]
-            if not acc:
-                continue
-            a = np.asarray(acc)
-            for i, j in enumerate(pool_j):
-                if c["frames"][j]:
-                    d = float(np.linalg.norm(a - c["cen"][int(j)], axis=1).min())
-                    key[i] = min(key[i], d)
-        near = np.isfinite(key)
-        rest = pool_j[~near]
-        return np.concatenate(
-            [
-                pool_j[near][np.argsort(key[near], kind="stable")],
-                rest[np.argsort(cnt[rest], kind="stable")],
-            ]
-        )
-
-    rvec, tvec, pts, posed, accepted = widen(
-        rvec,
-        tvec,
-        pts,
-        posed,
-        f0,
-        obs_c,
-        obs_i,
-        u,
-        n_img,
-        n_cl,
-        rank,
-        gate,
-        allow=pool,
-        rungs=int(pool.sum()),
-        # No bridge, no reordering: an entry the certificates found nothing for
-        # walks exactly the ladder it walked before.
-        order=walk_order if n_bridge else None,
-    )
-    if not accepted:
-        # The ladder reverts a rejected rung whole, so nothing moved: no
-        # release runs and the winner is untouched.
-        print(
-            f"combination: no pool frame cleared the gate; the winner ships "
-            f"as arbitrated [{elapsed():.1f}s]"
-        )
-        return None, reclassified
-    n_add_b = int(sum(1 for j in accepted if bridge_mask[j]))
-    # What the growth did to the donors' reach: the same count the pool floor
-    # tests, re-measured on the structure the walk left behind.  A weld that
-    # accepted bridges and no donor frame says so here.
-    left = donors & ~posed
-    seen_after = np.bincount(
-        obs_i[left[obs_i] & ~np.isnan(pts[obs_c, 0])], minlength=n_img
-    )
-    print(
-        f"combination: resected {len(accepted)}/{int(pool.sum())} pool frames "
-        f"({len(accepted) - n_add_b} donor, {n_add_b} bridge); posed "
-        f"{int(w['posed_full'].sum())} -> {int(posed.sum())}; the "
-        f"{int(left.sum())} donor frames left out now carry a median "
-        f"{int(np.median(seen_after[left])) if left.any() else 0} observations "
-        f"of the grown structure (was {int(np.median(seen[donors]))}) "
-        f"[{elapsed():.1f}s]"
-    )
-
-    # Retriangulate and release at the winner's focal, under the same iterated
-    # schedule and the same basin guard the exploration releases with (anchored
-    # on the winner's released focal, which is what the combination grew from).
-    bam = budget_mask(posed, obs_i, rank)
-    denom = ba_rows(bam, obs_i)
-    pts = triangulate(
-        obs_c, obs_i, u, Rotation.from_rotvec(rvec).as_matrix(), tvec, posed, n_cl, f0
-    )
-    live = ba_rows(bam & ~np.isnan(pts[obs_c, 0]), obs_i)
-    _, rvec, tvec, pts, res, _ = bundle_adjust(
-        obs_c[live],
-        obs_i[live],
-        u[live],
-        rvec,
-        tvec,
-        pts,
-        f0,
-        n_img,
-        n_cl,
-        opt_f=False,
-        max_nfev=60,
-    )
-    inl = float((res < 2.0).sum() / max(int(denom.sum()), 1))
-    # The fixed-f state at the winner's own released focal is the baseline the
-    # free-f release has to beat, so a release that walks out of the basin
-    # costs the combination its focal, not its frames.
-    kept_state = (inl, f0, rvec.copy(), tvec.copy(), pts.copy())
-    f, f_prev = f0, f0
-    for _ in range(3):
-        live = ba_rows(bam & ~np.isnan(pts[obs_c, 0]), obs_i)
-        f, rvec, tvec, pts, res, _ = bundle_adjust(
-            obs_c[live],
-            obs_i[live],
-            u[live],
-            rvec,
-            tvec,
-            pts,
-            f,
-            n_img,
-            n_cl,
-            opt_f=True,
-            max_nfev=30,
-        )
-        inl = float((res < 2.0).sum() / max(int(denom.sum()), 1))
-        if not (f0 / 1.15 <= f <= 1.15 * f0) or f < focal_floor():
-            print(f"combined release left the basin (f = {f:.0f}); keeping previous")
-            break
-        if inl > kept_state[0]:
-            kept_state = (inl, f, rvec.copy(), tvec.copy(), pts.copy())
-        if abs(f - f_prev) < 0.01 * f_prev:
-            break
-        f_prev = f
-    inl, f, rvec, tvec, pts = kept_state
-
-    # The gates, re-measured on the combined release.  Posed count and reach
-    # can only grow; the scan verdicts are properties of the focal scan the
-    # exploration ran and carry over unchanged; the consensus and the
-    # vote-divergence guard are re-derived from the new release.
-    kept = int(posed.sum())
-    reach = capture_reach(np.nonzero(posed)[0])
-    f_bias = 1.0 if fisheye_stage1() else 1.1
-    f_indep = w["f_indep"]
-    flags = ["low_consensus"] if inl < 0.60 else []
-    if f_indep is not None and abs(np.log(f / (f_bias * f_indep))) > np.log(1.35):
-        flags.append("vote_divergence")
-    if reach < 0.30:
-        flags.append("narrow_reach")
-    flags += [t for t in ("flat_scan", "edge_scan") if t in w["flags"]]
-    combined = {
-        "kept": kept,
-        "reach": reach,
-        "spread": w["spread"],
-        "inl": inl,
-        "flags": flags,
-    }
-    gained = set(flags) - set(w["flags"])
-    print(
-        f"combination: released f {f:.1f} px, inlier<2px {100 * inl:.1f}% "
-        f"(was {100 * w['inl']:.1f}%), reach {100 * reach:.0f}% (was "
-        f"{100 * w['reach']:.0f}%), flags {','.join(flags) or 'ok'}, "
-        f"qualified {qualifies(combined)} [{elapsed():.1f}s]"
-    )
-    # KEEP-BEST.  The combination is an addition to a state the arbitration
-    # already chose, so it has to leave that state no worse on the gates: a
-    # combined release that stops qualifying (where the winner did qualify), or
-    # that picks up a confidence flag the winner did not carry, is reverted
-    # whole and the arbitrated winner ships.  A flag is a gate here — a
-    # collapse that keeps f in its basin shows up as `low_consensus` and
-    # nowhere else, and that is exactly the failure the prototype measured
-    # (76.3% -> 11.3% inliers on an over-admitting gate).
-    lost_qual = qualifies(w) and not qualifies(combined)
-    if lost_qual or gained:
-        print(
-            "combination REVERTED (keep-best): the combined release "
-            + (
-                f"raised {','.join(sorted(gained))}"
-                if gained
-                else "no longer clears the qualification gates"
-            )
-            + "; the winner ships as arbitrated"
-        )
-        return None, reclassified
-    f_report = f_indep if (flags and f_indep is not None) else f
-    return {
-        "names": list(data_w["names"]),
-        "rvec": rvec,
-        "tvec": tvec,
-        "posed": posed,
-        "f": float(f),
-        "f_report": float(f_report),
-        "f_released": float(f),
-        "inl": float(inl),
-        "flags": flags,
-        "n_donor": n_donor,
-        "n_bridge": n_bridge,
-        "n_added": len(accepted),
-        "n_added_bridge": n_add_b,
-    }, reclassified
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -5364,7 +4698,7 @@ def explore(hyp, args):
 
 
 def main():
-    global _CAM_WH, _RANK_O, _SEL_MATCHES
+    global _CAM_WH, _RANK_O
     data, rung = load_clusters()
     # The FULL admission, held past the loop's complement rebinds: the
     # rotation-only hypothesis below is a reading of the whole capture, not of
@@ -5396,12 +4730,8 @@ def main():
         # Vote on the FULL admission, solve on the restricted one: the referee
         # keeps the whole capture's pair graph even when the rung hands the
         # solve a few thousand clusters (`vote_admission`).
-        vote_c, vote_i, vote_u = (
-            rung.vote_admission(obs_c, obs_i, u)
-            if rung is not None
-            else (obs_c, obs_i, u)
-        )
-        if rung is not None and vote_c is not obs_c:
+        vote_c, vote_i, vote_u = rung.vote_admission(obs_c, obs_i, u)
+        if vote_c is not obs_c:
             print(
                 f"focal vote measured on the full admission "
                 f"({rung.vote_clusters} clusters, {len(vote_c)} "
@@ -5417,9 +4747,8 @@ def main():
         # of top-N clusters and hundreds of full-admission ones, and an
         # epipolar estimate on the former is not an estimate.  Held under the
         # battery's own switch and released the moment it has read them.
-        if rung is not None:
-            rung.eval_obs = rung.vote_obs if seed_eval_on() else ()
-            rung.vote_obs = ()
+        rung.eval_obs = rung.vote_obs if seed_eval_on() else ()
+        rung.vote_obs = ()
     if vote is not None:
         f_vote, n_votes = vote
         # Bougnoux votes from noisy F run consistently LOW on this campaign
@@ -5455,25 +4784,22 @@ def main():
         )
     cap = min(n_img, SCAN_CAP)
 
-    # The hypothesis loop.  Explore the admission; claim the committed
-    # hypothesis's coverage, and while the claim leaves real evidence
-    # unexplained (or the hypothesis is untrusted and the capture is owed a
-    # rescue look), admit the complement and explore again
-    # (`specs/core/geometry/seed-hypothesis-loop.md`).  The
-    # capture-level vote above is measured ONCE over the full admission's pair
-    # graph and read by every hypothesis — it is the independent referee the
-    # arbitration measures each release against, so no hypothesis re-derives it
-    # from its own restricted pair graph.
+    # The hypothesis loop.  Explore the admission; every distinct finalist of
+    # the pass commits, and the committed candidates' coverage claims order the
+    # complement admission the next pass explores
+    # (`specs/core/geometry/seed-hypothesis-loop.md`).  The capture-level vote
+    # above is measured ONCE over the full admission's pair graph and read by
+    # every hypothesis -- it is the independent referee each release is measured
+    # against, so no hypothesis re-derives it from its own restricted pair
+    # graph.
     # THE CANDIDATE SET: every distinct finalist of every pass, in commit order.
     hyps = []
     npass = 0
     claims = {}
     handle = _SEL_MATCHES
-    rescue_spent = False
-    # The generator is the RUNG's.  The legacy full-seed path keeps the
-    # single-winner loop it was made with, materiality stop and all: it feeds a
-    # finalization that wants one seed, not a set.
-    label = "pass" if rung is not None else "hypothesis"
+    # ONE generator: each PASS explores one admitted selection and commits
+    # every distinct finalist its ladder produced.
+    label = "pass"
     # The capture-level covisibility graph, built ONCE from the full admission
     # (as the vote above is measured once over the full pair graph), so every
     # hypothesis's coverage reach is measured against the same capture.
@@ -5511,7 +4837,7 @@ def main():
         # along as metadata and decides nothing; what used to be a winner and a
         # runner-up is just the first two entries of a list.
         first = None
-        for n_got, res in enumerate(got if rung is not None else got[:1]):
+        for n_got, res in enumerate(got):
             if len(hyps) >= CANDIDATE_BUDGET:
                 print(
                     f"candidate budget reached; {len(got) - len(hyps)} further "
@@ -5532,12 +4858,8 @@ def main():
             hyps.append(res)
             first = first or res
             print(
-                (
-                    f"candidate {idx} committed (ladder rank {res['ladder_rank']}): "
-                    if rung is not None
-                    else f"hypothesis {idx} committed: "
-                )
-                + f"f {res['f_released']:.1f} px, "
+                f"candidate {idx} committed (ladder rank {res['ladder_rank']}): "
+                f"f {res['f_released']:.1f} px, "
                 f"inlier<2px {100 * res['inl']:.1f}%, {int(res['posed'].sum())} posed, "
                 f"reach {100 * res['reach']:.0f}% (capture-level; own admission "
                 f"{100 * res['reach_pass']:.0f}%), "
@@ -5604,7 +4926,7 @@ def main():
         # winner's claim used to gate exploration, so a wrong winner did not
         # merely mis-rank the set -- it impoverished it (20240618_001255975~2
         # lost its +1.3% member to a claim stamped by the wrong candidate).
-        for res in got if rung is not None else got[:1]:
+        for res in got:
             if res.get("claim_pts") is not None:
                 claim_coverage(res, data, claims)
             res.pop("claim_pts", None)
@@ -5621,41 +4943,6 @@ def main():
             # complement is not a new admission and the generator is done.
             print("the complement is not a new admission; the generator stops")
             break
-        if rung is None:
-            # MATERIALITY, the legacy stop.  A complement that is most of the
-            # admission again means the committed hypothesis's structure barely
-            # overlaps the evidence pool, and exploring it enumerates
-            # independently-seedable frame WINDOWS of the same world.  The
-            # exception is rescue: an untrusted hypothesis's claim is not
-            # evidence about the rest of the capture, and it is spent when used,
-            # because a chain of untrusted hypotheses has no brake otherwise.
-            # The rung retires all of it -- a claim there orders the queue and
-            # can no longer veto a group.
-            qual = qualifies(first)
-            retention = len(survivors) / max(n_cl, 1)
-            material = retention < MATERIAL_RETENTION
-            rescue = not qual and not rescue_spent
-            if material:
-                decision = f"material (< {100 * MATERIAL_RETENTION:.0f}%) — exploring"
-            elif rescue:
-                decision = (
-                    f"immaterial but hypothesis {npass - 1} does not qualify — "
-                    f"exploring (rescue, the capture's one look)"
-                )
-            elif not qual:
-                decision = (
-                    f"immaterial and hypothesis {npass - 1} does not qualify, but "
-                    f"the rescue look is spent — the loop stops here"
-                )
-            else:
-                decision = (
-                    f"immaterial (>= {100 * MATERIAL_RETENTION:.0f}% retained "
-                    f"under a qualified hypothesis) — the loop stops here"
-                )
-            print(f"materiality: {decision} [{elapsed():.1f}s]")
-            if not (material or rescue):
-                break
-            rescue_spent = rescue_spent or rescue
         handle, data = complement_selection(handle, survivors)
         obs_c, obs_i, u = data["obs_c"], data["obs_i"], data["obs_uv"]
         n_cl = data["n_cl"]
@@ -5688,433 +4975,175 @@ def main():
     # value is as a referee of that finite basin, and a layer inherited from the
     # basin it referees could never indict it.
     #
-    # All of them land after the complement is exhausted and before the
-    # combination and the arbitration; none stamps a coverage claim, donates or
-    # receives frames, or enters the ranking (qualification stays a
-    # finite-structure verdict).  They join the set AFTER the finite
-    # hypotheses, which are exactly what they were.
+    # All of them land after the complement is exhausted and before the rank;
+    # none stamps a coverage claim, donates or receives frames, or enters the
+    # ranking (qualification stays a finite-structure verdict).  They join the
+    # set AFTER the finite hypotheses, which are exactly what they were.
     # Every finite candidate, in commit order, for the far layers to pair with.
     layered = list(enumerate(hyps))
-    if rung is not None:
-        # The vote's focal, in the SOLVE's own parameterization: the pinhole
-        # pool for a pinhole run, the equidistant verdict under a fisheye
-        # context.  The rotation model has no depth for a scan to trade against
-        # focal, so the referee's number is the honest one here.
-        if fisheye_stage1() or f_vote is None:
-            f_rot, f_src = f_probe, ("vote" if fisheye_stage1() else "probe")
-        else:
-            f_rot, f_src = f_vote, "vote"
-        far_idx = len(layered)
-        for k, h in layered:
-            print(
-                f"\n=== hypothesis {far_idx}: the far-field layer of h{k} "
-                f"({int(h['posed'].sum())} posed frames) ==="
-            )
-            built = rotation_only_hypothesis(
-                rung,
-                far_idx,
-                h.get("release_data") or data_full,
-                float(f_rot),
-                f_src,
-                scope="group",
-                images=h["keep"],
-                paired_with=k,
-                sib=h,
-            )
-            if built is not None:
-                evo_copy_stage(
-                    h.get("evo"),
-                    "far-field",
-                    built.get("release_file"),
-                    hypothesis_index=far_idx,
-                    scope="group",
-                    f=float(f_rot),
-                    f_source=f_src,
-                    n_posed=int(built["posed"].sum()),
-                    n_points=built["n_points_infinity"],
-                    inlier_2px=built["inl"],
-                    inlier_2px_earned=built["inl_earned"],
-                    reach=built["reach"],
-                    far_rows=built["far_rows"],
-                    obs_beyond_sibling=built["obs_beyond_sibling"],
-                    obs_beyond_sibling_frac=(
-                        None
-                        if not built["far_rows"] or built["obs_beyond_sibling"] is None
-                        else built["obs_beyond_sibling"] / built["far_rows"]
-                    ),
-                )
-            far_idx += built is not None
+    # The vote's focal, in the SOLVE's own parameterization: the pinhole
+    # pool for a pinhole run, the equidistant verdict under a fisheye
+    # context.  The rotation model has no depth for a scan to trade against
+    # focal, so the referee's number is the honest one here.
+    if fisheye_stage1() or f_vote is None:
+        f_rot, f_src = f_probe, ("vote" if fisheye_stage1() else "probe")
+    else:
+        f_rot, f_src = f_vote, "vote"
+    far_idx = len(layered)
+    for k, h in layered:
         print(
-            f"\n=== hypothesis {far_idx}: the capture's far-field layer "
-            f"(parallax-poverty {_VOTE_POVERTY:.2f}) ==="
+            f"\n=== hypothesis {far_idx}: the far-field layer of h{k} "
+            f"({int(h['posed'].sum())} posed frames) ==="
         )
-        cap_far = rotation_only_hypothesis(
-            rung, far_idx, data_full, float(f_rot), f_src
+        built = rotation_only_hypothesis(
+            rung,
+            far_idx,
+            h.get("release_data") or data_full,
+            float(f_rot),
+            f_src,
+            scope="group",
+            images=h["keep"],
+            paired_with=k,
+            sib=h,
         )
-        if cap_far is not None and evo_on():
-            # The capture's own far field is a reading of no single candidate,
-            # so it gets a record of its own rather than a stage of someone's.
-            s_cap = evo_candidate(
-                "capture_rotation",
-                scope="capture",
-                parallax_poverty=float(_VOTE_POVERTY),
-            )
-            evo_link(s_cap, far_idx)
+        if built is not None:
             evo_copy_stage(
-                s_cap,
-                "capture-hrot",
-                cap_far.get("release_file"),
-                scope="capture",
+                h.get("evo"),
+                "far-field",
+                built.get("release_file"),
+                hypothesis_index=far_idx,
+                scope="group",
                 f=float(f_rot),
                 f_source=f_src,
-                n_posed=int(cap_far["posed"].sum()),
-                n_points=cap_far["n_points_infinity"],
-                inlier_2px=cap_far["inl"],
-                inlier_2px_earned=cap_far["inl_earned"],
-                reach=cap_far["reach"],
-                far_rows=cap_far["far_rows"],
+                n_posed=int(built["posed"].sum()),
+                n_points=built["n_points_infinity"],
+                inlier_2px=built["inl"],
+                inlier_2px_earned=built["inl_earned"],
+                reach=built["reach"],
+                far_rows=built["far_rows"],
+                obs_beyond_sibling=built["obs_beyond_sibling"],
+                obs_beyond_sibling_frac=(
+                    None
+                    if not built["far_rows"] or built["obs_beyond_sibling"] is None
+                    else built["obs_beyond_sibling"] / built["far_rows"]
+                ),
             )
+        far_idx += built is not None
+    print(
+        f"\n=== hypothesis {far_idx}: the capture's far-field layer "
+        f"(parallax-poverty {_VOTE_POVERTY:.2f}) ==="
+    )
+    cap_far = rotation_only_hypothesis(rung, far_idx, data_full, float(f_rot), f_src)
+    if cap_far is not None and evo_on():
+        # The capture's own far field is a reading of no single candidate,
+        # so it gets a record of its own rather than a stage of someone's.
+        s_cap = evo_candidate(
+            "capture_rotation",
+            scope="capture",
+            parallax_poverty=float(_VOTE_POVERTY),
+        )
+        evo_link(s_cap, far_idx)
+        evo_copy_stage(
+            s_cap,
+            "capture-hrot",
+            cap_far.get("release_file"),
+            scope="capture",
+            f=float(f_rot),
+            f_source=f_src,
+            n_posed=int(cap_far["posed"].sum()),
+            n_points=cap_far["n_points_infinity"],
+            inlier_2px=cap_far["inl"],
+            inlier_2px_earned=cap_far["inl_earned"],
+            reach=cap_far["reach"],
+            far_rows=cap_far["far_rows"],
+        )
 
     # THE RELAXATION RUNG.  Every rotation-only member the phase above
     # committed is relaxed into a finite sibling and committed beside it: the
     # rows its model refused carry the baselines its model has no place for, so
     # the same evidence prices camera centres and depths.  It lands here, as
     # rung 1's LAST exploration phase, because it needs the far layers' arrays
-    # (which the battery clears) and the pre-restriction handle (which the
-    # restriction stage replaces), and because a member measured before the
+    # (which the battery clears), and because a member measured before the
     # relaxation would be measured on rotations the relaxation moves.
-    if rung is not None and relax_on():
+    if relax_on():
         relax_far_layers(rung, data_full)
 
-    # THE RANK.  Under the rung this is all the arbitration is: the recorded
-    # order of the set, qualified first and commit order otherwise.  The
-    # distinctness test and the combination that read it are statements ABOUT
-    # THE SET -- which committed hypotheses are one world and how they merge --
-    # and the set is not finished until rung 1 has shipped it, so both belong to
-    # whatever reads the product, not to the pass that writes it.  The legacy
-    # full-seed path still needs a single winner grown over its rivals before
-    # the finalization sees it, so it keeps both, untouched.
-    if rung is not None:
-        win = next(
-            (k for k, h in enumerate(hyps) if qualifies(h)),
-            0,
-        )
-        n_qual = sum(1 for h in hyps if qualifies(h))
-        any_distinct = False
-    else:
-        win, n_qual, any_distinct = arbitrate(hyps)
+    # THE RANK.  The recorded order of the set: qualified first, commit order
+    # otherwise.  It is ADVISORY and decides nothing -- ranking, refusal and
+    # trimming read the stored evaluation evidence in a later pass, and the set
+    # is what ships.
+    win = next(
+        (k for k, h in enumerate(hyps) if qualifies(h)),
+        0,
+    )
+    n_qual = sum(1 for h in hyps if qualifies(h))
     res = hyps[win]
-    # The winner's own admission is what the restriction stage narrows: cluster
-    # ids downstream are the winning hypothesis's selection's ids.
-    _SEL_MATCHES = res["handle"]
     if len(hyps) > 1:
         print(
-            f"arbitration: {len(hyps)} hypotheses committed, {n_qual} "
-            f"qualified, "
-            + ("a distinct pair" if any_distinct else "no distinct pair")
-            + f"; hypothesis {win} ships"
-            + ("" if n_qual else " (no qualifier — the first hypothesis ships)")
+            f"rank: {len(hyps)} hypotheses committed, {n_qual} qualified; "
+            f"hypothesis {win} ships first"
+            + ("" if n_qual else " (no qualifier; the first hypothesis ships)")
         )
-    # COMBINATION.  The losing hypotheses' frames are certified-seedable
-    # viewpoints of the winner's own world, so the winner grows over them before
-    # anything downstream sees it: the combined posed set is what the
-    # restriction stage narrows to and what the seed dict carries.  A capture
-    # with no donor frame — every single-hypothesis capture, and any capture
-    # whose other hypotheses are distinct — leaves the stage a strict no-op.
-    comb, reclassified = (None, []) if rung is not None else combine(hyps, win)
-    # DISTINCTNESS FEEDBACK.  The combination's cross-resection certificates are
-    # the second, stronger source of the arbitration's distinctness verdict: a
-    # pair whose linking frames systematically resect into one structure but not
-    # the other is two worlds, whatever the shared-frame rotation test said.  The
-    # verdict withdrew the donor's frames above; here it feeds the flag.  It
-    # never re-runs the arbitration — the incumbent already won among the
-    # qualified, and a reclassification only says the loser was a different
-    # world, not a better one.
-    if reclassified and qualifies(res):
-        newly = [k for k in reclassified if qualifies(hyps[k])]
-        if newly and not any_distinct:
-            print(
-                f"arbitration: the combination's certificates reclassify "
-                f"{', '.join(f'h{k}' for k in newly)} DISTINCT from the winner; "
-                f"the capture carries more than one rigid world"
-            )
-        any_distinct = any_distinct or bool(newly)
-    f_released = res["f_released"]
-    if comb is None:
-        names = res["names"]
-        rvec, tvec, posed = res["rvec"], res["tvec"], res["posed"]
-        f, f_report, inl, flags = res["f"], res["f_report"], res["inl"], res["flags"]
-    else:
-        # The combined release is stated in the LOADER's image frame (the
-        # winner's working set was a thinned subset of it), so the names, poses
-        # and posed mask all come off the combination.
-        names = comb["names"]
-        rvec, tvec, posed = comb["rvec"], comb["tvec"], comb["posed"]
-        f, f_report, inl, flags = (
-            comb["f"],
-            comb["f_report"],
-            comb["inl"],
-            comb["flags"],
-        )
-        f_released = comb["f_released"]
-    compare_to_reference(names, rvec, tvec, f_report, posed)
-    # The seed stage's data product is the finalized reconstruction, NOT a JSON.
-    # Build the seed in memory and run the photometric finalization in-process as
-    # the mandatory terminal step (embed-patches expand + congeal + consensus
-    # bitmaps -> drop length-2 -> native BA), writing sfmr/seed-final.sfmr.  No
-    # fast-pinhole.json is ever written; the stage-1 focal estimates and
-    # confidence flags are recorded in the sfmr's tool_options metadata instead.
-    # Camera-model verdict (escalation only; None on every pinhole capture).
-    # Without the opt-in it is a CONFIDENCE flag only — the seed above was
-    # produced by the pinhole pipeline on the pinhole vote, and the flag marks
-    # the reconstruction as one that pipeline cannot model.  With the opt-in
-    # (fisheye_stage1()) the seed IS equidistant and the flag records which
-    # model produced it.
-    if _VOTE_FISHEYE is not None:
-        flags = [*flags, "fisheye_detected"]
-    # Two or more hypotheses clearing the structure-trust gates AND disagreeing
-    # about the frames they both pose means the capture's cluster evidence
-    # supports more than one rigid world: the unchosen one is real structure,
-    # not noise, and the flag says so.  Qualified-but-not-distinct is one world
-    # seeded from two windows, which the flag must not claim.
-    if n_qual >= 2 and any_distinct:
-        flags = [*flags, "multiple_hypotheses"]
-    # Hypothesis records, present ONLY when the loop committed more than one —
-    # a single-hypothesis capture's metadata is byte-identical to a run without
-    # the loop.
-    hyp_opts = {}
-    if len(hyps) > 1:
-        hyp_opts["hypothesis_count"] = str(len(hyps))
-        hyp_opts["hypothesis_winner"] = str(win)
-        for i, h in enumerate(hyps):
-            hyp_opts[f"hypothesis_{i}"] = (
-                f"focal_released_px={h['f_released']:.3f},"
-                f"inlier_fraction={h['inl']:.4f},"
-                f"posed_count={int(h['posed'].sum())},"
-                f"flags={'|'.join(h['flags']) or 'ok'}"
-            )
-    # THE PRODUCT.  Everything above this line is stage 1: the focal vote, the
-    # probe/widen/verify/release attempts, the hypothesis loop, the far-field
-    # layers and the rank.  Everything below is the finalization — the
-    # restriction stage's matches artifact, the photometric embed/congeal, and
-    # sfmr/seed-final.sfmr — which belongs to the legacy full-seed path.
+    # The reference comparison, when a reference solve exists, is read against
+    # the first-ranked candidate's own release.
+    compare_to_reference(
+        res["names"], res["rvec"], res["tvec"], res["f_report"], res["posed"]
+    )
+    # THE PRODUCT.  Everything above this line is the exploration: the focal
+    # vote, the probe/widen/verify/release passes, the hypothesis loop, the
+    # far-field layers, the relaxation and the rank.  The stage ends here BY
+    # DEFINITION: exploration is over when the basin structure is on disk.  It
+    # ships `sfmr/candidate_solves/`, and that directory IS the product: the
+    # whole set, its manifest, nothing else to read, no stamp in any path.
     #
-    # An armed rung stops here BY DEFINITION: exploration ends when the basin
-    # structure is on disk.  It ships `sfmr/candidate_solves/`, and that
-    # directory IS the product: the whole set, its manifest, nothing else to
-    # read, no stamp in any path.
-    if rung is not None:
-        # THE EVIDENCE, before the product goes out: every committed member
-        # measured by the evaluation battery, attached to its own manifest
-        # entry (and to its corpus record), so what ranks and refuses the set
-        # later does not have to re-derive any of it.  Peer corroboration --
-        # how far each candidate stands from its rivals where they overlap --
-        # rides in the same block.
-        attach_evaluation(rung, hyps, data_full, f_vote)
-        path = write_candidate_solves(
-            rung, win, f_vote, None if vote is None else vote[1]
-        )
-        n_rel = sum(1 for h in rung.hypotheses if h["release_file"] is not None)
-        print(
-            f"\nRUNG 1 COMPLETE (top {rung.n} clusters): "
-            f"{len(rung.hypotheses)} hypotheses committed, {n_qual} qualified, "
-            f"{n_rel} released, {rung.memo_hits} probes memoized; "
-            f"the rank puts h{win} first "
-            f"(the set is the product, nothing is discarded); "
-            f"{path.relative_to(WS).as_posix()} [{elapsed():.1f}s]"
-        )
-        evo_write(
-            stamp=rung.stamp,
-            top_n=rung.n,
-            n_images=int(data_full["n_img"]),
-            n_clusters=int(data_full["n_cl"]),
-            n_clusters_total=rung.n_clusters_total,
-            n_clusters_kept=rung.n_clusters_kept,
-            min_kept_radius_px=rung.min_kept_radius_px,
-            image_names=[Path(str(s)).name for s in data_full["names"]],
-            image_dims=[[int(w), int(h)] for w, h in data_full["dims"]],
-            candidate_budget=CANDIDATE_BUDGET,
-            ladder_first=int(win),
-            n_qualified=int(n_qual),
-            vote_f=None if f_vote is None else float(f_vote),
-            vote_n=None if vote is None else int(vote[1]),
-            vote_parallax_poverty=float(_VOTE_POVERTY),
-            vote_rotation_votes=int(_VOTE_ROT_N),
-            vote_spread_log=float(_VOTE_SPREAD),
-            fisheye_verdict=(
-                None
-                if _VOTE_FISHEYE is None
-                else {
-                    k: v
-                    for k, v in _VOTE_FISHEYE.items()
-                    if isinstance(v, (int, float, str))
-                }
-            ),
-            fisheye_stage1=bool(fisheye_stage1()),
-            probe_focal=float(f_probe),
-            elapsed_s=round(elapsed(), 3),
-        )
-        return
-    seed = {
-        "focal_structure_px": float(f),
-        # The structure-free focal the finalization arbitrates against — in
-        # the SOLVE's parameterization, so a fisheye seed carries the
-        # equidistant verdict here rather than the (incommensurable) pinhole
-        # vote it would otherwise hand a fisheye camera.
-        "focal_vote_px": res["f_indep"],
-        # The same measurement bias-corrected, and its own measured precision
-        # (log-focal half-width): the finalization refuses a structure candidate
-        # that this independent measurement contradicts beyond its own band.
-        "focal_vote_center_px": res["f_center"],
-        "focal_vote_band_log": res["f_band"],
-        "posed_images": [n for j, n in enumerate(names) if posed[j]],
-        "rvec": rvec[posed].tolist(),
-        "tvec": tvec[posed].tolist(),
-        "confidence_flags": flags,
-    }
-    _write_seed_sfmr(seed, f_report, f_vote, inl, f_released, hyp_opts)
-
-
-# ── Cluster restriction stage ────────────────────────────────────────────────
-#
-# Stage 1 explores over the whole admitted cluster selection; the seed it
-# commits to spans a handful of images.  Narrowing the clusters to those images
-# is a STAGE with a file artifact — matches/seed-restricted.matches — and
-# everything after it reads that file.  Cluster ids downstream are the
-# restricted file's own; no stage past this one names a cluster of the
-# workspace's matches file.
-
-RESTRICTED_MATCHES = "matches/seed-restricted.matches"
-
-
-def restrict_clusters(posed_images):
-    """Run the restriction stage: derive stage 1's cluster selection again on
-    the seed images alone and write it as the stage artifact.  Returns the
-    path."""
-    import exp_pinhole_bootstrap as B
-
-    sel = _SEL_MATCHES
-    names = list(sel.image_names)
-    wanted = set(posed_images)
-    keep = np.array([n in wanted for n in names], bool)
-    restricted = sel.select_clusters(
-        min_span=B.MIN_SPAN_BA,
-        restrict_images=[n for j, n in enumerate(names) if keep[j]],
-    )
-    out_path = WS / RESTRICTED_MATCHES
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    restricted.save(str(out_path))
-    starts_in = np.asarray(sel.cluster_starts, dtype=np.int64)
-    starts_out = np.asarray(restricted.cluster_starts, dtype=np.int64)
+    # THE EVIDENCE, before the product goes out: every committed member
+    # measured by the evaluation battery, attached to its own manifest
+    # entry (and to its corpus record), so what ranks and refuses the set
+    # later does not have to re-derive any of it.  Peer corroboration --
+    # how far each candidate stands from its rivals where they overlap --
+    # rides in the same block.
+    attach_evaluation(rung, hyps, data_full, f_vote)
+    path = write_candidate_solves(rung, win, f_vote, None if vote is None else vote[1])
+    n_rel = sum(1 for h in rung.hypotheses if h["release_file"] is not None)
     print(
-        f"cluster restriction: {len(starts_in) - 1} -> {len(starts_out) - 1} "
-        f"clusters on {int(keep.sum())}/{len(names)} seed images "
-        f"-> {out_path.name}"
+        f"\nRUNG 1 COMPLETE (top {rung.n} clusters): "
+        f"{len(rung.hypotheses)} hypotheses committed, {n_qual} qualified, "
+        f"{n_rel} released, {rung.memo_hits} probes memoized; "
+        f"the rank puts h{win} first "
+        f"(the set is the product, nothing is discarded); "
+        f"{path.relative_to(WS).as_posix()} [{elapsed():.1f}s]"
     )
-    return out_path
-
-
-def _write_seed_sfmr(seed, f_report, f_vote, inl, f_released, hyp_opts=None):
-    """Finalize the in-memory seed into sfmr/seed-final.sfmr — the seed stage's
-    terminal, mandatory step.  Runs the bootstrap's photometric finalization
-    in-process (no JSON is written); the confidence flags and the stage-1 focal
-    estimates are recorded in the sfmr's tool_options metadata."""
-    from sfmtool._sfmtool.io import MatchesFile
-
-    # The stage-1 camera context reaches the finalization through
-    # `bootstrap_module` (a no-op restating of the pinhole default on every
-    # capture without a confirmed, opted-in fisheye verdict).
-    B = bootstrap_module()
-    # Cluster admission is decoupled from image selection: the restriction
-    # stage narrows the stage-1 selection to the seed's posed images, so span
-    # and the admission population are computed over the seed-image population
-    # instead of the whole matches file.  It writes the restricted cluster set
-    # as the stage artifact and everything below reads THAT — cluster ids from
-    # here on are the restricted file's own.
-    restricted_path = restrict_clusters(seed["posed_images"])
-    data = B.load_clusters(matches_data=MatchesFile(restricted_path), preselected=True)
-    final = B.finalize_seed_from_dict(data, seed)
-    out_path = WS / "sfmr" / "seed-final.sfmr"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    opts = {
-        "confidence_flags": ",".join(seed["confidence_flags"]) or "ok",
-        "focal_report_px": f"{f_report:.3f}",
-        "focal_vote_px": "none" if f_vote is None else f"{f_vote:.3f}",
-        "stage1_inlier_fraction": f"{inl:.4f}",
-    }
-    # Hypothesis-loop records.  Empty (the keys absent entirely) unless more
-    # than one hypothesis committed, so a single-hypothesis capture writes the
-    # metadata it wrote before the loop existed.
-    opts.update(hyp_opts or {})
-    # Escalated camera-model verdict.  These keys describe the DETECTION, so
-    # they appear only on a fisheye verdict and keep their fisheye names.
-    # Under the opt-in every focal here parameterizes the EQUIDISTANT map
-    # (theta = r/f); without it focal_report_px / focal_vote_px stay pinhole
-    # and fisheye_focal_equidistant_px is the one equidistant number.
-    if _VOTE_FISHEYE is not None:
-        opts["camera_model_verdict"] = "EquidistantFisheye"
-        opts["fisheye_focal_equidistant_px"] = (
-            "none"
-            if _VOTE_FISHEYE["focal_px"] is None
-            else f"{_VOTE_FISHEYE['focal_px']:.3f}"
-        )
-        # The RELEASED stage-1 focal, recorded whether or not a confidence
-        # flag sent focal_report_px back to the structure-free verdict — the
-        # release is the measurement Phase 3b exists to produce.
-        opts["focal_released_px"] = f"{f_released:.3f}"
-        opts["fisheye_verdict_margin"] = f"{_VOTE_FISHEYE['margin']:.2f}"
-        opts["fisheye_verdict_mass"] = (
-            f"pinhole={_VOTE_FISHEYE['mass_pinhole']},"
-            f"equidistant={_VOTE_FISHEYE['mass_equidistant']}"
-            f",equidistant_epipolar={_VOTE_FISHEYE['mass_epipolar']}"
-            f",equidistant_rotation={_VOTE_FISHEYE['mass_rotation']}"
-        )
-        opts["fisheye_escalation_trigger"] = _VOTE_FISHEYE["trigger"]
-    # The finalization's spline rung: the promoted model, the shipped radial
-    # spline and its domain.  The rung runs on EITHER base and the record is
-    # named for the spline, not for the base -- `bspline_d_max` is the end of
-    # the spline's domain in whichever radial coordinate the base measures,
-    # radians of incidence angle under the equidistant one and the normalized
-    # image-plane radius rho = tan(theta) under the pinhole one
-    # (specs/formats/sfmtool-camera-models.md); `camera_model_final` is the
-    # promoted model, which says which.
-    #
-    # The rung promotes on a REFUSAL too, at the pre-rung focal with an
-    # all-zero spline, so these keys record a refusal as naturally as a
-    # release: an all-zero `bspline` IS the refusal, and it is the base map
-    # bit for bit.  All three go absent only where nothing promoted the
-    # context at all -- the SFMTOOL_BSPLINE_RUNG=0 kill switch, or a capture
-    # with no spline domain to promote onto -- and the camera table then
-    # carries the base model, exactly as it did before the rung existed.
-    cam_ctx = B.camera_context()
-    promoted = {
-        "SFMTOOL_FISHEYE": "SfmtoolFisheye",
-        "SFMTOOL_PINHOLE": "SfmtoolPinhole",
-    }.get(cam_ctx["model"])
-    if promoted is not None:
-        opts["camera_model_final"] = promoted
-        opts["bspline"] = ",".join(
-            f"{c:.8f}" for c in np.asarray(cam_ctx["bspline"], dtype=np.float64)
-        )
-        opts["bspline_d_max"] = f"{cam_ctx['theta_max']:.6f}"
-    final.save(str(out_path), operation="seed-finalized", tool_options=opts)
-    print(
-        f"\nwrote {out_path} ({final.point_count} points, seed-finalized "
-        f"w/ bitmaps; no JSON written)"
+    evo_write(
+        stamp=rung.stamp,
+        top_n=rung.n,
+        n_images=int(data_full["n_img"]),
+        n_clusters=int(data_full["n_cl"]),
+        n_clusters_total=rung.n_clusters_total,
+        n_clusters_kept=rung.n_clusters_kept,
+        min_kept_radius_px=rung.min_kept_radius_px,
+        image_names=[Path(str(s)).name for s in data_full["names"]],
+        image_dims=[[int(w), int(h)] for w, h in data_full["dims"]],
+        candidate_budget=CANDIDATE_BUDGET,
+        ladder_first=int(win),
+        n_qualified=int(n_qual),
+        vote_f=None if f_vote is None else float(f_vote),
+        vote_n=None if vote is None else int(vote[1]),
+        vote_parallax_poverty=float(_VOTE_POVERTY),
+        vote_rotation_votes=int(_VOTE_ROT_N),
+        vote_spread_log=float(_VOTE_SPREAD),
+        fisheye_verdict=(
+            None
+            if _VOTE_FISHEYE is None
+            else {
+                k: v
+                for k, v in _VOTE_FISHEYE.items()
+                if isinstance(v, (int, float, str))
+            }
+        ),
+        fisheye_stage1=bool(fisheye_stage1()),
+        probe_focal=float(f_probe),
+        elapsed_s=round(elapsed(), 3),
     )
-    # Timestamped round copy: every run leaves a byte-identical snapshot under
-    # sfmr/seed-rounds/, so successive rounds accumulate and `sfm compare` can
-    # diagnose any two of them.  A fleet runner exports one SFMTOOL_ROUND_STAMP
-    # for the whole invocation so all its datasets share one round identity;
-    # a bare run stamps itself.  Copy, not re-save: a second save would
-    # recompute content_xxh128 and the round artifact would no longer be the
-    # file the canonical path holds.
-    import shutil
-
-    round_path = WS / "sfmr" / "seed-rounds" / f"{round_stamp()}-seed-final.sfmr"
-    round_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(out_path, round_path)
-    print(f"round snapshot: {round_path}")
 
 
 def run_pipeline(
@@ -6134,8 +5163,9 @@ def run_pipeline(
 ):
     """One full seed-exploration -> focal-scan -> release pass.
 
-    Returns the released estimate (poses, focal, released inlier fraction,
-    flags, and the working set it was measured on) for ``main`` to arbitrate.
+    Returns every distinct candidate the pass's ladder generated, rank-ordered:
+    each is a released estimate (poses, focal, released inlier fraction, flags,
+    and the working set it was measured on) for ``main`` to commit.
 
     ``hyp`` is the hypothesis index the pass belongs to; it only tags the
     snapshots, so hypothesis 0's checkpoints keep the names they always had.
@@ -6322,7 +5352,7 @@ def run_pipeline(
             # carry a bias toward the probe focal.  Appearance VERIFIES,
             # geometry decides.  It is also the rung's largest cost bucket,
             # which is why it is a mode rather than a constant.
-            if rung is None or rung.verify == "full":
+            if rung.verify == "full":
                 pv = np.bincount(o_c[posed[o_i]], minlength=n_cl_w)
                 cand_a = np.nonzero(~np.isnan(pts[:, 0]) & (pv >= 3))[0]
                 cand_a = cand_a[np.argsort(data_w["cl_quality"][cand_a], kind="stable")]
@@ -6402,7 +5432,7 @@ def run_pipeline(
                 "kept": int(posed.sum()),
                 # Exploration reach (this pass's graph) and QUALIFICATION reach
                 # (the capture's).  The exploration compares working sets of
-                # one admission; the arbitration compares hypotheses across
+                # one admission; the rank compares hypotheses across
                 # admissions, and only the capture-level graph is common to
                 # them.
                 "reach": float(reach_of(keep[pi])),
@@ -6566,7 +5596,7 @@ def run_pipeline(
         def group_workset(group_list):
             """Point the current try at the working set for ``group_list``'s
             images, re-admitted locally (stage B), or leave it at the
-            attempt's own when the re-admission is off or produces nothing.
+            attempt's own when the re-admission produces nothing.
 
             The image set is the groups' frames PLUS everything covisible with
             them in the attempt's own graph.  A group of five frames on its own
@@ -6579,8 +5609,6 @@ def run_pipeline(
             outside the neighbourhood still contributes wherever it sees one --
             the neighbourhood bounds what the ranking is measured on, not what
             the solve may reach."""
-            if rung is None:
-                return None
             imgs = np.unique(np.concatenate([np.asarray(g) for g in group_list]))
             seen = np.unique(o_c[np.isin(o_i, imgs)])
             nbr = np.unique(np.concatenate([imgs, o_i[np.isin(o_c, seen)]]))
@@ -6626,8 +5654,8 @@ def run_pipeline(
             return w
 
         def try_group_list(group_list):
-            """Probe -> widen -> verify each seed group (two at a time, sharing
-            factorization); return a HEALTHY outcome or None.
+            """Probe -> widen -> verify each seed group, one group per
+            working set; return a HEALTHY outcome or None.
 
             Each sub-healthy result folds into the enclosing ``best`` /
             ``low_par`` fallbacks the attempt arbitrates at its end.
@@ -6636,9 +5664,8 @@ def run_pipeline(
             point is a working set derived for the images being seeded, and two
             groups in one chunk would split N_local between them."""
             nonlocal best, low_par, probe_max
-            step = 1 if rung is not None else 2
-            for chunk in range(0, len(group_list), step):
-                grp = group_list[chunk : chunk + step]
+            for group in group_list:
+                grp = [group]
                 gk = tuple(
                     int(x)
                     for x in keep[
@@ -6649,7 +5676,7 @@ def run_pipeline(
                 local = group_workset(grp)
                 o_c, o_i, o_u, _o_f, _nms, rank = cur["wk"]
                 n_cl = cur["n_cl"]
-                if local is None and rung is not None:
+                if local is None:
                     print("group-local admission: nothing to re-admit; global set")
                 # A probe is memoizable exactly when its working set has an
                 # identity in the key: the re-admission ran (so the arrays are a
@@ -6907,9 +5934,9 @@ def run_pipeline(
         return covis_full.reach(np.ascontiguousarray(orig_posed, np.uint32), 8)
 
     def capture_reach_of(orig_posed):
-        """Coverage reach on the CAPTURE-level graph — what qualification, the
-        commit bar the arbitration ranks on, and the narrow-reach flag mean by
-        reach.  Identical to ``reach_of`` on the first hypothesis."""
+        """Coverage reach on the CAPTURE-level graph -- what qualification, the
+        commit bar the rank reads, and the narrow-reach flag mean by reach.
+        Identical to ``reach_of`` on the first hypothesis."""
         if covis_full is covis_capture:
             return reach_of(orig_posed)
         return capture_reach(orig_posed)
@@ -7053,46 +6080,6 @@ def run_pipeline(
         ev["beyond"] = int((far_in & ~priced).sum())
         return ev
 
-    def indicts(a, b):
-        """Does the evidence indict attempt ``a`` in favour of ``b``?
-
-        Two conjuncts, primary first.  ROTATION: ``a``'s camera motion is an
-        outlier against the rotation its own pair evidence supports, while
-        ``b``'s is not -- the direct reading of "the motion is not accurate".
-        ABSORPTION: ``b``'s far layer prices far more than ``a``'s does beyond
-        its finite sibling, which says ``a`` swallowed the far field into a
-        depth shell.  The second only speaks where the first is silent, is
-        never exculpatory, and stands down entirely on a far-field-dominated
-        capture, where a big far layer is the scene rather than a symptom."""
-        ea, eb = attempt_evidence(a), attempt_evidence(b)
-        if ea["dis"] is not None and eb["dis"] is not None:
-            if ea["dis"] > ROT_DISAGREE_ABS_DEG and ea[
-                "dis"
-            ] > ROT_DISAGREE_RATIO * max(eb["dis"], 1e-6):
-                return f"rotation {ea['dis']:.2f} deg vs {eb['dis']:.2f} deg"
-            if eb["dis"] > ROT_DISAGREE_ABS_DEG and eb[
-                "dis"
-            ] > ROT_DISAGREE_RATIO * max(ea["dis"], 1e-6):
-                return None  # the competitor is the outlier, not this one
-        if _VOTE_POVERTY >= FAR_DOMINANT_POVERTY:
-            return None
-        ba, bb = ea["beyond"], eb["beyond"]
-        if ba is None or bb is None or ba <= 0:
-            return None
-        if bb > ABSORPTION_RATIO * ba and (
-            a.get("f_peak") is None
-            or b.get("f_peak") is None
-            or f_center is None
-            or abs(np.log(a["f_peak"] / f_center)) > abs(np.log(b["f_peak"] / f_center))
-        ):
-            return f"absorption, far-beyond {ba} vs {bb}"
-        return None
-
-    def legacy_rank(att):
-        """The parallax-CLASS ranking this one replaces, kept only to name the
-        finalist the change displaces (never to decide anything)."""
-        return (not att.get("near_static_seed", False), *score(att))
-
     def att_pose_frame(a):
         """An attempt's rotations and posed mask in the DATA image frame, so
         two attempts from different thinning levels can be compared."""
@@ -7119,14 +6106,11 @@ def run_pipeline(
 
         The one thing still removed is a DUPLICATE: two finalists that pose
         overlapping frames and agree about the geometry there are one answer
-        found twice (`distinct`), and the better-scored copy stands for both.
+        found twice (`relative_rotation_disagreement` within
+        `POSE_DISAGREE_DEG`), and the better-scored copy stands for both.
         That is dedup, not judgment -- it collapses identical answers and never
         chooses between different ones."""
         ranked = sorted(atts, key=score, reverse=True)
-        if rung is None:
-            # The legacy full-seed path keeps the single-winner ladder it was
-            # made with: one attempt out, no evidence pass, no extra line.
-            return ranked[:1]
         for a in ranked:
             ev = attempt_evidence(a)
             a["evidence_summary"] = ev
@@ -7203,13 +6187,6 @@ def run_pipeline(
                 data["adm_rank"][obs_c],
             )
         else:
-            if rung is not None and rung.max_levels and level >= rung.max_levels:
-                # The ladder is capped: with the displaced finalists preserved,
-                # the later, thinner levels may only re-derive basins the
-                # earlier ones already committed.  Whether they do is a
-                # measurement, so the cap is a field with the measured
-                # behaviour (uncapped) as its default.
-                break
             target = n0 // 3**level
             if target < 20:
                 break
@@ -7448,38 +6425,36 @@ def run_pipeline(
         # the release nothing -- an all-zero spline is the base map bit for bit
         # -- so the structure below is what it was either way, and only the
         # camera record changes.
-        lens = None
-        if rung is not None:
-            live_l = ba_rows(bam & ~np.isnan(pts[obs_c, 0]), obs_i)
-            lens = spline_release(
-                obs_c, obs_i, u, rvec, tvec, pts, f, n_img, n_cl_w, live_l
-            )
-            if lens is not None and lens["accepted"]:
-                # The arm's own state ships with its lens.
-                rvec, tvec, pts = lens["rvec"], lens["tvec"], lens["pts"]
-                f = lens["f_chart"]
-                inl = float((lens["res"] < 2.0).sum() / max(int(denom.sum()), 1))
-            elif lens is not None and "rvec" in lens.get("refused", {}):
-                # The REFUSED arm, completed exactly as an accepted one would
-                # have been: the full triangulation of its own geometry, so the
-                # artifact beside the release is what acceptance would have
-                # shipped and not a partial view of it.
-                ref = lens["refused"]
-                ref["release_pts"] = triangulate(
-                    obs_c,
-                    obs_i,
-                    u,
-                    Rotation.from_rotvec(ref["rvec"]).as_matrix(),
-                    ref["tvec"],
-                    posed,
-                    n_cl_w,
+        live_l = ba_rows(bam & ~np.isnan(pts[obs_c, 0]), obs_i)
+        lens = spline_release(
+            obs_c, obs_i, u, rvec, tvec, pts, f, n_img, n_cl_w, live_l
+        )
+        if lens is not None and lens["accepted"]:
+            # The arm's own state ships with its lens.
+            rvec, tvec, pts = lens["rvec"], lens["tvec"], lens["pts"]
+            f = lens["f_chart"]
+            inl = float((lens["res"] < 2.0).sum() / max(int(denom.sum()), 1))
+        elif lens is not None and "rvec" in lens.get("refused", {}):
+            # The REFUSED arm, completed exactly as an accepted one would
+            # have been: the full triangulation of its own geometry, so the
+            # artifact beside the release is what acceptance would have
+            # shipped and not a partial view of it.
+            ref = lens["refused"]
+            ref["release_pts"] = triangulate(
+                obs_c,
+                obs_i,
+                u,
+                Rotation.from_rotvec(ref["rvec"]).as_matrix(),
+                ref["tvec"],
+                posed,
+                n_cl_w,
+                ref["f_chart"],
+                cam=bootstrap_module().make_cam_bspline(
                     ref["f_chart"],
-                    cam=bootstrap_module().make_cam_bspline(
-                        ref["f_chart"],
-                        ref["camera"]["params"]["coefficients"],
-                        lens["d_max"],
-                    ),
-                )
+                    ref["camera"]["params"]["coefficients"],
+                    lens["d_max"],
+                ),
+            )
         # BOTH ARMS OF THE KEEP-BEST into the corpus: the survey has to score
         # the arm that shipped against the one that did not, and a refusal is a
         # verdict about which of two reconstructions is better -- exactly the
@@ -7661,7 +6636,7 @@ def run_pipeline(
                 f"{100 * final_reach:.0f}% of the input images (<30%); focal is "
                 f"not observable on a sliver"
             )
-        if rung is not None and chosen.get("near_static_seed", False):
+        if chosen.get("near_static_seed", False):
             # The ladder had nothing the near-static gate passed, so the capture is
             # seeded from a window the gate rejected.  Nothing is discarded, but the
             # release says so and cannot qualify on it.
@@ -7761,10 +6736,10 @@ def run_pipeline(
             # What that re-admission selected, for the rung manifest; None when
             # the solve ran on the pass's own admission.
             "local_admission": chosen["data"].get("local_admission"),
-            # The commit-bar measurements of the attempt this pass committed, for
-            # the hypothesis arbitration's qualification gates.  Reach is the
-            # CAPTURE-level one: every hypothesis's reach is measured on the full
-            # admission's covisibility graph, so the gates compare like with like.
+            # The commit-bar measurements of the attempt this pass committed,
+            # for the qualification gates.  Reach is the CAPTURE-level one:
+            # every hypothesis's reach is measured on the full admission's
+            # covisibility graph, so the gates compare like with like.
             "kept": chosen["kept"],
             "reach": float(chosen["reach_capture"]),
             "reach_pass": float(chosen["reach"]),
