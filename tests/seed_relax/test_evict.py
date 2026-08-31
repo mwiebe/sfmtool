@@ -270,8 +270,8 @@ def test_the_enumeration_hands_back_only_pairs_inside_the_asking_disk():
         rch = reach[sel]
         for big, small, d in pairs.image_candidates(uv[sel, 0], uv[sel, 1], rch):
             assert (d <= rch[big]).all()
-            # Every row holds its own centre, once.
-            assert int((big == small).sum()) == len(sel)
+            # A row is never its own candidate.
+            assert not (big == small).any()
             seen += len(big)
     assert seen
 
