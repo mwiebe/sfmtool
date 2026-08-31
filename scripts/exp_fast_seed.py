@@ -3350,13 +3350,15 @@ def cell_codes(xy, cell, cols):
     return cy * cols + cx
 
 
-def claim_coverage(res, data, claims):
-    """Stamp a committed hypothesis's claim into ``claims``.
+def claim_grids(retained, data):
+    """The claim ONE set of retained clusters stamps, image by image.
 
-    The retained structure is every cluster with a finite position in the
-    released geometry's FULL triangulation (``claim_pts``, not the BA row
-    budget's subset — the budget is a solver-cost control, and the
-    observations it leaves out are read by the same geometry all the same).
+    The claim is an OCCUPANCY GRID per image, not a pixel bitmap: the cell size
+    is that image's median nearest-neighbour keypoint spacing among the
+    retained members (`cell_size`), and a cell holding at least one of them is
+    claimed.  An image with fewer than two retained members has no spacing to
+    measure and claims nothing.
+
     The claim is TRANSITIVE over cluster membership: a retained cluster is an
     explained 3D point, so its members stamp in EVERY image they appear in,
     posed or not.  The members come off the selection handle's own arrays,
@@ -3364,23 +3366,17 @@ def claim_coverage(res, data, claims):
     a long capture's frames still claims its structure's footprint
     capture-wide.
 
-    The claim is an OCCUPANCY GRID per image, not a pixel bitmap: the cell size
-    is that image's median nearest-neighbour keypoint spacing among the
-    retained members (`cell_size`), and a cell holding at least one of them is
-    claimed.  An image with fewer than two retained members has no spacing to
-    measure and claims nothing.  ``claims`` accumulates per data image index as
-    a LIST of grids — each hypothesis stamps into its own grid geometry, and
-    the cluster test evaluates a member against every grid its image carries.
-    """
-    t0 = time.perf_counter()
+    Returns ``({image index: (cell, cols, codes)}, census)`` -- one member's
+    claim, standing on its own, so a consumer can hold the claims of a chosen
+    set of members rather than only their running sum."""
     obs_c, obs_uv = data["obs_c"], data["obs_uv"]
     order, bounds = image_rows(data)
-    finite = np.isfinite(res["claim_pts"][:, 0])
-    n_img_claimed = n_members = 0
+    grids = {}
+    n_members = 0
     areas = []
     for g in range(data["n_img"]):
         rows = order[bounds[g] : bounds[g + 1]]
-        sel = rows[finite[obs_c[rows]]]
+        sel = rows[retained[obs_c[rows]]]
         if len(sel) < 2:
             continue
         xy = obs_uv[sel]
@@ -3390,16 +3386,89 @@ def claim_coverage(res, data, claims):
         w, h = data["dims"][g]
         cols = max(1, int(np.ceil(w / cell)))
         codes = np.unique(cell_codes(xy, cell, cols))
-        claims.setdefault(g, []).append((cell, cols, codes))
-        n_img_claimed += 1
+        grids[g] = (cell, cols, codes)
         n_members += len(sel)
         areas.append(len(codes) * cell * cell / (w * h))
+    census = {
+        "n_retained": int(retained.sum()),
+        "n_members": int(n_members),
+        "n_images": len(grids),
+        "mean_area": float(np.mean(areas)) if areas else 0.0,
+    }
+    return grids, census
+
+
+def member_claim(res, data):
+    """One committed hypothesis's OWN claim, and the census of it.
+
+    The retained structure is every cluster with a finite position in the
+    released geometry's FULL triangulation (``claim_pts``, not the BA row
+    budget's subset — the budget is a solver-cost control, and the
+    observations it leaves out are read by the same geometry all the same).
+
+    The retained mask is left on ``res`` so a consumer that later cuts frames
+    out of the member can RESTATE the claim on what survives (`core_claim`)
+    instead of standing on the footprint the whole member stamped."""
+    retained = np.isfinite(res["claim_pts"][:, 0])
+    res["claim_retained"] = retained
+    return claim_grids(retained, data)
+
+
+def core_claim(res, data, keep_frames, min_obs):
+    """The claim a member restates on the frames a cut LEFT it.
+
+    The member's own retained clusters, re-counted on the surviving frames:
+    a cluster the core no longer sees ``min_obs`` times is no longer an
+    explained point, so it stops claiming.  Those are the first two steps of
+    the core a trim states (`Member.restricted` in the battery), applied to the
+    claim triangulation rather than to the released one, so the restatement
+    lives in the same cluster space the original claim was stamped from."""
+    retained = np.asarray(res["claim_retained"], bool).copy()
+    posed = np.zeros(data["n_img"], bool)
+    keep = np.asarray(sorted(int(k) for k in keep_frames), np.int64)
+    if len(keep):
+        posed[keep] = True
+    live = posed[data["obs_i"]]
+    counts = np.bincount(data["obs_c"][live], minlength=data["n_cl"])
+    retained &= counts >= int(min_obs)
+    return claim_grids(retained, data)
+
+
+def claims_union(member_grids):
+    """The working claim map over a CHOSEN set of members.
+
+    ``claims`` carries per data image index a LIST of grids — each hypothesis
+    stamps into its own grid geometry, and the cluster test evaluates a member
+    against every grid its image carries.  The test ORs over that list
+    (`unclaimed_clusters`), so the map is order-free in what it answers; the
+    members' own order is preserved all the same, because it is the order the
+    set was committed in."""
+    claims = {}
+    for grids in member_grids:
+        for g, grid in grids.items():
+            claims.setdefault(g, []).append(grid)
+    return claims
+
+
+def claim_coverage(res, data, claims):
+    """Stamp a committed hypothesis's claim into ``claims``.
+
+    The member's own claim (`member_claim`), merged into the running map the
+    next complement is formed from, and left on ``res`` under
+    ``claim_grids`` so a consumer can re-form that map over a subset of the
+    set."""
+    t0 = time.perf_counter()
+    grids, census = member_claim(res, data)
+    res["claim_grids"] = grids
+    for g, grid in grids.items():
+        claims.setdefault(g, []).append(grid)
     print(
-        f"coverage claim: {int(finite.sum())} retained clusters, {n_members} "
-        f"members stamped over {n_img_claimed} images at "
-        f"{100 * float(np.mean(areas)) if areas else 0.0:.1f}% mean claimed "
-        f"area in {time.perf_counter() - t0:.1f}s; {len(claims)} images now "
-        f"carry a claim [{elapsed():.1f}s]"
+        f"coverage claim: {census['n_retained']} retained clusters, "
+        f"{census['n_members']} members stamped over {census['n_images']} "
+        f"images at "
+        f"{100 * census['mean_area'] if census['n_images'] else 0.0:.1f}% mean "
+        f"claimed area in {time.perf_counter() - t0:.1f}s; {len(claims)} images "
+        f"now carry a claim [{elapsed():.1f}s]"
     )
 
 
@@ -3852,7 +3921,7 @@ def capture_floors(blocks):
     return out
 
 
-def relax_far_layers(rung, data_full):
+def relax_far_layers(rung, data_full, layers=None):
     """THE RELAXATION RUNG: a finite sibling for every rotation-only member.
 
     A rotation-only member claims bearing without range, and the observations
@@ -3871,7 +3940,11 @@ def relax_far_layers(rung, data_full):
 
     Nothing about the member it read changes: the rotation-only entry, its
     release file and its channels stand, and it gains only a back-pointer to
-    the sibling -- or, where the chain refused, the reason."""
+    the sibling -- or, where the chain refused, the reason.
+
+    ``layers`` names which far-field members to relax, defaulting to every one
+    the rung holds; a driver that builds far layers a round at a time relaxes
+    that round's own."""
     import seed_candidate_eval as EV
     import seed_relax
     from seed_relax import release as RELEASE
@@ -3881,7 +3954,7 @@ def relax_far_layers(rung, data_full):
     idx = len(rung.hypotheses)
     t0 = elapsed()
     n_ok = n_ref = 0
-    for layer in list(rung.far_layers):
+    for layer in list(rung.far_layers if layers is None else layers):
         src = by_idx.get(int(layer["idx"]), {})
         ld = layer["data"]
         scope = src.get("scope", "capture")
@@ -3995,17 +4068,21 @@ def peer_records(hyps):
     Gauge-free by construction (relative rotations only) and the one channel
     that says anything about a member's RELATION to its rivals — how far the
     two stand apart where they overlap, and how much of each other's posed sets
-    they cover.  Cheap: the set is capped at the candidate budget."""
-    out = {k: [] for k in range(len(hyps))}
+    they cover.  Cheap: the set is capped at the candidate budget.
+
+    Keyed by MANIFEST index, which is the name every other record uses for a
+    member; a driver that commits other models between passes leaves the finite
+    candidates at positions that are no longer their index."""
+    out = {int(h["idx"]): [] for h in hyps}
     for a, b in itertools.combinations(range(len(hyps)), 2):
         n_sh, deg = rotation_disagreement(hyps[a], hyps[b])
         pa = np.asarray(hyps[a]["posed_full"])
         pb = np.asarray(hyps[b]["posed_full"])
         jac = float((pa & pb).sum()) / max(int((pa | pb).sum()), 1)
         for x, y in ((a, b), (b, a)):
-            out[x].append(
+            out[int(hyps[x]["idx"])].append(
                 {
-                    "vs_hypothesis": int(y),
+                    "vs_hypothesis": int(hyps[y]["idx"]),
                     "vs_serial": hyps[y].get("evo"),
                     "shared_frames": int(n_sh),
                     "rot_disagreement_deg": deg,
@@ -4091,130 +4168,146 @@ def write_member_arrays(stage, members):
     np.savez_compressed(Path(stage) / "member_arrays.npz", **blob)
 
 
-def attach_evaluation(rung, hyps, data_full, f_vote):
-    """Measure every committed member and attach the channels to its records.
+def eval_pair_obs(rung, data_full):
+    """THE WITNESS'S EVIDENCE: the capture's full pair graph where the coarse
+    cut dropped part of it, the solve's own admission where it did not.
 
-    The manifest entry gains an ``evaluation`` block with the per-frame and
-    per-held-out-image detail nested under it; the evolution record gains the
-    same block, so the corpus and the product carry one story.  Instrumentation
-    never kills the run it instruments: a failure is a one-line warning and an
-    ``error`` field."""
-    import seed_candidate_eval as EV
-
-    by_idx = {}
-    if not EV.eval_on():
-        for h in rung.hypotheses:
-            h["evaluation"] = EV.disabled_block()
-        return
-    t0 = elapsed()
-    # THE WITNESS'S EVIDENCE: the capture's full pair graph where the coarse cut
-    # dropped part of it, the solve's own admission where it did not.
+    Read once per run and released from the rung as it is read, so the arrays
+    the vote kept alive for the battery do not outlive the one reader they were
+    kept for.  A driver that measures in rounds holds the value it got."""
     pair_obs = tuple(rung.eval_obs) or (
         data_full["obs_c"],
         data_full["obs_i"],
         data_full["obs_uv"],
     )
     rung.eval_obs = ()
-    peers = peer_records(hyps)
-    try:
-        members = []
-        for k, res in enumerate(hyps):
-            d = res.get("release_data") or res["data"]
-            members.append(
-                EV.Member(
-                    k,
-                    "finite",
-                    data_full["names"],
-                    member_camera(res),
-                    member_focal_eq(res),
-                    res["rvec_full"],
-                    res["tvec_full"],
-                    res["posed_full"],
-                    res.get("release_pts"),
-                    (d["obs_c"], d["obs_i"], d["obs_uv"], d.get("obs_f")),
-                    shapes=d.get("obs_shape"),
-                )
+    return pair_obs
+
+
+def measure_members(
+    rung,
+    hyps,
+    data_full,
+    f_vote,
+    pair_obs,
+    layers=None,
+    relaxed_layers=None,
+    floors=None,
+):
+    """Measure the given members on the battery's channels.
+
+    ``hyps`` are the FINITE candidates to measure, ``layers`` the far-field
+    ones and ``relaxed_layers`` the relaxed siblings; the last two default to
+    everything the rung is holding.  A driver measuring one round at a time
+    passes the round's own slices and its own ``floors``, so the capture's
+    conditioning is respected rather than re-derived on each round's smaller
+    population (the same reason the relaxed members are measured in a second
+    call below).
+
+    Returns ``(blocks, members)`` -- the channels by member index, and the
+    battery's own member views in measurement order, which is what the arrays
+    sidecar ships."""
+    import seed_candidate_eval as EV
+
+    layers = rung.far_layers if layers is None else layers
+    relaxed_layers = rung.relaxed_layers if relaxed_layers is None else relaxed_layers
+    members = []
+    for res in hyps:
+        d = res.get("release_data") or res["data"]
+        members.append(
+            EV.Member(
+                int(res["idx"]),
+                "finite",
+                data_full["names"],
+                member_camera(res),
+                member_focal_eq(res),
+                res["rvec_full"],
+                res["tvec_full"],
+                res["posed_full"],
+                res.get("release_pts"),
+                (d["obs_c"], d["obs_i"], d["obs_uv"], d.get("obs_f")),
+                shapes=d.get("obs_shape"),
             )
-        # THE FAR-FIELD LAYERS, measured on their own model.  A rotation-only
-        # member is a candidate like any other -- on a panorama capture it is
-        # the RIGHT one -- so it is judged, not waved through.
-        for layer in rung.far_layers:
-            ld = layer["data"]
-            members.append(
-                EV.Member(
-                    layer["idx"],
-                    "rotation_only",
-                    data_full["names"],
-                    make_cam(layer["f"]),
-                    layer["f"],
-                    layer["rvec"],
-                    layer["tvec"],
-                    layer["posed"],
-                    layer["dirs"],
-                    (ld["obs_c"], ld["obs_i"], ld["obs_uv"], ld.get("obs_f")),
-                    shapes=ld.get("obs_shape"),
-                    keep=layer["keep"],
-                )
-            )
-        # THE RELAXED MEMBERS, on the FINITE channels.  A relaxed member has
-        # depth where its baselines priced one, so the questions a rotation
-        # cannot answer are exactly the ones it now can; its remaining bearings
-        # are stated as no finite position, so a channel that reads structure
-        # reads only what the member actually placed.
-        relaxed = []
-        for rl in rung.relaxed_layers:
-            r = rl["res"]
-            d = r["data"]
-            pts = np.asarray(r["release_pts"], dtype=np.float64).copy()
-            pts[np.asarray(r["at_inf"], dtype=bool)] = np.nan
-            relaxed.append(
-                EV.Member(
-                    rl["idx"],
-                    "finite",
-                    data_full["names"],
-                    member_camera(r),
-                    member_focal_eq(r),
-                    r["rvec_full"],
-                    r["tvec_full"],
-                    r["posed_full"],
-                    pts,
-                    (d["obs_c"], d["obs_i"], d["obs_uv"], d.get("obs_f")),
-                    shapes=d.get("obs_shape"),
-                    keep=r["keep"],
-                )
-            )
-        by_idx = EV.evaluate(
-            members, f_vote, pair_obs=pair_obs, images=eval_image_source()
         )
-        # Measured in a SECOND call, on the floors the first one drew.  The
-        # hold-out gates are quantiles of the capture's own pooled per-frame
-        # readings, so measuring the relaxed members in the same call would
-        # re-draw those floors and move every member already measured; the
-        # relaxed members are a later population of the same capture, and they
-        # are conditioned on it rather than allowed to redefine it.
-        if relaxed:
-            by_idx.update(
-                EV.evaluate(
-                    relaxed,
-                    f_vote,
-                    pair_obs=pair_obs,
-                    images=eval_image_source(),
-                    floors=capture_floors(by_idx),
-                )
+    # THE FAR-FIELD LAYERS, measured on their own model.  A rotation-only
+    # member is a candidate like any other -- on a panorama capture it is
+    # the RIGHT one -- so it is judged, not waved through.
+    for layer in layers:
+        ld = layer["data"]
+        members.append(
+            EV.Member(
+                layer["idx"],
+                "rotation_only",
+                data_full["names"],
+                make_cam(layer["f"]),
+                layer["f"],
+                layer["rvec"],
+                layer["tvec"],
+                layer["posed"],
+                layer["dirs"],
+                (ld["obs_c"], ld["obs_i"], ld["obs_uv"], ld.get("obs_f")),
+                shapes=ld.get("obs_shape"),
+                keep=layer["keep"],
             )
-        # The arrays the battery was handed, beside the product: what a
-        # selection pass needs to measure a core it cut rather than to
-        # re-aggregate readings taken before the cut.
-        write_member_arrays(rung.stage, members + relaxed)
-    except Exception as exc:  # noqa: BLE001 — evaluation never kills the run
-        print(f"  [candidate evaluation FAILED: {type(exc).__name__}: {exc}]")
-        by_idx = {}
-        for h in rung.hypotheses:
-            h["evaluation"] = {
-                "enabled": True,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        return
+        )
+    # THE RELAXED MEMBERS, on the FINITE channels.  A relaxed member has
+    # depth where its baselines priced one, so the questions a rotation
+    # cannot answer are exactly the ones it now can; its remaining bearings
+    # are stated as no finite position, so a channel that reads structure
+    # reads only what the member actually placed.
+    relaxed = []
+    for rl in relaxed_layers:
+        r = rl["res"]
+        d = r["data"]
+        pts = np.asarray(r["release_pts"], dtype=np.float64).copy()
+        pts[np.asarray(r["at_inf"], dtype=bool)] = np.nan
+        relaxed.append(
+            EV.Member(
+                rl["idx"],
+                "finite",
+                data_full["names"],
+                member_camera(r),
+                member_focal_eq(r),
+                r["rvec_full"],
+                r["tvec_full"],
+                r["posed_full"],
+                pts,
+                (d["obs_c"], d["obs_i"], d["obs_uv"], d.get("obs_f")),
+                shapes=d.get("obs_shape"),
+                keep=r["keep"],
+            )
+        )
+    by_idx = EV.evaluate(
+        members, f_vote, pair_obs=pair_obs, images=eval_image_source(), floors=floors
+    )
+    # Measured in a SECOND call, on the floors the first one drew.  The
+    # hold-out gates are quantiles of the capture's own pooled per-frame
+    # readings, so measuring the relaxed members in the same call would
+    # re-draw those floors and move every member already measured; the
+    # relaxed members are a later population of the same capture, and they
+    # are conditioned on it rather than allowed to redefine it.
+    if relaxed:
+        by_idx.update(
+            EV.evaluate(
+                relaxed,
+                f_vote,
+                pair_obs=pair_obs,
+                images=eval_image_source(),
+                floors=floors or capture_floors(by_idx),
+            )
+        )
+    return by_idx, members + relaxed
+
+
+def attach_blocks(rung, by_idx, f_vote, peers=None):
+    """Attach the measured channels to each member's manifest entry.
+
+    An entry the battery did not measure gets the reading its model supports
+    and non-measurements for the rest.  ``peers`` is the peer-corroboration
+    block per member, which is a reading of the WHOLE set and so is attached
+    only once the set is final."""
+    import seed_candidate_eval as EV
+
     for h in rung.hypotheses:
         idx = int(h["idx"])
         block = by_idx.get(idx)
@@ -4228,13 +4321,24 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
                     "measurable": False,
                     "unmeasurable_reason": "layer_not_measured",
                 }
-        if idx in peers:
+        if peers is not None and idx in peers:
             block["peer_corroboration"] = peers[idx]
         h["evaluation"] = _jsonable(block)
+
+
+def finish_evaluation(rung, hyps, by_idx, peers, f_vote, t0):
+    """The block that can only be taken over the FINAL set: the channels
+    attached with peer corroboration, the corpus records, and the census.
+
+    The rung's far-field and relaxed layer arrays are released here, so a
+    driver that measures in rounds must reach this exactly once, after the last
+    round."""
+    attach_blocks(rung, by_idx, f_vote, peers)
     # The same channels into the corpus, under the candidate they belong to.
     if evo_on():
-        for k, res in enumerate(hyps):
+        for res in hyps:
             c = _EVO["cands"].get(res.get("evo"))
+            k = int(res["idx"])
             if c is not None and k in by_idx:
                 blk = dict(by_idx[k])
                 blk["peer_corroboration"] = peers[k]
@@ -4257,6 +4361,43 @@ def attach_evaluation(rung, hyps, data_full, f_vote):
         f"({n_ok} finite with a hold-out reading, {n_rot} rotation-only) "
         f"[{elapsed():.1f}s, +{elapsed() - t0:.1f}s]"
     )
+
+
+def attach_evaluation(rung, hyps, data_full, f_vote):
+    """Measure every committed member and attach the channels to its records.
+
+    The default driver's whole evidence phase, in one call: the set is final,
+    so it is measured in one pass and finished in one.
+
+    The manifest entry gains an ``evaluation`` block with the per-frame and
+    per-held-out-image detail nested under it; the evolution record gains the
+    same block, so the corpus and the product carry one story.  Instrumentation
+    never kills the run it instruments: a failure is a one-line warning and an
+    ``error`` field."""
+    import seed_candidate_eval as EV
+
+    if not EV.eval_on():
+        for h in rung.hypotheses:
+            h["evaluation"] = EV.disabled_block()
+        return
+    t0 = elapsed()
+    pair_obs = eval_pair_obs(rung, data_full)
+    peers = peer_records(hyps)
+    try:
+        by_idx, measured = measure_members(rung, hyps, data_full, f_vote, pair_obs)
+        # The arrays the battery was handed, beside the product: what a
+        # selection pass needs to measure a core it cut rather than to
+        # re-aggregate readings taken before the cut.
+        write_member_arrays(rung.stage, measured)
+    except Exception as exc:  # noqa: BLE001 — evaluation never kills the run
+        print(f"  [candidate evaluation FAILED: {type(exc).__name__}: {exc}]")
+        for h in rung.hypotheses:
+            h["evaluation"] = {
+                "enabled": True,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return
+    finish_evaluation(rung, hyps, by_idx, peers, f_vote, t0)
 
 
 def write_candidate_solves(rung, win, f_vote, n_votes):
@@ -4968,7 +5109,12 @@ def candidate_source(ctx, budget=None):
                 for r in got[n_got:]:
                     evo_reason(r.get("evo"), "budget_overflow")
                 break
-            idx = len(hyps)
+            # THE MANIFEST INDEX, which is a member's name everywhere it is
+            # recorded.  It is the length of the COMMITTED set rather than of
+            # the finite one, because a driver may commit other models between
+            # passes; when nothing does, the two are the same number.
+            idx = len(rung.hypotheses)
+            res["idx"] = idx
             res["handle"] = handle
             # The release lifted into the LOADER's image frame — the one frame
             # every candidate in the chain shares.  It is what the artifact
@@ -5057,6 +5203,144 @@ def candidate_source(ctx, budget=None):
         yield hyps[n0:]
 
 
+def far_field_focal(f_probe, f_vote):
+    """``(focal, source)`` the rotation-only layers are fit at.
+
+    The vote's focal, in the SOLVE's own parameterization: the pinhole pool for
+    a pinhole run, the equidistant verdict under a fisheye context.  The
+    rotation model has no depth for a scan to trade against focal, so the
+    referee's number is the honest one here."""
+    if fisheye_stage1() or f_vote is None:
+        return f_probe, ("vote" if fisheye_stage1() else "probe")
+    return f_vote, "vote"
+
+
+def far_field_layers(rung, pairs, data_full, f_rot, f_src, far_idx):
+    """A far-field sibling for each ``(index, hypothesis)`` in ``pairs``.
+
+    A group layer is fit INDEPENDENTLY of its sibling's rotations: its later
+    value is as a referee of that finite basin, and a layer inherited from the
+    basin it referees could never indict it.  The layers are independent of
+    each other too, so a driver may build the siblings of one batch of
+    candidates without waiting for the rest of the set.
+
+    Returns the next free hypothesis index."""
+    for k, h in pairs:
+        print(
+            f"\n=== hypothesis {far_idx}: the far-field layer of h{k} "
+            f"({int(h['posed'].sum())} posed frames) ==="
+        )
+        built = rotation_only_hypothesis(
+            rung,
+            far_idx,
+            h.get("release_data") or data_full,
+            float(f_rot),
+            f_src,
+            scope="group",
+            images=h["keep"],
+            paired_with=k,
+            sib=h,
+        )
+        if built is not None:
+            evo_copy_stage(
+                h.get("evo"),
+                "far-field",
+                built.get("release_file"),
+                hypothesis_index=far_idx,
+                scope="group",
+                f=float(f_rot),
+                f_source=f_src,
+                n_posed=int(built["posed"].sum()),
+                n_points=built["n_points_infinity"],
+                inlier_2px=built["inl"],
+                inlier_2px_earned=built["inl_earned"],
+                reach=built["reach"],
+                far_rows=built["far_rows"],
+                obs_beyond_sibling=built["obs_beyond_sibling"],
+                obs_beyond_sibling_frac=(
+                    None
+                    if not built["far_rows"] or built["obs_beyond_sibling"] is None
+                    else built["obs_beyond_sibling"] / built["far_rows"]
+                ),
+            )
+        far_idx += built is not None
+    return far_idx
+
+
+def capture_far_layer(rung, far_idx, data_full, f_rot, f_src):
+    """The capture's OWN far-field layer, over the whole admission.
+
+    A reading of no single candidate, so it is run once, when the set is
+    final."""
+    print(
+        f"\n=== hypothesis {far_idx}: the capture's far-field layer "
+        f"(parallax-poverty {_VOTE_POVERTY:.2f}) ==="
+    )
+    cap_far = rotation_only_hypothesis(rung, far_idx, data_full, float(f_rot), f_src)
+    if cap_far is not None and evo_on():
+        # The capture's own far field is a reading of no single candidate,
+        # so it gets a record of its own rather than a stage of someone's.
+        s_cap = evo_candidate(
+            "capture_rotation",
+            scope="capture",
+            parallax_poverty=float(_VOTE_POVERTY),
+        )
+        evo_link(s_cap, far_idx)
+        evo_copy_stage(
+            s_cap,
+            "capture-hrot",
+            cap_far.get("release_file"),
+            scope="capture",
+            f=float(f_rot),
+            f_source=f_src,
+            n_posed=int(cap_far["posed"].sum()),
+            n_points=cap_far["n_points_infinity"],
+            inlier_2px=cap_far["inl"],
+            inlier_2px_earned=cap_far["inl_earned"],
+            reach=cap_far["reach"],
+            far_rows=cap_far["far_rows"],
+        )
+    return cap_far
+
+
+def write_evolution(ctx, rung, win, n_qual, budget=CANDIDATE_BUDGET, **extra):
+    """The run's evolution record: what the capture was, what the referee said,
+    and where the rank put the set."""
+    data_full = ctx.data_full
+    evo_write(
+        stamp=rung.stamp,
+        top_n=rung.n,
+        n_images=int(data_full["n_img"]),
+        n_clusters=int(data_full["n_cl"]),
+        n_clusters_total=rung.n_clusters_total,
+        n_clusters_kept=rung.n_clusters_kept,
+        min_kept_radius_px=rung.min_kept_radius_px,
+        image_names=[Path(str(s)).name for s in data_full["names"]],
+        image_dims=[[int(w), int(h)] for w, h in data_full["dims"]],
+        candidate_budget=budget,
+        ladder_first=int(win),
+        n_qualified=int(n_qual),
+        vote_f=None if ctx.f_vote is None else float(ctx.f_vote),
+        vote_n=None if ctx.vote is None else int(ctx.vote[1]),
+        vote_parallax_poverty=float(_VOTE_POVERTY),
+        vote_rotation_votes=int(_VOTE_ROT_N),
+        vote_spread_log=float(_VOTE_SPREAD),
+        fisheye_verdict=(
+            None
+            if _VOTE_FISHEYE is None
+            else {
+                k: v
+                for k, v in _VOTE_FISHEYE.items()
+                if isinstance(v, (int, float, str))
+            }
+        ),
+        fisheye_stage1=bool(fisheye_stage1()),
+        probe_focal=float(ctx.f_probe),
+        elapsed_s=round(elapsed(), 3),
+        **extra,
+    )
+
+
 def main():
     """The default driver: build the capture context, drain the candidate source
     under the standing budget, then run the tail phases over the accumulated set
@@ -5102,82 +5386,9 @@ def main():
     # set AFTER the finite hypotheses, which are exactly what they were.
     # Every finite candidate, in commit order, for the far layers to pair with.
     layered = list(enumerate(hyps))
-    # The vote's focal, in the SOLVE's own parameterization: the pinhole
-    # pool for a pinhole run, the equidistant verdict under a fisheye
-    # context.  The rotation model has no depth for a scan to trade against
-    # focal, so the referee's number is the honest one here.
-    if fisheye_stage1() or f_vote is None:
-        f_rot, f_src = f_probe, ("vote" if fisheye_stage1() else "probe")
-    else:
-        f_rot, f_src = f_vote, "vote"
-    far_idx = len(layered)
-    for k, h in layered:
-        print(
-            f"\n=== hypothesis {far_idx}: the far-field layer of h{k} "
-            f"({int(h['posed'].sum())} posed frames) ==="
-        )
-        built = rotation_only_hypothesis(
-            rung,
-            far_idx,
-            h.get("release_data") or data_full,
-            float(f_rot),
-            f_src,
-            scope="group",
-            images=h["keep"],
-            paired_with=k,
-            sib=h,
-        )
-        if built is not None:
-            evo_copy_stage(
-                h.get("evo"),
-                "far-field",
-                built.get("release_file"),
-                hypothesis_index=far_idx,
-                scope="group",
-                f=float(f_rot),
-                f_source=f_src,
-                n_posed=int(built["posed"].sum()),
-                n_points=built["n_points_infinity"],
-                inlier_2px=built["inl"],
-                inlier_2px_earned=built["inl_earned"],
-                reach=built["reach"],
-                far_rows=built["far_rows"],
-                obs_beyond_sibling=built["obs_beyond_sibling"],
-                obs_beyond_sibling_frac=(
-                    None
-                    if not built["far_rows"] or built["obs_beyond_sibling"] is None
-                    else built["obs_beyond_sibling"] / built["far_rows"]
-                ),
-            )
-        far_idx += built is not None
-    print(
-        f"\n=== hypothesis {far_idx}: the capture's far-field layer "
-        f"(parallax-poverty {_VOTE_POVERTY:.2f}) ==="
-    )
-    cap_far = rotation_only_hypothesis(rung, far_idx, data_full, float(f_rot), f_src)
-    if cap_far is not None and evo_on():
-        # The capture's own far field is a reading of no single candidate,
-        # so it gets a record of its own rather than a stage of someone's.
-        s_cap = evo_candidate(
-            "capture_rotation",
-            scope="capture",
-            parallax_poverty=float(_VOTE_POVERTY),
-        )
-        evo_link(s_cap, far_idx)
-        evo_copy_stage(
-            s_cap,
-            "capture-hrot",
-            cap_far.get("release_file"),
-            scope="capture",
-            f=float(f_rot),
-            f_source=f_src,
-            n_posed=int(cap_far["posed"].sum()),
-            n_points=cap_far["n_points_infinity"],
-            inlier_2px=cap_far["inl"],
-            inlier_2px_earned=cap_far["inl_earned"],
-            reach=cap_far["reach"],
-            far_rows=cap_far["far_rows"],
-        )
+    f_rot, f_src = far_field_focal(f_probe, f_vote)
+    far_idx = far_field_layers(rung, layered, data_full, f_rot, f_src, len(layered))
+    capture_far_layer(rung, far_idx, data_full, f_rot, f_src)
 
     # THE RELAXATION RUNG.  Every rotation-only member the phase above
     # committed is relaxed into a finite sibling and committed beside it: the
@@ -5234,37 +5445,7 @@ def main():
         f"(the set is the product, nothing is discarded); "
         f"{path.relative_to(WS).as_posix()} [{elapsed():.1f}s]"
     )
-    evo_write(
-        stamp=rung.stamp,
-        top_n=rung.n,
-        n_images=int(data_full["n_img"]),
-        n_clusters=int(data_full["n_cl"]),
-        n_clusters_total=rung.n_clusters_total,
-        n_clusters_kept=rung.n_clusters_kept,
-        min_kept_radius_px=rung.min_kept_radius_px,
-        image_names=[Path(str(s)).name for s in data_full["names"]],
-        image_dims=[[int(w), int(h)] for w, h in data_full["dims"]],
-        candidate_budget=CANDIDATE_BUDGET,
-        ladder_first=int(win),
-        n_qualified=int(n_qual),
-        vote_f=None if f_vote is None else float(f_vote),
-        vote_n=None if vote is None else int(vote[1]),
-        vote_parallax_poverty=float(_VOTE_POVERTY),
-        vote_rotation_votes=int(_VOTE_ROT_N),
-        vote_spread_log=float(_VOTE_SPREAD),
-        fisheye_verdict=(
-            None
-            if _VOTE_FISHEYE is None
-            else {
-                k: v
-                for k, v in _VOTE_FISHEYE.items()
-                if isinstance(v, (int, float, str))
-            }
-        ),
-        fisheye_stage1=bool(fisheye_stage1()),
-        probe_focal=float(f_probe),
-        elapsed_s=round(elapsed(), 3),
-    )
+    write_evolution(ctx, rung, win, n_qual)
 
 
 def run_pipeline(
