@@ -8789,7 +8789,8 @@ def main():
     if not seed_src:
         sys.exit(
             "no seed found: run scripts/exp_fast_seed.py on this workspace "
-            "first (it writes sfmr/seed-final.sfmr), or pass SFMTOOL_SEED=<path>"
+            "first (it writes sfmr/candidate_solves/), then pass "
+            "SFMTOOL_SEED=<path to a chosen member .sfmr>"
         )
     r = external_seed_complete(
         data,
