@@ -42,7 +42,12 @@ release, never in place:
   evidence that is not about its poses.  First a FRAME TRIM on the member's own
   worst frames -- read against quantiles of that member's own frame
   population, because a defect the fleet's bars do not localize is not thereby
-  spread evenly over the member.  Then a POINT CULL: the points the fired
+  spread evenly over the member.  That cut is ITERATIVE AND MINIMAL: each step
+  drops only the frames past the cliff in the member's own loudness
+  population, re-measures the core, and re-derives the bars on the fresh
+  readings, because a per-frame reading taken while a catastrophically
+  mis-registered frame is still in the member is a reading of THAT frame and
+  not of the neighbour it is attributed to.  Then a POINT CULL: the points the fired
   channels indict, at bars taken over the member's own points, written as a
   culled SIBLING beside the member and re-measured and re-judged exactly as a
   trimmed core is.  A channel with a per-point form of its own indicts on that
@@ -2172,9 +2177,8 @@ def defect_frames(hyp, gates, model, family="other"):
     return named, corroborated
 
 
-def salvage_frames(hyp, row, named, n_posed):
-    """`(cut, hits)` -- the frames a SALVAGE cuts, from the member's OWN frame
-    population.
+def salvage_candidates(hyp, row, named):
+    """`hits` -- every frame a SALVAGE may cut, with what named it.
 
     The fleet frame bars ask whether a frame is unlike the FLEET's frames, and
     a member whose defect they do not localize has no frame past them -- which
@@ -2183,9 +2187,12 @@ def salvage_frames(hyp, row, named, n_posed):
     member's frames sit at the far end of its own readings.  So each naming
     per-frame channel is read against a quantile of the member's own readings
     of it, at the quantile every accusation in this pass is taken at, and a
-    frame past it on any channel is a candidate.  The fleet's own named frames
-    are candidates too.  Candidates are ordered by how many channels name them
-    and the cut is capped at the share a trim may remove.
+    frame past it on any channel is a candidate.  The fleet's own named frames,
+    passed in as `named`, are candidates too.
+
+    Naming is a reading of ONE STATE: `hyp` carries the evaluation block the
+    candidates are named off, which is the member's own on the first step of a
+    walk and the re-measured core's on every step after it.
     """
     slots = frame_rows(hyp)
     model = row["model"]
@@ -2216,11 +2223,144 @@ def salvage_frames(hyp, row, named, n_posed):
                         "population": "the member's own frames",
                     }
                 )
-    if not hits or not n_posed:
-        return [], hits
-    cap = max(1, int(MAX_TRIM_FRACTION * n_posed))
-    order = sorted(hits, key=lambda k: (-len(hits[k]), k))
-    return sorted(order[:cap]), hits
+    return hits
+
+
+def frame_loudness(hits):
+    """How far past its own bar the loudest NAMING reading against one frame
+    sits, as a multiple of that bar, or None where none of them is readable.
+
+    A coherence reading says something is off without saying which frame is
+    wrong, so it is never part of how loud a frame is, exactly as it is never
+    part of what puts one on a cut list."""
+    best = None
+    for h in hits:
+        if not h.get("names_frame"):
+            continue
+        x = reading_loudness(h)
+        if x is not None and (best is None or x > best):
+            best = x
+    return best
+
+
+def loudness_order(hits):
+    """`(order, loudness)` -- the candidate frames from loudest to quietest.
+
+    A frame whose loudest naming reading is not readable as a multiple of a bar
+    -- a bar the member's own population put at zero, which nothing can be a
+    multiple of -- carries no loudness and sorts behind every frame that does.
+    """
+    loud = {name: frame_loudness(rec) for name, rec in hits.items()}
+    readable = sorted(
+        (n for n in loud if loud[n] is not None), key=lambda n: (-loud[n], n)
+    )
+    return readable + sorted(n for n in loud if loud[n] is None), loud
+
+
+def loudness_cliff(values):
+    """`(k, ratio)` -- how many readings stand past the cliff, and how wide it
+    is.  `values` are the loudness readings in DESCENDING order.
+
+    A loudness is a reading over its own bar, so a RATIO between two of them is
+    scale-free: it compares readings taken in degrees, in fractions and in
+    correlations, and it compares one member's population with another's.  The
+    cliff is the widest successive ratio in the order -- the one place the
+    member's own loudness population separates -- and the cut is everything
+    above it.  Ties take the earlier place, which is the smaller cut, and a
+    population with one reading or none has no separation to find and cuts one
+    frame, the loudest.  Nothing here is a threshold: the criterion reads the
+    population's own spacing and carries no magnitude of its own, so a
+    population that decays smoothly hands back a step of the size its own
+    smoothness earns rather than a share fixed in advance.
+    """
+    xs = [float(v) for v in values]
+    if len(xs) < 2:
+        return 1, None
+    best_k, best_r = 1, None
+    for k in range(1, len(xs)):
+        r = (xs[k - 1] / xs[k]) if xs[k] > 0 else math.inf
+        if best_r is None or r > best_r:
+            best_k, best_r = k, r
+    return best_k, best_r
+
+
+def salvage_frame_walk(ctx, hyp, row, named, n_posed, tried=None):
+    """`(trim, iterations, cut, evidence)` -- the salvage's ITERATIVE frame
+    trim, or `(None, [], [], {})` where the member's own frames name nothing.
+
+    A one-shot cut cannot tell a spread of defects from CONTAMINATION.  Every
+    per-frame reading of a small member is taken against the structure the
+    whole member holds, so a catastrophically mis-registered frame makes its
+    sound neighbours read badly too: re-resecting a good frame against a cloud
+    that still carries the bad frame's points is a measurement of the bad
+    frame.  Only a fresh measurement after a partial cut separates the two.
+
+    So the cut is taken a STEP AT A TIME, each step the smallest the readings
+    defend: the frames past the cliff in the member's own loudness population
+    (`loudness_cliff`), never fewer than one.  Each step re-measures the core
+    it leaves, re-derives the member's own frame bars ON THOSE FRESH READINGS,
+    and re-judges against the member gates.  A core that passes ends the walk;
+    frames still named continue it.  `MAX_TRIM_FRACTION` caps the TOTAL cut, so
+    a member whose readings keep naming frames walks into the cap and its
+    refusal stands with the walk recorded.
+
+    Every step is one re-measurement and no step is measured twice.
+    """
+    cap = max(1, int(MAX_TRIM_FRACTION * n_posed)) if n_posed else 0
+    state, state_named = hyp, named
+    cut, iterations, evidence, trim = [], [], {}, None
+    while len(cut) < cap:
+        hits = salvage_candidates(state, row, state_named)
+        for name in cut:
+            hits.pop(name, None)
+        if not hits:
+            break
+        order, loud = loudness_order(hits)
+        k, ratio = loudness_cliff([loud[n] for n in order if loud[n] is not None])
+        step = order[:k][: cap - len(cut)]
+        if not step:
+            break
+        rec = {
+            "step": len(iterations) + 1,
+            "named": len(order),
+            # The whole candidate population, so the cliff is replayable.
+            "loudness": {n: loud[n] for n in order},
+            "cliff_at": k,
+            "cliff_ratio": ratio,
+            "dropped": list(step),
+            "capped": len(step) < k,
+        }
+        for name in step:
+            evidence[name] = hits[name]
+        cut = sorted(set(cut) | set(step))
+        rec["cut_total"] = len(cut)
+        if tried is not None and set(cut) == set(tried):
+            # The cut the ordinary trim test already lost.  It is taken again
+            # because the walk needs the readings it produces, not because its
+            # verdict is in doubt.
+            rec["already_tried"] = True
+        trim, block = take_trim(cut, ctx, hyp, row)
+        rec["core_frames"] = trim.get("frames_after")
+        rec["core_ok"] = bool(trim.get("ok"))
+        rec["core_fails"] = sorted(
+            {e["channel"] for e in (trim.get("core_evidence") or [])}
+        )
+        if not trim.get("ok"):
+            rec["reason"] = trim.get("reason")
+        iterations.append(rec)
+        if trim.get("ok"):
+            break
+        if block is None:
+            # Nothing fresh to name the next step off: the cut either left no
+            # core at all or was judged on the stored readings, and both are
+            # the same statement -- this walk cannot take another step.
+            rec["stopped"] = "no re-measured core to name a further step from"
+            break
+        state = {"idx": hyp.get("idx"), "evaluation": block}
+        state_named, _ = defect_frames(
+            state, ctx["gates"], row["model"], row.get("family", "other")
+        )
+    return trim, iterations, cut, evidence
 
 
 #: The members' own arrays, per release directory, loaded once.
@@ -2950,16 +3090,18 @@ def take_cull(drop_ids, signals, bars, ctx, hyp, row):
 def take_trim(cut, ctx, hyp, row):
     """Cut `cut` from one member and judge what is left, as a member.
 
-    Returns the trim report.  `ok` says whether the core survived the cut and
-    then passed the member gates; a core that fails carries its own evidence in
-    `core_evidence`, and the released file is not left behind.
+    Returns `(trim report, core block)`.  `ok` says whether the core survived
+    the cut and then passed the member gates; a core that fails carries its own
+    evidence in `core_evidence`, and the released file is not left behind.  The
+    block is the core's own fresh evaluation, which is what an iterative walk
+    names its next step off, and is None where no core could be measured.
     """
     stem = Path(row["release_file"]).stem
     out_path = ctx["out_dir"] / f"{stem}-trimmed.sfmr"
     ctx["out_dir"].mkdir(parents=True, exist_ok=True)
     trim = trim_member(ctx["release_dir"] / (row["release_file"] or ""), cut, out_path)
     if not trim["ok"]:
-        return trim
+        return trim, None
     # THE CORE IS MEASURED, not re-aggregated.  Every stored per-frame reading
     # was taken with the cut frames still in the member, so a core that
     # inherits them can read clean while the geometry it inherits is not.  The
@@ -2998,7 +3140,7 @@ def take_trim(cut, ctx, hyp, row):
             sorted({e["channel"] for e in left})
         )
         out_path.unlink(missing_ok=True)
-    return trim
+    return trim, block
 
 
 def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
@@ -3043,8 +3185,8 @@ def refuse_or_salvage(
     is the bar a trim has always faced.  Where neither stands the refusal
     stands, and its reason records what was tried.
 
-    ``tried`` names a frame cut the ordinary trim test already took and lost,
-    so the salvage does not re-run the identical cut.
+    ``tried`` names a frame cut the ordinary trim test already took and lost;
+    a walk that reproduces it says so in its own record.
     """
     fired = sorted({e["channel"] for e in evidence})
     pose = [k for k in fired if k in POSE_INSTABILITY]
@@ -3059,24 +3201,34 @@ def refuse_or_salvage(
     # -- REMEDY ONE: the frames at the far end of the member's own population,
     #    whatever the fleet's own localization test said.  A defect the fleet
     #    bars do not localize is not thereby spread evenly over the member.
-    cut, hits = salvage_frames(hyp, row, named, n_posed)
-    if cut and set(cut) != set(tried or ()):
-        trim = take_trim(cut, ctx, hyp, row)
-        trim["frame_evidence"] = {k: hits[k] for k in sorted(hits)}
-        trim["salvage"] = "the member's own worst frames"
+    #    The cut is walked a step at a time, smallest first, and re-measured
+    #    between steps: readings taken while a catastrophic frame is still in
+    #    the member are readings OF that frame, and only fresh ones say whether
+    #    its quieter neighbours were ever wrong.
+    trim, iterations, cut, frame_ev = salvage_frame_walk(
+        ctx, hyp, row, named, n_posed, tried
+    )
+    if trim is not None:
+        trim["frame_evidence"] = {k: frame_ev[k] for k in sorted(frame_ev)}
+        trim["salvage"] = "the member's own worst frames, one step at a time"
+        trim["iterations"] = iterations
         rec["salvage_trim"] = trim
         if trim["ok"]:
             rec["trim"] = trim
             rec["verdict"] = "trim"
+            steps = len(iterations)
             rec["verdict_reason"] = (
                 f"{phrase}; salvaged by dropping {len(trim['frames_dropped'])} of "
                 f"{n_posed} frames at the far end of the member's own readings, "
-                "and the core was re-judged clean against the member gates"
+                f"cut in {steps} step{'' if steps == 1 else 's'} with the core "
+                "re-measured between them, and the core was re-judged clean "
+                "against the member gates"
             )
             return
-        tried_note.append(f"frame trim of {len(cut)} ({trim.get('reason')})")
-    elif cut:
-        tried_note.append("frame trim (the cut the trim test already lost)")
+        tried_note.append(
+            f"frame trim, {len(iterations)} step(s) to {len(cut)} of {n_posed} "
+            f"frames ({trim.get('reason')})"
+        )
     else:
         tried_note.append("frame trim (the member's own frames name none)")
     # -- REMEDY TWO: the points the fired channels indict, at the member's own
@@ -3263,7 +3415,7 @@ def judge_set(
             taken, tried_cut, why = False, None, None
             if minority and not wide:
                 tried_cut = sorted(bad)
-                trim = take_trim(tried_cut, ctx, hyp, row)
+                trim, _ = take_trim(tried_cut, ctx, hyp, row)
                 trim["frame_evidence"] = rec["frame_evidence"]
                 rec["trim"] = trim
                 if trim["ok"]:
@@ -3326,7 +3478,7 @@ def judge_set(
                     k: [h for h in starved[k] if h["support"]] for k in sorted(starved)
                 }
                 if n_posed and len(starved) <= MAX_TRIM_FRACTION * n_posed:
-                    trim = take_trim(sorted(starved), ctx, hyp, row)
+                    trim, _ = take_trim(sorted(starved), ctx, hyp, row)
                     trim["frame_evidence"] = rec["frame_support_evidence"]
                     if trim["ok"]:
                         rec["trim"] = trim
@@ -3788,6 +3940,11 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
             block["trimmed_release_file"] = trim.get("output")
             block["trimmed_from"] = h.get("release_file")
             block["frames_dropped"] = trim.get("frames_dropped")
+            # A SALVAGE cut is walked, and the walk is what a reviewer replays:
+            # which frames each step took, how loud they were, and what the
+            # re-measurement said about the core each one left.
+            if trim.get("iterations"):
+                block["salvage_iterations"] = trim.get("iterations")
         if cull.get("ok"):
             # THE CULLED SIBLING, on the same terms: the member as committed
             # and the core its cull states, each entry naming the other file.
