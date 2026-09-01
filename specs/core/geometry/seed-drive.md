@@ -75,11 +75,43 @@ gates in its own right.
 1. **Frame trim**, on the frames at the far end of the member's OWN frame
    population. Each naming per-frame channel is read against a quantile
    of that member's own readings of it, and a frame past the bar on any
-   of them is a candidate; candidates are ordered by how many channels
-   name them and the cut is capped at the share a trim may remove. This
-   runs whether or not the fleet's bars localized the defect: a defect
-   the fleet's frame bars do not localize is not thereby spread evenly
-   over the member's frames.
+   of them is a candidate; the fleet's own named frames are candidates
+   too. This runs whether or not the fleet's bars localized the defect:
+   a defect the fleet's frame bars do not localize is not thereby spread
+   evenly over the member's frames.
+
+   The cut is taken **a step at a time, smallest first**. Every
+   per-frame reading of a member is taken against the structure the
+   whole member holds, so a catastrophically mis-registered frame makes
+   its sound neighbours read badly too: re-resecting a good frame
+   against a cloud that still carries the bad frame's points measures
+   the bad frame. A single naming pass cannot tell that contamination
+   from a genuine spread of defects, and only a fresh measurement after
+   a partial cut can.
+
+   One step is: name the candidates on the readings standing now, rank
+   them by **loudness** -- the loudest naming reading against the frame,
+   as a multiple of its own bar -- drop the frames past the **cliff** in
+   that loudness population, and re-measure the core the cut leaves. The
+   cliff is the widest successive RATIO in the loudness order: a
+   loudness is a reading over its own bar, so ratios between loudnesses
+   are scale-free and compare readings taken in degrees, in fractions
+   and in correlations, and the widest of them is the one place the
+   member's own population separates. Ties take the earlier place, which
+   is the smaller cut; a population with no separation to find cuts one
+   frame, the loudest. The criterion reads the population's own spacing
+   and carries no magnitude of its own.
+
+   The member's own frame bars are then **re-derived on the fresh
+   readings** and the core is re-judged against the member gates. A core
+   that passes ends the walk, and the trim is the union of the steps
+   taken. Frames still named continue it. The share a trim may remove
+   caps the TOTAL cut, so a member whose fresh readings keep naming
+   frames walks into that cap and its refusal stands. Each step pays one
+   re-measurement and no step is measured twice. The verdict record
+   carries the walk -- per step, the candidates and their loudness, where
+   the cliff cut, the frames dropped, and what the re-measured core
+   said -- so a reviewer replays it without re-running the pass.
 2. **Point cull**, on the points the fired channels indict. A channel
    with a per-point form of its own is read at that form; a channel with
    none is read on what the member's own arrays say about a point
