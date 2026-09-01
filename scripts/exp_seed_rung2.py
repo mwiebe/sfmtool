@@ -3007,6 +3007,7 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
         floors = FS.capture_floors(blocks)
         FS.attach_blocks(rung, blocks, f_vote)
 
+    @FS.timed("judge")
     def judge(out_dir, write):
         """The verdicts over the accumulated set, or the reason there are
         none.
@@ -3077,9 +3078,10 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
         # settled once and carried.
         report, verdicts = judge(scratch, write=False)
         # THE NEXT COMPLEMENT stands on the SURVIVORS' claims alone.
-        ctx.claims.clear()
-        ctx.claims.update(surviving_claims(FS, ctx.hyps, verdicts))
-        left, _n_claimed = FS.unclaimed_clusters(ctx.data, ctx.claims)
+        with FS.timed("claims"):
+            ctx.claims.clear()
+            ctx.claims.update(surviving_claims(FS, ctx.hyps, verdicts))
+            left, _n_claimed = FS.unclaimed_clusters(ctx.data, ctx.claims)
         # The source's own exhaustion test, read here so the loop can answer
         # `sufficient` and its own no-progress question before it pulls again.
         complement_is_new = bool(len(left)) and len(left) != ctx.data["n_cl"]

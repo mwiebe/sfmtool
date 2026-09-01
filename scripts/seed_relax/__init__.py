@@ -32,9 +32,12 @@ Module map (each module carries its own provenance comment):
 * :mod:`report` -- the runaway-frame report.
 * :mod:`pipeline` -- the nine stages on one member.
 * :mod:`release` -- the arrays and manifest blocks the writer needs.
+* :mod:`timing` -- each stage's wall time, reported to a sink the caller
+  installs.
 
 Nothing here samples, and nothing reads a clock into a record: same inputs,
-same output.
+same output.  The timing a caller asks for goes to that caller's own
+collector, never into a census.
 """
 
 from __future__ import annotations
