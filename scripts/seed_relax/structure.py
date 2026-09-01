@@ -342,7 +342,7 @@ def stage_adjust(m, inp, schedule=None):
     Points marked at infinity stay directions and contribute rotation only,
     which is what keeps a member whose far field is most of its evidence from
     having that field dragged into a depth it never measured."""
-    from sfmtool._sfmtool.geometry import bundle_adjust
+    from .timing import bundle_adjust
 
     kw = {} if schedule is None else {"schedule": schedule}
     return bundle_adjust(
