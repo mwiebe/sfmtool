@@ -29,6 +29,13 @@ with RAY-NATIVE chirality, ray-midpoint triangulation, growth by ray-P3P
 far-field core.  Those checks run under the fisheye context only; the pinhole
 path never reaches the code they cover.
 
+A final suite covers rung 2's SALVAGE frame trim
+(``specs/core/geometry/seed-drive.md``) on synthetic members rather than a
+workspace: the loudness cliff, the iterative walk over a member whose readings
+collapse once its catastrophic frames go, the walk into the cap on a member
+whose defects are genuinely spread, and the routing truth table that decides
+which refusals are offered a salvage at all.
+
 Run:  pixi run -e dev python scripts/check_fisheye_seed_primitives.py
 
 Exits 0 when every check passes; prints the first failure and exits 1
@@ -1005,6 +1012,274 @@ def run_bspline_context_suite():
     )
 
 
+SALVAGE_MODEL = "finite"
+SALVAGE_FRAMES = tuple(f"f{i:02d}" for i in range(14))
+
+
+def _warp_block(raws):
+    """One evaluation block carrying a warp reading per frame.
+
+    ``frame_warp_nf`` is a MEMBER-RELATIVE channel: rung 2 gates each frame on
+    its reading over its own member's median frame, so a block states raw
+    readings and the pass forms the ratios itself -- which is what makes a
+    trimmed core's bars move when the loud frames leave."""
+    return {
+        "warp_epipolar": {
+            "frames": [{"name": n, "nf_med": float(v)} for n, v in sorted(raws.items())]
+        }
+    }
+
+
+def _warp_gates(bar):
+    """Fleet frame gates carrying one bar on the warp channel."""
+    return {
+        "frame_gates": {
+            SALVAGE_MODEL: {
+                "frame_warp_nf": {
+                    "value": float(bar),
+                    "quantile": 0.95,
+                    "by_family": {},
+                }
+            }
+        }
+    }
+
+
+def _salvage_stub(R2, reading, gates):
+    """A `take_trim` that measures a synthetic core instead of a `.sfmr`.
+
+    ``reading`` maps the surviving frame set to that set's raw readings, which
+    is where CONTAMINATION lives: a specimen whose good frames only read badly
+    while a catastrophic frame is still in the member states exactly that.  The
+    core passes when no surviving frame is past the fleet frame bar, which
+    stands in for the member gates a real core is judged on."""
+
+    def take_trim(cut, ctx, hyp, row):
+        keep = [n for n in SALVAGE_FRAMES if n not in set(cut)]
+        block = _warp_block(reading(keep))
+        left, _ = R2.defect_frames({"evaluation": block}, gates, SALVAGE_MODEL, "other")
+        trim = {
+            "ok": not left,
+            "frames_dropped": sorted(cut),
+            "frames_after": len(keep),
+            "frames_kept": list(keep),
+            "core_evidence": [{"channel": "frame_warp_nf"} for _ in sorted(left)],
+        }
+        if left:
+            trim["reason"] = "the trimmed core still fails frame_warp_nf"
+        return trim, block
+
+    return take_trim
+
+
+def _run_walk(R2, reading, bar):
+    """Walk one synthetic member and hand back `(cut, iterations, trim)`."""
+    gates = _warp_gates(bar)
+    hyp = {"idx": 0, "evaluation": _warp_block(reading(list(SALVAGE_FRAMES)))}
+    row = {
+        "idx": 0,
+        "model": SALVAGE_MODEL,
+        "family": "other",
+        "release_file": "member.sfmr",
+    }
+    named, _ = R2.defect_frames(hyp, gates, SALVAGE_MODEL, "other")
+    saved = R2.take_trim
+    R2.take_trim = _salvage_stub(R2, reading, gates)
+    try:
+        trim, iters, cut, _ev = R2.salvage_frame_walk(
+            {"gates": gates}, hyp, row, named, len(SALVAGE_FRAMES)
+        )
+    finally:
+        R2.take_trim = saved
+    return cut, iters, trim
+
+
+def run_salvage_suite():
+    """Rung 2's SALVAGE frame trim: the cliff, the walk, and the routing.
+
+    Workspace-free.  Every reading is synthetic and the only thing stubbed is
+    the artifact I/O -- the naming, the loudness ordering, the cliff, the
+    capping and the re-derivation of the member's own bars on the fresh
+    readings are the pass's own code.
+
+    1. The cliff criterion picks the obvious cliff, and finds none where the
+       population decays smoothly.
+    2. A member whose readings COLLAPSE once two catastrophic frames go stops
+       at exactly those two, in one step.  A one-shot cut names seven.
+    3. A member with genuinely spread defects walks one frame at a time into
+       the cap and its refusal stands.
+    4. The salvage truth table: a refusal stands outright where a
+       pose-instability channel fired and did not fire alone, or where
+       ``SFMTOOL_RUNG2_SALVAGE=0``; every other refusal is offered the salvage
+       first."""
+    import os
+
+    import exp_seed_rung2 as R2
+
+    print("\nRung 2 salvage -- the iterative minimal frame trim")
+
+    # -- 1: the cliff criterion --------------------------------------------
+    k, ratio = R2.loudness_cliff([146.9, 130.2, 4.22, 3.05, 2.25, 1.60, 1.09])
+    check(
+        k == 2 and ratio > 25.0,
+        "the cliff is the widest successive loudness ratio",
+        f"cut {k}, ratio {ratio:.1f}x",
+    )
+    k_smooth, r_smooth = R2.loudness_cliff([2.12, 1.77, 1.52, 1.34, 1.20, 1.10, 1.02])
+    check(
+        k_smooth == 1 and r_smooth < 1.3,
+        "a smoothly decaying population cuts one frame, the loudest",
+        f"cut {k_smooth}, ratio {r_smooth:.3f}x",
+    )
+    check(
+        R2.loudness_cliff([3.0]) == (1, None) and R2.loudness_cliff([]) == (1, None),
+        "a population with no separation to find still cuts the loudest frame",
+    )
+
+    # -- 2: contamination collapses after the two catastrophic frames go ----
+    catastrophic = {"f00": 202.0, "f01": 179.0}
+    tail = dict(zip(SALVAGE_FRAMES[2:7], (5.8, 4.2, 3.1, 2.2, 1.5)))
+
+    def collapse(keep):
+        contaminated = any(n in keep for n in catastrophic)
+        out = {}
+        for n in keep:
+            if n in catastrophic:
+                out[n] = catastrophic[n]
+            else:
+                out[n] = tail[n] if (contaminated and n in tail) else 1.0
+        return out
+
+    named, _ = R2.defect_frames(
+        {"evaluation": _warp_block(collapse(list(SALVAGE_FRAMES)))},
+        _warp_gates(1.1),
+        SALVAGE_MODEL,
+        "other",
+    )
+    cut, iters, trim = _run_walk(R2, collapse, 1.1)
+    check(
+        len(named) == 7,
+        "a one-shot cut on this specimen names seven of fourteen frames",
+        f"{len(named)} named",
+    )
+    check(
+        trim is not None and trim["ok"] and sorted(cut) == ["f00", "f01"],
+        "the walk stops at the two catastrophic frames",
+        f"cut {sorted(cut)}",
+    )
+    check(
+        len(iters) == 1 and iters[0]["cliff_at"] == 2 and iters[0]["named"] == 7,
+        "it takes one step, cutting two of the seven the readings named",
+        f"{len(iters)} step(s), cliff at {iters[0]['cliff_at'] if iters else '-'}",
+    )
+    check(
+        bool(iters) and iters[0]["core_ok"] and iters[0]["core_frames"] == 12,
+        "the re-measurement shows the surviving twelve frames clean",
+    )
+
+    # -- 3: a genuinely spread member walks into the cap --------------------
+    spread_raw = dict(
+        zip(
+            SALVAGE_FRAMES,
+            (
+                3.0,
+                2.5,
+                2.15,
+                1.9,
+                1.7,
+                1.55,
+                1.45,
+                1.38,
+                1.33,
+                1.30,
+                1.28,
+                1.27,
+                1.265,
+                1.26,
+            ),
+        )
+    )
+
+    def spread(keep):
+        return {n: spread_raw[n] for n in keep}
+
+    cap = max(1, int(R2.MAX_TRIM_FRACTION * len(SALVAGE_FRAMES)))
+    cut, iters, trim = _run_walk(R2, spread, 1.0)
+    check(
+        trim is not None and not trim["ok"] and len(cut) == cap,
+        "a spread of defects walks the total cut into the cap and is refused",
+        f"cut {len(cut)} of {len(SALVAGE_FRAMES)}, cap {cap}",
+    )
+    check(
+        len(iters) == cap and all(r["cliff_at"] == 1 for r in iters),
+        "with no cliff to find every step drops one frame",
+        f"{len(iters)} steps",
+    )
+    check(
+        all(len(r["dropped"]) == 1 for r in iters)
+        and [r["dropped"][0] for r in iters] == list(SALVAGE_FRAMES[:cap]),
+        "the steps take the frames in loudness order, loudest first",
+    )
+
+    # -- 4: the salvage truth table -----------------------------------------
+    def routing(channels, salvage="1"):
+        rec, hyp = {}, {"idx": 0, "evaluation": {}}
+        row = {
+            "idx": 0,
+            "model": SALVAGE_MODEL,
+            "family": "other",
+            "release_file": "member.sfmr",
+        }
+        evidence = [
+            {
+                "channel": c,
+                "reading": "absolute",
+                "value": 2.0,
+                "gate": 1.0,
+                "side": "above",
+                "corroborating": False,
+            }
+            for c in channels
+        ]
+        saved_walk, saved_cull = R2.salvage_frame_walk, R2.cull_points
+        saved_env = os.environ.get("SFMTOOL_RUNG2_SALVAGE")
+        R2.salvage_frame_walk = lambda *a, **k: (None, [], [], {})
+        R2.cull_points = lambda *a, **k: ([], {})
+        os.environ["SFMTOOL_RUNG2_SALVAGE"] = salvage
+        try:
+            R2.refuse_or_salvage(
+                rec, {"arrays": {}}, hyp, row, evidence, evidence, {}, 14, "why"
+            )
+        finally:
+            R2.salvage_frame_walk, R2.cull_points = saved_walk, saved_cull
+            if saved_env is None:
+                os.environ.pop("SFMTOOL_RUNG2_SALVAGE", None)
+            else:
+                os.environ["SFMTOOL_RUNG2_SALVAGE"] = saved_env
+        return rec["verdict"], "salvage tried" in (rec["verdict_reason"] or "")
+
+    verdict, offered = routing(("settling_rot_worst", "stranger_res_med"))
+    check(
+        verdict == "refuse" and not offered,
+        "a pose-instability channel that did not fire alone refuses outright",
+    )
+    verdict, offered = routing(("settling_rot_worst",))
+    check(
+        verdict == "refuse" and offered,
+        "one pose-instability channel alone is one reading, and is salvaged first",
+    )
+    verdict, offered = routing(("surface_res_spread", "stranger_res_med"))
+    check(
+        verdict == "refuse" and offered,
+        "structure evidence is offered the salvage however many channels fired",
+    )
+    verdict, offered = routing(("stranger_res_med",), salvage="0")
+    check(
+        verdict == "refuse" and not offered,
+        "SFMTOOL_RUNG2_SALVAGE=0 restores the straight refusal",
+    )
+
+
 def main():
     print("Fisheye seed Phase-1 primitive gate")
     check_model_equivalence()
@@ -1068,6 +1343,8 @@ def main():
         run_bspline_context_suite()
     finally:
         B.set_camera_context("SIMPLE_PINHOLE", None)
+
+    run_salvage_suite()
 
     print()
     if _FAILURES:
