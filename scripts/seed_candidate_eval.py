@@ -527,6 +527,50 @@ class Member:
             dropped=self.dropped | (self.posed & ~posed),
         )
 
+    def without_points(self, drop_ids, min_obs=2):
+        """The member with ``drop_ids`` culled, as a member in its own right.
+
+        The named clusters stop being finite, every point left with fewer than
+        ``min_obs`` observations on the frames that remain goes with them, and
+        a frame the cull emptied stops being posed: the same three steps
+        :meth:`restricted` takes, with the cut made on the POINTS instead of
+        on the frames.  Nothing else moves -- the poses, the camera, the
+        keypoints and the shapes are the member's own -- so what comes back is
+        the surviving geometry itself.
+        """
+        posed = self.posed.copy()
+        pts = None if self.pts is None else self.pts.copy()
+        if pts is not None:
+            drop = np.asarray(sorted({int(k) for k in drop_ids}), np.int64)
+            if len(drop):
+                drop = drop[(drop >= 0) & (drop < self.n_cl)]
+                pts[drop] = np.nan
+        live = posed[self.obs_i]
+        if pts is not None:
+            live &= np.isfinite(pts[self.obs_c]).all(axis=1)
+            counts = np.bincount(self.obs_c[live], minlength=self.n_cl)
+            pts[counts < int(min_obs)] = np.nan
+            live &= np.isfinite(pts[self.obs_c]).all(axis=1)
+        seen = np.zeros(self.n_img, bool)
+        if live.any():
+            seen[np.unique(self.obs_i[live])] = True
+        posed &= seen
+        return Member(
+            self.idx,
+            self.model,
+            self.names,
+            self.camera,
+            self.f_eq,
+            self.rvec,
+            self.tvec,
+            posed,
+            pts,
+            (self.obs_c, self.obs_i, self.obs_uv, self.obs_f),
+            shapes=self.obs_shape,
+            keep=self.keep_mask(),
+            dropped=self.dropped | (self.posed & ~posed),
+        )
+
 
 def member_arrays(m):
     """Everything a :class:`Member` was built from, as plain arrays.
@@ -1800,6 +1844,77 @@ def _frame_rollup(per_frame, key, out, prefix):
     )
 
 
+def _surface_point_readings(m):
+    """The member's own PER-POINT surface readings, from one neighbour search.
+
+    ``a_res`` and ``a_sv`` are the leave-one-out plane residual and the surface
+    variation of each point's own k-NN neighbourhood, ``c_res`` the same
+    residual against a STRANGER surface -- neighbours no image that saw the
+    point ever saw -- and ``loc`` how much further away that stranger
+    neighbourhood sits than the point's own.  Every array is indexed by the
+    finite points' slot and ``slot`` maps a cluster id into it; ``reason``
+    names why nothing was read, and is None when something was.
+
+    One search and one plane primitive serve both the member aggregates
+    :func:`surface_channels` publishes and the per-point readings
+    :func:`point_evidence` indicts single points with, so the two never
+    disagree about a number.
+    """
+    from scipy.spatial import cKDTree
+
+    out = {
+        "reason": None,
+        "fin": np.zeros(0, np.int64),
+        "slot": np.full(m.n_cl, -1, dtype=np.int64),
+        "n_pts": 0,
+        "n_infinite": 0 if m.pts is None else int((~m.finite).sum()),
+        "x": np.zeros((0, 3)),
+        "a_res": None,
+        "a_sv": None,
+        "c_res": np.zeros(0),
+        "loc": np.zeros(0),
+        "ok": np.zeros(0, bool),
+        "disj": np.zeros((0, 0), bool),
+    }
+    if m.pts is None or not len(m.rows):
+        out["reason"] = "no_structure" if m.pts is None else "no_obs"
+        return out
+    fin = np.nonzero(m.finite)[0]
+    fin = fin[np.isfinite(m.pts[fin]).all(axis=1)]
+    n_pts = len(fin)
+    out["fin"], out["n_pts"] = fin, int(n_pts)
+    if n_pts < SURF_K + 2:
+        out["reason"] = "few_finite_points"
+        return out
+    x = m.pts[fin]
+    slot = np.full(m.n_cl, -1, dtype=np.int64)
+    slot[fin] = np.arange(n_pts)
+    tree = cKDTree(x)
+    kq = min(max(SURF_K, SURF_C_CAND) + 1, n_pts)
+    dist, idx = tree.query(x, k=kq, workers=-1)
+    out.update(slot=slot, x=x)
+    if SURF_K + 1 <= kq:
+        out["a_res"], out["a_sv"] = _plane_stats(x, x[idx[:, 1 : SURF_K + 1]])
+    bits = _observer_bitsets(m, slot, n_pts)
+    ncand = min(SURF_C_CAND, kq - 1)
+    cand = idx[:, 1 : ncand + 1]
+    cdist = dist[:, 1 : ncand + 1]
+    ii = np.repeat(np.arange(n_pts), ncand)
+    disj = ~_shares_any(bits, ii, cand.reshape(-1)).reshape(n_pts, ncand)
+    groups, counts, ok = _pick_neighbours(disj, cand, x, SURF_C_USE, SURF_C_MIN)
+    own = np.median(cdist[:, : min(SURF_K, ncand)], axis=1)
+    loc = np.full(n_pts, np.nan)
+    for i in np.nonzero(ok)[0]:
+        sel = np.nonzero(disj[i])[0][:SURF_C_USE]
+        if own[i] > 0:
+            loc[i] = float(np.median(cdist[i, sel]) / own[i])
+    c_res = np.full(n_pts, np.nan)
+    if int(ok.sum()):
+        c_res, _ = _grouped_plane(x, groups, counts)
+    out.update(c_res=c_res, loc=loc, ok=ok, disj=disj)
+    return out
+
+
 def surface_channels(m):
     """The three surface readings of the member's own point cloud.
 
@@ -1822,32 +1937,25 @@ def surface_channels(m):
     vetted.update(
         k_candidates=SURF_BV_CAND, k_used=SURF_BV_USE, support_floor=SURF_BV_MIN
     )
-    if m.pts is None or not len(m.rows):
-        why = "no_structure" if m.pts is None else "no_obs"
+    sp = _surface_point_readings(m)
+    if sp["reason"] in ("no_structure", "no_obs"):
         for b in blocks.values():
-            b["unmeasurable_reason"] = why
+            b["unmeasurable_reason"] = sp["reason"]
         return blocks
-    fin = np.nonzero(m.finite)[0]
-    fin = fin[np.isfinite(m.pts[fin]).all(axis=1)]
-    n_pts = len(fin)
+    n_pts = sp["n_pts"]
     for b in blocks.values():
         b["n_points"] = int(n_pts)
-        b["n_points_infinite"] = int((~m.finite).sum())
-    if n_pts < SURF_K + 2:
+        b["n_points_infinite"] = int(sp["n_infinite"])
+    if sp["reason"]:
         for b in blocks.values():
-            b["unmeasurable_reason"] = "few_finite_points"
+            b["unmeasurable_reason"] = sp["reason"]
         return blocks
-    x = m.pts[fin]
-    slot = np.full(m.n_cl, -1, dtype=np.int64)
-    slot[fin] = np.arange(n_pts)
-    tree = cKDTree(x)
-    kq = min(max(SURF_K, SURF_C_CAND) + 1, n_pts)
-    dist, idx = tree.query(x, k=kq, workers=-1)
+    slot, x = sp["slot"], sp["x"]
+    a_res, a_sv, c_res = sp["a_res"], sp["a_sv"], sp["c_res"]
+    loc, ok, disj = sp["loc"], sp["ok"], sp["disj"]
 
     # -- local surface variation, and the plain k-NN residual beside it -----
-    a_res = a_sv = None
-    if SURF_K + 1 <= kq:
-        a_res, a_sv = _plane_stats(x, x[idx[:, 1 : SURF_K + 1]])
+    if a_sv is not None:
         variation["point_sv_med"] = _q(a_sv, 50)
         variation["point_sv_p90"] = _q(a_sv, 90)
         variation["point_res_med"] = _q(a_res, 50)
@@ -1857,25 +1965,10 @@ def surface_channels(m):
         variation["unmeasurable_reason"] = "few_finite_points"
 
     # -- stranger-surface membership ---------------------------------------
-    bits = _observer_bitsets(m, slot, n_pts)
-    ncand = min(SURF_C_CAND, kq - 1)
-    cand = idx[:, 1 : ncand + 1]
-    cdist = dist[:, 1 : ncand + 1]
-    ii = np.repeat(np.arange(n_pts), ncand)
-    disj = ~_shares_any(bits, ii, cand.reshape(-1)).reshape(n_pts, ncand)
-    groups, counts, ok = _pick_neighbours(disj, cand, x, SURF_C_USE, SURF_C_MIN)
-    own = np.median(cdist[:, : min(SURF_K, ncand)], axis=1)
-    loc = np.full(n_pts, np.nan)
-    for i in np.nonzero(ok)[0]:
-        sel = np.nonzero(disj[i])[0][:SURF_C_USE]
-        if own[i] > 0:
-            loc[i] = float(np.median(cdist[i, sel]) / own[i])
     stranger["n_measurable"] = int(ok.sum())
     stranger["frac_measurable"] = float(ok.mean())
     stranger["disjoint_avail_med"] = float(np.median(disj.sum(axis=1)))
-    c_res = np.full(n_pts, np.nan)
     if int(ok.sum()):
-        c_res, _ = _grouped_plane(x, groups, counts)
         stranger["res_med"] = _q(c_res, 50)
         stranger["res_p90"] = _q(c_res, 90)
         stranger["locality_med"] = _q(loc, 50)
@@ -1980,6 +2073,134 @@ def surface_channels(m):
     else:
         vetted.setdefault("unmeasurable_reason", "no_range_vetted_neighbourhood")
     return blocks
+
+
+# ── Per-point attribution ───────────────────────────────────────────────────
+#
+# Every channel above answers for a whole member or for one of its frames,
+# because that is the grain a verdict is taken at.  A consumer that wants to
+# relieve a member of its junk needs the same readings one point at a time,
+# and a point is not a member: some channels have a per-point form of their
+# own (the surface residuals are per-point readings the member aggregates),
+# and the rest do not, so what stands in for them is what the member's own
+# arrays say about a point regardless of any channel -- how far its own rays
+# put it from where it is stored, how much baseline it had, and how well it
+# reprojects.
+
+
+#: The per-point signals :func:`point_evidence` publishes, and whether the
+#: DEFECT of each is at the SMALL end (a baseline is a defect when it is
+#: narrow; a residual when it is wide).
+POINT_SIGNALS = {
+    "retri_logdev": False,
+    "tri_angle_deg": True,
+    "reproj_px": False,
+    "depth_logdev": False,
+    "surface_res": False,
+    "surface_sv": False,
+    "stranger_res": False,
+}
+
+
+def point_evidence(m):
+    """Per-point readings of one member, by the member's OWN cluster id.
+
+    Returns ``{signal: array}``, each array ``n_cl`` long and NaN where the
+    point produced no reading.  Nothing here is a bar and nothing accuses:
+    these are the member's own numbers about its own points, and the consumer
+    that culls draws its bars from their distributions.
+
+    * ``retri_logdev`` -- re-triangulate the point from its own rays and take
+      the median ``|log10|`` of the range ratio over the frames that see it.
+      A point whose stored position disagrees with its own observations.
+    * ``tri_angle_deg`` -- the widest angle its supporting centres subtend at
+      it, at that re-triangulated position: the baseline the depth came out
+      of.
+    * ``reproj_px`` -- its median reprojection residual under the member's own
+      camera and poses.
+    * ``depth_logdev`` -- the median ``|log10|`` of its range from each
+      observing frame over the member's own scene scale: the per-point form of
+      the frame-level depth-scale coherence.
+    * ``surface_res`` / ``surface_sv`` / ``stranger_res`` -- the three surface
+      readings :func:`surface_channels` aggregates, before it aggregates them.
+    """
+    out = {k: np.full(max(m.n_cl, 0), np.nan) for k in POINT_SIGNALS}
+    if m.pts is None or not m.n_cl or not len(m.rows):
+        return out
+    rows = m.rows
+    order = np.argsort(m.obs_c[rows], kind="stable")
+    c, i = m.obs_c[rows][order], m.obs_i[rows][order]
+    uv = m.obs_uv[rows][order]
+    uniq, starts = np.unique(c, return_index=True)
+    ends = np.append(starts[1:], len(c))
+    counts = ends - starts
+
+    # -- the reprojection tail and the depth deviation, per point ----------
+    res = _residual_norms(m.camera, m.rvec, m.tvec, m.pts, uv, i, c)
+    scale = m.scene_scale()
+    rng = np.linalg.norm(m.pts[c] - m.centre[i], axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dev = (
+            np.abs(np.log10(np.where(rng > 0, rng, np.nan) / scale))
+            if (scale and scale > 0)
+            else np.full(len(rng), np.nan)
+        )
+    for k in range(len(uniq)):
+        lo, hi = starts[k], ends[k]
+        v = res[lo:hi][np.isfinite(res[lo:hi])]
+        if len(v):
+            out["reproj_px"][uniq[k]] = float(np.median(v))
+        d = dev[lo:hi][np.isfinite(dev[lo:hi])]
+        if len(d):
+            out["depth_logdev"][uniq[k]] = float(np.median(d))
+
+    # -- the point re-triangulated from its own rays, and the baseline it
+    #    came out of.  Both need the point's own support, so the points with
+    #    fewer observations than a triangulation takes have neither.
+    keep = np.repeat(counts >= MIN_SUPPORT_OBS, counts)
+    dirs = _world_rays(m.camera, m.rot, i, uv)
+    keep &= np.repeat(
+        np.logical_and.reduceat(np.isfinite(dirs).all(axis=1), starts), counts
+    )
+    if keep.any():
+        cc, ii, gg = c[keep], i[keep], np.repeat(np.arange(len(uniq)), counts)[keep]
+        sel = np.unique(gg)
+        cnt = np.bincount(np.searchsorted(sel, gg), minlength=len(sel))
+        offs = np.concatenate([[0], np.cumsum(cnt)]).astype(np.int64)
+        cen = np.ascontiguousarray(m.centre[ii])
+        tri = triangulate_batch(np.ascontiguousarray(dirs[keep]), cen, offs)
+        xr = np.asarray(tri["points"])
+        fin = np.isfinite(xr).all(axis=1)
+        ang = _tri_angle_max(cen, offs, xr)
+        d_ret = np.linalg.norm(xr[np.repeat(np.arange(len(sel)), cnt)] - cen, axis=1)
+        d_sto = np.linalg.norm(m.pts[cc] - cen, axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ld = np.abs(
+                np.log10(
+                    np.where(d_ret > 0, d_ret, np.nan)
+                    / np.where(d_sto > 0, d_sto, np.nan)
+                )
+            )
+        for k in range(len(sel)):
+            if not fin[k]:
+                continue
+            cid = uniq[sel[k]]
+            v = ld[offs[k] : offs[k + 1]]
+            v = v[np.isfinite(v)]
+            if len(v):
+                out["retri_logdev"][cid] = float(np.median(v))
+            if np.isfinite(ang[k]):
+                out["tri_angle_deg"][cid] = float(ang[k])
+
+    # -- the surface readings, before they are aggregated ------------------
+    sp = _surface_point_readings(m)
+    if not sp["reason"]:
+        fin_ids = sp["fin"]
+        if sp["a_res"] is not None:
+            out["surface_res"][fin_ids] = sp["a_res"]
+            out["surface_sv"][fin_ids] = sp["a_sv"]
+        out["stranger_res"][fin_ids] = sp["c_res"]
+    return out
 
 
 # ── Channels: the rotation-only member ──────────────────────────────────────
