@@ -2466,6 +2466,12 @@ def save_sfmr(
         reprojection_errors=per_point_err,
         track_image_indexes=track_img,
         track_feature_indexes=track_feat,
+        # A release-grade file is read on its own, often against a workspace
+        # whose `.sift` files were never written (the observations came from the
+        # cluster patches). Carry the refined positions inline so its
+        # observations stay readable; the patch-bearing path below states them
+        # as an `embedded_patches` file instead.
+        keypoints_xy=keypoints_xy if release_grade else None,
         point_indexes=point_idx,
         observation_counts=obs_counts,
         feature_tool_hashes=ft_hashes,
