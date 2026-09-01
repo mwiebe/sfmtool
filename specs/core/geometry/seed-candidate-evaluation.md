@@ -534,7 +534,10 @@ The selection pass consumes the channels as follows:
   population, read against quantiles of that member's own readings of each
   naming per-frame channel; it runs whether or not the fleet's frame bars
   localized the defect, because a defect those bars do not localize is not
-  thereby spread evenly over the member's frames. Then a point cull on the
+  thereby spread evenly over the member's frames. That cut is walked a step
+  at a time, each step dropping the frames past the cliff in the member's
+  own loudness population and re-deriving the bars on the re-measured core's
+  fresh readings ([seed-drive.md](seed-drive.md)). Then a point cull on the
   points the fired channels indict. A remedy stands only where the core it
   leaves passes the member gates in its own right, which is the bar a trim
   has always faced.
