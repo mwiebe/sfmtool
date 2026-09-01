@@ -570,13 +570,14 @@ pub fn write_sfmr_with_options(
         &mut tracks_hasher,
     )?;
 
-    // tracks/keypoints_xy (embedded_patches only; lexicographically after
-    // image_indexes, before metadata.json)
-    if is_embedded {
+    // tracks/keypoints_xy (the coordinate under embedded_patches, an optional
+    // inline copy under sift_files; lexicographically after image_indexes,
+    // before metadata.json)
+    if let Some(keypoints_xy) = &data.keypoints_xy {
         write_binary_entry_hashed(
             &mut zip,
             &entries::tracks_keypoints_xy(observation_count),
-            bytemuck::cast_slice(data.keypoints_xy.as_ref().unwrap().as_slice().unwrap()),
+            bytemuck::cast_slice(keypoints_xy.as_slice().unwrap()),
             options.zstd_level,
             &mut tracks_hasher,
         )?;
@@ -586,7 +587,7 @@ pub fn write_sfmr_with_options(
     let tracks_meta = serde_json::json!({
         "observation_count": observation_count,
         "has_feature_indexes": !is_embedded,
-        "has_keypoints_xy": is_embedded,
+        "has_keypoints_xy": data.keypoints_xy.is_some(),
         "has_observation_confidence": data.observation_confidence.is_some(),
     });
     let bytes = write_json_entry(
@@ -753,9 +754,18 @@ fn ensure_tracks_sorted(data: &mut SfmrData) {
 }
 
 /// Validate that `feature_source` is recognized and the mode-appropriate columns
-/// are present *and the opposite-mode columns absent* — the two modes never mix,
-/// so a contradictory `SfmrData` is rejected rather than silently dropping the
-/// column the chosen mode does not write.
+/// are present *and the opposite-mode identity columns absent* — no file states
+/// both ways of identifying an observation, so a contradictory `SfmrData` is
+/// rejected rather than silently dropping the column the chosen mode does not
+/// write.
+///
+/// `keypoints_xy` is the one column both modes may carry: under
+/// `embedded_patches` it is the observation coordinate and is required, and under
+/// `sift_files` it is an optional inline copy of the coordinate the
+/// `feature_indexes` resolve to. It identifies nothing on its own, so carrying it
+/// alongside the `.sift` link is not a contradiction — unlike
+/// `image_file_hashes`, which is `embedded_patches`' substitute for the `.sift`
+/// hash pair and stays forbidden under `sift_files`.
 fn validate_feature_source(data: &SfmrData) -> Result<(), SfmrError> {
     let src = data.metadata.feature_source.as_str();
     let present = |name: &str, ok: bool| -> Result<(), SfmrError> {
@@ -779,7 +789,6 @@ fn validate_feature_source(data: &SfmrData) -> Result<(), SfmrError> {
             present("feature_indexes", data.feature_indexes.is_some())?;
             present("feature_tool_hashes", data.feature_tool_hashes.is_some())?;
             present("sift_content_hashes", data.sift_content_hashes.is_some())?;
-            absent("keypoints_xy", data.keypoints_xy.is_none())?;
             absent("image_file_hashes", data.image_file_hashes.is_none())?;
         }
         FEATURE_SOURCE_EMBEDDED_PATCHES => {

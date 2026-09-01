@@ -369,6 +369,26 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
     // === Tracks hash (lexicographic path order) ===
     let mut tracks_hasher = Xxh3::new();
 
+    // tracks/metadata.json is read ahead of the section — its `has_*` flags say
+    // which optional columns the archive carries — but fed to the hasher below in
+    // its own lexicographic slot, after `keypoints_xy`.
+    let tracks_meta_raw = read_zst_entry(&mut archive, entries::tracks_metadata())?;
+    let tracks_meta: serde_json::Value =
+        serde_json::from_slice(&tracks_meta_raw).unwrap_or(serde_json::Value::Null);
+    // The inline keypoint column is the coordinate in an `embedded_patches` file
+    // and an optional copy of it in a `sift_files` one; `has_keypoints_xy` is what
+    // says whether the entry exists.
+    let has_keypoints_xy = is_embedded
+        || tracks_meta
+            .get("has_keypoints_xy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    // Per-observation confidence is optional from version 6 (default `false`).
+    let has_observation_confidence = tracks_meta
+        .get("has_observation_confidence")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // tracks/feature_indexes (sift_files only; sorts before image_indexes)
     if !is_embedded {
         tracks_hasher.update(&read_zst_entry(
@@ -382,8 +402,8 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
         &entries::tracks_image_indexes(observation_count),
     )?;
     tracks_hasher.update(&track_image_indexes_raw);
-    // tracks/keypoints_xy (embedded_patches only; sorts after image_indexes)
-    let keypoints_raw = if is_embedded {
+    // tracks/keypoints_xy (optional; sorts after image_indexes)
+    let keypoints_raw = if has_keypoints_xy {
         let raw = read_zst_entry(
             &mut archive,
             &entries::tracks_keypoints_xy(observation_count),
@@ -394,15 +414,7 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
         None
     };
     // tracks/metadata.json
-    let tracks_meta_raw = read_zst_entry(&mut archive, entries::tracks_metadata())?;
     tracks_hasher.update(&tracks_meta_raw);
-    let tracks_meta: serde_json::Value =
-        serde_json::from_slice(&tracks_meta_raw).unwrap_or(serde_json::Value::Null);
-    // Per-observation confidence is optional from version 6 (default `false`).
-    let has_observation_confidence = tracks_meta
-        .get("has_observation_confidence")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     // tracks/observation_confidence (optional, version 6+; sorts after
     // metadata.json, before observation_counts)
     if has_observation_confidence {
@@ -463,9 +475,12 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
     }
 
     // === Validate feature_source vs tracks-metadata flags (v4) ===
-    // Exactly one of has_feature_indexes / has_keypoints_xy is true, matching
-    // feature_source. Only enforced when the flags are present (v4 writers always
-    // emit them; an upgraded pre-v4 file has none).
+    // `has_feature_indexes` is true exactly for a `sift_files` file.
+    // `has_keypoints_xy` is a presence flag rather than a mode flag: an
+    // `embedded_patches` file must set it (the column is its coordinate), while a
+    // `sift_files` file sets it only when it carries the optional inline copy.
+    // Only enforced when the flags are present (v4 writers always emit them; an
+    // upgraded pre-v4 file has none).
     if let Some(hfi) = tracks_meta
         .get("has_feature_indexes")
         .and_then(|v| v.as_bool())
@@ -481,15 +496,17 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
         .get("has_keypoints_xy")
         .and_then(|v| v.as_bool())
     {
-        if hk != is_embedded {
-            errors.push(format!(
-                "tracks/metadata.json has_keypoints_xy={hk} contradicts \
-                 feature_source (embedded={is_embedded})"
-            ));
+        if is_embedded && !hk {
+            errors.push(
+                "tracks/metadata.json has_keypoints_xy=false contradicts \
+                 feature_source \"embedded_patches\", whose keypoints_xy is the \
+                 observation coordinate"
+                    .to_string(),
+            );
         }
     }
 
-    // === Validate embedded keypoints (finite + within image bounds) ===
+    // === Validate the inline keypoints (finite + within image bounds) ===
     // Each keypoint row is two little-endian f32s (u, v).
     const KEYPOINT_ROW_BYTES: usize = 2 * std::mem::size_of::<f32>();
     if let Some(kp_raw) = &keypoints_raw {

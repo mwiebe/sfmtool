@@ -164,11 +164,13 @@ pub fn read_sfmr(path: &Path) -> Result<SfmrData, SfmrError> {
         }
     }
     // The top-level `feature_source` is the authoritative discriminator for which
-    // per-observation / per-image columns exist (a file is wholly one mode — the
-    // spec's "no mixing"). The `tracks/metadata.json` `has_feature_indexes` /
-    // `has_keypoints_xy` flags mirror it for section-local readers and are
-    // cross-checked in `verify_sfmr`; they intentionally do not gate reading here
-    // the way the independent `points3d` `has_*` flags do.
+    // identity columns exist (a file links to `.sift` or carries its own image
+    // hash, never both). `tracks/metadata.json`'s `has_feature_indexes` mirrors it
+    // for section-local readers and is cross-checked in `verify_sfmr`; it
+    // intentionally does not gate reading here the way the independent `points3d`
+    // `has_*` flags do. `has_keypoints_xy` is different: the inline keypoint
+    // column is optional under `sift_files`, so that flag is what says whether the
+    // entry is there, and it does gate the read below.
     let is_embedded = metadata.feature_source == FEATURE_SOURCE_EMBEDDED_PATCHES;
 
     // A `sift_files` file links to `.sift` via per-image tool/content hashes; an
@@ -373,7 +375,27 @@ pub fn read_sfmr(path: &Path) -> Result<SfmrData, SfmrError> {
 
     // A `sift_files` file references `.sift` features by index; an
     // `embedded_patches` file carries the sub-pixel `(u, v)` coordinate inline.
-    let (feature_indexes, keypoints_xy) = if is_embedded {
+    let feature_indexes = if is_embedded {
+        None
+    } else {
+        let feature_indexes_vec: Vec<u32> = read_binary_array(
+            &mut archive,
+            &entries::tracks_feature_indexes(observation_count),
+            observation_count,
+        )?;
+        Some(Array1::from_vec(feature_indexes_vec))
+    };
+
+    // The inline keypoint column: the coordinate itself under
+    // `embedded_patches`, and under `sift_files` an optional copy of what the
+    // `.sift` companions hold, flagged by `has_keypoints_xy`. Present or absent,
+    // it is validated the same way.
+    let has_keypoints_xy = is_embedded
+        || tracks_meta
+            .get("has_keypoints_xy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let keypoints_xy = if has_keypoints_xy {
         let kp_vec: Vec<f32> = read_binary_array(
             &mut archive,
             &entries::tracks_keypoints_xy(observation_count),
@@ -388,14 +410,9 @@ pub fn read_sfmr(path: &Path) -> Result<SfmrData, SfmrError> {
             &cameras,
         )
         .map_err(SfmrError::InvalidFormat)?;
-        (None, Some(keypoints_xy))
+        Some(keypoints_xy)
     } else {
-        let feature_indexes_vec: Vec<u32> = read_binary_array(
-            &mut archive,
-            &entries::tracks_feature_indexes(observation_count),
-            observation_count,
-        )?;
-        (Some(Array1::from_vec(feature_indexes_vec)), None)
+        None
     };
 
     // Optional per-observation confidence (version 6+). Absent means "no

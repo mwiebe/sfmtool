@@ -162,8 +162,10 @@ pub struct SfmrMetadata {
     pub world_space_unit: Option<String>,
     /// Observation source (format version 4+):
     /// [`FEATURE_SOURCE_SIFT_FILES`] — observations reference external `.sift`
-    /// files via `feature_indexes`; or [`FEATURE_SOURCE_EMBEDDED_PATCHES`] —
-    /// per-observation keypoints are stored inline in `tracks/keypoints_xy`.
+    /// files via `feature_indexes`, optionally alongside an inline copy of the
+    /// coordinate in `tracks/keypoints_xy`; or [`FEATURE_SOURCE_EMBEDDED_PATCHES`]
+    /// — per-observation keypoints are stored inline in `tracks/keypoints_xy`
+    /// and there is no `.sift` link at all.
     /// Legacy version 1–3 files have no key and read as `sift_files`.
     #[serde(default = "default_feature_source")]
     pub feature_source: String,
@@ -171,9 +173,9 @@ pub struct SfmrMetadata {
 
 /// Validate per-observation keypoints: every `(u, v)` must be finite and lie
 /// within `[0, width) × [0, height)` of the image's camera intrinsics. Returns a
-/// descriptive message on the first violation. Used on both read and verify of
-/// `embedded_patches` files. Index arrays are bounds-checked so malformed input
-/// yields an error rather than a panic.
+/// descriptive message on the first violation. Used on both read and verify,
+/// wherever the column is present. Index arrays are bounds-checked so malformed
+/// input yields an error rather than a panic.
 pub fn validate_keypoints(
     keypoints: &Array2<f32>,
     image_indexes: &[u32],
@@ -459,8 +461,11 @@ pub struct SfmrData {
     /// `Some` in a `sift_files` file; `None` in an `embedded_patches` file.
     pub feature_indexes: Option<Array1<u32>>,
     /// `(M, 2)` sub-pixel `(u, v)` keypoint per observation, in image pixel
-    /// coordinates. `Some` in an `embedded_patches` file; `None` in a
-    /// `sift_files` file.
+    /// coordinates. Always `Some` in an `embedded_patches` file, where it *is*
+    /// the observation coordinate. Optional in a `sift_files` file, where it is
+    /// an inline copy of the position the `feature_indexes` resolve to in the
+    /// `.sift` companions, so a consumer that has only the `.sfmr` still reads
+    /// where each observation sits.
     pub keypoints_xy: Option<Array2<f32>>,
     /// Optional `(M,)` per-observation confidence in that observation's
     /// photometric sharpness *relative to its track's consensus*: how well this

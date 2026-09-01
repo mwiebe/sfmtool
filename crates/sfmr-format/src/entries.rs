@@ -249,7 +249,8 @@ pub(crate) fn tracks_feature_indexes(observation_count: impl std::fmt::Display) 
     format!("tracks/feature_indexes.{observation_count}.uint32.zst")
 }
 
-/// `tracks/keypoints_xy` — inline keypoint per observation (`embedded_patches`).
+/// `tracks/keypoints_xy` — inline keypoint per observation: the coordinate in
+/// an `embedded_patches` file, an optional copy of it in a `sift_files` one.
 pub(crate) fn tracks_keypoints_xy(observation_count: impl std::fmt::Display) -> String {
     format!("tracks/keypoints_xy.{observation_count}.2.float32.zst")
 }
