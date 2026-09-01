@@ -52,6 +52,7 @@ import os
 import shutil
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -258,6 +259,68 @@ _VOTE_FISHEYE = None
 
 def elapsed():
     return time.perf_counter() - _T0
+
+
+# ── Where the run spent its time ────────────────────────────────────────────
+#
+# THE PRODUCT STATES ITS OWN BREAKDOWN.  `write_candidate_solves` writes these
+# buckets into the manifest head beside `elapsed_s`, so "which phase is the
+# wall time" is a question the product answers rather than one a reader scrapes
+# out of a log's timestamps.  Always on, with no switch to arm or to forget: a
+# `perf_counter` pair per phase is not a cost any phase can feel, and a
+# breakdown that only some runs carry is not a breakdown a fleet can compare.
+#
+# A bucket is a NAME, the wall time spent inside it and the number of times it
+# was entered.  Buckets NEST -- the relaxation chain's `relax.*` stages run
+# inside `relax_far_layers`, the adjustments they run sum inside them again
+# under `relax.bundle_adjust`, `attach_blocks` runs inside `finish_evaluation`
+# -- so the block is a breakdown to read down, not a partition to add up.
+# `elapsed_s` remains the only total.
+_TIMINGS = {}
+
+
+def clear_timings():
+    """Start the breakdown over.  `capture_context` calls this, so a driver
+    that builds a second context in one process measures that run and not the
+    sum of both."""
+    _TIMINGS.clear()
+
+
+def add_timing(name, seconds):
+    """Add one measured call to the ``name`` bucket.
+
+    The sink form, for a caller that already holds the duration -- notably the
+    relaxation package, which reports its stages through
+    ``seed_relax.timing``."""
+    b = _TIMINGS.get(name)
+    if b is None:
+        _TIMINGS[name] = {"s": float(seconds), "n": 1}
+    else:
+        b["s"] += float(seconds)
+        b["n"] += 1
+
+
+@contextmanager
+def timed(name):
+    """Time what runs inside, under ``name``.
+
+    Usable both ways round: ``with timed("claims"): ...`` for a phase written
+    inline, and ``@timed("measure_members")`` on a function that IS a phase
+    (a `contextmanager` doubles as a decorator, and rebuilds itself per call)."""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        add_timing(name, time.perf_counter() - t0)
+
+
+def timings_block():
+    """The breakdown as the manifest states it: the widest bucket first,
+    seconds rounded to milliseconds."""
+    return {
+        k: {"s": round(v["s"], 3), "n": int(v["n"])}
+        for k, v in sorted(_TIMINGS.items(), key=lambda kv: -kv[1]["s"])
+    }
 
 
 # ── Fisheye seed camera context (scripts/notes-fisheye-seed.md, Phases 1-6) ──
@@ -1016,6 +1079,7 @@ def make_rung(
     )
 
 
+@timed("load_clusters")
 def load_clusters():
     """Flat observation arrays of every usable cluster, plus each cluster's
     global admission rank (span-major, cluster-id tiebreak) — the quality
@@ -3921,6 +3985,7 @@ def capture_floors(blocks):
     return out
 
 
+@timed("relax_far_layers")
 def relax_far_layers(rung, data_full, layers=None):
     """THE RELAXATION RUNG: a finite sibling for every rotation-only member.
 
@@ -3947,8 +4012,11 @@ def relax_far_layers(rung, data_full, layers=None):
     that round's own."""
     import seed_candidate_eval as EV
     import seed_relax
-    from seed_relax import release as RELEASE
+    from seed_relax import release as RELEASE, timing as RELAX_TIMING
 
+    # The chain reports each of its stages, and each adjustment inside them, to
+    # whoever asks; this run's collector is who asks.
+    RELAX_TIMING.install(add_timing)
     opts = seed_relax.options()
     by_idx = {int(h["idx"]): h for h in rung.hypotheses}
     idx = len(rung.hypotheses)
@@ -4168,6 +4236,7 @@ def write_member_arrays(stage, members):
     np.savez_compressed(Path(stage) / "member_arrays.npz", **blob)
 
 
+@timed("eval_pair_obs")
 def eval_pair_obs(rung, data_full):
     """THE WITNESS'S EVIDENCE: the capture's full pair graph where the coarse
     cut dropped part of it, the solve's own admission where it did not.
@@ -4184,6 +4253,7 @@ def eval_pair_obs(rung, data_full):
     return pair_obs
 
 
+@timed("measure_members")
 def measure_members(
     rung,
     hyps,
@@ -4299,6 +4369,7 @@ def measure_members(
     return by_idx, members + relaxed
 
 
+@timed("attach_blocks")
 def attach_blocks(rung, by_idx, f_vote, peers=None):
     """Attach the measured channels to each member's manifest entry.
 
@@ -4326,6 +4397,7 @@ def attach_blocks(rung, by_idx, f_vote, peers=None):
         h["evaluation"] = _jsonable(block)
 
 
+@timed("finish_evaluation")
 def finish_evaluation(rung, hyps, by_idx, peers, f_vote, t0):
     """The block that can only be taken over the FINAL set: the channels
     attached with peer corroboration, the corpus records, and the census.
@@ -4438,6 +4510,10 @@ def write_candidate_solves(rung, win, f_vote, n_votes, extra=None):
         # the answer.  The set is the product.
         "ladder_first": int(win),
         "elapsed_s": round(elapsed(), 3),
+        # WHERE THAT TIME WENT, by phase: the buckets `timed` accumulated over
+        # this run, widest first.  They nest and they do not cover everything,
+        # so they are read as a breakdown and never summed (see `_TIMINGS`).
+        "timings_s": timings_block(),
     }
     manifest.update(extra or {})
     (rung.stage / "manifest.json").write_text(
@@ -4821,6 +4897,7 @@ POOL_FLOOR = 30
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
+@timed("explore")
 def explore(hyp, args):
     """One exploration pass over one admitted selection: EVERY distinct
     candidate its ladder generated, rank-ordered.
@@ -4897,8 +4974,11 @@ def capture_context():
     the capture-level covisibility graph.
 
     Sets the module-level camera dimensions and per-observation admission rank,
-    which every stage below reads."""
+    which every stage below reads, and starts the run's own timing breakdown:
+    this is the first thing either driver builds, so it is where the buckets
+    begin."""
     global _CAM_WH, _RANK_O
+    clear_timings()
     data, rung = load_clusters()
     # The FULL admission, held past the loop's complement rebinds: the
     # rotation-only hypothesis below is a reading of the whole capture, not of
@@ -5219,6 +5299,7 @@ def far_field_focal(f_probe, f_vote):
     return f_vote, "vote"
 
 
+@timed("far_field_layers")
 def far_field_layers(rung, pairs, data_full, f_rot, f_src, far_idx):
     """A far-field sibling for each ``(index, hypothesis)`` in ``pairs``.
 
@@ -5271,6 +5352,7 @@ def far_field_layers(rung, pairs, data_full, f_rot, f_src, far_idx):
     return far_idx
 
 
+@timed("capture_far_layer")
 def capture_far_layer(rung, far_idx, data_full, f_rot, f_src):
     """The capture's OWN far-field layer, over the whole admission.
 

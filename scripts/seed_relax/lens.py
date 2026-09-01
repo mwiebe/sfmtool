@@ -324,7 +324,7 @@ def rot_lens_ba(
     Returns ``(record, camera, (frames, quaternions))``.  A solve that raises,
     or that comes back with no finite residual, is a REFUSAL: the previous
     camera stands and the record says so."""
-    from sfmtool._sfmtool.geometry import bundle_adjust
+    from .timing import bundle_adjust
 
     rows = m.rows_all if rowset == "admission" else m.rows
     inp = rot_lens_inputs(m, rows)
@@ -395,7 +395,7 @@ def final_release(m, state, knots=SEED_KNOTS, schedule=None, max_iters=30):
     The lens read off finite structure and bearings together, after the centres
     exist.  The state's own camera is promoted where it is not already a spline
     model; where it is, its coefficients are the start."""
-    from sfmtool._sfmtool.geometry import bundle_adjust
+    from .timing import bundle_adjust
 
     frames = [int(f) for f in state["frames"]]
     clusters = [int(c) for c in state["clusters"]]
