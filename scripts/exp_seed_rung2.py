@@ -16,9 +16,13 @@ release, never in place:
   reason to drop one.
 * **Refuse.**  A member is refused only on defect evidence: a gated channel
   past its population gate with healthy conditioning, or a diverging settling
-  refit.  Every refusal names the readings it was taken on.  A CORROBORATING
-  channel (scale coherence, the lens deviation) qualifies a verdict other
-  evidence already carries and is never a sole ground for one.
+  refit.  Every refusal names the readings it was taken on, how many channels
+  fired and the loudest of them.  A CORROBORATING channel (scale coherence,
+  the lens deviation) qualifies a verdict other evidence already carries and
+  is never a sole ground for one.  A refusal STANDS OUTRIGHT only where a
+  POSE-INSTABILITY channel fired and did not fire alone: nothing that can be
+  taken out of a member repairs poses that will not hold still.  Every other
+  member the gates would refuse is offered a SALVAGE first.
 * **Trim.**  When the defect localizes to named frames, those frames are
   dropped instead of the member: the points that fall below two supporting
   observations go with them, the cut may not break a link the member's own
@@ -32,8 +36,20 @@ release, never in place:
   reading taken while the cut frames were still in the member describes
   geometry the core no longer holds, and cannot answer for it.  The arrays
   rung 1 ships beside the release set are what the core is stated from.
-  Where any of them fails the verdict is a refusal, and the
+  Where any of them fails the member reaches the salvage tier below, and the
   frames a trim would have dropped are recorded instead.
+* **Salvage.**  Two remedies, in order, for a member the gates would refuse on
+  evidence that is not about its poses.  First a FRAME TRIM on the member's own
+  worst frames -- read against quantiles of that member's own frame
+  population, because a defect the fleet's bars do not localize is not thereby
+  spread evenly over the member.  Then a POINT CULL: the points the fired
+  channels indict, at bars taken over the member's own points, written as a
+  culled SIBLING beside the member and re-measured and re-judged exactly as a
+  trimmed core is.  A channel with a per-point form of its own indicts on that
+  form; one without indicts on what the member's arrays say about a point
+  regardless of any channel.  Where neither remedy leaves a core that passes
+  the member gates the refusal stands, and its reason records what was tried.
+  `SFMTOOL_RUNG2_SALVAGE=0` turns the tier off.
 * **Coverage.**  The capture coverage of the SURVIVING set is computed from
   the frames those members posed, with its gaps.  It is never inferred from
   quality.
@@ -133,6 +149,7 @@ import argparse
 import datetime as _dt
 import json
 import math
+import os
 import shutil
 import sys
 from collections import namedtuple
@@ -151,9 +168,19 @@ MIN_CORE_FRAMES = 3
 MIN_POINT_OBS = 2
 #: Points two frames must share before a trim counts them linked.
 MIN_LINK_POINTS = 3
-#: Largest share of a member's frames a trim may remove.  Past it the defect is
-#: the member, not a few frames, and the verdict is a refusal.
+#: Largest share of a member's frames a trim may remove -- and of its finite
+#: points a cull may remove, for the same reason.  Past it the defect is the
+#: member and not a part of it, and what is left is a different member rather
+#: than the same one with its junk taken out.
 MAX_TRIM_FRACTION = 0.5
+#: Readings a per-point signal needs before a quantile of it is a quantile.
+#: Below it the pass's own top ventile is one reading, and a bar drawn at one
+#: reading ranks nothing.
+MIN_CULL_POPULATION = 20
+#: The verdict tiers, in the order a member passes through them.  Every one but
+#: the last is a SURVIVOR: it stands in the ranking, it claims coverage, and it
+#: is counted as a member the set keeps.
+VERDICTS = ("keep", "trim", "cull", "refuse")
 #: The fleet quantile every gate is taken at, unless `derive-gates` is told
 #: otherwise.  One quantile for every member-median channel: a per-channel
 #: choice would be a knob fitted to the fleet's labels, and this pass has none.
@@ -760,6 +787,75 @@ CAPTURE_REFEREED = ("focal_dev",)
 LOCALIZING = tuple(
     c.key for c in GATED_CHANNELS if c.frame is not None and not c.corroborating
 )
+
+#: The synthetic channels `member_evidence` appends beside the catalogue: a
+#: refit that walked away is a reading of the member, not of a gated quantity,
+#: and it carries no bar of its own.
+DIVERGED_CHANNELS = ("settling_diverged", "rot_settling_diverged")
+
+#: THE CHANNELS THAT SAY THE POSES ARE UNSTABLE.  A verdict rests on what KIND
+#: of channel fired as much as on how loud it was.  These say the member's own
+#: poses do not hold still: a held-out frame resects somewhere else, a refit
+#: walks away when it is let go, a rotation cycle does not close.  Nothing that
+#: can be taken out of a cloud repairs that, so a member two of these accuse
+#: together is refused where it stands.
+#:
+#: Every OTHER channel -- a depth agreement, a surface residual, a non-member's
+#: verdict, a scale or lens deviation -- speaks about STRUCTURE or about the
+#: capture, and a member can be relieved of structure: it may be carrying junk
+#: points and solid ones at once, and only the junk has to go.  A member with
+#: no pose channel against it, or with a single channel against it of whatever
+#: kind, is offered a SALVAGE before it is refused.
+POSE_INSTABILITY = (
+    "loo_rot_worst",
+    "loo_trans_worst",
+    "settling_rot_worst",
+    "settling_tdir_worst",
+    "settling_diverged",
+    "rot_holdout_rot_worst",
+    "rot_holdout_dir_dev_worst",
+    "rot_settling_rot_worst",
+    "rot_settling_diverged",
+    "rot_cycle_res_med",
+    "rot_cycle_res_worst",
+)
+
+#: A taxonomy that names a channel the catalogue does not hold would silently
+#: stop classifying it, so the names are checked against the catalogue here.
+assert frozenset(POSE_INSTABILITY) <= frozenset(
+    [c.key for c in GATED_CHANNELS] + list(DIVERGED_CHANNELS)
+), "POSE_INSTABILITY names a channel the catalogue does not carry"
+
+#: WHAT A CHANNEL INDICTS SINGLE POINTS WITH.  A channel with a per-point form
+#: of its own is read at that form: the surface residuals are per-point
+#: readings the member aggregates, and a depth agreement is a statement about
+#: the points whose depth disagrees.  A channel with no per-point form is not
+#: silent about points, it simply does not name them, and what stands in for it
+#: is the member's own arithmetic about each point -- whether its own rays put
+#: it where it is stored, how much baseline priced that depth, how well it
+#: reprojects.
+CHANNEL_POINT_SIGNALS = {
+    "loo_logdev_worst": ("retri_logdev",),
+    "loo_rho_p10": ("retri_logdev",),
+    "sup_depth_logdev_worst": ("depth_logdev",),
+    "stranger_res_med": ("stranger_res",),
+    "stranger_res_spread": ("stranger_res",),
+    "surface_sv_frame_med": ("surface_sv",),
+    "surface_res_spread": ("surface_res",),
+    "vetted_res_med": ("surface_res",),
+}
+
+#: The junk signals a channel with no per-point form of its own is read with.
+GENERIC_POINT_SIGNALS = ("retri_logdev", "tri_angle_deg", "reproj_px")
+
+
+def salvage_on():
+    """Whether a member the gates would refuse is offered a salvage first.
+
+    ``SFMTOOL_RUNG2_SALVAGE=0`` restores the straight refusal, which is what
+    the salvage is measured against."""
+    return (os.environ.get("SFMTOOL_RUNG2_SALVAGE", "1") or "1").strip() != "0"
+
 
 #: One per-frame channel.  `eligible` is the per-frame record's own
 #: eligibility field, evaluated on that record.
@@ -1972,6 +2068,48 @@ def member_evidence(
     return evidence, blocked
 
 
+def reading_loudness(e):
+    """How far past its own bar one reading sits, as a multiple of that bar.
+
+    A ratio in the READING'S OWN terms, so channels measured in degrees, in
+    fractions and in correlations compare: an absolute reading is its value
+    over its gate (the gate over the value where the small end is the defect),
+    and a capture-relative one is the capture ratio over the ratio the gate
+    sets.  It orders readings; it is never a bar itself."""
+    gate = _num(e.get("gate"))
+    relative = e.get("reading") == "capture-relative"
+    value = _num(e.get("ratio") if relative else e.get("value"))
+    if gate is None or value is None or not gate:
+        return None
+    if not relative and e.get("side") == "below":
+        return (gate / value) if value else None
+    return value / gate
+
+
+def evidence_summary(evidence):
+    """`(n_channels, loudest)` -- the weight of a member's defect evidence.
+
+    A verdict taken on six channels is not the verdict taken on one, and the
+    sentence it is written into has to say which it was: how many DISTINCT
+    channels fired, and the loudest reading among them named in its own
+    terms."""
+    channels = sorted({e["channel"] for e in evidence})
+    best, best_x = None, None
+    for e in evidence:
+        x = reading_loudness(e)
+        if x is not None and (best_x is None or x > best_x):
+            best, best_x = e, x
+    if best is None:
+        return len(channels), ", ".join(channels) or "no reading"
+    return len(channels), f"{best['channel']} {best_x:.3g}x gate"
+
+
+def defect_phrase(evidence):
+    """The one-line weight-of-evidence phrase every refusal opens with."""
+    n, loud = evidence_summary(evidence)
+    return f"defect evidence ({n} channel{'' if n == 1 else 's'}, worst {loud})"
+
+
 def frame_bar(gate, family):
     """`(value, fleet_floored)` -- the bar one frame gate sets for a family.
 
@@ -2031,6 +2169,57 @@ def defect_frames(hyp, gates, model, family="other"):
     return named, corroborated
 
 
+def salvage_frames(hyp, row, named, n_posed):
+    """`(cut, hits)` -- the frames a SALVAGE cuts, from the member's OWN frame
+    population.
+
+    The fleet frame bars ask whether a frame is unlike the FLEET's frames, and
+    a member whose defect they do not localize has no frame past them -- which
+    is a statement about the fleet, not a finding that every frame of this
+    member is equally good.  A salvage asks the smaller question: which of THIS
+    member's frames sit at the far end of its own readings.  So each naming
+    per-frame channel is read against a quantile of the member's own readings
+    of it, at the quantile every accusation in this pass is taken at, and a
+    frame past it on any channel is a candidate.  The fleet's own named frames
+    are candidates too.  Candidates are ordered by how many channels name them
+    and the cut is capped at the share a trim may remove.
+    """
+    slots = frame_rows(hyp)
+    model = row["model"]
+    hits = {name: list(rec) for name, rec in (named or {}).items()}
+    for c in FRAME_CHANNELS:
+        if not c.names or (c.models and model not in c.models):
+            continue
+        vals = {
+            name: slot[c.key]
+            for name, slot in slots.items()
+            if slot.get(c.key + "__eligible") and slot.get(c.key) is not None
+        }
+        if len(vals) < 3:
+            continue
+        q = 100.0 * ((1.0 - DEFAULT_QUANTILE) if c.low else DEFAULT_QUANTILE)
+        bar = float(np.percentile(np.asarray(list(vals.values()), float), q))
+        for name, value in vals.items():
+            if (value < bar) if c.low else (value > bar):
+                hits.setdefault(name, []).append(
+                    {
+                        "channel": c.key,
+                        "value": value,
+                        "gate": bar,
+                        "side": "below" if c.low else "above",
+                        "quantile": q / 100.0,
+                        "names_frame": True,
+                        "support": False,
+                        "population": "the member's own frames",
+                    }
+                )
+    if not hits or not n_posed:
+        return [], hits
+    cap = max(1, int(MAX_TRIM_FRACTION * n_posed))
+    order = sorted(hits, key=lambda k: (-len(hits[k]), k))
+    return sorted(order[:cap]), hits
+
+
 #: The members' own arrays, per release directory, loaded once.
 _ARRAYS = {}
 
@@ -2081,6 +2270,16 @@ def member_arrays_of(release_dir):
     return out
 
 
+def eval_module():
+    """The battery, importable from this script's own directory."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import seed_candidate_eval as EV
+
+    return EV
+
+
 def capture_floors(ev):
     """The conditioning floors rung 1 recorded for this member's capture.
 
@@ -2095,10 +2294,11 @@ def capture_floors(ev):
     }
 
 
-def remeasure_core(arrays, hyp, keep_names, f_vote):
-    """Re-run the battery on the frames a trim kept, as a member in its own
-    right.
+def remeasure_core(arrays, hyp, f_vote, keep_names=None, drop_points=None):
+    """Re-run the battery on what a cut LEFT, as a member in its own right.
 
+    ``keep_names`` states the core over the frames a trim kept and
+    ``drop_points`` over the points a cull removed; either, both or neither.
     Returns the fresh evaluation block, or None when the release ships no
     arrays to state the core from.  The two channels the capture supplies
     rather than the member -- the held-out images' verdict, which needs the
@@ -2107,13 +2307,12 @@ def remeasure_core(arrays, hyp, keep_names, f_vote):
     d = arrays.get(int(hyp.get("idx", -1)))
     if d is None:
         return None
-    here = str(Path(__file__).resolve().parent)
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import seed_candidate_eval as EV
-
-    member = EV.member_from_arrays(d)
-    core = member.restricted(keep_names, min_obs=MIN_POINT_OBS)
+    EV = eval_module()
+    core = EV.member_from_arrays(d)
+    if keep_names is not None:
+        core = core.restricted(keep_names, min_obs=MIN_POINT_OBS)
+    if drop_points is not None:
+        core = core.without_points(drop_points, min_obs=MIN_POINT_OBS)
     if not int(core.posed.sum()):
         return None
     blocks = EV.evaluate(
@@ -2326,6 +2525,195 @@ def trim_member(sfmr_path, drop_names, out_path):
     return report
 
 
+# ── Culling ─────────────────────────────────────────────────────────────────
+#
+# The second remedy.  A trim answers "some of these FRAMES are wrong"; a cull
+# answers "some of these POINTS are junk", which is the other thing a member
+# with solid coverage and a bad cloud can be suffering from.  The cut is made
+# on the member's own cluster ids, the released artifact is cut to match, and
+# the core that is left is measured and re-judged exactly as a trimmed one is.
+
+
+def cull_signals(deciding):
+    """The per-point signals a member's fired channels indict points with."""
+    out = []
+    for e in deciding:
+        for sig in CHANNEL_POINT_SIGNALS.get(e["channel"], GENERIC_POINT_SIGNALS):
+            if sig not in out:
+                out.append(sig)
+    return out or list(GENERIC_POINT_SIGNALS)
+
+
+def cull_points(arrays, hyp, signals):
+    """`(point ids, bars)` -- the points a salvage culls, and what named them.
+
+    Every bar is a quantile of the MEMBER'S OWN population of that signal,
+    taken at the quantile every accusation in this pass is taken at.  A fleet
+    quantile is a rank among members and there is no fleet population of
+    points to rank a point in; the member has one, and the question a cull
+    asks is the smaller one -- which of THIS member's points sit at the far
+    end of its own readings.  A point past the bar on any indicting signal
+    goes.  The cut is capped at the share of the cloud a trim may take of the
+    frames, and where the cap binds the points the most signals name go first.
+    """
+    d = arrays.get(int(hyp.get("idx", -1)))
+    if d is None:
+        return [], {}
+    EV = eval_module()
+    member = EV.member_from_arrays(d)
+    if member.pts is None or not member.n_cl:
+        return [], {}
+    finite = np.isfinite(member.pts).all(axis=1)
+    n_fin = int(finite.sum())
+    if not n_fin:
+        return [], {}
+    readings = EV.point_evidence(member)
+    votes = np.zeros(member.n_cl, np.int64)
+    bars = {}
+    for sig in signals:
+        value = readings.get(sig)
+        if value is None:
+            continue
+        low = bool(EV.POINT_SIGNALS[sig])
+        ok = np.isfinite(value) & finite
+        n_ok = int(ok.sum())
+        if n_ok < MIN_CULL_POPULATION:
+            bars[sig] = {
+                "n": n_ok,
+                "reason": (
+                    f"{n_ok} readings below the {MIN_CULL_POPULATION} a quantile "
+                    "of the member's own points needs"
+                ),
+            }
+            continue
+        q = 100.0 * ((1.0 - DEFAULT_QUANTILE) if low else DEFAULT_QUANTILE)
+        bar = float(np.percentile(value[ok], q))
+        hit = ok & ((value < bar) if low else (value > bar))
+        votes += hit
+        bars[sig] = {
+            "bar": bar,
+            "quantile": q / 100.0,
+            "side": "below" if low else "above",
+            "n": n_ok,
+            "n_named": int(hit.sum()),
+            "population": "the member's own finite points",
+        }
+    cand = np.nonzero(votes > 0)[0]
+    cap = int(MAX_TRIM_FRACTION * n_fin)
+    if len(cand) > cap:
+        cand = cand[np.argsort(-votes[cand], kind="stable")][:cap]
+    return sorted(int(k) for k in cand), bars
+
+
+def _release_clusters(recon, arrays_d):
+    """Each released point's cluster in the MEMBER's own id space, or None.
+
+    An observation is (image, pixel) and both artifacts carry both, so the two
+    are matched on that identity: the release then needs no assumption about
+    how its writer ordered, renumbered or compacted the cloud.  A point takes
+    the cluster its observations agree on; a point whose rows the member does
+    not hold takes none.
+    """
+    keypoints = recon.keypoints_xy
+    if keypoints is None:
+        return None
+    names = [str(n).replace("\\", "/") for n in recon.image_names]
+    mem_names = [str(n).replace("\\", "/") for n in arrays_d["names"]]
+    obs_c = np.asarray(arrays_d["obs_c"], np.int64)
+    obs_i = np.asarray(arrays_d["obs_i"], np.int64)
+    obs_uv = np.asarray(arrays_d["obs_uv"], np.float64).astype(np.float32)
+    by_row = {}
+    for cid, img, (u, v) in zip(obs_c, obs_i, obs_uv):
+        by_row[(mem_names[img], float(u), float(v))] = int(cid)
+    tii = np.asarray(recon.track_image_indexes, np.int64)
+    tpi = np.asarray(recon.track_point_indexes, np.int64)
+    kp = np.asarray(keypoints, np.float32)
+    out = np.full(int(recon.point_count), -1, np.int64)
+    for row in range(len(tpi)):
+        cid = by_row.get((names[tii[row]], float(kp[row, 0]), float(kp[row, 1])), -1)
+        if cid >= 0:
+            out[tpi[row]] = cid
+    return out
+
+
+def cull_member(sfmr_path, arrays_d, drop_ids, out_path):
+    """Cull `drop_ids` out of a member and write the surviving cloud.
+
+    The points go, then any frame the cull left with nothing to see, and the
+    cut may not break a link the member's own frames had -- the same three
+    conditions a trim answers to, read on the other side of the cut.  Returns
+    a report dict; `ok` is False when nothing was written, and nothing is
+    written in those cases.
+    """
+    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+
+    recon = SfmrReconstruction.load(str(sfmr_path))
+    names = [str(n).replace("\\", "/") for n in recon.image_names]
+    report = {
+        "ok": False,
+        "frames_before": len(names),
+        "points_before": int(recon.point_count),
+        "obs_before": int(recon.observation_count),
+        "n_named": len(drop_ids),
+    }
+    clusters = _release_clusters(recon, arrays_d)
+    if clusters is None:
+        report["reason"] = (
+            "the release carries no inline keypoints, so its cloud cannot be "
+            "matched to the member's own rows"
+        )
+        return report
+    drop = np.asarray(sorted({int(k) for k in drop_ids}), np.int64)
+    keep = ~np.isin(clusters, drop)
+    report["points_culled"] = int((~keep).sum())
+    report["points_unmatched"] = int((clusters < 0).sum())
+    if not report["points_culled"]:
+        report["reason"] = "the release holds none of the named points"
+        return report
+    if int(keep.sum()) < MIN_LINK_POINTS:
+        report["reason"] = f"the cull leaves {int(keep.sum())} points"
+        return report
+    core = recon.filter_points_by_mask(keep)
+    tii = np.asarray(core.track_image_indexes, np.int64)
+    alive = np.zeros(core.image_count, bool)
+    if tii.size:
+        alive[np.unique(tii)] = True
+    if not alive.all():
+        core = core.subset_by_image_indices(
+            np.flatnonzero(alive).astype(np.uint32), drop_orphaned_points=True
+        )
+    core_names = [str(n).replace("\\", "/") for n in core.image_names]
+    report["frames_dropped"] = sorted(set(names) - set(core_names))
+    if core.image_count < MIN_CORE_FRAMES:
+        report["reason"] = (
+            f"core held {core.image_count} frames < {MIN_CORE_FRAMES} after the cull"
+        )
+        return report
+    if not _links_preserved(recon, core, set(names)):
+        report["reason"] = "the cut breaks a link the member had"
+        return report
+    core.save(
+        str(out_path),
+        operation="seed_rung2_cull",
+        tool_options={
+            "rung2_cull": "points dropped on per-point defect evidence",
+            "points_culled": str(report["points_culled"]),
+            "min_point_obs": str(MIN_POINT_OBS),
+        },
+    )
+    report.update(
+        ok=True,
+        output=Path(out_path).name,
+        frames_after=int(core.image_count),
+        points_after=int(core.point_count),
+        obs_after=int(core.observation_count),
+        frames_kept=core_names,
+        clusters_dropped=[int(k) for k in drop],
+        links_preserved=True,
+    )
+    return report
+
+
 # ── Coverage ────────────────────────────────────────────────────────────────
 
 
@@ -2343,6 +2731,19 @@ def _spans(indices):
     return out
 
 
+def frames_dropped_by(verdict):
+    """The frames a verdict's remedy actually removed, whichever it was.
+
+    A remedy that was attempted and withdrawn removed nothing, so only a
+    remedy that STANDS is read here."""
+    out = set()
+    for key in ("trim", "cull"):
+        report = verdict.get(key) or {}
+        if report.get("ok"):
+            out.update(report.get("frames_dropped") or [])
+    return out
+
+
 def _surviving_frames(hyps, verdicts, model=None):
     """The frames the surviving members of one model family hold."""
     by_idx = {int(h.get("idx", -1)): h for h in hyps}
@@ -2354,7 +2755,7 @@ def _surviving_frames(hyps, verdicts, model=None):
         if model is not None and v.get("model") != model:
             continue
         posed = [int(k) for k in hyp.get("posed_frames") or []]
-        dropped = set((v.get("trim") or {}).get("frames_dropped") or [])
+        dropped = frames_dropped_by(v)
         if dropped:
             names = [
                 r.get("name")
@@ -2421,7 +2822,7 @@ def coverage_report(hyps, verdicts, capture_frames=None):
         if hyp is None or v["verdict"] == "refuse":
             continue
         posed = [int(k) for k in hyp.get("posed_frames") or []]
-        dropped = set((v.get("trim") or {}).get("frames_dropped") or [])
+        dropped = frames_dropped_by(v)
         if dropped:
             names = [
                 r.get("name")
@@ -2457,6 +2858,92 @@ def coverage_report(hyps, verdicts, capture_frames=None):
 # ── The pass ────────────────────────────────────────────────────────────────
 
 
+def judge_core(block, ctx, hyp, row, n_frames, report):
+    """Put a re-measured core to the SAME member gates its member faced.
+
+    The core is judged exactly as a member is, on the readings the battery
+    just took over what the cut left, against the fleet quantiles of those
+    same statistics.  Returns the DECIDING evidence left standing against it;
+    the corroborating readings and the non-measurements go into `report`,
+    because a core that passes still has to say what was asked of it."""
+    crow, celig = member_channels(
+        {
+            "idx": row["idx"],
+            "model": row["model"],
+            "camera": hyp.get("camera"),
+            "release_file": row["release_file"],
+            "posed": int(n_frames or 0),
+            "evaluation": block,
+        }
+    )
+    crow["_eligible"] = celig
+    fam = row["model"]
+    core_ev, core_blocked = member_evidence(
+        crow,
+        ctx["gates"],
+        ctx["broken"],
+        ctx["capture_meds"].get(fam, {}),
+        ctx["defective"].get(fam, False),
+    )
+    report["core_judged_on"] = "the surviving core, re-measured"
+    report["core_channels"] = {
+        c.key: crow.get(c.key) for c in GATED_CHANNELS if crow.get(c.key) is not None
+    }
+    report["core_corroborating"] = [e for e in core_ev if e.get("corroborating")]
+    report["core_conditioning_limited"] = core_blocked
+    return [e for e in core_ev if not e.get("corroborating")]
+
+
+def take_cull(drop_ids, signals, bars, ctx, hyp, row):
+    """Cull `drop_ids` out of one member and judge what is left, as a member.
+
+    The culled core ships as a SIBLING of the member it came out of, exactly
+    as a trimmed core does, so both artifacts open in the viewer and a reviewer
+    can see what the cull took.  A core that fails carries its own evidence in
+    `core_evidence`, and the released file is not left behind."""
+    stem = Path(row["release_file"] or "member").stem
+    out_path = ctx["out_dir"] / f"{stem}-culled.sfmr"
+    arrays = ctx["arrays"].get(int(hyp.get("idx", -1)))
+    cull = {"ok": False, "signals": list(signals), "bars": bars}
+    if arrays is None:
+        cull["reason"] = "the release ships no member arrays to state a cull from"
+        return cull
+    ctx["out_dir"].mkdir(parents=True, exist_ok=True)
+    cull.update(
+        cull_member(
+            ctx["release_dir"] / (row["release_file"] or ""),
+            arrays,
+            drop_ids,
+            out_path,
+        )
+    )
+    if not cull["ok"]:
+        return cull
+    # THE CORE IS MEASURED, not re-aggregated.  Every stored reading was taken
+    # with the culled points still in the member, so a core that inherits them
+    # reads whatever the member read.
+    block = None
+    try:
+        block = remeasure_core(ctx["arrays"], hyp, ctx["f_vote"], drop_points=drop_ids)
+    except Exception as exc:  # noqa: BLE001 — a failed re-measurement withdraws
+        # the cull, it never kills the pass.
+        cull["core_remeasure_error"] = f"{type(exc).__name__}: {exc}"
+    if block is None:
+        cull["ok"] = False
+        cull["reason"] = "the culled core could not be re-measured"
+        out_path.unlink(missing_ok=True)
+        return cull
+    left = judge_core(block, ctx, hyp, row, cull.get("frames_after"), cull)
+    cull["core_evidence"] = left
+    if left:
+        cull["ok"] = False
+        cull["reason"] = "the culled core still fails " + ", ".join(
+            sorted({e["channel"] for e in left})
+        )
+        out_path.unlink(missing_ok=True)
+    return cull
+
+
 def take_trim(cut, ctx, hyp, row):
     """Cut `cut` from one member and judge what is left, as a member.
 
@@ -2479,38 +2966,12 @@ def take_trim(cut, ctx, hyp, row):
     fam = row["model"]
     block = None
     try:
-        block = remeasure_core(ctx["arrays"], hyp, kept, ctx["f_vote"])
+        block = remeasure_core(ctx["arrays"], hyp, ctx["f_vote"], keep_names=kept)
     except Exception as exc:  # noqa: BLE001 — a failed re-measurement falls
         # back to the stored readings, it never kills the pass.
         trim["core_remeasure_error"] = f"{type(exc).__name__}: {exc}"
     if block is not None:
-        crow, celig = member_channels(
-            {
-                "idx": row["idx"],
-                "model": row["model"],
-                "camera": hyp.get("camera"),
-                "release_file": row["release_file"],
-                "posed": int(trim.get("frames_after") or 0),
-                "evaluation": block,
-            }
-        )
-        crow["_eligible"] = celig
-        core_ev, core_blocked = member_evidence(
-            crow,
-            ctx["gates"],
-            ctx["broken"],
-            ctx["capture_meds"].get(fam, {}),
-            ctx["defective"].get(fam, False),
-        )
-        left = [e for e in core_ev if not e.get("corroborating")]
-        trim["core_judged_on"] = "the surviving core, re-measured"
-        trim["core_channels"] = {
-            c.key: crow.get(c.key)
-            for c in GATED_CHANNELS
-            if crow.get(c.key) is not None
-        }
-        trim["core_corroborating"] = [e for e in core_ev if e.get("corroborating")]
-        trim["core_conditioning_limited"] = core_blocked
+        left = judge_core(block, ctx, hyp, row, trim.get("frames_after"), trim)
     else:
         # No arrays beside the release: fall back to the aggregates of the
         # stored per-frame readings, and say so, because that is the weaker
@@ -2558,6 +3019,86 @@ def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
         source_stamp=man.get("stamp"),
         write=write,
     )
+
+
+def refuse_or_salvage(
+    rec, ctx, hyp, row, evidence, deciding, named, n_posed, why, tried=None
+):
+    """The verdict for a member the gates would otherwise refuse.
+
+    A REFUSAL STANDS OUTRIGHT where the evidence says the member's POSES are
+    the problem: a pose-instability channel fired, and it did not fire alone.
+    Nothing that can be taken out of a member repairs unstable poses, and one
+    channel on its own is one reading.
+
+    Anything else is evidence about STRUCTURE, or about a single reading, and
+    a member can be relieved of structure: solid coverage and a bad cloud is
+    one member, not two, and only the bad half has to go.  Such a member is
+    offered two remedies in turn -- the frames its own readings put at the far
+    end of its population, then the points its fired channels indict -- and a
+    remedy stands only where the core it leaves passes the member gates, which
+    is the bar a trim has always faced.  Where neither stands the refusal
+    stands, and its reason records what was tried.
+
+    ``tried`` names a frame cut the ordinary trim test already took and lost,
+    so the salvage does not re-run the identical cut.
+    """
+    fired = sorted({e["channel"] for e in evidence})
+    pose = [k for k in fired if k in POSE_INSTABILITY]
+    phrase = defect_phrase(evidence)
+    rec["fired_channels"] = fired
+    rec["pose_instability"] = pose
+    if (pose and len(fired) >= 2) or not salvage_on():
+        rec["verdict"] = "refuse"
+        rec["verdict_reason"] = f"{phrase}; {why}"
+        return
+    tried_note = []
+    # -- REMEDY ONE: the frames at the far end of the member's own population,
+    #    whatever the fleet's own localization test said.  A defect the fleet
+    #    bars do not localize is not thereby spread evenly over the member.
+    cut, hits = salvage_frames(hyp, row, named, n_posed)
+    if cut and set(cut) != set(tried or ()):
+        trim = take_trim(cut, ctx, hyp, row)
+        trim["frame_evidence"] = {k: hits[k] for k in sorted(hits)}
+        trim["salvage"] = "the member's own worst frames"
+        rec["salvage_trim"] = trim
+        if trim["ok"]:
+            rec["trim"] = trim
+            rec["verdict"] = "trim"
+            rec["verdict_reason"] = (
+                f"{phrase}; salvaged by dropping {len(trim['frames_dropped'])} of "
+                f"{n_posed} frames at the far end of the member's own readings, "
+                "and the core was re-judged clean against the member gates"
+            )
+            return
+        tried_note.append(f"frame trim of {len(cut)} ({trim.get('reason')})")
+    elif cut:
+        tried_note.append("frame trim (the cut the trim test already lost)")
+    else:
+        tried_note.append("frame trim (the member's own frames name none)")
+    # -- REMEDY TWO: the points the fired channels indict, at the member's own
+    #    per-point bars.
+    signals = cull_signals(deciding)
+    drop, bars = cull_points(ctx["arrays"], hyp, signals)
+    rec["cull_signals"] = signals
+    if drop:
+        cull = take_cull(drop, signals, bars, ctx, hyp, row)
+        rec["cull"] = cull
+        if cull["ok"]:
+            rec["verdict"] = "cull"
+            rec["verdict_reason"] = (
+                f"{phrase}; salvaged by culling {cull['points_culled']} of "
+                f"{cull['points_before']} points named by "
+                f"{', '.join(signals)}, and the core was re-judged clean "
+                "against the member gates"
+            )
+            return
+        tried_note.append(f"point cull of {len(drop)} ({cull.get('reason')})")
+    else:
+        rec["cull_bars"] = bars
+        tried_note.append("point cull (no point past the member's own bars)")
+    rec["verdict"] = "refuse"
+    rec["verdict_reason"] = f"{phrase}; {why}; salvage tried: " + "; ".join(tried_note)
 
 
 def judge_set(
@@ -2716,11 +3257,14 @@ def judge_set(
                 and bool(n_posed)
                 and (len(bad) <= MAX_TRIM_FRACTION * n_posed)
             )
+            taken, tried_cut, why = False, None, None
             if minority and not wide:
-                trim = take_trim(sorted(bad), ctx, hyp, row)
+                tried_cut = sorted(bad)
+                trim = take_trim(tried_cut, ctx, hyp, row)
                 trim["frame_evidence"] = rec["frame_evidence"]
                 rec["trim"] = trim
                 if trim["ok"]:
+                    taken = True
                     rec["verdict"] = "trim"
                     rec["verdict_reason"] = (
                         f"defect localized to {len(trim['frames_dropped'])} of "
@@ -2728,19 +3272,12 @@ def judge_set(
                         "links and was re-judged clean against the member gates"
                     )
                 elif trim.get("core_evidence"):
-                    rec["verdict"] = "refuse"
-                    rec["verdict_reason"] = (
-                        f"defect evidence, trim withdrawn: {trim['reason']}"
-                    )
-                    rec["trim_not_taken"] = sorted(bad)
+                    why = f"trim withdrawn: {trim['reason']}"
+                    rec["trim_not_taken"] = tried_cut
                 else:
-                    rec["verdict"] = "refuse"
-                    rec["verdict_reason"] = (
-                        f"defect evidence, trim refused: {trim.get('reason')}"
-                    )
+                    why = f"trim refused: {trim.get('reason')}"
             else:
-                rec["verdict"] = "refuse"
-                rec["verdict_reason"] = (
+                why = (
                     "member-wide evidence (" + ", ".join(wide) + ")"
                     if wide
                     else (
@@ -2754,6 +3291,21 @@ def judge_set(
                 # named frames are still the most likely seat of the defect.
                 if minority:
                     rec["trim_not_taken"] = sorted(bad)
+            # THE SALVAGE TIER, or the refusal.  A member the trim test could
+            # not repair is not thereby a member with nothing worth keeping.
+            if not taken:
+                refuse_or_salvage(
+                    rec,
+                    ctx,
+                    hyp,
+                    row,
+                    evidence,
+                    deciding,
+                    bad,
+                    n_posed,
+                    why,
+                    tried=tried_cut,
+                )
         else:
             # NOTHING ACCUSES THIS MEMBER, and a frame it posed on almost
             # nothing is still not a frame it measured.  A SUPPORT reading
@@ -2827,16 +3379,13 @@ def judge_set(
         },
         "ordering": ordering,
         "members": verdicts,
-        "counts": {
-            v: sum(1 for r in verdicts if r["verdict"] == v)
-            for v in ("keep", "trim", "refuse")
-        },
+        "counts": {v: sum(1 for r in verdicts if r["verdict"] == v) for v in VERDICTS},
         "counts_by_model": {
             fam: {
                 v: sum(
                     1 for r in verdicts if r["verdict"] == v and r.get("model") == fam
                 )
-                for v in ("keep", "trim", "refuse")
+                for v in VERDICTS
             }
             for fam in families
         },
