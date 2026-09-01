@@ -13,7 +13,8 @@ gate, relax, fill in, reconcile, hand over, release, re-estimate, state the
 depths that were measured, report.
 
 Nothing here reads a clock into the record.  The per-stage census is a count of
-what the stage decided, not how long it took.
+what the stage decided, not how long it took; each stage's wall time goes to
+the caller's own collector through :mod:`timing`, and to nothing else.
 """
 
 from __future__ import annotations
@@ -23,7 +24,17 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import depth, evict, fill, lens, reconcile, relaxation, report, structure
+from . import (
+    depth,
+    evict,
+    fill,
+    lens,
+    reconcile,
+    relaxation,
+    report,
+    structure,
+    timing,
+)
 from .fleet_constants import SETTLING_FINITE_COUNT
 
 
@@ -102,9 +113,10 @@ def run_member(m, source, opts=None):
     census["early_gate"] = why
     cam = base_cam
     if early:
-        vrec, cam_b, rots = lens.rot_lens_ba(
-            m, knots=lens.SEED_KNOTS, rowset="admission", opt_bspline=True
-        )
+        with timing.stage("relax.early_release"):
+            vrec, cam_b, rots = lens.rot_lens_ba(
+                m, knots=lens.SEED_KNOTS, rowset="admission", opt_bspline=True
+            )
         if cam_b is not None:
             lens.swap_camera(m, cam_b, thetas=thetas)
             lens.apply_rotations(m, rots[0], rots[1])
@@ -120,7 +132,8 @@ def run_member(m, source, opts=None):
         say(f"  relax: early release {census['early_release']} ({why})")
 
     # -- stage 2: the relaxation -------------------------------------------
-    out = relaxation.relax_oriented(m)
+    with timing.stage("relax.relaxation"):
+        out = relaxation.relax_oriented(m)
     if out.get("failed"):
         census["n_frames_graph"] = out["census"].get("n_frames")
         census["n_edges"] = out["census"].get("n_edges")
@@ -160,7 +173,8 @@ def run_member(m, source, opts=None):
     if not (np.isfinite(f_eq) and f_eq > 0):
         f_eq = float(m.f_eq)
     tol_rad = ev.E_TOL_PX / f_eq
-    mx, state, fill_census = fill.fill_in(m, source, cam, state, tol_rad, opts, say)
+    with timing.stage("relax.fill"):
+        mx, state, fill_census = fill.fill_in(m, source, cam, state, tol_rad, opts, say)
     census["fill"] = fill_census
     if say:
         say(
@@ -170,29 +184,31 @@ def run_member(m, source, opts=None):
 
     # -- stage 3b: the points that rest on one measurement ------------------
     if opts.reconcile:
-        mx, state, rcens = reconcile.reconcile_stage(
-            mx,
-            cam,
-            state,
-            getattr(source, "refine_radius", None),
-            tol_rad,
-            f_eq,
-            say,
-        )
+        with timing.stage("relax.reconcile"):
+            mx, state, rcens = reconcile.reconcile_stage(
+                mx,
+                cam,
+                state,
+                getattr(source, "refine_radius", None),
+                tol_rad,
+                f_eq,
+                say,
+            )
     else:
         rcens = {"held": "SFMTOOL_RELAX_RECONCILE"}
     census["reconcile"] = rcens
 
     # -- stage 4: the hand-over to the fill-in's own features --------------
     if opts.evict:
-        state, ecens = evict.evict_stage(
-            mx,
-            cam,
-            state,
-            getattr(source, "refine_radius", None),
-            fill_census.get("adm_floor_px"),
-            say,
-        )
+        with timing.stage("relax.evict"):
+            state, ecens = evict.evict_stage(
+                mx,
+                cam,
+                state,
+                getattr(source, "refine_radius", None),
+                fill_census.get("adm_floor_px"),
+                say,
+            )
     else:
         ecens = {"held": "SFMTOOL_RELAX_EVICT"}
     census["evict"] = ecens
@@ -203,7 +219,8 @@ def run_member(m, source, opts=None):
     knots = opts.knots_fisheye if family == "fisheye" else opts.knots_pinhole
     late = {"family": family, "knots": int(knots), "finite_count": n_finite}
     if family == "fisheye" or n_finite >= SETTLING_FINITE_COUNT:
-        crec, cam_c, state_c = lens.release_at_knots(mx, state, cam, knots, thetas)
+        with timing.stage("relax.late_release"):
+            crec, cam_c, state_c = lens.release_at_knots(mx, state, cam, knots, thetas)
         late["refit_resid_px"] = crec.get("refit_resid_px")
         late["reproj_med_px"] = crec.get("reproj_med_px")
         if cam_c is not None:
@@ -231,34 +248,35 @@ def run_member(m, source, opts=None):
     if not (np.isfinite(f_eq_final) and f_eq_final > 0):
         f_eq_final = float(m.f_eq)
     tol_final = ev.E_TOL_PX / f_eq_final
-    rows, slot_i, slot_c = structure.state_rows(mx, state)
-    rot, cen = structure.centres_of(state)
-    uv = mx.obs_uv[rows]
-    was_finite = ~np.asarray(state["at_inf"], bool)
-    before = structure.reprojection(
-        cam, rot, cen, state["points"], state["at_inf"], uv, slot_i, slot_c
-    )
-    pts, at_inf, retri, pruned = structure.estimate_points(
-        cam,
-        state["quats"],
-        state["trans"],
-        uv,
-        slot_i,
-        slot_c,
-        len(state["clusters"]),
-        tol_final,
-        prune_behind=True,
-    )
-    state = dict(state)
-    state["points"] = pts
-    state["at_inf"] = at_inf
-    # The observations the estimate refused leave the admission, so the writer
-    # states a point over the rows it was solved on and nothing else.
-    state = structure.with_pruned(state, rows[pruned])
-    keep = ~pruned
-    after = structure.reprojection(
-        cam, rot, cen, pts, at_inf, uv[keep], slot_i[keep], slot_c[keep]
-    )
+    with timing.stage("relax.retri"):
+        rows, slot_i, slot_c = structure.state_rows(mx, state)
+        rot, cen = structure.centres_of(state)
+        uv = mx.obs_uv[rows]
+        was_finite = ~np.asarray(state["at_inf"], bool)
+        before = structure.reprojection(
+            cam, rot, cen, state["points"], state["at_inf"], uv, slot_i, slot_c
+        )
+        pts, at_inf, retri, pruned = structure.estimate_points(
+            cam,
+            state["quats"],
+            state["trans"],
+            uv,
+            slot_i,
+            slot_c,
+            len(state["clusters"]),
+            tol_final,
+            prune_behind=True,
+        )
+        state = dict(state)
+        state["points"] = pts
+        state["at_inf"] = at_inf
+        # The observations the estimate refused leave the admission, so the writer
+        # states a point over the rows it was solved on and nothing else.
+        state = structure.with_pruned(state, rows[pruned])
+        keep = ~pruned
+        after = structure.reprojection(
+            cam, rot, cen, pts, at_inf, uv[keep], slot_i[keep], slot_c[keep]
+        )
     retri.update(
         {
             "floor_deg": math.degrees(float(tol_final)),
@@ -278,7 +296,8 @@ def run_member(m, source, opts=None):
 
     # -- stage 7: the depth the release states -----------------------------
     if opts.depth:
-        state, dcens = depth.depth_stage(mx, cam, state, f_eq_final, say)
+        with timing.stage("relax.depth"):
+            state, dcens = depth.depth_stage(mx, cam, state, f_eq_final, say)
     else:
         dcens = {"held": "SFMTOOL_RELAX_DEPTH"}
     census["depth"] = dcens
@@ -288,7 +307,8 @@ def run_member(m, source, opts=None):
     census["n_infinity_final"] = int(final_inf.sum())
 
     # -- stage 8: the runaway report ---------------------------------------
-    frows, agg = report.runaway_report(mx, state)
+    with timing.stage("relax.runaway"):
+        frows, agg = report.runaway_report(mx, state)
     census["runaway"] = agg
     if say:
         say(

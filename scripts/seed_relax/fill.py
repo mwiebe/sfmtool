@@ -171,7 +171,7 @@ def adjust_held(mx, cam, state, schedule=None, max_iters=30):
 
     The lens is HELD, both the focal and the spline closed, so the ring that
     just joined is absorbed by the geometry and not by the camera."""
-    from sfmtool._sfmtool.geometry import bundle_adjust
+    from .timing import bundle_adjust
 
     frames = [int(f) for f in state["frames"]]
     clusters = [int(c) for c in state["clusters"]]
