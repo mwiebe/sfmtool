@@ -516,7 +516,41 @@ The selection pass consumes the channels as follows:
   the non-member translation-direction delta and the depth-agreement rho.
 - **Refuse** a member only on defect evidence: a gated worst-channel past
   its population gate with healthy conditioning, a diverging refit, or a
-  focal-vote outlier. Redundancy is not defect evidence.
+  focal-vote outlier. Redundancy is not defect evidence. The reason a
+  refusal is taken on names how many distinct channels fired and the loudest
+  of them, each reading measured against its own bar so that channels in
+  degrees, in fractions and in correlations compare.
+- **A refusal stands outright only on pose instability, twice over.** The
+  channels that say the member's own poses do not hold still -- the settling
+  family and its rotation-only twin, the hold-out pose deltas of both model
+  families, and the rotation cycles -- are the ones nothing removable from a
+  member repairs. A refusal stands where one of them fired and did not fire
+  alone. Every other member the gates would refuse is offered a salvage
+  first: the evidence against it speaks about structure or about a single
+  reading, and a member carrying solid structure and junk together is
+  relieved of the junk rather than discarded.
+- **The salvage is two remedies in order, each judged as a member.** First a
+  frame trim on the frames at the far end of the MEMBER'S OWN frame
+  population, read against quantiles of that member's own readings of each
+  naming per-frame channel; it runs whether or not the fleet's frame bars
+  localized the defect, because a defect those bars do not localize is not
+  thereby spread evenly over the member's frames. Then a point cull on the
+  points the fired channels indict. A remedy stands only where the core it
+  leaves passes the member gates in its own right, which is the bar a trim
+  has always faced.
+- **A channel indicts points at its own per-point form where it has one.**
+  The surface residuals are per-point readings the member aggregates and the
+  depth agreement is a statement about the points whose depth disagrees, so
+  those channels name points directly. A channel with no per-point form is
+  read on what the member's own arrays say about a point regardless of any
+  channel: whether the point's own rays re-triangulate to where it is
+  stored, the widest angle its supporting centres subtend at it, and its
+  reprojection residual. Every bar is a quantile of the member's own
+  population of that signal, because a fleet quantile ranks members and
+  there is no fleet population of points to rank a point in. The cut is
+  capped at the share of the cloud a trim may take of the frames, it may not
+  break a link the member's frames had, and the surviving cloud is written
+  as a culled sibling beside the member.
 - **Corroborating channels never refuse alone.** The coherence and
   support channels (per-frame depth-scale coherence, near-support ratio)
   and the focal-vote deviation qualify a verdict that other evidence
