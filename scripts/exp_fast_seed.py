@@ -3478,16 +3478,24 @@ def member_claim(res, data):
     return claim_grids(retained, data)
 
 
-def core_claim(res, data, keep_frames, min_obs):
-    """The claim a member restates on the frames a cut LEFT it.
+def core_claim(res, data, keep_frames, min_obs, drop_clusters=None):
+    """The claim a member restates on what a cut LEFT it.
 
     The member's own retained clusters, re-counted on the surviving frames:
     a cluster the core no longer sees ``min_obs`` times is no longer an
     explained point, so it stops claiming.  Those are the first two steps of
     the core a trim states (`Member.restricted` in the battery), applied to the
     claim triangulation rather than to the released one, so the restatement
-    lives in the same cluster space the original claim was stamped from."""
+    lives in the same cluster space the original claim was stamped from.
+
+    ``drop_clusters`` names the clusters a POINT CULL removed, in that same
+    space: a culled point is not an explained point either, and it stops
+    claiming for the same reason a starved one does."""
     retained = np.asarray(res["claim_retained"], bool).copy()
+    if drop_clusters is not None and len(drop_clusters):
+        drop = np.asarray(sorted(int(k) for k in drop_clusters), np.int64)
+        drop = drop[(drop >= 0) & (drop < len(retained))]
+        retained[drop] = False
     posed = np.zeros(data["n_img"], bool)
     keep = np.asarray(sorted(int(k) for k in keep_frames), np.int64)
     if len(keep):

@@ -136,7 +136,10 @@ the door has closed (`specs/core/geometry/seed-drive.md`)::
 The drive loop pulls one exploration pass at a time from rung 1's candidate
 source, completes and measures the members that pass produced, judges the
 accumulated set with the same machinery `select` uses, and forms the next
-pass's coverage complement from the SURVIVING members' claims alone.  It
+pass's coverage complement from the SURVIVING members' claims alone.  It stops
+on sufficiency only when something SURVIVED AND CLAIMED: a set that explains
+nothing has not answered the capture, and an immovable complement beneath an
+empty claim map is no progress.  It
 writes the ordinary product -- every member the run committed, refused ones
 included -- with each entry's verdict, its named readings and the round it
 arrived in, plus `rung2.json` beside the manifest.  Without `--gates`,
@@ -3442,8 +3445,13 @@ def surviving_claims(FS, hyps, verdicts):
     where it claimed.  A trimmed member restates its claim on the frames its
     core kept: the clusters its core no longer sees ``MIN_POINT_OBS`` times
     stop being explained points and stop claiming, which is the same cull the
-    trim itself applies (`exp_fast_seed.core_claim`).  Only finite candidates
-    ever stamped a claim, so only they are read here."""
+    trim itself applies (`exp_fast_seed.core_claim`).  A CULLED member restates
+    on the clusters its core kept, by the same mechanism -- a culled point is
+    not an explained point.  The cull is stated in the member's own cluster
+    space, which is the claim's space unless the member solved on a group-local
+    re-admission; where the two differ the restatement stands on the frames
+    alone and says so.  Only finite candidates ever stamped a claim, so only
+    they are read here."""
     by_idx = {int(h["idx"]): h for h in hyps}
     grids = []
     for v in verdicts:
@@ -3451,27 +3459,82 @@ def surviving_claims(FS, hyps, verdicts):
         if res is None or v["verdict"] == "refuse" or res.get("claim_grids") is None:
             continue
         trim = v.get("trim") or {}
-        kept_names = trim.get("frames_kept") if trim.get("ok") else None
-        if not kept_names:
+        cull = v.get("cull") or {}
+        data = res["data"]
+        kept_names = None
+        if trim.get("ok"):
+            kept_names = trim.get("frames_kept")
+        elif cull.get("ok"):
+            kept_names = cull.get("frames_kept")
+        same_space = res.get("release_data") is None or res["release_data"] is data
+        drop = cull.get("clusters_dropped") if (cull.get("ok") and same_space) else None
+        v["claim_restated_on"] = (
+            "the core's own clusters"
+            if drop is not None
+            else (
+                "the core's frames alone: the member solved on a re-admission "
+                "of its own, so its cull is not stated in the claim's cluster "
+                "space"
+                if cull.get("ok")
+                else None
+            )
+        )
+        if not kept_names and drop is None:
             grids.append(res["claim_grids"])
             continue
-        want = {str(n).replace("\\", "/") for n in kept_names}
-        data = res["data"]
+        want = (
+            None if not kept_names else {str(n).replace("\\", "/") for n in kept_names}
+        )
         keep = [
-            k for k, n in enumerate(data["names"]) if str(n).replace("\\", "/") in want
+            k
+            for k, n in enumerate(data["names"])
+            if want is None or str(n).replace("\\", "/") in want
         ]
-        grids.append(FS.core_claim(res, data, keep, MIN_POINT_OBS)[0])
+        grids.append(
+            FS.core_claim(res, data, keep, MIN_POINT_OBS, drop_clusters=drop)[0]
+        )
     return FS.claims_union(grids)
 
 
-def sufficient(verdicts, complement_is_new):
+def sufficient(verdicts, complement_is_new, claims):
     """Whether the surviving set answers the capture.
 
-    Two conditions, both read off the loop's own evidence: at least one member
-    the gates do not refuse, and a complement that is not a new admission --
-    the source's own exhaustion test, applied to the survivors' claims rather
-    than to every claim the run ever stamped."""
-    return any(v["verdict"] != "refuse" for v in verdicts) and not complement_is_new
+    Three conditions, all read off the loop's own evidence: at least one member
+    the gates do not refuse, at least one SURVIVING CLAIM, and a complement
+    that is not a new admission -- the source's own exhaustion test, applied to
+    the survivors' claims rather than to every claim the run ever stamped.
+
+    The middle condition is what an empty claim map costs.  With nothing
+    claimed the complement is the whole admission, which IS the admission that
+    produced the last pass, so the exhaustion test reads true -- for the reason
+    that the set explains nothing, not for the reason that it explains
+    everything.  A set that explains nothing has not answered the capture,
+    however many members it holds, so emptiness is never sufficiency."""
+    return (
+        any(v["verdict"] != "refuse" for v in verdicts)
+        and bool(claims)
+        and not complement_is_new
+    )
+
+
+def drive_stop(verdicts, complement_is_new, claims, batch_all_refused, over_budget):
+    """The rule the loop stops on after a round, or None to pull again.
+
+    The order is the order of what a stop MEANS.  Sufficiency comes first
+    because it is the only one that says the capture was answered.  The budget
+    is the resource bound the run was given.  What is left is NO PROGRESS: a
+    complement that cannot move, together with either a pass whose members were
+    all refused, or a set with no surviving claim at all.  Both are the same
+    situation -- the next pull would form its admission from the unexplained
+    set this one already ran on -- and neither of them is an answer.
+    """
+    if sufficient(verdicts, complement_is_new, claims):
+        return "sufficient"
+    if over_budget:
+        return "budget"
+    if not complement_is_new and (not claims or batch_all_refused):
+        return "no progress"
+    return None
 
 
 def _keep_all(hyps, reason):
@@ -3635,13 +3698,15 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
         # `sufficient` and its own no-progress question before it pulls again.
         complement_is_new = bool(len(left)) and len(left) != ctx.data["n_cl"]
         refused = {int(v["idx"]) for v in verdicts if v["verdict"] == "refuse"}
-        counts = {
-            v: sum(1 for r in verdicts if r["verdict"] == v)
-            for v in ("keep", "trim", "refuse")
-        }
+        counts = {v: sum(1 for r in verdicts if r["verdict"] == v) for v in VERDICTS}
         print(
             f"drive round {n_round}: {len(rung.hypotheses)} members "
             + " ".join(f"{k}={v}" for k, v in counts.items())
+            + (
+                "; NO SURVIVING CLAIM: nothing the set holds explains anything"
+                if not ctx.claims
+                else ""
+            )
             + f"; the surviving claims leave {len(left)}/{ctx.data['n_cl']} "
             f"clusters unexplained [{FS.elapsed():.1f}s]"
         )
@@ -3651,21 +3716,25 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
         # overlap, a runaway gate that refuses a member before its relaxation
         # is paid for.  Each is an instruction handed to the source or to the
         # completion above; none of them is implemented here.
-        if sufficient(verdicts, complement_is_new):
-            stop = "sufficient"
+
+        # THE STOP RULE.  A pass whose members were all refused withdrew every
+        # claim it stamped, and a set with no surviving claim explains nothing
+        # at all; either way, with a complement that cannot move, the next pull
+        # would explore the admission this one already ran on.  That is no
+        # progress and it is never sufficiency -- the withdrawal that keeps a
+        # garbage claim from suppressing exploration must not cost the loop its
+        # termination, and it must not buy a capture a clean bill of health at
+        # whatever coverage one refused member left behind.
+        stop_now = drive_stop(
+            verdicts,
+            complement_is_new,
+            ctx.claims,
+            bool(batch) and all(int(r["idx"]) in refused for r in batch),
+            len(ctx.hyps) >= budget,
+        )
+        if stop_now:
+            stop = stop_now
             break
-        if len(ctx.hyps) >= budget:
-            stop = "budget"
-            break
-        if batch and all(int(r["idx"]) in refused for r in batch):
-            # NO PROGRESS: a pass whose members were all refused, whose claims
-            # were therefore all withdrawn, and whose complement is back to the
-            # admission that produced it.  Pulling again would explore the same
-            # admission, so the withdrawal that keeps a garbage claim from
-            # suppressing exploration cannot cost the loop its termination.
-            if not complement_is_new:
-                stop = "no progress"
-                break
 
     # THE CAPTURE'S OWN far-field layer and its relaxation: readings of no
     # single candidate, so they are taken once, on the final set.
@@ -3701,7 +3770,7 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
     by_verdict = {int(v["idx"]): v for v in verdicts}
     for h in rung.hypotheses:
         v = by_verdict.get(int(h["idx"]), {})
-        trim = v.get("trim") or {}
+        trim, cull = v.get("trim") or {}, v.get("cull") or {}
         block = {
             "round": round_of.get(int(h["idx"])),
             "verdict": v.get("verdict", "keep"),
@@ -3719,14 +3788,20 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
             block["trimmed_release_file"] = trim.get("output")
             block["trimmed_from"] = h.get("release_file")
             block["frames_dropped"] = trim.get("frames_dropped")
+        if cull.get("ok"):
+            # THE CULLED SIBLING, on the same terms: the member as committed
+            # and the core its cull states, each entry naming the other file.
+            block["culled_release_file"] = cull.get("output")
+            block["culled_from"] = h.get("release_file")
+            block["points_culled"] = cull.get("points_culled")
+            block["cull_signals"] = cull.get("signals")
+            if cull.get("frames_dropped"):
+                block.setdefault("frames_dropped", cull.get("frames_dropped"))
         h["drive"] = block
 
     win = next((int(h["idx"]) for h in ctx.hyps if FS.qualifies(h)), 0)
     n_qual = sum(1 for h in ctx.hyps if FS.qualifies(h))
-    counts = {
-        v: sum(1 for r in verdicts if r["verdict"] == v)
-        for v in ("keep", "trim", "refuse")
-    }
+    counts = {v: sum(1 for r in verdicts if r["verdict"] == v) for v in VERDICTS}
     path = FS.write_candidate_solves(
         rung,
         win,
