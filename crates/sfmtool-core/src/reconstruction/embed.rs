@@ -34,9 +34,11 @@ impl SfmrReconstruction {
     ///   frame; points at infinity get a tangent-sphere frame around their
     ///   direction `d` (`u, v ⊥ d`, normal `normalize(-d)`), so **every** point
     ///   carries a real frame and the point set is preserved.
-    /// - **Keypoints:** each observation's inline `keypoints_xy` is copied
-    ///   verbatim from its `.sift` feature (`sift.positions_xy[feature_index]`),
-    ///   so the 2D coordinate is exactly the original SIFT detection.
+    /// - **Keypoints:** each observation's inline `keypoints_xy` is carried over
+    ///   verbatim. A `sift_files` reconstruction that already holds the optional
+    ///   inline column keeps exactly those coordinates; otherwise each one is
+    ///   copied from its `.sift` feature (`sift.positions_xy[feature_index]`), so
+    ///   the 2D coordinate is the original SIFT detection.
     /// - **Image hashes:** each image's `image_file_hashes` entry is read from its
     ///   `.sift` metadata (`image_file_xxh128`) — a minimal metadata read, no
     ///   re-hashing of the image bytes.
@@ -58,10 +60,12 @@ impl SfmrReconstruction {
             ));
         }
 
-        let feature_indexes = match &self.observations {
+        let (feature_indexes, inline_keypoints) = match &self.observations {
             ObservationSource::SiftFiles {
-                feature_indexes, ..
-            } => feature_indexes,
+                feature_indexes,
+                keypoints_xy,
+                ..
+            } => (feature_indexes, keypoints_xy.as_ref()),
             // Unreachable: the embedded case returned above.
             ObservationSource::EmbeddedPatches { .. } => unreachable!(),
         };
@@ -83,12 +87,20 @@ impl SfmrReconstruction {
         let mut image_file_hashes: Vec<[u8; 16]> = Vec::with_capacity(n_images);
         for i in 0..n_images {
             let path = self.sift_path_for_image(i);
-            let count = self.max_track_feature_index[i] as usize + 1;
-            let positions =
-                read_sift_positions(&path, count).map_err(|e| ReconstructionError::SiftRead {
-                    path: path.clone(),
-                    source: e.to_string(),
-                })?;
+            // The detections are needed only when the reconstruction states no
+            // coordinates of its own; the image hash below is read either way.
+            let positions = match inline_keypoints {
+                Some(_) => Vec::new(),
+                None => {
+                    let count = self.max_track_feature_index[i] as usize + 1;
+                    read_sift_positions(&path, count).map_err(|e| {
+                        ReconstructionError::SiftRead {
+                            path: path.clone(),
+                            source: e.to_string(),
+                        }
+                    })?
+                }
+            };
             let (_, meta, _) =
                 read_sift_metadata(&path).map_err(|e| ReconstructionError::SiftRead {
                     path: path.clone(),
@@ -110,23 +122,29 @@ impl SfmrReconstruction {
         // Per-observation keypoints, parallel to `tracks` (and thus to the
         // feature_indexes column), so the existing track ordering is preserved.
         let m = self.tracks.len();
-        let mut keypoints_xy = Array2::<f32>::zeros((m, 2));
-        for (j, obs) in self.tracks.iter().enumerate() {
-            let img = obs.image_index as usize;
-            let fidx = feature_indexes[j] as usize;
-            let pos = positions_per_image[img].get(fidx).ok_or_else(|| {
-                ReconstructionError::SiftRead {
-                    path: self.sift_path_for_image(img),
-                    source: format!(
-                        "observation {j} references feature {fidx} of image {img}, but only \
-                         {} features were read",
-                        positions_per_image[img].len()
-                    ),
+        let keypoints_xy = match inline_keypoints {
+            Some(inline) => inline.clone(),
+            None => {
+                let mut keypoints_xy = Array2::<f32>::zeros((m, 2));
+                for (j, obs) in self.tracks.iter().enumerate() {
+                    let img = obs.image_index as usize;
+                    let fidx = feature_indexes[j] as usize;
+                    let pos = positions_per_image[img].get(fidx).ok_or_else(|| {
+                        ReconstructionError::SiftRead {
+                            path: self.sift_path_for_image(img),
+                            source: format!(
+                                "observation {j} references feature {fidx} of image {img}, but \
+                                 only {} features were read",
+                                positions_per_image[img].len()
+                            ),
+                        }
+                    })?;
+                    keypoints_xy[[j, 0]] = pos[0];
+                    keypoints_xy[[j, 1]] = pos[1];
                 }
-            })?;
-            keypoints_xy[[j, 0]] = pos[0];
-            keypoints_xy[[j, 1]] = pos[1];
-        }
+                keypoints_xy
+            }
+        };
 
         let mut out = self.clone();
         out.observations = ObservationSource::EmbeddedPatches {

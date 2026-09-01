@@ -214,6 +214,7 @@ impl SfmrReconstruction {
             observation_confidence: None,
             observations: ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy: None,
                 feature_tool_hashes: vec![[0u8; 16]; num_images],
                 sift_content_hashes: vec![[0u8; 16]; num_images],
             },

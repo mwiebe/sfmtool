@@ -310,42 +310,54 @@ impl SfmrReconstruction {
             .collect()
     }
 
-    /// Mean world-frame bearing of `point_idx`'s observation keypoints — each
-    /// `.sift` detection unprojected through its camera and rotated into world,
-    /// then averaged and normalised. `None` when the reconstruction has no
-    /// feature indexes (an `embedded_patches` recon), no observation's `.sift`
-    /// keypoint is readable, or the rays sum to zero.
+    /// Mean world-frame bearing of `point_idx`'s observation keypoints -- each
+    /// observation's coordinate unprojected through its camera and rotated into
+    /// world, then averaged and normalised. `None` when the reconstruction has no
+    /// feature indexes (an `embedded_patches` recon), no observation's keypoint
+    /// is readable, or the rays sum to zero.
     ///
     /// This recovers a direction for a point whose observing cameras have
     /// collapsed onto one centre: the triangulated position (and hence the
     /// point-to-camera rays) is degenerate there, but the keypoints still define
-    /// a bearing. `sift_positions` caches each image's `.sift` `positions_xy`
-    /// (read once, `None` when unreadable) across the points of one classify pass.
+    /// a bearing. The coordinate comes from the reconstruction's inline
+    /// `keypoints_xy` when it carries one; otherwise `sift_positions` caches each
+    /// image's `.sift` `positions_xy` (read once, `None` when unreadable) across
+    /// the points of one classify pass.
     fn keypoint_mean_bearing(
         &self,
         point_idx: usize,
         sift_positions: &mut HashMap<usize, Option<Array2<f32>>>,
     ) -> Option<Vector3<f64>> {
         let feature_indexes = self.feature_indexes()?;
+        let inline = self.keypoints_xy();
         let start = self.observation_offsets[point_idx];
         let mut sum = Vector3::zeros();
         for (k, o) in self.observations_for_point(point_idx).iter().enumerate() {
             let img = o.image_index as usize;
-            let positions = sift_positions.entry(img).or_insert_with(|| {
-                let count = self.max_track_feature_index[img] as usize + 1;
-                sift_format::read_sift_partial(&self.sift_path_for_image(img), count)
-                    .ok()
-                    .map(|d| d.positions_xy)
-            });
-            let Some(positions) = positions.as_ref() else {
-                continue;
+            let uv = match inline {
+                Some(keypoints_xy) => [
+                    keypoints_xy[[start + k, 0]] as f64,
+                    keypoints_xy[[start + k, 1]] as f64,
+                ],
+                None => {
+                    let positions = sift_positions.entry(img).or_insert_with(|| {
+                        let count = self.max_track_feature_index[img] as usize + 1;
+                        sift_format::read_sift_partial(&self.sift_path_for_image(img), count)
+                            .ok()
+                            .map(|d| d.positions_xy)
+                    });
+                    let Some(positions) = positions.as_ref() else {
+                        continue;
+                    };
+                    let feat = feature_indexes[start + k] as usize;
+                    if feat >= positions.shape()[0] {
+                        continue;
+                    }
+                    [positions[[feat, 0]] as f64, positions[[feat, 1]] as f64]
+                }
             };
-            let feat = feature_indexes[start + k] as usize;
-            if feat >= positions.shape()[0] {
-                continue;
-            }
             let cam = &self.cameras[self.images[img].camera_index as usize];
-            let ray = cam.pixel_to_ray(positions[[feat, 0]] as f64, positions[[feat, 1]] as f64);
+            let ray = cam.pixel_to_ray(uv[0], uv[1]);
             // `pixel_to_ray` is a camera-frame ray; rotate to world (camera-to-
             // world is the inverse of the stored world-to-camera rotation).
             let world =

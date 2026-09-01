@@ -616,3 +616,85 @@ class TestEmbeddedPatches:
         np.testing.assert_array_equal(np.asarray(reloaded.observation_counts), counts)
         np.testing.assert_array_equal(np.asarray(reloaded.track_point_indexes), pt_ids)
         np.testing.assert_array_equal(np.asarray(reloaded.track_image_indexes), img_idx)
+
+
+class TestSiftFilesInlineKeypoints:
+    """A ``sift_files`` reconstruction may carry the optional inline
+    ``keypoints_xy`` column, and it is what consumers read."""
+
+    @staticmethod
+    def _in_bounds_keypoints(recon):
+        """``observation_count`` distinct coordinates inside every camera."""
+        n_obs = int(np.asarray(recon.track_image_indexes).shape[0])
+        width = min(c.width for c in recon.cameras)
+        height = min(c.height for c in recon.cameras)
+        keypoints = np.arange(n_obs * 2, dtype=np.float32).reshape(n_obs, 2)
+        keypoints[:, 0] %= width
+        keypoints[:, 1] %= height
+        return keypoints
+
+    def test_from_data_save_load_keeps_the_column(self, seoul_bull_sfmr_only, tmp_path):
+        from sfmtool._sfmtool.io import read_sfmr
+
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        keypoints = self._in_bounds_keypoints(recon)
+        workspace_dir = seoul_bull_sfmr_only.parent
+
+        data = read_sfmr(seoul_bull_sfmr_only)
+        # This fixture copies the `.sfmr` alone, so nothing can resolve a
+        # `.sift`: without the inline column `from_data` cannot recompute the
+        # point errors at all.
+        with pytest.raises(OSError):
+            SfmrReconstruction.from_data(workspace_dir, data)
+
+        data = read_sfmr(seoul_bull_sfmr_only)
+        data["keypoints_xy"] = keypoints
+        built = SfmrReconstruction.from_data(workspace_dir, data)
+        assert built.feature_source == "sift_files"
+        np.testing.assert_array_equal(np.asarray(built.keypoints_xy), keypoints)
+
+        out = tmp_path / "inline.sfmr"
+        built.save(out)
+        reloaded = SfmrReconstruction.load(out)
+        assert reloaded.feature_source == "sift_files"
+        np.testing.assert_array_equal(np.asarray(reloaded.keypoints_xy), keypoints)
+        # The `.sift` link is untouched by the inline copy.
+        np.testing.assert_array_equal(
+            np.asarray(reloaded.track_feature_indexes),
+            np.asarray(recon.track_feature_indexes),
+        )
+        assert reloaded.image_file_hashes is None
+
+    def test_clone_with_changes_sets_the_column_in_sift_files_mode(
+        self, seoul_bull_sfmr_only, tmp_path
+    ):
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        keypoints = self._in_bounds_keypoints(recon)
+
+        out = recon.clone_with_changes(keypoints_xy=keypoints)
+        assert out.feature_source == "sift_files"
+        np.testing.assert_array_equal(np.asarray(out.keypoints_xy), keypoints)
+
+        path = tmp_path / "cloned.sfmr"
+        out.save(path)
+        reloaded = SfmrReconstruction.load(path)
+        np.testing.assert_array_equal(np.asarray(reloaded.keypoints_xy), keypoints)
+
+    def test_point_filter_selects_the_inline_rows_in_lockstep(
+        self, seoul_bull_sfmr_only
+    ):
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        keypoints = self._in_bounds_keypoints(recon)
+        inline = recon.clone_with_changes(keypoints_xy=keypoints)
+
+        mask = np.zeros(inline.point_count, dtype=bool)
+        mask[::3] = True
+        filtered = inline.filter_points_by_mask(mask)
+
+        kept = np.asarray(filtered.keypoints_xy)
+        assert kept.shape[0] == filtered.observation_count
+        # The surviving rows are the source rows of the surviving points, in
+        # order -- the same selection the feature indexes make.
+        point_indexes = np.asarray(recon.track_point_indexes)
+        expected = keypoints[mask[point_indexes]]
+        np.testing.assert_array_equal(kept, expected)

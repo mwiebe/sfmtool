@@ -25,11 +25,15 @@ use super::{ReconstructionError, SfmrReconstruction};
 impl SfmrReconstruction {
     /// Compute per-observation reprojection errors for a single image.
     ///
-    /// Loads feature positions from the image's `.sift` file, projects each
-    /// observed 3D point through the camera, and measures pixel distance to
-    /// the observed feature position. Points at infinity (`w = 0`) project
-    /// their stored bearing direction (translation-free), so their error is
-    /// well-defined like any finite point's.
+    /// Projects each observed 3D point through the camera and measures pixel
+    /// distance to where that observation says it sits. Points at infinity
+    /// (`w = 0`) project their stored bearing direction (translation-free), so
+    /// their error is well-defined like any finite point's.
+    ///
+    /// The observed pixel comes from the reconstruction's inline `keypoints_xy`
+    /// when it carries one, and otherwise from the image's `.sift` file -- so a
+    /// `sift_files` reconstruction with the optional inline copy needs no
+    /// `.sift` companion on disk.
     ///
     /// Returns a vector of `(feature_index, reprojection_error_px)` pairs,
     /// one per track observation for this image. Points behind the camera
@@ -41,18 +45,22 @@ impl SfmrReconstruction {
         let image = &self.images[image_index];
         let camera = &self.cameras[image.camera_index as usize];
 
-        // Determine how many features we need from the sift file
-        let max_feat_idx = self.max_track_feature_index[image_index] as usize;
-        let read_count = max_feat_idx + 1;
-
-        // Load feature positions from the .sift file
-        let sift_path = self.sift_path_for_image(image_index);
-        let positions = sift_format::read_sift_positions(&sift_path, read_count).map_err(|e| {
-            ReconstructionError::SiftRead {
-                path: sift_path,
-                source: e.to_string(),
+        let inline = self.keypoints_xy();
+        // Feature positions from the image's `.sift` file, read only when there
+        // is no inline column to answer from.
+        let positions = match inline {
+            Some(_) => Vec::new(),
+            None => {
+                let read_count = self.max_track_feature_index[image_index] as usize + 1;
+                let sift_path = self.sift_path_for_image(image_index);
+                sift_format::read_sift_positions(&sift_path, read_count).map_err(|e| {
+                    ReconstructionError::SiftRead {
+                        path: sift_path,
+                        source: e.to_string(),
+                    }
+                })?
             }
-        })?;
+        };
 
         // World-to-camera rotation (the stored unit quaternion rotates the point
         // into the camera frame directly, no matrix needed).
@@ -64,16 +72,26 @@ impl SfmrReconstruction {
         let mut results = Vec::with_capacity(feat_to_point.len());
 
         for (&feat_idx, &point_idx) in feat_to_point {
-            let feature_xy = match positions.get(feat_idx as usize) {
-                Some(&xy) => xy,
-                None => {
-                    results.push((feat_idx, f32::NAN));
-                    continue;
+            let observed = match inline {
+                Some(keypoints_xy) => {
+                    match self.observation_row(image_index, point_idx, feat_idx) {
+                        Some(row) => [keypoints_xy[[row, 0]] as f64, keypoints_xy[[row, 1]] as f64],
+                        None => {
+                            results.push((feat_idx, f32::NAN));
+                            continue;
+                        }
+                    }
                 }
+                None => match positions.get(feat_idx as usize) {
+                    Some(&xy) => [xy[0] as f64, xy[1] as f64],
+                    None => {
+                        results.push((feat_idx, f32::NAN));
+                        continue;
+                    }
+                },
             };
 
             let point = &self.points[point_idx as usize];
-            let observed = [feature_xy[0] as f64, feature_xy[1] as f64];
             let error = match observation_reprojection_error(
                 r,
                 t,
@@ -93,17 +111,18 @@ impl SfmrReconstruction {
         Ok(results)
     }
 
-    /// Mean reprojection error (px) per point from the inline `keypoints_xy` of
-    /// an `embedded_patches` reconstruction — one entry per point, parallel to
-    /// `points`. Each observation reprojects its point through the observing
-    /// camera and measures pixel distance to the inline keypoint; points at
-    /// infinity project their bearing (translation-free). A point with no valid
+    /// Mean reprojection error (px) per point from the reconstruction's inline
+    /// `keypoints_xy` -- one entry per point, parallel to `points`. Each
+    /// observation reprojects its point through the observing camera and
+    /// measures pixel distance to the inline keypoint; points at infinity
+    /// project their bearing (translation-free). A point with no valid
     /// (in-front) observation gets `0.0`.
     ///
-    /// Returns `None` for a `sift_files` source, whose 2D observations live in
+    /// Returns `None` when the reconstruction carries no inline column -- a
+    /// `sift_files` one without the optional copy, whose 2D observations live in
     /// external `.sift` files and must be read via
     /// [`Self::compute_observation_reprojection_errors`] instead.
-    fn embedded_point_reprojection_errors(&self) -> Option<Vec<f32>> {
+    fn inline_point_reprojection_errors(&self) -> Option<Vec<f32>> {
         let keypoints_xy = self.keypoints_xy()?;
         let num_points = self.points.len();
         let mut out = vec![0.0f32; num_points];
@@ -152,10 +171,11 @@ impl SfmrReconstruction {
     /// which may use different coordinate conventions (GLOMAP stores
     /// errors in normalized image coordinates, not pixels).
     ///
-    /// An `embedded_patches` reconstruction has no `.sift` files; its inline
-    /// keypoints are used directly.
+    /// A reconstruction carrying inline `keypoints_xy` -- every
+    /// `embedded_patches` one, and a `sift_files` one with the optional copy --
+    /// uses those directly and reads no `.sift` file.
     pub fn recompute_point_errors(&mut self) -> Result<(), ReconstructionError> {
-        if let Some(errors) = self.embedded_point_reprojection_errors() {
+        if let Some(errors) = self.inline_point_reprojection_errors() {
             for (pt, error) in self.points.iter_mut().zip(errors) {
                 pt.error = error;
             }
@@ -206,10 +226,10 @@ impl SfmrReconstruction {
             return Ok(());
         }
 
-        // An `embedded_patches` reconstruction has no `.sift` files; recompute
-        // the infinity points' errors from the inline keypoints, leaving finite
-        // points untouched.
-        if let Some(errors) = self.embedded_point_reprojection_errors() {
+        // With an inline keypoint column there is nothing to read from disk;
+        // recompute the infinity points' errors from it, leaving finite points
+        // untouched.
+        if let Some(errors) = self.inline_point_reprojection_errors() {
             for (i, &inf) in is_infinity.iter().enumerate() {
                 if inf {
                     self.points[i].error = errors[i];

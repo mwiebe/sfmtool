@@ -462,6 +462,170 @@ fn test_validate_observation_columns_detects_desync() {
     assert!(err.contains("keypoints_xy"), "unexpected message: {err}");
 }
 
+/// The `sift_files` `demo`, given the optional inline keypoint column. Row `i`
+/// holds `[2i, 2i+1]` -- the same values `demo_embedded` writes -- so the two
+/// fixtures state the same observation coordinates in the two different modes.
+fn demo_sift_files_inline(num_points: usize) -> SfmrReconstruction {
+    let mut data = SfmrReconstruction::demo(num_points).to_sfmr_data();
+    let m = data.metadata.observation_count as usize;
+    data.keypoints_xy = Some(ndarray::Array2::from_shape_fn((m, 2), |(i, c)| {
+        (i * 2 + c) as f32
+    }));
+    SfmrReconstruction::from_sfmr_data(data).expect("sift_files + keypoints should load")
+}
+
+#[test]
+fn test_sift_files_inline_keypoints_round_trip_through_reconstruction() {
+    let recon = demo_sift_files_inline(10);
+    let kp_expected = recon.keypoints_xy().expect("inline column").clone();
+
+    // The mode is unchanged: the .sift link is still there, the inline column
+    // rides alongside it.
+    assert_eq!(recon.feature_source(), FEATURE_SOURCE_SIFT_FILES);
+    assert_eq!(recon.feature_indexes().unwrap().len(), recon.tracks.len());
+    assert_eq!(kp_expected.nrows(), recon.tracks.len());
+    recon.validate_observation_columns().unwrap();
+
+    // And it survives the trip back out to SfmrData, alongside the .sift-link
+    // arrays and with no embedded_patches column invented.
+    let out = recon.to_sfmr_data();
+    assert_eq!(out.metadata.feature_source, FEATURE_SOURCE_SIFT_FILES);
+    assert_eq!(out.keypoints_xy.unwrap(), kp_expected);
+    assert!(out.feature_indexes.is_some());
+    assert!(out.feature_tool_hashes.is_some());
+    assert!(out.sift_content_hashes.is_some());
+    assert!(out.image_file_hashes.is_none());
+
+    // A sift_files reconstruction without the column still reports none.
+    assert!(SfmrReconstruction::demo(10).keypoints_xy().is_none());
+}
+
+#[test]
+fn test_filter_points_keeps_sift_files_inline_keypoints_parallel() {
+    // demo observes each point by 2 cameras, so observations are grouped by
+    // point: point i owns keypoint rows 2i and 2i+1 (values [2k] / [2k+1]).
+    let recon = demo_sift_files_inline(4);
+    let mask = vec![true, false, true, false];
+    let out = recon.filter_points_by_mask(&mask);
+
+    assert_eq!(out.feature_source(), FEATURE_SOURCE_SIFT_FILES);
+    assert_eq!(out.point_count(), 2);
+
+    // Surviving observations are the rows for points 0 and 2 -- source rows
+    // [0, 1, 4, 5] -- and the inline column selects exactly the same rows the
+    // feature indexes do.
+    let kp = out.keypoints_xy().expect("inline column survives");
+    assert_eq!(kp.nrows(), out.tracks.len());
+    assert_eq!(kp.nrows(), 4);
+    assert_eq!([kp[[0, 0]], kp[[0, 1]]], [0.0, 1.0]); // source row 0
+    assert_eq!([kp[[1, 0]], kp[[1, 1]]], [2.0, 3.0]); // source row 1
+    assert_eq!([kp[[2, 0]], kp[[2, 1]]], [8.0, 9.0]); // source row 4
+    assert_eq!([kp[[3, 0]], kp[[3, 1]]], [10.0, 11.0]); // source row 5
+    out.validate_observation_columns().unwrap();
+}
+
+#[test]
+fn test_subset_by_image_indices_keeps_sift_files_inline_in_lockstep() {
+    let recon = demo_sift_files_inline(4);
+    let sub = recon
+        .subset_by_image_indices(&[0, 2], true)
+        .expect("subset must keep the inline column");
+
+    assert_eq!(sub.feature_source(), FEATURE_SOURCE_SIFT_FILES);
+    let kp = sub.keypoints_xy().expect("inline column survives");
+    assert_eq!(kp.nrows(), sub.tracks.len());
+    sub.validate_observation_columns().unwrap();
+
+    // The two modes carry the same coordinates, so subsetting the same images
+    // must select the same rows in both -- that is what lockstep means here.
+    let embedded = demo_embedded(4)
+        .subset_by_image_indices(&[0, 2], true)
+        .expect("embedded subset");
+    assert_eq!(kp, embedded.keypoints_xy().expect("embedded keypoints"));
+}
+
+#[test]
+fn test_validate_observation_columns_detects_a_sift_files_inline_desync() {
+    demo_sift_files_inline(4)
+        .validate_observation_columns()
+        .unwrap();
+
+    let mut recon = demo_sift_files_inline(4);
+    if let ObservationSource::SiftFiles {
+        keypoints_xy: Some(keypoints_xy),
+        ..
+    } = &mut recon.observations
+    {
+        *keypoints_xy = keypoints_xy.select(ndarray::Axis(0), &[0, 1]);
+    }
+    let err = recon
+        .validate_observation_columns()
+        .expect_err("a desynced inline column must be rejected");
+    assert!(err.contains("keypoints_xy"), "unexpected message: {err}");
+}
+
+#[test]
+fn test_recompute_point_errors_sift_files_prefers_inline_keypoints() {
+    // This synthetic workspace has no `.sift` files, so the plain sift_files
+    // recon cannot recompute at all -- and the one carrying the inline column
+    // can, producing exactly what the embedded twin over the same coordinates
+    // produces.
+    SfmrReconstruction::demo(10)
+        .recompute_point_errors()
+        .expect_err("no .sift on disk");
+
+    let mut inline = demo_sift_files_inline(10);
+    inline
+        .recompute_point_errors()
+        .expect("the inline column answers without any .sift");
+
+    let mut embedded = demo_embedded(10);
+    embedded.recompute_point_errors().unwrap();
+
+    for (i, (a, b)) in inline.points.iter().zip(&embedded.points).enumerate() {
+        assert!(a.error.is_finite(), "point {i} error must be finite");
+        assert_eq!(a.error, b.error, "point {i} error differs from embedded");
+    }
+}
+
+#[test]
+fn test_compute_observation_reprojection_errors_sift_files_prefers_inline() {
+    let recon = demo_sift_files_inline(6);
+    // Reading `.sift` is what the same call does without the column.
+    SfmrReconstruction::demo(6)
+        .compute_observation_reprojection_errors(0)
+        .expect_err("no .sift on disk");
+
+    let results = recon
+        .compute_observation_reprojection_errors(0)
+        .expect("the inline column answers without any .sift");
+    assert_eq!(results.len(), recon.image_feature_to_point[0].len());
+    assert!(!results.is_empty());
+
+    // Each pair measures the reprojection against that observation's own inline
+    // row, found by crossing the feature-keyed map with the observation rows.
+    let keypoints_xy = recon.keypoints_xy().unwrap();
+    let image = &recon.images[0];
+    let camera = &recon.cameras[image.camera_index as usize];
+    for (feature_index, error) in &results {
+        let point_index = recon.image_feature_to_point[0][feature_index];
+        let row = recon
+            .observation_row(0, point_index, *feature_index)
+            .expect("every tracked feature has an observation row");
+        let point = &recon.points[point_index as usize];
+        let expected = super::recompute::observation_reprojection_error(
+            &image.quaternion_wxyz,
+            &image.translation_xyz,
+            camera,
+            &point.position,
+            point.is_at_infinity(),
+            [keypoints_xy[[row, 0]] as f64, keypoints_xy[[row, 1]] as f64],
+        )
+        .expect("the demo points image") as f32;
+        assert_eq!(*error, expected);
+    }
+}
+
 // ── .sfmr v4 → v5 convention upgrade on load (plan D1) ─────────────────────
 
 /// Convert a canonical `SfmrData` to the COLMAP convention in place — the

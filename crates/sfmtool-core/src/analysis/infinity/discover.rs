@@ -502,6 +502,13 @@ impl SfmrReconstruction {
         // collides with an existing point's observation.
         let mut recon = self.clone();
         let old_point_count = recon.points.len();
+        // A `sift_files` reconstruction may carry an inline copy of its
+        // observation coordinates; the appended observations extend it in
+        // lockstep with `feature_indexes`. Their pixels are the ones unprojected
+        // above, collected here and spliced on once the loop is done. `None`
+        // when there is no inline column to extend.
+        let mut appended_keypoints: Option<Vec<[f32; 2]>> =
+            recon.keypoints_xy().map(|_| Vec::new());
         let (mut n_finite, mut n_infinity, mut n_dropped) = (0usize, 0usize, 0usize);
         for track in found {
             let rc = &track.classification;
@@ -559,6 +566,14 @@ impl SfmrReconstruction {
                     feature_indexes.push(*feat);
                 }
             }
+            // Every member is one of the candidate keypoints unprojected above,
+            // so its pixel is in `obs_xy`.
+            if let Some(rows) = appended_keypoints.as_mut() {
+                for (img, feat) in &track.members {
+                    let xy = obs_xy[&(*img, *feat)];
+                    rows.push([xy[0] as f32, xy[1] as f32]);
+                }
+            }
             // A newly discovered observation was never measured, so it gets the
             // "no data-derived support" code rather than inheriting anything.
             if let Some(confidence) = recon.observation_confidence.as_mut() {
@@ -571,6 +586,21 @@ impl SfmrReconstruction {
              at-infinity points, dropped {n_dropped} indeterminate \
              (finite_horizon={finite_horizon:.2})"
         );
+
+        if let (
+            Some(rows),
+            ObservationSource::SiftFiles {
+                keypoints_xy: Some(keypoints_xy),
+                ..
+            },
+        ) = (appended_keypoints, &mut recon.observations)
+        {
+            for xy in rows {
+                keypoints_xy
+                    .push_row(ndarray::ArrayView1::from(&xy[..]))
+                    .expect("appended keypoint row is 2 wide");
+            }
+        }
 
         debug_assert!(recon.points.len() >= old_point_count);
         recon.rebuild_derived_fields();

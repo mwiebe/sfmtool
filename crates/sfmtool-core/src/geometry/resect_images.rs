@@ -659,18 +659,25 @@ fn world_centre(rotation: &UnitQuaternion<f64>, translation: &Vector3<f64>) -> P
 
 /// The 2D pixel of each requested observation row, in the same order.
 ///
-/// An `embedded_patches` reconstruction carries them inline; a `sift_files` one
-/// keeps them in the images' `.sift` companions, which are read once per image
-/// touched rather than once per row.
+/// An inline keypoint column answers directly -- always for `embedded_patches`,
+/// and for a `sift_files` reconstruction that carries the optional copy, whose
+/// coordinates are what that reconstruction says its observations are. Failing
+/// that, a `sift_files` reconstruction resolves each row through the images'
+/// `.sift` companions, read once per image touched rather than once per row.
 fn observation_pixels(
     recon: &SfmrReconstruction,
     rows: &[usize],
 ) -> Result<Vec<[f64; 2]>, ReconstructionError> {
-    match &recon.observations {
-        ObservationSource::EmbeddedPatches { keypoints_xy, .. } => Ok(rows
+    if let Some(keypoints_xy) = recon.keypoints_xy() {
+        return Ok(rows
             .iter()
             .map(|&row| [keypoints_xy[[row, 0]] as f64, keypoints_xy[[row, 1]] as f64])
-            .collect()),
+            .collect());
+    }
+    match &recon.observations {
+        ObservationSource::EmbeddedPatches { .. } => {
+            unreachable!("embedded_patches always carries keypoints_xy, handled above")
+        }
         ObservationSource::SiftFiles {
             feature_indexes, ..
         } => {

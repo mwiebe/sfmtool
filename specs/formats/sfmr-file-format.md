@@ -220,8 +220,8 @@ two modes differ only in the per-observation and per-image columns above (marked
 *sift_files only* / *embedded_patches only*). A `sift_files` file is the classic
 model (and what versions 1–3 always were); an `embedded_patches` file stores the
 2D coordinate inline, based on patches. A `sift_files` file MAY additionally
-carry `tracks/keypoints_xy` as an inline copy of the coordinates its
-`feature_indexes` resolve to. See
+carry `tracks/keypoints_xy`, stating its observation coordinates inline rather
+than only by reference. See
 [Observation source](#observation-source-version-4) below.
 
 Where:
@@ -1171,10 +1171,12 @@ The inline 2D keypoint for each observation:
 - **Meaning**: the observation's 2D coordinate. In an `embedded_patches` file it
   additionally anchors that observation's patch — see
   [Observation source](#observation-source-version-4). In a `sift_files` file it
-  is a copy of the coordinate `sift[feature_indexes[j]]` holds, so a consumer
-  that has the `.sfmr` alone still reads where every observation sits; the
-  `.sift` files stay the referenced source of the feature itself (descriptor,
-  scale, affine shape).
+  is the file's own statement of where observation `j` sits, so a consumer that
+  has the `.sfmr` alone still reads every observation's coordinate. A consumer
+  resolving that coordinate reads this column in preference to
+  `sift[feature_indexes[j]]`, and the two need not agree: a producer may write a
+  refined position that no `.sift` file holds. The `.sift` files stay the
+  referenced source of the feature itself (descriptor, scale, affine shape).
 - **Presence**: `has_keypoints_xy = true`. Always present in `embedded_patches`
   files; optional in `sift_files` files, where the producer chooses whether to
   copy the coordinates in.
@@ -1252,7 +1254,7 @@ columns:
 | `images/feature_tool_hashes` | **present** | **absent** |
 | `images/sift_content_hashes` | **present** | **absent** |
 | `images/image_file_hashes` | **absent** (image hash reachable via the `.sift`) | **present** (direct image identity) |
-| 2D coordinate source | `.sift[feature_indexes[j]]`, or `keypoints_xy[j]` when the inline copy is present | `keypoints_xy[j]` directly |
+| 2D coordinate source | `keypoints_xy[j]` when the inline copy is present, else `.sift[feature_indexes[j]]` | `keypoints_xy[j]` directly |
 
 A `sift_files` v4 file that carries no inline keypoints is byte-equivalent to a
 v3 file except for the `version` and `feature_source` metadata keys and the

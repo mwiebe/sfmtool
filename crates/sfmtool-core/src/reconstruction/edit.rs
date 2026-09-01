@@ -381,10 +381,16 @@ impl SfmrReconstruction {
         let new_observations = match &self.observations {
             ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy,
                 feature_tool_hashes,
                 sift_content_hashes,
             } => ObservationSource::SiftFiles {
                 feature_indexes: kept_obs.iter().map(|&i| feature_indexes[i]).collect(),
+                // The optional inline column is an observation row like the
+                // feature index, so it selects by `kept_obs` too.
+                keypoints_xy: keypoints_xy
+                    .as_ref()
+                    .map(|kp| kp.select(ndarray::Axis(0), &kept_obs)),
                 feature_tool_hashes: image_indices
                     .iter()
                     .map(|&i| feature_tool_hashes[i as usize])
@@ -540,10 +546,14 @@ impl SfmrReconstruction {
         let new_observations = match &self.observations {
             ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy,
                 feature_tool_hashes,
                 sift_content_hashes,
             } => ObservationSource::SiftFiles {
                 feature_indexes: kept.iter().map(|&i| feature_indexes[i]).collect(),
+                keypoints_xy: keypoints_xy
+                    .as_ref()
+                    .map(|kp| kp.select(ndarray::Axis(0), &kept)),
                 feature_tool_hashes: feature_tool_hashes.clone(),
                 sift_content_hashes: sift_content_hashes.clone(),
             },
