@@ -55,7 +55,7 @@ members the set keeps.
 | Verdict | What it says |
 |---------|--------------|
 | `keep` | no gated channel fired against the member |
-| `trim` | the frames a cut removed carried the defect, and the core that is left passes the member gates |
+| `trim` | the frames the walk moved carried the defect -- dropped, or re-seated where the structure supports another pose -- and the core that is left passes the member gates |
 | `cull` | the points a cut removed carried the defect, and the core that is left passes the member gates |
 | `refuse` | the defect is the member |
 
@@ -91,9 +91,10 @@ gates in its own right.
 
    One step is: name the candidates on the readings standing now, rank
    them by **loudness** -- the loudest naming reading against the frame,
-   as a multiple of its own bar -- drop the frames past the **cliff** in
-   that loudness population, and re-measure the core the cut leaves. The
-   cliff is the widest successive RATIO in the loudness order: a
+   as a multiple of its own bar -- take the frames past the **cliff** in
+   that loudness population as the step's group, re-seat what that group
+   supports and drop the rest, and re-measure the core the step leaves.
+   The cliff is the widest successive RATIO in the loudness order: a
    loudness is a reading over its own bar, so ratios between loudnesses
    are scale-free and compare readings taken in degrees, in fractions
    and in correlations, and the widest of them is the one place the
@@ -102,16 +103,49 @@ gates in its own right.
    frame, the loudest. The criterion reads the population's own spacing
    and carries no magnitude of its own.
 
+   A step **re-seats before it drops**. A stored pose was fit jointly
+   with the frames beside it, so a subtractive move asks one question of
+   a loud frame -- does the member read better without it -- and a frame
+   that is only SEATED WRONG answers a different one: what pose it takes
+   against structure held out from the whole group. The group goes to
+   the resection primitive
+   ([resect-image.md](../../gui/resect-image.md)) against the state the
+   walk holds, which is the member minus what earlier steps dropped with
+   the group STILL IN IT: the primitive holds the target set out itself,
+   re-triangulating everything the set observes from the non-target
+   frames alone before it estimates anything, so a state the group is
+   part of is what makes the estimate independent of the group. The
+   capture's own match graph carries the correspondences where the run
+   names one, and the member's stored observations carry them where it
+   does not. No bundle adjustment runs.
+
+   The primitive's own acceptance is the criterion. A frame it accepts
+   is **re-seated**: it keeps its place in the core at the pose the
+   primitive estimated, with the points that pose re-triangulated, and
+   the re-seated state is measured as it stands. A frame it refuses is
+   **dropped** -- a frame the held-out structure gives no support at all
+   is a stranger to it, and a frame whose estimate misses the gate is a
+   frame the member cannot state a pose for. Each frame is tried once
+   ever: a re-seated frame the fresh readings name again is dropped
+   rather than re-seated a second time, so every step either drops a
+   frame or tries one that was never tried. A member whose release ships
+   no arrays to state a re-seated core from is not re-seated, because a
+   core that cannot be measured is not a core this pass judges.
+
    The member's own frame bars are then **re-derived on the fresh
-   readings** and the core is re-judged against the member gates. A core
-   that passes ends the walk, and the trim is the union of the steps
-   taken. Frames still named continue it. The share a trim may remove
-   caps the TOTAL cut, so a member whose fresh readings keep naming
-   frames walks into that cap and its refusal stands. Each step pays one
-   re-measurement and no step is measured twice. The verdict record
-   carries the walk -- per step, the candidates and their loudness, where
-   the cliff cut, the frames dropped, and what the re-measured core
-   said -- so a reviewer replays it without re-running the pass.
+   readings** and the core is re-judged against the member gates, on the
+   same terms whether the step dropped frames, re-seated them, or both.
+   A core that passes ends the walk, and the trim is the union of the
+   steps taken. Frames still named continue it. The share a trim may
+   remove caps the frames DROPPED -- a re-seated frame is a kept frame
+   and costs the cap nothing -- so a member whose fresh readings keep
+   naming frames walks into that cap and its refusal stands. Each step
+   pays one re-measurement and no step is measured twice. The verdict
+   record carries the walk -- per step, the candidates and their
+   loudness, where the cliff cut, what the resection said about each
+   frame in the group, which frames it re-seated and which it dropped,
+   and what the re-measured core said -- so a reviewer replays it
+   without re-running the pass.
 2. **Point cull**, on the points the fired channels indict. A channel
    with a per-point form of its own is read at that form; a channel with
    none is read on what the member's own arrays say about a point
@@ -138,7 +172,8 @@ surviving members' own claims.
 * A member the gates REFUSE contributes nothing. Its claim is
   withdrawn whole, and the complement re-opens where it claimed.
 * A member the gates TRIM restates its claim on the frames its core
-  kept: its retained clusters are re-counted on those frames, and a
+  kept, which are the frames it never dropped and the frames it
+  re-seated: its retained clusters are re-counted on those frames, and a
   cluster the core no longer sees at least twice stops being an
   explained point and stops claiming. This is the same point cull the
   trim itself applies, taken on the claim triangulation rather than on
@@ -225,6 +260,7 @@ Each manifest entry carries a `drive` block:
 | `points_culled` | how many points the cull removed |
 | `cull_signals` | the per-point signals the cull was taken on |
 | `frames_dropped` | the frames the cut removed |
+| `frames_reseated` | the frames the core keeps at a re-seated pose |
 
 A trimmed or culled member keeps BOTH artifacts as cross-referenced
 siblings: the member as it was committed, and the core the remedy
