@@ -119,6 +119,40 @@ gates in its own right.
    names one, and the member's stored observations carry them where it
    does not. No bundle adjustment runs.
 
+   The structure a member holds between its core and one of its own
+   frames can be a small fraction of what the capture's match graph
+   carries there, and a frame questioned on ten points has not been
+   questioned. So the state is **densified** before it is resected, by
+   an effort the member itself states. Each core frame's SUPPORT is how
+   many of the capture's clusters that frame observes which at least two
+   OTHER core frames also observe; the bar is the MINIMUM of those, which
+   is what the least supported frame the member already stands on has.
+   The bar is read once, on the member as released, so one number serves
+   the whole walk instead of falling with what the walk drops.
+
+   A target already at the bar is resected against the state as it
+   stands. A target under it is given SCAFFOLD structure: the clusters
+   two core frames and that target all observe which the member holds no
+   point for, offered in the match file's own admission rank, each
+   triangulated at the core's stored poses and kept only where it comes
+   back a finite point in front of the cameras that see it. Admission
+   stops the moment every under-bar target either reaches the bar or has
+   nothing left to offer it, so what is added is the smallest prefix of
+   that order which answers the question. The bar governs the EFFORT and
+   never the question: a target whose ceiling cannot reach it is resected
+   on everything obtainable anyway, because the alternative to a thin
+   answer is no answer at all, and only a frame with no support at all is
+   left to the primitive's own refusal.
+
+   The scaffold exists for that one call. It is taken back out of the
+   primitive's answer before anything reads it, so no scaffold point
+   reaches the member's arrays, the core this pass writes, or any reading
+   taken of either; what the walk adopts is the member's own cloud as the
+   primitive re-triangulated it. The step records the bar, each target's
+   support before and after, its ceiling and how many scaffold clusters
+   were admitted, so a reviewer sees what the frame was asked on. The
+   ceiling is a diagnostic and never a gate.
+
    The primitive's own acceptance is the criterion. A frame it accepts
    is **re-seated**: it keeps its place in the core at the pose the
    primitive estimated, with the points that pose re-triangulated, and
