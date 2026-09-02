@@ -865,6 +865,14 @@ def salvage_on():
     return (os.environ.get("SFMTOOL_RUNG2_SALVAGE", "1") or "1").strip() != "0"
 
 
+def reseat_on():
+    """Whether a salvage step RE-SEATS the frames it names before dropping them.
+
+    ``SFMTOOL_RUNG2_RESEAT=0`` restores the drop-only walk, which is what the
+    re-seat is measured against."""
+    return (os.environ.get("SFMTOOL_RUNG2_RESEAT", "1") or "1").strip() != "0"
+
+
 #: One per-frame channel.  `eligible` is the per-frame record's own
 #: eligibility field, evaluated on that record.
 #:
@@ -2300,15 +2308,34 @@ def salvage_frame_walk(ctx, hyp, row, named, n_posed, tried=None):
     (`loudness_cliff`), never fewer than one.  Each step re-measures the core
     it leaves, re-derives the member's own frame bars ON THOSE FRESH READINGS,
     and re-judges against the member gates.  A core that passes ends the walk;
-    frames still named continue it.  `MAX_TRIM_FRACTION` caps the TOTAL cut, so
-    a member whose readings keep naming frames walks into the cap and its
-    refusal stands with the walk recorded.
+    frames still named continue it.  `MAX_TRIM_FRACTION` caps the frames
+    DROPPED, so a member whose readings keep naming frames walks into the cap
+    and its refusal stands with the walk recorded.
+
+    Every step RE-SEATS BEFORE IT DROPS (`take_reseat`): the group it names is
+    handed to the resection primitive against the state the walk holds, which
+    questions the group against structure held out from all of it.  A frame the
+    primitive accepts keeps its place at the pose it estimated; a frame it
+    refuses -- a stranger the held-out structure gives no support, an estimate
+    below the gate -- is dropped.  A re-seated frame the fresh readings name
+    again is dropped rather than re-seated a second time, so every step either
+    drops a frame or tries one that was never tried, and the walk ends.
 
     Every step is one re-measurement and no step is measured twice.
     """
     cap = max(1, int(MAX_TRIM_FRACTION * n_posed)) if n_posed else 0
     state, state_named = hyp, named
     cut, iterations, evidence, trim = [], [], {}, None
+    # The member as the walk holds it: the reconstruction and the arrays a
+    # re-seat moves, the frames it moved, and the frames already tried.  A
+    # member whose release ships no arrays cannot have a re-seated core
+    # MEASURED, and an unmeasured core is not one this pass judges, so such a
+    # member walks the drop-only walk.
+    walk = {"recon": None, "arrays": None, "seated": [], "attempted": set()}
+    reseat = (
+        reseat_on()
+        and (ctx.get("arrays") or {}).get(int(hyp.get("idx", -1))) is not None
+    )
     while len(cut) < cap:
         hits = salvage_candidates(state, row, state_named)
         for name in cut:
@@ -2332,14 +2359,20 @@ def salvage_frame_walk(ctx, hyp, row, named, n_posed, tried=None):
         }
         for name in step:
             evidence[name] = hits[name]
-        cut = sorted(set(cut) | set(step))
+        if reseat:
+            trim, block, moved, walk = take_reseat(walk, step, cut, ctx, hyp, row)
+            rec["dropped"] = moved["dropped"]
+        else:
+            trim, block = take_trim(sorted(set(cut) | set(step)), ctx, hyp, row)
+        cut = sorted(set(cut) | set(rec["dropped"]))
         rec["cut_total"] = len(cut)
+        if reseat:
+            rec["reseat"] = moved
         if tried is not None and set(cut) == set(tried):
             # The cut the ordinary trim test already lost.  It is taken again
             # because the walk needs the readings it produces, not because its
             # verdict is in doubt.
             rec["already_tried"] = True
-        trim, block = take_trim(cut, ctx, hyp, row)
         rec["core_frames"] = trim.get("frames_after")
         rec["core_ok"] = bool(trim.get("ok"))
         rec["core_fails"] = sorted(
@@ -2590,7 +2623,7 @@ def _links_preserved(recon, core, keep_names):
     return _restricted_to(before, core_names) == after
 
 
-def trim_member(sfmr_path, drop_names, out_path):
+def trim_member(sfmr_path, drop_names, out_path, recon=None, reseated=()):
     """Drop `drop_names` from a member and write the surviving core.
 
     The frames go, then every point left with fewer than `MIN_POINT_OBS`
@@ -2599,13 +2632,21 @@ def trim_member(sfmr_path, drop_names, out_path):
     `subset_by_image_indices` and `filter_points_by_mask` return a fresh,
     consistently indexed reconstruction), so no array is rebuilt here.
 
+    ``recon`` cuts a state the caller already holds -- the walk's re-seated
+    member -- instead of loading the released file, and ``reseated`` names the
+    frames that state re-seated.  Those names reach the artifact's own options,
+    and they are what lets a cut of NOTHING still write: a state whose poses
+    moved is a different member from the one released even where no frame left
+    it.
+
     Returns a report dict; `ok` is False when no core survives, when the cut
     drops nothing, or when the cut breaks a link the member had, and nothing is
     written in those cases.
     """
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+    if recon is None:
+        from sfmtool._sfmtool.reconstruction import SfmrReconstruction
 
-    recon = SfmrReconstruction.load(str(sfmr_path))
+        recon = SfmrReconstruction.load(str(sfmr_path))
     names = [str(n).replace("\\", "/") for n in recon.image_names]
     drop = {str(n).replace("\\", "/") for n in drop_names}
     keep = [i for i, n in enumerate(names) if n not in drop]
@@ -2616,7 +2657,7 @@ def trim_member(sfmr_path, drop_names, out_path):
         "obs_before": int(recon.observation_count),
         "frames_dropped": sorted(n for n in names if n in drop),
     }
-    if len(keep) == len(names):
+    if len(keep) == len(names) and not reseated:
         # A named frame the release does not hold is a frame already gone.
         report["reason"] = "the release holds none of the named frames"
         return report
@@ -2647,15 +2688,16 @@ def trim_member(sfmr_path, drop_names, out_path):
     if not _links_preserved(recon, core, {n for n in names if n not in drop}):
         report["reason"] = "the cut breaks a link the member had"
         return report
-    core.save(
-        str(out_path),
-        operation="seed_rung2_trim",
-        tool_options={
-            "rung2_trim": "frames dropped on per-frame defect evidence",
-            "frames_dropped": "|".join(report["frames_dropped"]),
-            "min_point_obs": str(MIN_POINT_OBS),
-        },
-    )
+    opts = {
+        "rung2_trim": "frames dropped on per-frame defect evidence",
+        "frames_dropped": "|".join(report["frames_dropped"]),
+        "min_point_obs": str(MIN_POINT_OBS),
+    }
+    if reseated:
+        opts["frames_reseated"] = "|".join(
+            sorted(str(n).replace("\\", "/") for n in reseated)
+        )
+    core.save(str(out_path), operation="seed_rung2_trim", tool_options=opts)
     report.update(
         ok=True,
         output=Path(out_path).name,
@@ -2666,6 +2708,305 @@ def trim_member(sfmr_path, drop_names, out_path):
         links_preserved=True,
     )
     return report
+
+
+# ── Re-seating ──────────────────────────────────────────────────────────────
+#
+# A frame's stored pose was fit jointly with the frames beside it, so a walk
+# whose only move is subtractive asks one question of a loud frame: does the
+# member read better without it.  There is a second question, and it is the one
+# a frame that is merely SEATED WRONG answers -- what pose it takes against
+# structure held out from the whole named group.  The resection primitive
+# states that pose, and its answer sorts the group: a frame the held-out
+# structure gives no support is a stranger and goes, a frame the primitive
+# accepts is re-seated where it put it and stays.
+
+
+def reseat_split(report, group):
+    """`(re-seated, dropped)` -- one group sorted by the primitive's report.
+
+    The primitive's own acceptance is the criterion and the only one.  An
+    accepted target carries an estimate that stands on structure held out from
+    the whole group; every refusal -- no support at all, an inlier fraction
+    below the gate, bearings that span no angle -- is a frame the member cannot
+    state a pose for, and a frame whose pose cannot be stated is not a frame
+    the core keeps.
+    """
+    by_name = {
+        str(r.get("image_name")).replace("\\", "/"): r
+        for r in ((report or {}).get("images") or [])
+    }
+    seated, dropped = [], []
+    for name in group:
+        row = by_name.get(str(name).replace("\\", "/"))
+        (seated if (row or {}).get("accepted") else dropped).append(name)
+    return sorted(seated), sorted(dropped)
+
+
+def reseat_rows(report):
+    """The per-frame essentials of a resection report, for the walk record.
+
+    What the frame had to work with, what the estimate scored, whether it was
+    accepted and why not, and how far the pose moved -- the reading a reviewer
+    replays the sort from, without the arrays behind it.
+    """
+    return [
+        {
+            "name": str(r.get("image_name")).replace("\\", "/"),
+            "correspondences": r.get("correspondences"),
+            "inlier_fraction": r.get("inlier_fraction"),
+            "accepted": bool(r.get("accepted")),
+            "refusal": r.get("refusal"),
+            "rotation_deg": r.get("rotation_deg"),
+            "translation_scene": r.get("translation_scene"),
+        }
+        for r in ((report or {}).get("images") or [])
+    ]
+
+
+def _internal_rotvecs(quaternions_wxyz):
+    """The internal-frame rotation vectors of canonical world-to-camera
+    quaternions.
+
+    A released `.sfmr` carries the canonical world: the writer built each pose
+    by rotating the ROWS of the internal rotation by `W`, so reading one back
+    rotates the rows by `W` inverse.  The camera-frame translation is the same
+    vector in both worlds and is not touched here.
+    """
+    from scipy.spatial.transform import Rotation
+
+    from sfmtool.colmap.convention import world_rotate_w_inverse
+
+    q = np.asarray(quaternions_wxyz, dtype=np.float64)
+    rot = Rotation.from_quat(q[:, [1, 2, 3, 0]]).as_matrix()
+    rot = np.asarray(world_rotate_w_inverse(rot.reshape(-1, 3))).reshape(-1, 3, 3)
+    return Rotation.from_matrix(rot).as_rotvec()
+
+
+def _point_clusters(recon, d):
+    """`(P,)` -- the member cluster each of a reconstruction's points is, or -1.
+
+    The file and the member hold the same observations under different names:
+    the file stores an `(image, feature)` pair per observation grouped by
+    point, the member stores the same pair as a row carrying a cluster id.  The
+    pair is the identity the two share, so the join is exact and reads no
+    geometry at all.  None where either side ships no feature indexes to join
+    on.
+    """
+    feat = recon.track_feature_indexes
+    obs_f = d.get("obs_f")
+    if feat is None or obs_f is None:
+        return None
+    index = {str(n).replace("\\", "/"): i for i, n in enumerate(d["names"])}
+    mine = np.asarray(
+        [index.get(str(n).replace("\\", "/"), -1) for n in recon.image_names],
+        dtype=np.int64,
+    )
+    tii = np.asarray(recon.track_image_indexes, dtype=np.int64)
+    tfi = np.asarray(feat, dtype=np.int64)
+    tpi = np.asarray(recon.track_point_indexes, dtype=np.int64)
+    obs_i = np.asarray(d["obs_i"], dtype=np.int64)
+    obs_f = np.asarray(obs_f, dtype=np.int64)
+    obs_c = np.asarray(d["obs_c"], dtype=np.int64)
+    out = np.full(int(recon.point_count), -1, dtype=np.int64)
+    if not len(obs_f) or not len(tfi):
+        return out
+    # One integer per pair, so the join is a sorted lookup rather than a
+    # dictionary over a million rows.
+    span = int(max(int(obs_f.max()), int(tfi.max()))) + 1
+    order = np.argsort(obs_i * span + obs_f, kind="stable")
+    keys = (obs_i * span + obs_f)[order]
+    clusters = obs_c[order]
+    img = mine[tii]
+    want = img * span + tfi
+    at = np.clip(np.searchsorted(keys, want), 0, len(keys) - 1)
+    hit = (img >= 0) & (keys[at] == want)
+    out[tpi[hit]] = clusters[at[hit]]
+    return out
+
+
+def reseated_arrays(d, recon, seated):
+    """The member arrays a resected reconstruction re-seats.
+
+    The accepted frames take the poses the primitive estimated, and the cloud
+    takes what the primitive left: it re-triangulated every finite point the
+    target set observes -- at the accepted targets' new poses where it could,
+    from the non-target frames alone where it could not -- and touched nothing
+    else, so adopting the whole finite cloud adopts exactly what moved.
+
+    Points the file carries at INFINITY keep the bearings the member holds.  A
+    bearing is not a triangulation and the member states it in its own cluster
+    space; the geometry that changed under a re-seat is the finite structure.
+    """
+    out = dict(d)
+    rvec = np.array(d["rvec"], dtype=np.float64, copy=True)
+    tvec = np.array(d["tvec"], dtype=np.float64, copy=True)
+    want = {str(n).replace("\\", "/") for n in seated}
+    index = {str(n).replace("\\", "/"): i for i, n in enumerate(d["names"])}
+    rv = _internal_rotvecs(np.asarray(recon.quaternions_wxyz, dtype=np.float64))
+    tv = np.asarray(recon.translations, dtype=np.float64)
+    for j, name in enumerate(recon.image_names):
+        key = str(name).replace("\\", "/")
+        if key in want and key in index:
+            rvec[index[key]] = rv[j]
+            tvec[index[key]] = tv[j]
+    out["rvec"], out["tvec"] = rvec, tvec
+    if d.get("pts") is None:
+        return out
+    clusters = _point_clusters(recon, d)
+    if clusters is None:
+        return out
+    from sfmtool.colmap.convention import world_rotate_w_inverse
+
+    pts = np.array(d["pts"], dtype=np.float64, copy=True)
+    xyzw = np.asarray(recon.positions_xyzw, dtype=np.float64)
+    take = (
+        (clusters >= 0)
+        & (clusters < len(pts))
+        & (xyzw[:, 3] != 0.0)
+        & np.isfinite(xyzw[:, :3]).all(axis=1)
+    )
+    if take.any():
+        pts[clusters[take]] = np.asarray(
+            world_rotate_w_inverse(np.ascontiguousarray(xyzw[take, :3])),
+            dtype=np.float64,
+        )
+        out["pts"] = pts
+    return out
+
+
+def resect_group(state, group, cut, ctx, hyp, row):
+    """`(report, recon, arrays)` -- `group` re-estimated against the walk state.
+
+    The state handed to the primitive is the member with every frame earlier
+    steps dropped taken out and the GROUP STILL IN, because the primitive holds
+    the whole target set out itself: it re-triangulates what the set observes
+    from the non-target frames alone before it estimates anything, which is
+    what makes the estimate independent of the group rather than of one frame
+    at a time.  No bundle adjustment runs, and the primitive's own defaults are
+    the acceptance criteria.  The capture's match graph is passed where the run
+    knows it, which admits correspondences the member never assigned to the
+    frame; without it the pairs are the frame's own stored observations.
+
+    ``recon`` and ``arrays`` come back as the state the accepted targets
+    re-seat, or as the state's own where the primitive accepted none -- a group
+    it refuses whole leaves the walk exactly where a drop leaves it.  Raises
+    what the primitive raises.
+    """
+    from sfmtool._sfmtool.geometry import resect_images
+
+    recon, d = state["recon"], state["arrays"]
+    if d is None:
+        d = (ctx.get("arrays") or {}).get(int(hyp.get("idx", -1)))
+    if recon is None:
+        from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+
+        recon = SfmrReconstruction.load(
+            str(ctx["release_dir"] / (row["release_file"] or ""))
+        )
+    names = [str(n).replace("\\", "/") for n in recon.image_names]
+    gone = {str(n).replace("\\", "/") for n in cut}
+    keep = [i for i, n in enumerate(names) if n not in gone]
+    if len(keep) < len(names):
+        recon = recon.subset_by_image_indices(
+            np.asarray(keep, np.uint32), drop_orphaned_points=True
+        )
+    # The file's own spelling of each target: the primitive matches a name
+    # exactly, and a member states its frames normalized.
+    spelling = {str(n).replace("\\", "/"): str(n) for n in recon.image_names}
+    targets = [spelling[n] for n in group if n in spelling]
+    if not targets:
+        raise ValueError("the walk state holds none of the named frames")
+    matches = ctx.get("matches_path")
+    out, report = resect_images(
+        recon, targets, matches_path=None if matches is None else str(matches)
+    )
+    seated, _dropped = reseat_split(report, group)
+    if not seated:
+        return report, state["recon"], state["arrays"]
+    return report, out, reseated_arrays(d, out, seated)
+
+
+def take_reseat(state, step, cut, ctx, hyp, row):
+    """`(trim, block, reseat, state)` -- one walk step, re-seated before it cuts.
+
+    ``step`` is the group the readings named and ``cut`` the frames earlier
+    steps dropped.  Every frame of the group the walk has not already tried
+    goes to `resect_group`; the frames it accepts are re-seated and KEPT with
+    the points it re-triangulated, and the frames it refuses are dropped.  A
+    frame that was re-seated once and is named again is dropped without a
+    second attempt: one re-seat per frame is what makes a step that drops
+    nothing still move the walk forward.  A primitive that cannot be asked at
+    all -- too few non-target posed frames, an unjoinable match graph,
+    unreadable observations -- leaves the step the plain drop it would have
+    been, recorded.
+
+    The core is then written, re-measured and re-judged through `take_trim`,
+    which is the walk's one artifact seam: a re-seated state is cut and judged
+    exactly as any trimmed core is, on the member's own arrays as the re-seat
+    left them.  `MAX_TRIM_FRACTION` is the walk's own bound and it binds the
+    frames DROPPED; a re-seated frame is a kept frame and costs it nothing.
+    """
+    fresh = [n for n in step if n not in state["attempted"]]
+    seated, dropped = [], sorted(step)
+    if not fresh:
+        reseat = {
+            "already_tried": sorted(step),
+            "reseated": [],
+            "dropped": sorted(step),
+        }
+    else:
+        try:
+            report, recon, arrays = resect_group(state, fresh, cut, ctx, hyp, row)
+        except (ValueError, OSError) as exc:  # noqa: BLE001 -- a resection that
+            # cannot be attempted is not evidence about the frames.
+            reseat = {
+                "attempted": sorted(fresh),
+                "error": f"{type(exc).__name__}: {exc}",
+                "reseated": [],
+                "dropped": sorted(step),
+            }
+        else:
+            seated, _refused = reseat_split(report, fresh)
+            dropped = sorted(set(step) - set(seated))
+            reseat = {
+                "attempted": sorted(fresh),
+                "frames": reseat_rows(report),
+                "reseated": seated,
+                "dropped": dropped,
+                "retriangulated": report.get("retriangulated"),
+            }
+            state = dict(state, recon=recon, arrays=arrays)
+    gone = set(dropped)
+    state = dict(
+        state,
+        attempted=set(state["attempted"]) | set(step),
+        seated=sorted((set(state["seated"]) | set(seated)) - gone),
+    )
+    if state["recon"] is None:
+        # Nothing has ever been re-seated, so the state IS the released member
+        # and the cut is taken off it exactly as a drop-only walk takes it.
+        trim, block = take_trim(sorted(set(cut) | gone), ctx, hyp, row)
+    else:
+        trim, block = take_trim(
+            sorted(gone),
+            ctx,
+            hyp,
+            row,
+            recon=state["recon"],
+            reseated=state["seated"],
+            arrays={int(hyp.get("idx", -1)): state["arrays"]},
+        )
+        # The state already lost what earlier steps dropped, so its own report
+        # counts from there.  A reader of the walk wants both counts against
+        # the member as it was released.
+        if trim.get("frames_before") is not None:
+            trim["frames_before"] = int(trim["frames_before"]) + len(cut)
+        trim["frames_dropped"] = sorted(
+            set(cut) | set(trim.get("frames_dropped") or [])
+        )
+    trim["frames_reseated"] = list(state["seated"])
+    return trim, block, reseat, state
 
 
 # ── Culling ─────────────────────────────────────────────────────────────────
@@ -3087,7 +3428,7 @@ def take_cull(drop_ids, signals, bars, ctx, hyp, row):
     return cull
 
 
-def take_trim(cut, ctx, hyp, row):
+def take_trim(cut, ctx, hyp, row, recon=None, reseated=(), arrays=None):
     """Cut `cut` from one member and judge what is left, as a member.
 
     Returns `(trim report, core block)`.  `ok` says whether the core survived
@@ -3095,11 +3436,23 @@ def take_trim(cut, ctx, hyp, row):
     evidence in `core_evidence`, and the released file is not left behind.  The
     block is the core's own fresh evaluation, which is what an iterative walk
     names its next step off, and is None where no core could be measured.
+
+    ``recon`` cuts a state the caller already holds and ``reseated`` names the
+    frames that state re-seated (`trim_member`); ``arrays`` are the arrays the
+    core is stated and MEASURED from, which for a re-seated state are the
+    member's own with the moved poses and the re-triangulated points in them.
+    A re-seated core is judged on exactly the terms a dropped-only one is.
     """
     stem = Path(row["release_file"]).stem
     out_path = ctx["out_dir"] / f"{stem}-trimmed.sfmr"
     ctx["out_dir"].mkdir(parents=True, exist_ok=True)
-    trim = trim_member(ctx["release_dir"] / (row["release_file"] or ""), cut, out_path)
+    trim = trim_member(
+        ctx["release_dir"] / (row["release_file"] or ""),
+        cut,
+        out_path,
+        recon=recon,
+        reseated=reseated,
+    )
     if not trim["ok"]:
         return trim, None
     # THE CORE IS MEASURED, not re-aggregated.  Every stored per-frame reading
@@ -3111,7 +3464,12 @@ def take_trim(cut, ctx, hyp, row):
     fam = row["model"]
     block = None
     try:
-        block = remeasure_core(ctx["arrays"], hyp, ctx["f_vote"], keep_names=kept)
+        block = remeasure_core(
+            ctx["arrays"] if arrays is None else arrays,
+            hyp,
+            ctx["f_vote"],
+            keep_names=kept,
+        )
     except Exception as exc:  # noqa: BLE001 — a failed re-measurement falls
         # back to the stored readings, it never kills the pass.
         trim["core_remeasure_error"] = f"{type(exc).__name__}: {exc}"
@@ -3144,7 +3502,11 @@ def take_trim(cut, ctx, hyp, row):
 
 
 def select(release_dir, gates, out_dir=None, capture_frames=None, write=True):
-    """Rank, refuse and trim one committed candidate set, off its release."""
+    """Rank, refuse and trim one committed candidate set, off its release.
+
+    A release is read on its own, without the workspace that produced it, so
+    nothing here names the capture's match graph: a salvage re-seat states its
+    correspondences from the member's own stored observations."""
     release_dir = Path(release_dir)
     man, hyps = load_release(release_dir)
     out_dir = Path(out_dir) if out_dir else release_dir / "rung2"
@@ -3204,21 +3566,34 @@ def refuse_or_salvage(
     #    The cut is walked a step at a time, smallest first, and re-measured
     #    between steps: readings taken while a catastrophic frame is still in
     #    the member are readings OF that frame, and only fresh ones say whether
-    #    its quieter neighbours were ever wrong.
+    #    its quieter neighbours were ever wrong.  Each step RE-SEATS the frames
+    #    it named before it drops any of them: a frame whose pose the held-out
+    #    structure supports is wrong only in where it sits, and a member is not
+    #    relieved of it by losing it.
     trim, iterations, cut, frame_ev = salvage_frame_walk(
         ctx, hyp, row, named, n_posed, tried
     )
     if trim is not None:
         trim["frame_evidence"] = {k: frame_ev[k] for k in sorted(frame_ev)}
-        trim["salvage"] = "the member's own worst frames, one step at a time"
+        trim["salvage"] = (
+            "the member's own worst frames, one step at a time, re-seated "
+            "before they are dropped"
+        )
         trim["iterations"] = iterations
         rec["salvage_trim"] = trim
         if trim["ok"]:
             rec["trim"] = trim
             rec["verdict"] = "trim"
             steps = len(iterations)
+            # BOTH MOVES ARE COUNTED.  A salvage that re-seated frames kept
+            # them, and a reader of the verdict is owed the difference between
+            # a member that lost five frames and one that lost two.
+            n_seat = len(trim.get("frames_reseated") or [])
+            moved = f"dropping {len(trim['frames_dropped'])}" + (
+                f" and re-seating {n_seat}" if n_seat else ""
+            )
             rec["verdict_reason"] = (
-                f"{phrase}; salvaged by dropping {len(trim['frames_dropped'])} of "
+                f"{phrase}; salvaged by {moved} of "
                 f"{n_posed} frames at the far end of the member's own readings, "
                 f"cut in {steps} step{'' if steps == 1 else 's'} with the core "
                 "re-measured between them, and the core was re-judged clean "
@@ -3266,6 +3641,7 @@ def judge_set(
     capture_frames=None,
     entry=None,
     source_stamp=None,
+    matches_path=None,
     write=True,
 ):
     """Rank, refuse and trim a committed candidate set.
@@ -3275,7 +3651,12 @@ def judge_set(
     trimmed core is stated from; ``release_dir`` holds the members' ``.sfmr``
     files and ``out_dir`` receives the trimmed cores and the report.  A driver
     that has not written its manifest yet passes the set it is holding and the
-    directory the releases are accumulating in."""
+    directory the releases are accumulating in.
+
+    ``matches_path`` is the capture's own match graph -- the ``.matches`` file
+    the run solved from -- which a salvage re-seat states its correspondences
+    through.  Without it the re-seat reads the member's stored observations
+    instead, which is what a release read on its own has."""
     release_dir = Path(release_dir)
     out_dir = Path(out_dir)
 
@@ -3339,6 +3720,7 @@ def judge_set(
         "capture_meds": capture_meds,
         "core_meds": core_meds,
         "defective": defective,
+        "matches_path": matches_path,
     }
 
     verdicts = []
@@ -3792,6 +4174,10 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
                 capture_frames=capture_frames,
                 entry=entry,
                 source_stamp=rung.stamp,
+                # The capture's own match graph, which is what a salvage
+                # re-seat resects through: the file the pipeline solved from,
+                # named by the context rather than looked for.
+                matches_path=getattr(ctx, "matches_path", None),
                 write=write,
             )
         except Exception as exc:  # noqa: BLE001 -- a verdict never kills the run
@@ -3940,6 +4326,11 @@ def drive(workspace, gates=None, budget=None, capture_frames=None):
             block["trimmed_release_file"] = trim.get("output")
             block["trimmed_from"] = h.get("release_file")
             block["frames_dropped"] = trim.get("frames_dropped")
+            if trim.get("frames_reseated") is not None:
+                # A SALVAGE keeps a frame it re-seated, so the two moves are
+                # recorded side by side: what left the member, and what stayed
+                # in it at a pose the member did not release it with.
+                block["frames_reseated"] = trim.get("frames_reseated")
             # A SALVAGE cut is walked, and the walk is what a reviewer replays:
             # which frames each step took, how loud they were, and what the
             # re-measurement said about the core each one left.

@@ -1054,7 +1054,7 @@ def _salvage_stub(R2, reading, gates):
     core passes when no surviving frame is past the fleet frame bar, which
     stands in for the member gates a real core is judged on."""
 
-    def take_trim(cut, ctx, hyp, row):
+    def take_trim(cut, ctx, hyp, row, **kw):
         keep = [n for n in SALVAGE_FRAMES if n not in set(cut)]
         block = _warp_block(reading(keep))
         left, _ = R2.defect_frames({"evaluation": block}, gates, SALVAGE_MODEL, "other")
@@ -1072,8 +1072,63 @@ def _salvage_stub(R2, reading, gates):
     return take_trim
 
 
-def _run_walk(R2, reading, bar):
-    """Walk one synthetic member and hand back `(cut, iterations, trim)`."""
+def _reseat_stub(accept, seated, calls):
+    """A `resect_group` that states a verdict per target without a `.sfmr`.
+
+    ``accept`` names the frames the primitive would accept; every other target
+    comes back refused for NO SUPPORT, which is what a stranger to the
+    structure reads as.  Accepted names land in ``seated``, which is what lets
+    a specimen's readings say whether a re-seat repaired the frame, and every
+    call is recorded in ``calls``, which is what says a frame was never tried
+    twice.
+
+    The walk state it hands back carries no reconstruction and no arrays: the
+    artifact I/O stays stubbed at `take_trim` exactly as it is for a plain
+    trim, so what runs here is the walk's own routing and nothing else."""
+
+    def resect_group(state, group, cut, ctx, hyp, row):
+        calls.append(sorted(group))
+        images = []
+        for name in sorted(group):
+            ok = name in accept
+            images.append(
+                {
+                    "image_name": name,
+                    "correspondences": 40 if ok else 0,
+                    "inlier_fraction": 0.62 if ok else 0.0,
+                    "accepted": ok,
+                    "refusal": (
+                        None
+                        if ok
+                        else "no support: 0 held-out finite points and 0 bearings"
+                    ),
+                    "rotation_deg": 0.39 if ok else 0.0,
+                    "translation_scene": 0.011 if ok else None,
+                }
+            )
+            if ok:
+                seated.add(name)
+        report = {
+            "images": images,
+            "targets": len(images),
+            "accepted": sum(1 for i in images if i["accepted"]),
+            "refused": sum(1 for i in images if not i["accepted"]),
+            "retriangulated": 120,
+        }
+        return report, state["recon"], state["arrays"]
+
+    return resect_group
+
+
+def _run_walk(R2, reading, bar, resect=None, reseat=None):
+    """Walk one synthetic member and hand back `(cut, iterations, trim)`.
+
+    Without ``resect`` the context ships no member arrays, which is the walk of
+    a member whose release cannot state a re-seated core: drop-only, as it has
+    always been.  With one, the arrays are there and the resection is stubbed;
+    ``reseat`` sets the kill switch for the run."""
+    import os
+
     gates = _warp_gates(bar)
     hyp = {"idx": 0, "evaluation": _warp_block(reading(list(SALVAGE_FRAMES)))}
     row = {
@@ -1083,14 +1138,28 @@ def _run_walk(R2, reading, bar):
         "release_file": "member.sfmr",
     }
     named, _ = R2.defect_frames(hyp, gates, SALVAGE_MODEL, "other")
-    saved = R2.take_trim
+    ctx = {"gates": gates}
+    saved, saved_resect = R2.take_trim, R2.resect_group
+    saved_env = os.environ.get("SFMTOOL_RUNG2_RESEAT")
     R2.take_trim = _salvage_stub(R2, reading, gates)
+    if resect is not None:
+        # A member with arrays is a member whose re-seated core can be
+        # measured, which is what arms the re-seat at all.
+        ctx["arrays"] = {0: {"idx": 0}}
+        R2.resect_group = resect
+    if reseat is not None:
+        os.environ["SFMTOOL_RUNG2_RESEAT"] = reseat
     try:
         trim, iters, cut, _ev = R2.salvage_frame_walk(
-            {"gates": gates}, hyp, row, named, len(SALVAGE_FRAMES)
+            ctx, hyp, row, named, len(SALVAGE_FRAMES)
         )
     finally:
-        R2.take_trim = saved
+        R2.take_trim, R2.resect_group = saved, saved_resect
+        if reseat is not None:
+            if saved_env is None:
+                os.environ.pop("SFMTOOL_RUNG2_RESEAT", None)
+            else:
+                os.environ["SFMTOOL_RUNG2_RESEAT"] = saved_env
     return cut, iters, trim
 
 
@@ -1108,10 +1177,17 @@ def run_salvage_suite():
        at exactly those two, in one step.  A one-shot cut names seven.
     3. A member with genuinely spread defects walks one frame at a time into
        the cap and its refusal stands.
-    4. The salvage truth table: a refusal stands outright where a
+    4. THE RE-SEAT: a step hands its group to the resection primitive first, a
+       stranger the held-out structure gives no support is dropped while an
+       accepted frame is re-seated and kept, a re-seated frame named again is
+       dropped rather than tried twice, ``SFMTOOL_RUNG2_RESEAT=0`` reproduces
+       the drop-only walk record for record, and the collapse specimen still
+       stops at its two catastrophic frames with the re-seat armed.
+    5. The salvage truth table: a refusal stands outright where a
        pose-instability channel fired and did not fire alone, or where
        ``SFMTOOL_RUNG2_SALVAGE=0``; every other refusal is offered the salvage
        first."""
+    import json
     import os
 
     import exp_seed_rung2 as R2
@@ -1221,7 +1297,123 @@ def run_salvage_suite():
         "the steps take the frames in loudness order, loudest first",
     )
 
-    # -- 4: the salvage truth table -----------------------------------------
+    # -- 4: the re-seat -----------------------------------------------------
+    # One stranger and two frames that are only SEATED WRONG, with two quiet
+    # neighbours the group contaminates: exactly the shape the walk has to tell
+    # apart, and a shape no subtractive move can.
+    def reseat_case(seated, still_bad=()):
+        def reading(keep):
+            loud = [
+                n
+                for n in ("f00", "f01", "f02")
+                if n in keep and (n not in seated or n in still_bad)
+            ]
+            out = {}
+            for n in keep:
+                if n in loud:
+                    out[n] = 200.0
+                elif n in ("f03", "f04") and loud:
+                    out[n] = 1.2
+                else:
+                    out[n] = 1.0
+            return out
+
+        return reading
+
+    seated, calls = set(), []
+    cut, iters, trim = _run_walk(
+        R2,
+        reseat_case(seated),
+        1.1,
+        resect=_reseat_stub({"f01", "f02"}, seated, calls),
+    )
+    check(
+        trim is not None and trim["ok"] and cut == ["f00"],
+        "the stranger the held-out structure cannot support is the only frame cut",
+        f"cut {cut}",
+    )
+    check(
+        trim is not None and trim.get("frames_reseated") == ["f01", "f02"],
+        "the two frames the primitive accepted are re-seated and KEPT",
+        f"re-seated {None if trim is None else trim.get('frames_reseated')}",
+    )
+    step = (iters or [{}])[0]
+    rec = step.get("reseat") or {}
+    check(
+        step.get("named") == 5
+        and step.get("cliff_at") == 3
+        and rec.get("reseated") == ["f01", "f02"]
+        and rec.get("dropped") == ["f00"]
+        and len(rec.get("frames") or []) == 3,
+        "the step records what the primitive said about every frame it named",
+        f"{len(rec.get('frames') or [])} frames reported",
+    )
+    stranger = next((f for f in (rec.get("frames") or []) if f["name"] == "f00"), {})
+    check(
+        not stranger.get("accepted")
+        and str(stranger.get("refusal") or "").startswith("no support"),
+        "a no-support refusal is what names a frame a stranger",
+        f"{stranger.get('refusal')}",
+    )
+
+    # Named again after a re-seat: dropped, never re-seated twice.
+    seated, calls = set(), []
+    cut, iters, trim = _run_walk(
+        R2,
+        reseat_case(seated, still_bad=("f01",)),
+        1.1,
+        resect=_reseat_stub({"f01", "f02"}, seated, calls),
+    )
+    check(
+        trim is not None and trim["ok"] and cut == ["f00", "f01"] and len(calls) == 1,
+        "a re-seated frame named again is dropped, not re-seated twice",
+        f"cut {cut}, {len(calls)} resection(s)",
+    )
+    check(
+        len(iters) == 2
+        and (iters[1].get("reseat") or {}).get("already_tried") == ["f01"],
+        "the second step records the frame as already tried",
+    )
+    check(
+        trim is not None and trim.get("frames_reseated") == ["f02"],
+        "a frame re-seated and then dropped is no longer a re-seated frame",
+        f"re-seated {None if trim is None else trim.get('frames_reseated')}",
+    )
+
+    # THE KILL SWITCH, on the same specimen: the walk of a member whose release
+    # ships no arrays and the walk with the re-seat switched off are the same
+    # walk, record for record, and the primitive is never asked.
+    plain_cut, plain_iters, _plain = _run_walk(R2, reseat_case(set()), 1.1)
+    seated, calls = set(), []
+    off_cut, off_iters, off_trim = _run_walk(
+        R2,
+        reseat_case(seated),
+        1.1,
+        resect=_reseat_stub({"f01", "f02"}, seated, calls),
+        reseat="0",
+    )
+    check(
+        off_cut == plain_cut == ["f00", "f01", "f02"]
+        and json.dumps(off_iters) == json.dumps(plain_iters)
+        and not calls
+        and (off_trim or {}).get("frames_reseated") is None,
+        "SFMTOOL_RUNG2_RESEAT=0 reproduces the drop-only walk record for record",
+        f"cut {off_cut}, {len(calls)} resection(s)",
+    )
+
+    # The contamination specimen, with the re-seat armed and every target
+    # refused: a group the structure cannot support is cut exactly as before.
+    seated, calls = set(), []
+    cut, iters, trim = _run_walk(
+        R2, collapse, 1.1, resect=_reseat_stub(set(), seated, calls)
+    )
+    check(
+        trim is not None and trim["ok"] and sorted(cut) == ["f00", "f01"],
+        "the collapse specimen still stops at the two catastrophic frames",
+        f"cut {sorted(cut)}, {len(calls)} resection(s)",
+    )
+
+    # -- 5: the salvage truth table -----------------------------------------
     def routing(channels, salvage="1"):
         rec, hyp = {}, {"idx": 0, "evaluation": {}}
         row = {
