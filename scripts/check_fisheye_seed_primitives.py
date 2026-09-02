@@ -1163,6 +1163,42 @@ def _run_walk(R2, reading, bar, resect=None, reseat=None):
     return cut, iters, trim
 
 
+def _densify_graph(R2, members, n_img):
+    """A capture match graph as `exp_seed_rung2` joins on it, without a file.
+
+    ``members`` is one image list per cluster, in cluster order, which is how a
+    match file stores its rows.  The feature index is synthetic and unique per
+    row, because the join reads it as an identity and as nothing else."""
+    obs_c, obs_i, obs_f = [], [], []
+    for c, images in enumerate(members):
+        for i in sorted(images):
+            obs_c.append(c)
+            obs_i.append(i)
+            obs_f.append(100 * c + i)
+    return R2.match_graph(
+        [f"f{i:02d}" for i in range(n_img)],
+        obs_c,
+        obs_i,
+        obs_f,
+        np.zeros((len(obs_c), 2)),
+    )
+
+
+class _StripRecon:
+    """The track arrays `strip_scaffold` reads, and the mask it hands back."""
+
+    def __init__(self, images, features, points, n_points):
+        self.track_image_indexes = np.asarray(images, np.int64)
+        self.track_feature_indexes = np.asarray(features, np.int64)
+        self.track_point_indexes = np.asarray(points, np.int64)
+        self.point_count = n_points
+        self.mask = None
+
+    def filter_points_by_mask(self, mask):
+        self.mask = np.asarray(mask, bool)
+        return self
+
+
 def run_salvage_suite():
     """Rung 2's SALVAGE frame trim: the cliff, the walk, and the routing.
 
@@ -1186,7 +1222,15 @@ def run_salvage_suite():
     5. The salvage truth table: a refusal stands outright where a
        pose-instability channel fired and did not fire alone, or where
        ``SFMTOOL_RUNG2_SALVAGE=0``; every other refusal is offered the salvage
-       first."""
+       first.
+    6. THE DENSIFICATION: the member's own sufficiency bar is the support of
+       its least supported core frame, a target under it is densified and one
+       at it is not, admission takes the prefix of the match file's own rank
+       order that reaches sufficiency, a target whose ceiling cannot reach the
+       bar is densified with everything obtainable anyway, the strip drops
+       exactly the points built only from scaffold rows, and
+       ``SFMTOOL_RUNG2_DENSIFY=0`` leaves the walk with no bar to densify
+       against."""
     import json
     import os
 
@@ -1469,6 +1513,132 @@ def run_salvage_suite():
     check(
         verdict == "refuse" and not offered,
         "SFMTOOL_RUNG2_SALVAGE=0 restores the straight refusal",
+    )
+
+    # -- 6: the densification a re-seat resects against ---------------------
+    # THE BAR.  Four posed frames, five clusters all of them see and three only
+    # the first three do: the fourth frame stands on five and the rest on eight,
+    # so the member's own bar is five.  A frame the member never posed is not
+    # part of the core it reads that off.
+    bar_graph = _densify_graph(
+        R2, [[0, 1, 2, 3]] * 5 + [[0, 1, 2]] * 3 + [[0, 4]] * 9, 5
+    )
+    bar_ctx = {
+        "matches_path": "capture.matches",
+        "arrays": {
+            0: {
+                "idx": 0,
+                "names": [f"f{i:02d}" for i in range(5)],
+                "posed": np.array([True, True, True, True, False]),
+            }
+        },
+    }
+    saved_graph = R2.capture_match_graph
+    saved_env = os.environ.get("SFMTOOL_RUNG2_DENSIFY")
+    R2.capture_match_graph = lambda _path: bar_graph
+    try:
+        bar = R2.support_bar(bar_ctx, {"idx": 0})
+        support = R2.graph_support(bar_graph, range(4), range(4))
+        os.environ["SFMTOOL_RUNG2_DENSIFY"] = "0"
+        bar_off = R2.support_bar(bar_ctx, {"idx": 0})
+    finally:
+        R2.capture_match_graph = saved_graph
+        if saved_env is None:
+            os.environ.pop("SFMTOOL_RUNG2_DENSIFY", None)
+        else:
+            os.environ["SFMTOOL_RUNG2_DENSIFY"] = saved_env
+    check(
+        bar == 5 and sorted(support.values()) == [5, 8, 8, 8],
+        "the bar is the support of the member's LEAST supported core frame",
+        f"bar {bar}, core support {sorted(support.values())}",
+    )
+    check(
+        bar_off is None,
+        "SFMTOOL_RUNG2_DENSIFY=0 leaves the walk no bar, so nothing densifies",
+        f"bar {bar_off}",
+    )
+
+    # THE PLAN.  Eight clusters the member triangulated over a four-frame core,
+    # six more the core sees three times and four it sees twice, none of which
+    # the member holds a point for.  f04 stands on two of its own, f05 on all
+    # eight, and f06 on nothing at all.
+    graph = _densify_graph(
+        R2,
+        [[0, 1, 2, 3, 4, 5]] * 2
+        + [[0, 1, 2, 3, 5]] * 6
+        + [[0, 1, 2, 4, 5]] * 3
+        + [[0, 1, 2, 4]] * 3
+        + [[0, 1, 4, 6]] * 2
+        + [[0, 1, 4]] * 2,
+        7,
+    )
+    held = np.arange(8)
+    aim = [("f04", 4), ("f05", 5), ("f06", 6)]
+    plan, under, order = R2.densify_targets(graph, [0, 1, 2, 3], aim, held, held, 8)
+    check(
+        under == ["f04", "f06"]
+        and plan["f04"]["support_before"] == 2
+        and plan["f05"]["support_before"] == 8,
+        "a target under the bar is densified and one already at it is not",
+        f"under {under}, f04 {plan['f04']['support_before']}, "
+        f"f05 {plan['f05']['support_before']}",
+    )
+    check(
+        plan["f04"]["ceiling"] == 12 and plan["f06"]["ceiling"] == 2,
+        "the ceiling is where a target's own candidates could carry it",
+        f"f04 {plan['f04']['ceiling']}, f06 {plan['f06']['ceiling']}",
+    )
+    solo, solo_under, solo_order = R2.densify_targets(
+        graph, [0, 1, 2, 3], aim[:2], held, held, 8
+    )
+    admitted = R2.admit_scaffold(
+        solo_order, solo, solo_under, 8, {int(c) for c in solo_order}
+    )
+    check(
+        len(admitted) == 6 and len(solo_order) == 10,
+        "admission stops at sufficiency, with the rest of the order untouched",
+        f"{len(admitted)} of {len(solo_order)} candidates admitted",
+    )
+    check(
+        [int(c) for c in solo_order[:6]] == admitted,
+        "what it admits is the PREFIX of the match file's own admission rank",
+        f"admitted {admitted}",
+    )
+    usable = {int(c) for c in order}
+    admitted = R2.admit_scaffold(order, plan, under, 8, usable)
+    starved = [int(c) for c in plan["f06"]["candidates"]]
+    check(
+        plan["f06"]["ceiling"] < 8
+        and "f06" in under
+        and all(c in admitted for c in starved),
+        "a target whose ceiling cannot reach the bar is densified with "
+        "everything obtainable anyway",
+        f"ceiling {plan['f06']['ceiling']}, candidates {starved} all admitted",
+    )
+    check(
+        R2.admit_scaffold(order, plan, ["f06"], 8, usable) == starved,
+        "and its admission ends where it runs out, not where it is satisfied",
+    )
+    thin = R2.admit_scaffold(order, plan, under, 8, usable - {int(order[0])})
+    check(
+        int(order[0]) not in thin and len(thin) == len(admitted) - 1,
+        "a candidate that did not triangulate finitely is passed over in place",
+        f"{len(thin)} admitted without cluster {int(order[0])}",
+    )
+
+    # THE STRIP.  A point every observation of which is a scaffold row goes; a
+    # member point that shares one keypoint with a scaffold cluster stays.
+    recon = _StripRecon([0, 1, 2, 3, 0, 2], [5, 5, 7, 7, 9, 7], [0, 0, 1, 1, 2, 2], 3)
+    check(
+        list(R2.strip_scaffold(recon, R2._obs_keys([2, 3], [7, 7])).mask)
+        == [True, False, True],
+        "the strip drops exactly the points built only from scaffold rows",
+        f"mask {list(recon.mask)}",
+    )
+    recon = _StripRecon([0, 1], [5, 5], [0, 0], 1)
+    check(
+        R2.strip_scaffold(recon, []).mask is None,
+        "a resection that densified nothing has nothing stripped out of it",
     )
 
 
