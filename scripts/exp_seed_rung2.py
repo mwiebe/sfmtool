@@ -2347,6 +2347,12 @@ def salvage_frame_walk(ctx, hyp, row, named, n_posed, tried=None):
         reseat_on()
         and (ctx.get("arrays") or {}).get(int(hyp.get("idx", -1))) is not None
     )
+    if reseat:
+        # THE BAR, read once on the member as released and held for the whole
+        # walk: what a re-seated frame needs under it is what the member's own
+        # weakest core frame stands on, and a walk that re-derived it each step
+        # would lower it as it dropped frames until anything sufficed.
+        walk["bar"] = support_bar(ctx, hyp)
     while len(cut) < cap:
         hits = salvage_candidates(state, row, state_named)
         for name in cut:
@@ -2794,6 +2800,24 @@ def _internal_rotvecs(quaternions_wxyz):
     return Rotation.from_matrix(rot).as_rotvec()
 
 
+#: A feature index is a ``uint32``, so an ``(image, feature)`` observation
+#: packs into one ``int64`` without the two sides of a join agreeing a span.
+_KEY_SPAN = 1 << 32
+
+
+def _obs_keys(images, features):
+    """One integer per ``(image, feature)`` observation.
+
+    The pair is the identity two tables of the same observations share -- a
+    member's and the capture's, a reconstruction's and a match file's -- so a
+    join over it reads no geometry and survives either side renumbering
+    anything else.  An absent image (-1) keys negative and matches nothing.
+    """
+    return np.asarray(images, dtype=np.int64) * _KEY_SPAN + np.asarray(
+        features, dtype=np.int64
+    )
+
+
 def _point_clusters(recon, d):
     """`(P,)` -- the member cluster each of a reconstruction's points is, or -1.
 
@@ -2824,12 +2848,12 @@ def _point_clusters(recon, d):
         return out
     # One integer per pair, so the join is a sorted lookup rather than a
     # dictionary over a million rows.
-    span = int(max(int(obs_f.max()), int(tfi.max()))) + 1
-    order = np.argsort(obs_i * span + obs_f, kind="stable")
-    keys = (obs_i * span + obs_f)[order]
+    pairs = _obs_keys(obs_i, obs_f)
+    order = np.argsort(pairs, kind="stable")
+    keys = pairs[order]
     clusters = obs_c[order]
     img = mine[tii]
-    want = img * span + tfi
+    want = _obs_keys(img, tfi)
     at = np.clip(np.searchsorted(keys, want), 0, len(keys) - 1)
     hit = (img >= 0) & (keys[at] == want)
     out[tpi[hit]] = clusters[at[hit]]
@@ -2886,6 +2910,500 @@ def reseated_arrays(d, recon, seated):
     return out
 
 
+# ── Densifying what a re-seat resects against ───────────────────────────────
+#
+# A re-seat asks what pose a frame takes against structure held out from its
+# whole group, and on a thin member that structure is a few percent of the
+# correspondences the capture's match graph actually carries between the frame
+# and the core.  A frame that answers on ten points has not answered the
+# question the walk asked it.  So the re-seat DENSIFIES first: the clusters two
+# core frames see and the target sees too, triangulated at the core's own
+# stored poses and put into the state the primitive resects against.
+#
+# The effort is governed by a bar the MEMBER states, never by a constant -- the
+# support of its least supported core frame.  A target that already reads at
+# least that is left alone; a target under it is densified until it reaches the
+# bar or its candidates run out.  The bar governs EFFORT only: a target whose
+# ceiling cannot reach it is still resected on everything obtainable, because
+# the alternative to a thin answer is no answer at all.
+#
+# The scaffold exists for the resection and for nothing else.  It is stripped
+# out of the primitive's answer before the walk adopts it, so no scaffold point
+# reaches the member's arrays, the core this pass writes, or anything measured.
+
+
+def densify_on():
+    """Whether a re-seat DENSIFIES the structure it resects against.
+
+    ``SFMTOOL_RUNG2_DENSIFY=0`` restores the re-seat that resects against the
+    member's own stored structure alone, which is what the densification is
+    measured against."""
+    return (os.environ.get("SFMTOOL_RUNG2_DENSIFY", "1") or "1").strip() != "0"
+
+
+def structure_module():
+    """The relaxation's point estimation, importable from this script's own
+    directory.
+
+    Its ``estimate_points`` is the core's triangulation kernel under one
+    wrapper, which is the estimate every point in this pipeline already is."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from seed_relax import structure
+
+    return structure
+
+
+def match_graph(names, obs_c, obs_i, obs_f, obs_uv):
+    """A capture's cluster rows as the flat table a re-seat joins on.
+
+    The ``obs_*`` arrays are one row per cluster member, GROUPED BY CLUSTER as
+    the match file stores them.  What this adds is the two orderings the
+    densification reads: the rows of one image, and the ADMISSION RANK of one
+    cluster -- span-major with the cluster id to break a tie, which is the
+    quality ordering `exp_fast_seed`'s loader states and the order a scaffold
+    is admitted in.  Everything stays in the file's own index frame, so one
+    table serves every member of the capture.
+    """
+    obs_c = np.asarray(obs_c, dtype=np.int64)
+    obs_i = np.asarray(obs_i, dtype=np.int64)
+    n_cl = int(obs_c[-1]) + 1 if len(obs_c) else 0
+    cstart = np.searchsorted(obs_c, np.arange(n_cl + 1))
+    sizes = np.diff(cstart)
+    # Span descending, cluster id ascending among ties: a stable lexsort of the
+    # negated spans is exactly that, so the order is a function of the file.
+    order = np.lexsort((np.arange(n_cl), -sizes))
+    rank = np.empty(n_cl, np.int64)
+    rank[order] = np.arange(n_cl)
+    rows = np.argsort(obs_i, kind="stable")
+    names = [str(n).replace("\\", "/") for n in names]
+    return {
+        "names": names,
+        "index": {n: i for i, n in enumerate(names)},
+        "n_cl": n_cl,
+        "obs_c": obs_c,
+        "obs_i": obs_i,
+        "obs_f": np.asarray(obs_f, dtype=np.int64),
+        "obs_uv": np.asarray(obs_uv, dtype=np.float64),
+        "cstart": cstart,
+        "rank": rank,
+        # The rows of one image, so a per-frame reading costs that frame's own
+        # rows rather than a pass over the capture.
+        "rows": rows,
+        "istart": np.searchsorted(obs_i[rows], np.arange(len(names) + 1)),
+    }
+
+
+#: The capture match graphs this pass has read, by resolved path.
+_MATCH_GRAPHS = {}
+
+
+def capture_match_graph(matches_path):
+    """The capture's own match graph, read once per file.
+
+    The admission is the match file's OWN (``select_clusters``, the derivation
+    `exp_fast_seed.load_clusters` opens with), so the clusters a re-seat
+    densifies with are the clusters the pipeline itself admits, ranked the way
+    it ranks them.  A cluster a single image sees carries no correspondence at
+    all, which is what the span floor of two says.
+    """
+    key = str(Path(matches_path).resolve())
+    got = _MATCH_GRAPHS.get(key)
+    if got is not None:
+        return got
+    from sfmtool._sfmtool.io import MatchesFile
+
+    mfile = MatchesFile(str(matches_path))
+    sel = mfile.select_clusters(min_span=2)
+    starts = np.asarray(sel.cluster_starts, dtype=np.int64)
+    got = match_graph(
+        list(mfile.image_names),
+        np.repeat(np.arange(len(starts) - 1, dtype=np.int64), np.diff(starts)),
+        sel.member_images,
+        sel.member_features,
+        sel.member_positions(),
+    )
+    _MATCH_GRAPHS[key] = got
+    return got
+
+
+def image_rows(graph, image):
+    """The graph's observation rows of one image, in the graph's index frame."""
+    lo, hi = int(graph["istart"][image]), int(graph["istart"][image + 1])
+    return graph["rows"][lo:hi]
+
+
+def cluster_rows(graph, clusters):
+    """The graph's observation rows of a set of clusters, cluster-major."""
+    cs = graph["cstart"]
+    if not len(clusters):
+        return np.zeros(0, np.int64)
+    return np.concatenate(
+        [np.arange(int(cs[c]), int(cs[c + 1]), dtype=np.int64) for c in clusters]
+    )
+
+
+def graph_support(graph, core, frames):
+    """`{image: support}` -- how many clusters each image of ``frames``
+    observes that at least two core images OTHER than itself observe.
+
+    This is the one counting form the whole densification is stated in, and it
+    is what a resection against the core has to work with, in clusters.  A
+    frame's own observation is not evidence that the rest of the core can see
+    the cluster, so a frame INSIDE the core needs three core observations where
+    a frame outside it needs two; nothing else about the count differs, which
+    is what lets a target's support and a core frame's compare at all.
+    """
+    core = sorted({int(c) for c in core})
+    rows = (
+        np.concatenate([image_rows(graph, c) for c in core])
+        if core
+        else np.zeros(0, np.int64)
+    )
+    seen = np.bincount(graph["obs_c"][rows], minlength=graph["n_cl"])
+    inside = set(core)
+    out = {}
+    for frame in frames:
+        frame = int(frame)
+        cl = graph["obs_c"][image_rows(graph, frame)]
+        out[frame] = int((seen[cl] >= (3 if frame in inside else 2)).sum())
+    return out
+
+
+def support_bar(ctx, hyp):
+    """The member's OWN sufficiency bar, or None where it cannot be read.
+
+    A frame is sufficiently supported when a resection can put at least as much
+    structure under it as the WEAKEST frame the member already stands on has.
+    That is the bar: the minimum support over the member's core frames, in the
+    capture's own match graph.  No quantile and no constant -- a member states
+    what a frame of it needs, so a member whose frames are all thin asks less of
+    a re-seated one than a densely covered member does.
+
+    It is frozen on the member AS RELEASED, so one number serves every step of a
+    walk rather than drifting down with what the walk has dropped.  None where
+    the capture ships no match graph, or the release no arrays to read its core
+    off: both are the same statement, that this walk cannot densify and resects
+    against stored structure exactly as it always has.
+    """
+    if not densify_on():
+        return None
+    path = ctx.get("matches_path")
+    d = (ctx.get("arrays") or {}).get(int(hyp.get("idx", -1)))
+    if path is None or d is None or d.get("posed") is None:
+        return None
+    graph = capture_match_graph(path)
+    core = [
+        graph["index"][str(name).replace("\\", "/")]
+        for name, posed in zip(d["names"], np.asarray(d["posed"], bool))
+        if posed and str(name).replace("\\", "/") in graph["index"]
+    ]
+    sup = graph_support(graph, core, core) if len(core) >= 2 else {}
+    return int(min(sup.values())) if sup else None
+
+
+def densify_targets(graph, core, targets, held, finite, bar):
+    """`(plan, under, order)` -- what each target has to resect against now,
+    what it could reach, and the scaffold candidates in admission-rank order.
+
+    ``targets`` are ``(name, graph image)`` pairs, ``held`` the clusters the
+    member already carries a point for and ``finite`` those it carries a FINITE
+    one for.  A target's support is counted the way a core frame's is
+    (`graph_support`) but over the structure that exists: the eligible clusters
+    it observes that the member holds finitely, which are the ones the primitive
+    re-triangulates from the core and hands it as a correspondence.  A CANDIDATE
+    is an eligible cluster the target observes that the member holds no point
+    for at all; one it holds at infinity is not a candidate, because a bearing
+    is already the member's statement about that cluster.
+
+    The ceiling is where the candidates could carry the target, and it is a
+    diagnostic and never a gate: a target under the bar is densified whether or
+    not its ceiling reaches it.
+    """
+    rows = (
+        np.concatenate([image_rows(graph, int(c)) for c in core])
+        if len(core)
+        else np.zeros(0, np.int64)
+    )
+    seen = np.bincount(graph["obs_c"][rows], minlength=graph["n_cl"])
+    # A cluster two core frames see is one the core can price a depth for with
+    # the target held out; a cluster one core frame sees is a bearing.
+    eligible = seen >= 2
+    plan = {}
+    for name, image in targets:
+        cl = np.unique(graph["obs_c"][image_rows(graph, int(image))])
+        cl = cl[eligible[cl]]
+        before = int(np.isin(cl, finite).sum())
+        cand = cl[~np.isin(cl, held)]
+        plan[name] = {
+            "support_before": before,
+            "ceiling": before + int(len(cand)),
+            "candidates": cand,
+        }
+    under = sorted(n for n in plan if plan[n]["support_before"] < bar)
+    pool = (
+        np.unique(np.concatenate([plan[n]["candidates"] for n in under]))
+        if under
+        else np.zeros(0, np.int64)
+    )
+    return plan, under, pool[np.argsort(graph["rank"][pool], kind="stable")]
+
+
+def admit_scaffold(order, plan, under, bar, usable):
+    """The scaffold clusters a resection is actually given.
+
+    The candidates are offered in admission-rank order and taken while any
+    under-bar target still needs support, so what is admitted is the smallest
+    PREFIX of that order which carries every under-bar target as far as the bar
+    takes it.  Admission stops the moment each of them either meets the bar or
+    has nothing left to offer it -- the order is the union of their own
+    candidates, so reaching its end IS running out.  A cluster that would only
+    add support to a target already at the bar is not admitted: the scaffold
+    answers the question asked, it does not enlarge the member.
+
+    ``usable`` is the candidates that triangulated finitely; the rest are passed
+    over in place, so an estimate that failed costs the order nothing.
+    """
+    need = {n: bar - plan[n]["support_before"] for n in under}
+    mine = {n: {int(c) for c in plan[n]["candidates"]} for n in under}
+    out = []
+    for cluster in order:
+        if all(v <= 0 for v in need.values()):
+            break
+        c = int(cluster)
+        if c not in usable:
+            continue
+        taken = False
+        for n in under:
+            if need[n] > 0 and c in mine[n]:
+                need[n] -= 1
+                taken = True
+        if taken:
+            out.append(c)
+    return out
+
+
+def scaffold_estimates(recon, graph, n_clusters, rows, slot_i, slot_c):
+    """`(xyz, finite)` -- the candidates triangulated at the CORE's own stored
+    poses, and which of them came back a point.
+
+    The estimate is the core's point-estimation kernel, the one the relaxation
+    reaches through `seed_relax.structure.estimate_points`, read at the
+    reconstruction's own camera and poses -- so a scaffold point is the same
+    estimate the member's own points are, taken from the same rays.  Only the
+    core's observations go in: the targets' poses are exactly what is in
+    question, and structure built at them would answer the resection with its
+    own input.  A cluster whose rays land behind a camera that sees them, or
+    that no two core frames subtend an angle over, comes back a bearing and
+    stops being a candidate.
+    """
+    ST = structure_module()
+    pts, at_inf, _census, _pruned = ST.estimate_points(
+        recon.cameras[0],
+        np.asarray(recon.quaternions_wxyz, dtype=np.float64),
+        np.asarray(recon.translations, dtype=np.float64),
+        graph["obs_uv"][rows],
+        slot_i,
+        slot_c,
+        int(n_clusters),
+        0.0,
+    )
+    return pts, ~np.asarray(at_inf, bool) & np.isfinite(pts).all(axis=1)
+
+
+def scaffold_keep_mask(recon, keys):
+    """Which of a reconstruction's points are the member's own.
+
+    A scaffold point is one every observation of which is a scaffold row.  The
+    identity read here is the observation's ``(image, feature)`` pair, which is
+    the one thing that survives the primitive re-triangulating, removing and
+    renumbering points -- a point id does not, and a position least of all.  A
+    member point that happens to share a keypoint with a scaffold cluster keeps
+    its other rows, and so keeps its place.
+    """
+    own = ~np.isin(
+        _obs_keys(recon.track_image_indexes, recon.track_feature_indexes),
+        np.unique(np.asarray(keys, dtype=np.int64)),
+    )
+    return (
+        np.bincount(
+            np.asarray(recon.track_point_indexes, dtype=np.int64),
+            weights=own,
+            minlength=int(recon.point_count),
+        )
+        > 0
+    )
+
+
+def strip_scaffold(recon, keys):
+    """``recon`` with every scaffold point taken back out.
+
+    THE SEAM.  Every path out of a densified resection passes through here
+    before anything reads the answer, so a scaffold point cannot reach the
+    member's arrays, the core artifact this pass writes, or any reading taken
+    of either.
+    """
+    if not len(keys):
+        return recon
+    return recon.filter_points_by_mask(scaffold_keep_mask(recon, keys))
+
+
+def attach_scaffold(recon, obs_img, obs_feat, obs_uv, obs_point, xyz):
+    """``recon`` with the scaffold points appended to its cloud.
+
+    The points go on the end of the cloud and their observations on the end of
+    the track arrays, grouped by point as the writer requires; nothing the
+    member already held is touched.  So the state the primitive sees is the
+    member's own state plus structure, and the strip afterwards is exact.
+    """
+    n0 = int(recon.point_count)
+    order = np.argsort(np.asarray(obs_point, dtype=np.int64), kind="stable")
+    changes = {
+        "positions": np.vstack(
+            [
+                np.asarray(recon.positions_xyzw, dtype=np.float64),
+                np.hstack([np.asarray(xyz, dtype=np.float64), np.ones((len(xyz), 1))]),
+            ]
+        ),
+        "colors": np.vstack(
+            [
+                np.asarray(recon.colors, dtype=np.uint8),
+                np.zeros((len(xyz), 3), np.uint8),
+            ]
+        ),
+        "errors": np.concatenate(
+            [
+                np.asarray(recon.errors, dtype=np.float32),
+                np.zeros(len(xyz), np.float32),
+            ]
+        ),
+        "track_image_indexes": np.concatenate(
+            [
+                np.asarray(recon.track_image_indexes, dtype=np.uint32),
+                np.asarray(obs_img, dtype=np.uint32)[order],
+            ]
+        ),
+        "track_feature_indexes": np.concatenate(
+            [
+                np.asarray(recon.track_feature_indexes, dtype=np.uint32),
+                np.asarray(obs_feat, dtype=np.uint32)[order],
+            ]
+        ),
+        "track_point_indexes": np.concatenate(
+            [
+                np.asarray(recon.track_point_indexes, dtype=np.uint32),
+                (n0 + np.asarray(obs_point, dtype=np.int64)[order]).astype(np.uint32),
+            ]
+        ),
+    }
+    keypoints = recon.keypoints_xy
+    if keypoints is not None:
+        # An inline-keypoint release states every observation's position in the
+        # file itself; a scaffold row states its own the same way, off the graph.
+        changes["keypoints_xy"] = np.vstack(
+            [
+                np.asarray(keypoints, dtype=np.float32),
+                np.asarray(obs_uv, dtype=np.float32)[order],
+            ]
+        )
+    return recon.clone_with_changes(**changes)
+
+
+def densify_for_resect(recon, targets, bar, matches_path):
+    """`(state, record, keys)` -- the reconstruction a re-seat resects against.
+
+    An under-bar target gets SCAFFOLD structure: the eligible clusters it
+    observes that the member never triangulated, admitted in the match file's
+    own rank order until every under-bar target reaches the bar or runs out
+    (`admit_scaffold`), triangulated at the core's stored poses
+    (`scaffold_estimates`), and appended to the cloud with the core
+    observations that priced them and the targets' own.  The TARGETS are never
+    filtered: one the scaffold cannot carry to the bar is handed to the
+    primitive on everything the graph could obtain for it, because the bar
+    governs the effort spent and not whether the question is asked.
+
+    ``keys`` are the appended observations' ``(image, feature)`` identities,
+    which `strip_scaffold` reads the scaffold back out by.  A member the graph
+    cannot be joined to -- no feature indexes to join through, more than one
+    camera to estimate under, too few of its frames named by the file --
+    densifies nothing and says so in the record.
+    """
+    record = {"bar": int(bar), "admitted": 0}
+    graph = capture_match_graph(matches_path)
+    names = [str(n).replace("\\", "/") for n in recon.image_names]
+    want = {str(n).replace("\\", "/") for n in targets}
+    gimg = np.asarray([graph["index"].get(n, -1) for n in names], np.int64)
+    core = [int(g) for n, g in zip(names, gimg) if g >= 0 and n not in want]
+    aim = [(n, int(g)) for n, g in zip(names, gimg) if g >= 0 and n in want]
+    if recon.track_feature_indexes is None or int(recon.camera_count) != 1:
+        record["unavailable"] = "the member's observations do not join the graph"
+        return recon, record, []
+    if not aim or len(core) < 2:
+        record["unavailable"] = "the graph names too few of the member's frames"
+        return recon, record, []
+    cl = _point_clusters(recon, graph)
+    w = np.asarray(recon.positions_xyzw, dtype=np.float64)[:, 3]
+    held = np.unique(cl[cl >= 0])
+    finite = np.unique(cl[(cl >= 0) & (w != 0.0)])
+    plan, under, order = densify_targets(graph, core, aim, held, finite, bar)
+    admitted, rows, img, pts, slot = [], None, None, None, None
+    if len(order):
+        # Every candidate is estimated in one call and the ADMISSION then walks
+        # the rank order over what survived: the prefix it takes is the prefix
+        # it would have taken one estimate at a time, for the cost of one.
+        rows = cluster_rows(graph, order)
+        rmap = np.full(len(graph["names"]), -1, np.int64)
+        rmap[gimg[gimg >= 0]] = np.nonzero(gimg >= 0)[0]
+        slot = np.full(graph["n_cl"], -1, np.int64)
+        slot[order] = np.arange(len(order))
+        img = rmap[graph["obs_i"][rows]]
+        rows, img = rows[img >= 0], img[img >= 0]
+        aimed = np.isin(img, [i for i, n in enumerate(names) if n in want])
+        pts, ok = scaffold_estimates(
+            recon,
+            graph,
+            len(order),
+            rows[~aimed],
+            img[~aimed],
+            slot[graph["obs_c"][rows[~aimed]]],
+        )
+        admitted = admit_scaffold(order, plan, under, bar, {int(c) for c in order[ok]})
+    record["admitted"] = len(admitted)
+    taken = set(admitted)
+    record["targets"] = [
+        {
+            "name": name,
+            "support_before": plan[name]["support_before"],
+            "support_after": plan[name]["support_before"]
+            + sum(1 for c in plan[name]["candidates"] if int(c) in taken),
+            "ceiling": plan[name]["ceiling"],
+            "under_bar": name in under,
+        }
+        for name in sorted(plan)
+    ]
+    if not admitted:
+        return recon, record, []
+    keep = np.isin(graph["obs_c"][rows], admitted)
+    rows, img = rows[keep], img[keep]
+    # Sorted, because the rows join to their point by a search over it; the
+    # admission ORDER decided which clusters are here and has nothing left to
+    # say about how the cloud stores them.
+    admitted = np.sort(np.asarray(admitted, dtype=np.int64))
+    return (
+        attach_scaffold(
+            recon,
+            img,
+            graph["obs_f"][rows],
+            graph["obs_uv"][rows],
+            np.searchsorted(admitted, graph["obs_c"][rows]),
+            pts[slot[admitted]],
+        ),
+        record,
+        _obs_keys(img, graph["obs_f"][rows]),
+    )
+
+
 def resect_group(state, group, cut, ctx, hyp, row):
     """`(report, recon, arrays)` -- `group` re-estimated against the walk state.
 
@@ -2898,6 +3416,12 @@ def resect_group(state, group, cut, ctx, hyp, row):
     the acceptance criteria.  The capture's match graph is passed where the run
     knows it, which admits correspondences the member never assigned to the
     frame; without it the pairs are the frame's own stored observations.
+
+    The state is DENSIFIED first where the walk carries a sufficiency bar and
+    a target reads under it (`densify_for_resect`): the scaffold is structure
+    the capture's graph supports and the member never triangulated, and it
+    exists for this one call.  `strip_scaffold` takes it back out of the
+    answer, so what comes back is the member's own cloud and nothing else.
 
     ``recon`` and ``arrays`` come back as the state the accepted targets
     re-seat, or as the state's own where the primitive accepted none -- a group
@@ -2929,9 +3453,19 @@ def resect_group(state, group, cut, ctx, hyp, row):
     if not targets:
         raise ValueError("the walk state holds none of the named frames")
     matches = ctx.get("matches_path")
+    dense, keys = None, []
+    if matches is not None and densify_on() and state.get("bar") is not None:
+        recon, dense, keys = densify_for_resect(
+            recon, targets, int(state["bar"]), matches
+        )
     out, report = resect_images(
         recon, targets, matches_path=None if matches is None else str(matches)
     )
+    if dense is not None:
+        report["densify"] = dense
+    # THE STRIP, on the one path every answer takes: the scaffold was built for
+    # the call above and is gone before anything else reads `out`.
+    out = strip_scaffold(out, keys)
     seated, _dropped = reseat_split(report, group)
     if not seated:
         return report, state["recon"], state["arrays"]
@@ -2987,6 +3521,8 @@ def take_reseat(state, step, cut, ctx, hyp, row):
                 "dropped": dropped,
                 "retriangulated": report.get("retriangulated"),
             }
+            if report.get("densify") is not None:
+                reseat["densify"] = report["densify"]
             state = dict(state, recon=recon, arrays=arrays)
     gone = set(dropped)
     state = dict(
