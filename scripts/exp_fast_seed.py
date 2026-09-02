@@ -1229,6 +1229,10 @@ def load_clusters():
     _LOAD_CTX = {
         "names": names,
         "dims": dims,
+        # The capture's match graph, by the path this loader actually opened:
+        # a stage that needs the pair rows behind a member's observations reads
+        # the file the pipeline solved from rather than looking for one.
+        "matches_path": Path(patches[0]),
         "min_span": min_span,
         "want_warp": want_warp,
         "refine_radius": mfile.refine_radius,
@@ -4952,6 +4956,9 @@ class CaptureContext:
     rung: object
     #: The selection handle every complement admission is derived from.
     handle: object
+    #: The ``.matches`` file the admission was loaded from, for a stage that
+    #: needs the capture's pair rows and not just the member's observations.
+    matches_path: object
     #: The current admission's observation arrays (cluster, image, uv).
     obs_c: object
     obs_i: object
@@ -5084,6 +5091,7 @@ def capture_context():
         # The cluster SELECTION the exploration solves on; every complement
         # admission is derived from it.
         handle=_SEL_MATCHES,
+        matches_path=_LOAD_CTX.get("matches_path"),
         obs_c=obs_c,
         obs_i=obs_i,
         u=u,
