@@ -143,6 +143,7 @@ def _build_sfmr_data_dict(
     reprojection_errors: np.ndarray,
     track_image_indexes: np.ndarray,
     track_feature_indexes: np.ndarray,
+    keypoints_xy: np.ndarray | None = None,
     point_indexes: np.ndarray,
     observation_counts: np.ndarray,
     feature_tool_hashes: list[bytes],
@@ -155,6 +156,13 @@ def _build_sfmr_data_dict(
 
     ``positions_xyzw`` is the homogeneous ``(P, 4)`` point array; use
     :func:`finite_positions_xyzw` to build it from Euclidean coordinates.
+
+    ``keypoints_xy`` is the optional ``(M, 2)`` inline copy of each
+    observation's pixel position, parallel to ``track_image_indexes``. The
+    reconstruction stays ``sift_files`` either way -- the observations are still
+    the features ``track_feature_indexes`` point at -- but with the copy present
+    a consumer reads where each observation sits without opening the ``.sift``
+    companions. Omit it and the file carries no such column.
     """
     data = {
         "metadata": metadata,
@@ -174,6 +182,8 @@ def _build_sfmr_data_dict(
         "sift_content_hashes": sift_content_hashes,
         "thumbnails_y_x_rgb": np.stack(thumbnails).astype(np.uint8),
     }
+    if keypoints_xy is not None:
+        data["keypoints_xy"] = np.asarray(keypoints_xy, dtype=np.float32)
     if rig_frame_data is not None:
         data["rig_frame_data"] = rig_frame_data
     return data

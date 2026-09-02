@@ -57,8 +57,12 @@ pub struct PointInspection {
 }
 
 impl SfmrReconstruction {
-    /// Inspect a single 3D point's triangulation. Reads the `.sift` files of the
-    /// observing images, so the workspace feature files must be present.
+    /// Inspect a single 3D point's triangulation.
+    ///
+    /// Observation coordinates come from the reconstruction's inline
+    /// `keypoints_xy` when it carries one; otherwise they are read from the
+    /// observing images' `.sift` files, which must then be present in the
+    /// workspace.
     ///
     /// `point_idx` must be in range; callers should validate it first.
     pub fn inspect_point(
@@ -77,6 +81,9 @@ impl SfmrReconstruction {
         let start = self.observation_offsets[point_idx];
         let observations = self.observations_for_point(point_idx);
         let noise = (pt.error as f64).max(noise_floor_px);
+        // The reconstruction's own statement of where its observations sit, when
+        // it makes one; the `.sift` read below is the fallback.
+        let inline = self.keypoints_xy();
 
         let mut dirs: Vec<Vector3<f64>> = Vec::with_capacity(observations.len());
         let mut centers: Vec<Point3<f64>> = Vec::with_capacity(observations.len());
@@ -90,15 +97,26 @@ impl SfmrReconstruction {
             let camera = &self.cameras[image.camera_index as usize];
             let (fx, fy) = camera.focal_lengths();
 
-            let sift_path = self.sift_path_for_image(img_idx);
-            let sift = sift_format::read_sift_partial(&sift_path, feature_index as usize + 1)
-                .map_err(|e| ReconstructionError::SiftRead {
-                    path: sift_path.clone(),
-                    source: e.to_string(),
-                })?;
-            let f = feature_index as usize;
-            let u = sift.positions_xy[[f, 0]] as f64;
-            let v = sift.positions_xy[[f, 1]] as f64;
+            let (u, v) = match inline {
+                Some(keypoints_xy) => (
+                    keypoints_xy[[start + k, 0]] as f64,
+                    keypoints_xy[[start + k, 1]] as f64,
+                ),
+                None => {
+                    let sift_path = self.sift_path_for_image(img_idx);
+                    let sift =
+                        sift_format::read_sift_partial(&sift_path, feature_index as usize + 1)
+                            .map_err(|e| ReconstructionError::SiftRead {
+                                path: sift_path.clone(),
+                                source: e.to_string(),
+                            })?;
+                    let f = feature_index as usize;
+                    (
+                        sift.positions_xy[[f, 0]] as f64,
+                        sift.positions_xy[[f, 1]] as f64,
+                    )
+                }
+            };
 
             let ray_cam = camera.pixel_to_ray(u, v);
             let ray_cam = Vector3::new(ray_cam[0], ray_cam[1], ray_cam[2]);

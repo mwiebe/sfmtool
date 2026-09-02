@@ -282,8 +282,11 @@ impl PySfmrReconstruction {
     }
 
     /// Per-observation sub-pixel keypoints ``(K, 2)`` (image-space ``(u, v)``),
-    /// parallel to the track arrays. ``None`` unless :attr:`feature_source` is
-    /// ``"embedded_patches"``.
+    /// parallel to the track arrays, or ``None`` when the reconstruction carries
+    /// none inline. Always present when :attr:`feature_source` is
+    /// ``"embedded_patches"``; present under ``"sift_files"`` only when the file
+    /// carries the optional inline copy of its observation coordinates, which
+    /// consumers then read in preference to the ``.sift`` features.
     #[getter]
     fn keypoints_xy<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f32>>> {
         self.inner

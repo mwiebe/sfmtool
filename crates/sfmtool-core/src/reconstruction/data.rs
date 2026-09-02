@@ -163,6 +163,15 @@ pub enum ObservationSource {
     SiftFiles {
         /// `(M,)` feature index per observation, parallel to `tracks`.
         feature_indexes: Vec<u32>,
+        /// Optional `(M, 2)` inline `(u, v)` per observation, parallel to
+        /// `tracks`. When present it is this reconstruction's own statement of
+        /// where each observation sits, and every consumer that resolves an
+        /// observation's pixel reads it in preference to the `.sift` feature the
+        /// matching `feature_indexes` entry points at -- a producer may have
+        /// refined the coordinate past the original detection. The `.sift` files
+        /// stay the source of the feature itself (descriptor, scale, affine
+        /// shape).
+        keypoints_xy: Option<Array2<f32>>,
         /// XXH128 of the feature-extraction tool config, per image.
         feature_tool_hashes: Vec<[u8; 16]>,
         /// XXH128 of the `.sift` file content, per image.
@@ -294,12 +303,16 @@ impl SfmrReconstruction {
         }
     }
 
-    /// Per-observation sub-pixel keypoints `(M, 2)`, or `None` for a `sift_files`
-    /// reconstruction.
+    /// Per-observation sub-pixel keypoints `(M, 2)`, or `None` when this
+    /// reconstruction carries none inline.
+    ///
+    /// Always present for `embedded_patches`, where the inline column *is* the
+    /// observation coordinate; present for `sift_files` only when the file
+    /// carries the optional inline copy.
     pub fn keypoints_xy(&self) -> Option<&Array2<f32>> {
         match &self.observations {
             ObservationSource::EmbeddedPatches { keypoints_xy, .. } => Some(keypoints_xy),
-            ObservationSource::SiftFiles { .. } => None,
+            ObservationSource::SiftFiles { keypoints_xy, .. } => keypoints_xy.as_ref(),
         }
     }
 
@@ -360,6 +373,7 @@ impl SfmrReconstruction {
         match &self.observations {
             ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy,
                 feature_tool_hashes,
                 sift_content_hashes,
             } => {
@@ -368,6 +382,14 @@ impl SfmrReconstruction {
                         "feature_indexes length ({}) must match observation count ({n_obs})",
                         feature_indexes.len()
                     ));
+                }
+                if let Some(keypoints_xy) = keypoints_xy {
+                    if keypoints_xy.nrows() != n_obs {
+                        return Err(format!(
+                            "keypoints_xy row count ({}) must match observation count ({n_obs})",
+                            keypoints_xy.nrows()
+                        ));
+                    }
                 }
                 if feature_tool_hashes.len() != n_img {
                     return Err(format!(
@@ -428,6 +450,31 @@ impl SfmrReconstruction {
         let start = self.observation_offsets[point_idx];
         let end = self.observation_offsets[point_idx + 1];
         &self.tracks[start..end]
+    }
+
+    /// The observation row of the `(image, point, feature)` triple, or `None`
+    /// when that image does not observe that point through that feature.
+    ///
+    /// A row index is what the per-observation columns (`keypoints_xy`,
+    /// `observation_confidence`) are addressed by, while
+    /// `image_feature_to_point` is keyed by feature; this walks the point's
+    /// short observation run to cross the two.
+    pub fn observation_row(
+        &self,
+        image_index: usize,
+        point_index: u32,
+        feature_index: u32,
+    ) -> Option<usize> {
+        let feature_indexes = self.feature_indexes()?;
+        let start = self.observation_offsets[point_index as usize];
+        self.observations_for_point(point_index as usize)
+            .iter()
+            .enumerate()
+            .find(|(k, obs)| {
+                obs.image_index as usize == image_index
+                    && feature_indexes[start + k] == feature_index
+            })
+            .map(|(k, _)| start + k)
     }
 
     /// Return the image indices that observe a given 3D point.

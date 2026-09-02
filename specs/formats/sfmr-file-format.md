@@ -206,7 +206,7 @@ reconstruction.sfmr (ZIP archive)
 └── tracks/
     ├── image_indexes.{M}.uint32.zst           # Image index per observation
     ├── feature_indexes.{M}.uint32.zst         # (sift_files only) feature index per observation
-    ├── keypoints_xy.{M}.2.float32.zst         # (embedded_patches only) inline 2D keypoint (version 4+)
+    ├── keypoints_xy.{M}.2.float32.zst         # inline 2D keypoint (embedded_patches; optional in sift_files) (version 4+)
     ├── observation_confidence.{M}.uint8.zst   # (Optional) per-observation sharpness confidence (version 6+)
     ├── point_indexes.{M}.uint32.zst           # Point index per observation
     ├── observation_counts.{N}.uint32.zst      # Observations per point
@@ -219,7 +219,9 @@ observation's 2D coordinate is carried; there is **no mixing** within a file. Th
 two modes differ only in the per-observation and per-image columns above (marked
 *sift_files only* / *embedded_patches only*). A `sift_files` file is the classic
 model (and what versions 1–3 always were); an `embedded_patches` file stores the
-2D coordinate inline, based on patches. See
+2D coordinate inline, based on patches. A `sift_files` file MAY additionally
+carry `tracks/keypoints_xy`, stating its observation coordinates inline rather
+than only by reference. See
 [Observation source](#observation-source-version-4) below.
 
 Where:
@@ -280,8 +282,9 @@ JSON structure describing the reconstruction:
 - `feature_source`: (version 4+) How each observation's 2D coordinate is carried
   — `"sift_files"` (a reference into a per-image `.sift` file, the model of
   versions 1–3) or `"embedded_patches"` (an inline patch-derived keypoint). A
-  file is wholly one mode. Absent in versions 1–3, which are read as
-  `"sift_files"`. See [Observation source](#observation-source-version-4).
+  file is wholly one mode, though a `sift_files` file may carry an inline copy of
+  its coordinates alongside the reference. Absent in versions 1–3, which are read
+  as `"sift_files"`. See [Observation source](#observation-source-version-4).
 - `operation`: Type of operation that created this reconstruction
   - `"sfm_solve"`: Structure-from-Motion reconstruction
   - `"transform"`: Geometric transformation of an existing reconstruction
@@ -384,7 +387,7 @@ XXH128 hashes for integrity verification:
 - `frames_xxh128`: (Optional) Hash of all frames data files' uncompressed contents, fed sequentially into a streaming XXH128 hasher in lexicographic path order. Present only when `frames/` section exists.
 - `images_xxh128`: Hash of all image data files' uncompressed contents, fed sequentially into a streaming XXH128 hasher in lexicographic path order (includes depth statistics and histogram files). The mode-dependent per-image hash files are included as present: `feature_tool_hashes` + `sift_content_hashes` for a `sift_files` file, or `image_file_hashes` for an `embedded_patches` file.
 - `points3d_xxh128`: Hash of all points3d data files' uncompressed contents, fed sequentially into a streaming XXH128 hasher in lexicographic path order. Includes the optional per-point arrays — `normals_xyz`, `normal_confidence`, and the patch-frame files `patch_u_halfvec_xyz`, `patch_v_halfvec_xyz`, `patch_bitmaps_y_x_rgba` — only when they are present.
-- `tracks_xxh128`: Hash of all tracks data files' uncompressed contents, fed sequentially into a streaming XXH128 hasher in lexicographic path order. The present per-observation column is mode-dependent: `feature_indexes` for a `sift_files` file, or `keypoints_xy` for an `embedded_patches` file (the other is absent). The optional `observation_confidence` column participates when present, in its lexicographic slot (after `metadata.json`, before `observation_counts`).
+- `tracks_xxh128`: Hash of all tracks data files' uncompressed contents, fed sequentially into a streaming XXH128 hasher in lexicographic path order. `feature_indexes` is present for a `sift_files` file and absent for an `embedded_patches` one. `keypoints_xy` participates whenever it is present — always in an `embedded_patches` file, and in a `sift_files` file when it carries the optional inline copy — in its lexicographic slot (after `image_indexes`, before `metadata.json`). The optional `observation_confidence` column participates when present, in its lexicographic slot (after `metadata.json`, before `observation_counts`).
 - `content_xxh128`: Hash of all present section hashes concatenated as raw 16-byte big-endian digests in order: metadata, cameras, rigs (if present), frames (if present), images, points3d, tracks.
 
 **Note**: Per-section metadata files (`images/metadata.json.zst`, `points3d/metadata.json.zst`, `tracks/metadata.json.zst`) are included in their respective section hashes.
@@ -1113,14 +1116,18 @@ Tracks link 2D feature observations to 3D points. Each observation has three com
 ```
 
 - `observation_count`: number of observations `M`.
-- `has_feature_indexes` / `has_keypoints_xy`: (version 4+) flag the two
-  mutually-exclusive per-observation columns. Exactly one is `true`:
-  `has_feature_indexes` in a `sift_files` file, `has_keypoints_xy` in an
-  `embedded_patches` file. They are redundant with the top-level `feature_source`
-  but kept local to the section so a reader that loads `tracks/metadata.json`
-  alone knows which column to expect (mirroring the `points3d/metadata.json`
-  `has_*` flags). A missing flag is `false`; a version 1–3 file (no flags) is read
-  as `has_feature_indexes = true`, `has_keypoints_xy = false`.
+- `has_feature_indexes`: (version 4+) `true` in a `sift_files` file, `false` in
+  an `embedded_patches` one. Redundant with the top-level `feature_source` but
+  kept local to the section so a reader that loads `tracks/metadata.json` alone
+  knows which column to expect (mirroring the `points3d/metadata.json` `has_*`
+  flags). A missing flag is `false`; a version 1–3 file (no flags) is read as
+  `has_feature_indexes = true`.
+- `has_keypoints_xy`: (version 4+) whether the `keypoints_xy` column below is
+  present. It is a presence flag, not a mode flag: `true` in every
+  `embedded_patches` file, where the column is the observation coordinate, and
+  `true` in a `sift_files` file exactly when that file carries the optional
+  inline copy. A missing flag is `false`, so a version 1–3 file reads as carrying
+  no inline keypoints.
 - `has_observation_confidence`: (version 6+) whether the optional
   `observation_confidence` column below is present. Independent of the two flags
   above — it rates observations, which exist in either mode. A missing flag is
@@ -1148,9 +1155,9 @@ Feature index for each observation:
   **absent** in `embedded_patches` files, where `keypoints_xy` carries the
   coordinate directly. Always present in versions 1–3.
 
-#### `tracks/keypoints_xy.{M}.2.float32.zst` (embedded_patches only, version 4+)
+#### `tracks/keypoints_xy.{M}.2.float32.zst` (version 4+)
 
-The inline 2D keypoint for each observation in an `embedded_patches` file:
+The inline 2D keypoint for each observation:
 
 - **Shape**: `(M, 2)` where M = observation_count
 - **Data type**: `float32` (little-endian)
@@ -1161,16 +1168,24 @@ The inline 2D keypoint for each observation in an `embedded_patches` file:
   camera intrinsics (the in-frame test used for a projected point). MUST be
   sorted lexicographically by `(point_indexes[j], image_indexes[j])`, parallel to
   the other `tracks/*` arrays.
-- **Meaning**: besides being the observation's 2D coordinate, the keypoint
-  anchors that observation's patch — see
-  [Observation source](#observation-source-version-4).
-- **Presence**: present only in `embedded_patches` files
-  (`has_keypoints_xy = true`).
+- **Meaning**: the observation's 2D coordinate. In an `embedded_patches` file it
+  additionally anchors that observation's patch — see
+  [Observation source](#observation-source-version-4). In a `sift_files` file it
+  is the file's own statement of where observation `j` sits, so a consumer that
+  has the `.sfmr` alone still reads every observation's coordinate. A consumer
+  resolving that coordinate reads this column in preference to
+  `sift[feature_indexes[j]]`, and the two need not agree: a producer may write a
+  refined position that no `.sift` file holds. The `.sift` files stay the
+  referenced source of the feature itself (descriptor, scale, affine shape).
+- **Presence**: `has_keypoints_xy = true`. Always present in `embedded_patches`
+  files; optional in `sift_files` files, where the producer chooses whether to
+  copy the coordinates in.
 
-Mode exclusivity is enforced on write: the writer rejects data carrying both
-`feature_indexes` and `keypoints_xy` (or neither). The reader is lenient — it
-reads only the column selected by `feature_source` and ignores a stray
-opposite-mode entry, which is also excluded from `tracks_xxh128` verification.
+The writer rejects a `sift_files` file that also carries the `embedded_patches`
+image-identity column (`images/image_file_hashes`), and an `embedded_patches`
+file that carries any of the `.sift`-link columns: no file states both ways of
+identifying an observation. `keypoints_xy` is outside that exclusivity — it
+identifies nothing on its own, so it may accompany `feature_indexes`.
 
 #### `tracks/observation_confidence.{M}.uint8.zst` (Optional, version 6+)
 
@@ -1235,14 +1250,15 @@ columns:
 | | `sift_files` (versions 1–3 model) | `embedded_patches` (version 4+) |
 |---|---|---|
 | `tracks/feature_indexes` | **present** (index into `.sift`) | **absent** |
-| `tracks/keypoints_xy` | **absent** | **present** (the coordinate) |
+| `tracks/keypoints_xy` | **optional** (an inline copy of the coordinate) | **present** (the coordinate) |
 | `images/feature_tool_hashes` | **present** | **absent** |
 | `images/sift_content_hashes` | **present** | **absent** |
 | `images/image_file_hashes` | **absent** (image hash reachable via the `.sift`) | **present** (direct image identity) |
-| 2D coordinate source | `.sift[feature_indexes[j]]` | `keypoints_xy[j]` directly |
+| 2D coordinate source | `keypoints_xy[j]` when the inline copy is present, else `.sift[feature_indexes[j]]` | `keypoints_xy[j]` directly |
 
-A `sift_files` v4 file is byte-equivalent to a v3 file except for the `version`
-and `feature_source` metadata keys and the `tracks/metadata.json` `has_*` keys.
+A `sift_files` v4 file that carries no inline keypoints is byte-equivalent to a
+v3 file except for the `version` and `feature_source` metadata keys and the
+`tracks/metadata.json` `has_*` keys.
 An `embedded_patches` file is self-contained — it needs no `.sift` companion, and
 its workspace `feature_prefix_dir` is optional.
 

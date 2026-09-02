@@ -210,6 +210,9 @@ impl SfmrReconstruction {
                         SfmrError::InvalidFormat("sift_files file missing feature_indexes".into())
                     })?
                     .to_vec(),
+                // Optional: a `sift_files` file may carry an inline copy of its
+                // observation coordinates, and it rides straight through.
+                keypoints_xy: data.keypoints_xy,
                 feature_tool_hashes: data.feature_tool_hashes.ok_or_else(|| {
                     SfmrError::InvalidFormat("sift_files file missing feature_tool_hashes".into())
                 })?,
@@ -382,13 +385,14 @@ impl SfmrReconstruction {
         ) = match &self.observations {
             ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy,
                 feature_tool_hashes,
                 sift_content_hashes,
             } => (
                 Some(Array1::from_vec(feature_indexes.clone())),
                 Some(feature_tool_hashes.clone()),
                 Some(sift_content_hashes.clone()),
-                None,
+                keypoints_xy.clone(),
                 None,
             ),
             ObservationSource::EmbeddedPatches {

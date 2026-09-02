@@ -109,8 +109,9 @@ pub fn read_sfmr(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
         None => dict.set_item("normals_xyz", py.None())?,
     }
     dict.set_item("image_indexes", data.image_indexes.into_pyarray(py))?;
-    // feature_indexes (sift_files) / keypoints_xy (embedded_patches) are
-    // mode-dependent: emit the present one, `None` for the absent one.
+    // feature_indexes is the sift_files column and keypoints_xy the
+    // embedded_patches one, except that a sift_files file may also carry
+    // keypoints_xy inline: emit each present column, `None` for an absent one.
     match data.feature_indexes {
         Some(f) => dict.set_item("feature_indexes", f.into_pyarray(py))?,
         None => dict.set_item("feature_indexes", py.None())?,
@@ -186,8 +187,9 @@ pub(crate) fn parse_sfmr_data_from_dict(
     let observation_counts: PyReadonlyArray1<u32> =
         get_item(data, "observation_counts")?.extract()?;
 
-    // Mode-dependent columns: exactly one of feature_indexes / keypoints_xy and
-    // one of the per-image hash sets is present (the others None or absent).
+    // Mode-dependent columns: one of the per-image hash sets is present (the
+    // other None or absent), and so is feature_indexes or keypoints_xy — though
+    // a sift_files reconstruction may carry both, the second as its inline copy.
     let feature_indexes = match get_optional_item(data, "feature_indexes")? {
         Some(v) => Some(
             v.extract::<PyReadonlyArray1<u32>>()?

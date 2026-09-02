@@ -629,7 +629,9 @@ pub(crate) fn clone_with_changes(
         // Per-observation feature indices live in the observation source for
         // sift_files reconstructions; keep them in step with the new tracks.
         // (embedded_patches has no feature indices — its per-observation data
-        // is keypoints_xy, updated via the 'keypoints_xy' kwarg.)
+        // is keypoints_xy, updated via the 'keypoints_xy' kwarg, which is also
+        // how a sift_files recon carrying the optional inline column keeps that
+        // column in step.)
         if let sfmtool_core::ObservationSource::SiftFiles {
             feature_indexes, ..
         } = &mut recon.observations
@@ -731,8 +733,14 @@ fn rebuild_observation_source(
                     )
                 })?;
             require_img_len("sift_content_hashes", sift_content_hashes.len())?;
+            // The inline keypoint column is optional here: a supplied one
+            // replaces it, and otherwise whatever the source carried rides
+            // along. Its row count is checked by the caller's final
+            // `validate_observation_columns`.
+            let keypoints_xy = new_keypoints_xy.or_else(|| recon.keypoints_xy().cloned());
             ObservationSource::SiftFiles {
                 feature_indexes,
+                keypoints_xy,
                 feature_tool_hashes,
                 sift_content_hashes,
             }

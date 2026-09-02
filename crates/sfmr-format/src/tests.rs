@@ -324,6 +324,136 @@ fn test_embedded_patches_round_trip() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Give the SIFT-referenced fixture the optional inline keypoint column: the
+/// same sub-pixel positions the `.sift` companions hold, copied into the file.
+fn make_sift_files_data_with_keypoints() -> SfmrData {
+    let mut data = make_test_data();
+    let m = data.metadata.observation_count as usize;
+    // Sub-pixel keypoints inside the 1920x1080 camera, one per observation.
+    let kp: Vec<f32> = (0..m)
+        .flat_map(|i| [300.5 + i as f32, 400.75 + i as f32])
+        .collect();
+    data.keypoints_xy = Some(Array2::from_shape_vec((m, 2), kp).unwrap());
+    data
+}
+
+#[test]
+fn test_sift_files_round_trip_with_inline_keypoints() {
+    let mut data = make_sift_files_data_with_keypoints();
+    let dir = std::env::temp_dir().join("sfmr_test_sift_inline_keypoints");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+
+    let options = WriteOptions {
+        skip_recompute_depth_stats: true,
+        ..Default::default()
+    };
+    write_sfmr_with_options(&path, &mut data, &options).unwrap();
+
+    // Still a sift_files file: the .sift link is intact, the image-bytes hash
+    // (the embedded_patches identity column) stays absent, and the inline
+    // keypoints ride along beside them.
+    let loaded = read_sfmr(&path).unwrap();
+    assert_eq!(loaded.metadata.feature_source, FEATURE_SOURCE_SIFT_FILES);
+    assert_eq!(loaded.feature_indexes, data.feature_indexes);
+    assert_eq!(loaded.feature_tool_hashes, data.feature_tool_hashes);
+    assert_eq!(loaded.sift_content_hashes, data.sift_content_hashes);
+    assert!(loaded.image_file_hashes.is_none());
+    assert_eq!(loaded.keypoints_xy, data.keypoints_xy);
+
+    // The column is hashed in its lexicographic slot like any other, so
+    // verification passes and the tracks hash differs from the same
+    // reconstruction written without it.
+    let (valid, errors) = verify_sfmr(&path).unwrap();
+    assert!(valid, "verification failed: {errors:?}");
+
+    let mut bare = make_test_data();
+    let bare_path = dir.join("bare.sfmr");
+    write_sfmr_with_options(&bare_path, &mut bare, &options).unwrap();
+    assert_ne!(
+        read_sfmr(&bare_path).unwrap().content_hash.tracks_xxh128,
+        loaded.content_hash.tracks_xxh128,
+        "the inline keypoints must participate in the tracks hash"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_sift_files_round_trip_without_inline_keypoints() {
+    // The column is optional: a sift_files file written without it carries no
+    // keypoints entry and reads back as `None`.
+    let mut data = make_test_data();
+    let dir = std::env::temp_dir().join("sfmr_test_sift_no_keypoints");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+    write_sfmr(&path, &mut data).unwrap();
+
+    let loaded = read_sfmr(&path).unwrap();
+    assert_eq!(loaded.metadata.feature_source, FEATURE_SOURCE_SIFT_FILES);
+    assert!(loaded.feature_indexes.is_some());
+    assert!(loaded.keypoints_xy.is_none());
+    let (valid, errors) = verify_sfmr(&path).unwrap();
+    assert!(valid, "verification failed: {errors:?}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_sift_files_inline_keypoints_validated_on_read_and_verify() {
+    // The bounds check is the column's, not the mode's: an out-of-bounds inline
+    // keypoint is rejected in a sift_files file exactly as in an embedded one.
+    let dir = std::env::temp_dir().join("sfmr_test_sift_kp_validate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut oob = make_sift_files_data_with_keypoints();
+    oob.keypoints_xy.as_mut().unwrap()[[2, 1]] = 5000.0;
+    let path = dir.join("oob.sfmr");
+    write_sfmr(&path, &mut oob).unwrap(); // write does not bounds-check
+    let err = read_sfmr(&path).err().unwrap();
+    assert!(format!("{err}").contains("image bounds"), "{err}");
+    let (valid, errors) = verify_sfmr(&path).unwrap();
+    assert!(
+        !valid && errors.iter().any(|e| e.contains("image bounds")),
+        "{errors:?}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_sift_files_sort_reorders_inline_keypoints_in_lockstep() {
+    // Deliberately unsorted tracks, each keypoint tagged (image+0.25,
+    // point+0.25): after the write-time sort every row's keypoint must still
+    // match its own (point, image), as the feature indexes do.
+    let mut d = make_test_data();
+    let pts = [2u32, 0, 4, 1, 0, 3, 1, 1];
+    let imgs = [0u32, 0, 2, 0, 1, 1, 1, 2];
+    d.point_indexes = Array1::from_vec(pts.to_vec());
+    d.image_indexes = Array1::from_vec(imgs.to_vec());
+    d.observation_counts = Array1::from_vec(vec![2, 3, 1, 1, 1]); // per point 0..4
+    let kp: Vec<f32> = (0..8)
+        .flat_map(|j| [imgs[j] as f32 + 0.25, pts[j] as f32 + 0.25])
+        .collect();
+    d.keypoints_xy = Some(Array2::from_shape_vec((8, 2), kp).unwrap());
+
+    let dir = std::env::temp_dir().join("sfmr_test_sift_kp_reorder");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("u.sfmr");
+    write_sfmr(&path, &mut d).unwrap();
+    let loaded = read_sfmr(&path).unwrap();
+
+    let kp = loaded.keypoints_xy.unwrap();
+    for j in 0..8 {
+        let p = loaded.point_indexes[j] as f32 + 0.25;
+        let i = loaded.image_indexes[j] as f32 + 0.25;
+        assert_eq!(
+            (kp[[j, 0]], kp[[j, 1]]),
+            (i, p),
+            "row {j} keypoint misaligned"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn test_embedded_patches_requires_patch_frame() {
     // An embedded_patches file without the per-point patch frame is rejected
@@ -348,14 +478,15 @@ fn test_embedded_patches_requires_patch_frame() {
 
 #[test]
 fn test_write_rejects_contradictory_columns() {
-    // sift_files must not also carry keypoints_xy.
+    // sift_files must not also carry the embedded_patches image hash: that
+    // column is the substitute for the .sift link, not an addition to it.
     let mut d = make_test_data();
-    d.keypoints_xy = Some(Array2::zeros((d.metadata.observation_count as usize, 2)));
+    d.image_file_hashes = Some(vec![[3u8; 16]; d.metadata.image_count as usize]);
     let dir = std::env::temp_dir().join("sfmr_test_contradiction1");
     std::fs::create_dir_all(&dir).unwrap();
     let err = write_sfmr(&dir.join("a.sfmr"), &mut d).unwrap_err();
     assert!(
-        format!("{err}").contains("must not carry keypoints_xy"),
+        format!("{err}").contains("must not carry image_file_hashes"),
         "{err}"
     );
 
