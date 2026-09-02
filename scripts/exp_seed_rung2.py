@@ -873,6 +873,17 @@ def reseat_on():
     return (os.environ.get("SFMTOOL_RUNG2_RESEAT", "1") or "1").strip() != "0"
 
 
+def pose_quorum():
+    """How many distinct pose-instability channels an outright refusal needs.
+
+    The default 1 is the shipped rule -- any pose channel joined by a second
+    channel of any kind refuses outright.  ``SFMTOOL_RUNG2_POSE_QUORUM=2`` is
+    the plurality-of-evidence experiment: a single pose reading standing among
+    structure evidence is one reading, and the member goes to salvage.
+    """
+    return int(os.environ.get("SFMTOOL_RUNG2_POSE_QUORUM", "1") or "1")
+
+
 #: One per-frame channel.  `eligible` is the per-frame record's own
 #: eligibility field, evaluated on that record.
 #:
@@ -3555,7 +3566,7 @@ def refuse_or_salvage(
     phrase = defect_phrase(evidence)
     rec["fired_channels"] = fired
     rec["pose_instability"] = pose
-    if (pose and len(fired) >= 2) or not salvage_on():
+    if (len(pose) >= pose_quorum() and len(fired) >= 2) or not salvage_on():
         rec["verdict"] = "refuse"
         rec["verdict_reason"] = f"{phrase}; {why}"
         return
