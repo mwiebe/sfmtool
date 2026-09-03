@@ -9,7 +9,6 @@ Pose estimation, epipolar geometry, and optimization. Implemented in
 | [relative-pose.md](relative-pose.md) | Relative pose between two cameras from ray correspondences. |
 | [baseline-direction.md](baseline-direction.md) | The direction between two centres from ray coplanarity, with the rotations held, batched over a graph. |
 | [translation-averaging.md](translation-averaging.md) | Camera centres from pairwise baseline directions and relative lengths, read off the null space of the angular form; the orientation bit from cheirality. |
-| [cluster-pinhole-bootstrap.md](cluster-pinhole-bootstrap.md) | Bootstrapping a coarse reconstruction from cluster patches alone, with no prior intrinsics and no two-view geometry. |
 | [seed-hypothesis-loop.md](seed-hypothesis-loop.md) | Developing and committing the whole set of seed candidates a capture's cluster evidence supports; the set is the product. |
 | [seed-candidate-evaluation.md](seed-candidate-evaluation.md) | The gauge-free battery every committed seed candidate is measured by before release. |
 | [seed-drive.md](seed-drive.md) | Judging the candidate set while it is still being produced: pull, complete, judge, and form the next complement from the survivors' claims. |
