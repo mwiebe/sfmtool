@@ -332,9 +332,12 @@ def timings_block():
 
 # ── Fisheye seed camera context (scripts/notes-fisheye-seed.md, Phases 1-6) ──
 #
-# A per-run CAMERA CONTEXT — image size, base model, focal, and any radial
-# spline promoted onto them — behind every camera the seed builds.  Default:
-# SIMPLE_PINHOLE, which is the code path this script has always run.
+# A per-run CAMERA CONTEXT — image size, radial chart, focal, spline
+# coefficients — behind every camera the seed builds.  The model is a spline
+# model from the first camera of the run, starting at zero knots, and a
+# zero-knot spline is its chart's base map bit for bit; the default chart is the
+# perspective one (SFMTOOL_PINHOLE), which is the code path this script has
+# always run.
 #
 # THE CONTEXT IS ONE OBJECT, and it lives in ``seed_camera``: the stage-1 solve
 # here and the writers there build their cameras out of the same state, so a
@@ -359,11 +362,11 @@ def timings_block():
 # on the epipolar cell with zero rotation-cell mass.  A capture with no verdict
 # has no equidistant focal to build a context from at all.
 #
-# The fisheye model is EQUIDISTANT_FISHEYE — the exact SIMPLE_PINHOLE analog
-# (one focal, centred principal point) parameterizing `theta = r/f` — at the
-# verdict's EQUIDISTANT focal, which is a different quantity from the pinhole
-# vote and not commensurable with it.  (Phase 1-2 carried the same map as
-# SIMPLE_RADIAL_FISHEYE with k1 = 0 by hand; Phase 3a made it a native model
+# The fisheye chart is SFMTOOL_FISHEYE at zero knots — `theta = r/f`, one focal
+# and a centred principal point, the exact analog of the perspective chart — at
+# the verdict's EQUIDISTANT focal, which is a different quantity from the
+# pinhole vote and not commensurable with it.  (Phase 1-2 carried the same map
+# as SIMPLE_RADIAL_FISHEYE with k1 = 0 by hand; Phase 3a made it a native model
 # with closed-form projection both ways and an analytic pixel Jacobian, so the
 # native BA and pose refinement linearize analytically instead of
 # central-differencing.)
@@ -1363,7 +1366,7 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
         )
         return
     print(detected)
-    set_camera_context("EQUIDISTANT_FISHEYE", f_eq)
+    set_camera_context("SFMTOOL_FISHEYE", f_eq)
     # The parallax diagnostics that steer stage 1's seed-class choice must be
     # read off the WINNING column: `parallax_poverty` is the median
     # rotation/essential consensus ratio, and the pinhole column's version of
@@ -1373,7 +1376,7 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
     _VOTE_POVERTY = float(eq.get("parallax_poverty") or 0.0)
     _VOTE_ROT_N = int(eq.get("n_rotation") or 0)
     print(
-        "  ROUTED to the fisheye seed: camera context -> EQUIDISTANT_FISHEYE "
+        "  ROUTED to the fisheye seed: camera context -> SFMTOOL_FISHEYE "
         f"at the equidistant focal {f_eq:.1f} px.  Stage 1 now runs "
         "its ray-space seed (Phase 2): ray-space two-view pair init instead "
         "of the affine factorization, ray parallax, a ray-rotation far-field "
@@ -2524,7 +2527,7 @@ def evo_stage(
                 B.spline_model()[0],
                 float(lens["f_chart"]),
                 bspline=np.asarray(lens["coeffs"], dtype=np.float64),
-                theta_max=float(lens["d_max"]),
+                d_max=float(lens["d_max"]),
             )
         rv, tv, pd = _snap_full_frame(data, keep, rvec, tvec, posed, f)
         written = B.seed_snapshot(
@@ -2549,7 +2552,7 @@ def evo_stage(
             prior["model"],
             prior["focal"],
             bspline=prior["bspline"],
-            theta_max=prior["theta_max"],
+            d_max=prior["d_max"],
         )
     _EVO["cands"][serial]["stages"][stage] = row
     return row
@@ -2753,9 +2756,10 @@ def reproj_res_one(cam, rvec_i, tvec_i, x_pts, uv):
 
 # ── Bundle adjustment ────────────────────────────────────────────────────────
 
-# Free-focal BA admits both of this script's camera models: SIMPLE_PINHOLE and
-# EQUIDISTANT_FISHEYE.  Both are single-focal and distortion-free, so the
-# kernel's analytic focal column `d(u, v)/df = (u - cx)/f` is EXACT for each
+# Free-focal BA admits both of the context's camera models, SFMTOOL_PINHOLE and
+# SFMTOOL_FISHEYE, on either chart and at any knot count.  The focal is the
+# central scale under the model's center-anchored gauge, so the kernel's
+# analytic focal column `d(u, v)/df = (u - cx)/f` is EXACT for each
 # (specs/core/geometry/bundle-adjustment.md) — the Phase-3b kernel widening removed the
 # fixed-focal clamp this wrapper used to apply under a fisheye context.
 
@@ -3597,7 +3601,7 @@ def write_finite_release(idx, res, data, out):
                 B.spline_model()[0],
                 float(lens["f_chart"]),
                 bspline=lens["coeffs"],
-                theta_max=lens["d_max"],
+                d_max=lens["d_max"],
             )
         written = write_finite_body(B, idx, res, data, out)
         # THE REFUSED ARM, beside the release it lost to.  The verdict is the
@@ -3614,7 +3618,7 @@ def write_finite_release(idx, res, data, out):
                 cam["model"],
                 float(ref["f_chart"]),
                 bspline=np.asarray(cam["params"]["coefficients"], dtype=np.float64),
-                theta_max=float(lens["d_max"]),
+                d_max=float(lens["d_max"]),
             )
             rv, tv, pd = _snap_full_frame(
                 data,
@@ -3645,7 +3649,7 @@ def write_finite_release(idx, res, data, out):
             prior["model"],
             prior["focal"],
             bspline=prior["bspline"],
-            theta_max=prior["theta_max"],
+            d_max=prior["d_max"],
         )
 
 
@@ -3742,7 +3746,7 @@ def write_relaxed_release(idx, res, tool_options, out):
                 lens["model"],
                 float(lens["f_chart"]),
                 bspline=np.asarray(lens["coeffs"], dtype=np.float64),
-                theta_max=float(lens["d_max"]),
+                d_max=float(lens["d_max"]),
             )
         # The CHART focal, which is what the installed model is parameterized
         # by; the equivalent focal the manifest reports is a reading of the
@@ -3785,7 +3789,7 @@ def write_relaxed_release(idx, res, tool_options, out):
             prior["model"],
             prior["focal"],
             bspline=prior["bspline"],
-            theta_max=prior["theta_max"],
+            d_max=prior["d_max"],
         )
 
 
@@ -3827,8 +3831,11 @@ def commit_hypothesis(rung, idx, res, write, model="finite", f_source=None, extr
     lens = res.get("lens")
     f = float(res["f_released"] if lens is None else lens["f_eq"])
     if lens is None:
+        # No lens rung adopted anything, so the hypothesis shipped the context's
+        # own model at zero knots -- its chart's base map, described by the focal
+        # alone.
         camera = {
-            "model": "EQUIDISTANT_FISHEYE" if fisheye_stage1() else "PINHOLE",
+            "model": bootstrap_module().spline_model()[0],
             "params": {"focal_length": f},
         }
     else:
@@ -4094,9 +4101,9 @@ def member_camera(res):
     """The camera a committed hypothesis was released under.
 
     The same one `write_finite_release` installs for the artifact: the
-    hypothesis's own spline lens where it carries coefficients, the capture's
-    base model otherwise.  A refusal ships a zero spline, which is the base map
-    bit for bit."""
+    hypothesis's own lens where it carries coefficients, the context's own model
+    at zero knots otherwise.  A refusal ships a zero spline, which is the chart's
+    base map bit for bit."""
     lens = res.get("lens")
     return make_cam(float(res["f_released"])) if lens is None else evo_lens_cam(lens)
 
