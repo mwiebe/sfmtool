@@ -231,7 +231,10 @@ def make_scene(cam, n_img, n_pt, shell_radius, rig_radius, theta_max_deg, poses=
 
 def run_suite(module, label, model, focal, shell, rig, theta_max, min_behind):
     print(f"\n{label}  [{model} @ f = {focal:g} px]")
-    module._CAM_WH = WH
+    # ONE camera context, in ``seed_camera``; ``exp_fast_seed`` re-exports its
+    # accessors, so installing it on either module installs it for both, and
+    # what this loop varies is which module's PRIMITIVES are exercised.
+    B._CAM_WH = WH
     module.set_camera_context(model, focal)
     cam = module.make_cam(focal)
     check(
@@ -326,7 +329,7 @@ def run_ray_suite():
     translation parallax — a ray-space pair init is exactly what the affine
     factorization could not do here."""
     print(f"\nexp_fast_seed — ray-space seed (Phase 2)  [equidistant @ {F_EQUI:g} px]")
-    F._CAM_WH = WH
+    B._CAM_WH = WH
     F.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
     cam = F.make_cam(F_EQUI)
     check(F.fisheye_stage1(), "fisheye_stage1() is armed by the camera context")
@@ -503,7 +506,7 @@ def run_release_suite():
     and the same solve with ``opt_f = False`` returns the input focal
     untouched, so the release is what moves it and not the trim schedule."""
     print("\nPhase 3b — equidistant focal scan and release")
-    F._CAM_WH = WH
+    B._CAM_WH = WH
     F.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
     check(F.fisheye_stage1(), "the fisheye stage-1 gate is armed")
 
