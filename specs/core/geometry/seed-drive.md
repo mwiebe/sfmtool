@@ -13,6 +13,13 @@ where that member's structure claimed.
 The set is still the product. Verdicts annotate members; they never
 remove one.
 
+A pull is a request rather than a subscription, so the round structure
+carries moves that shape what the source produces next: asking for the
+mirrored orientation of a member whose hard bit is in doubt, asking for
+two members merged into one candidate, and refusing a member whose
+relaxation runs away rather than relaxing it further and pulling a
+replacement in its place.
+
 ## Round
 
 One round is one pull and everything taken on it.

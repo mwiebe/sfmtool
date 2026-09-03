@@ -1077,7 +1077,7 @@ def load_clusters():
     min_span = max(2, int(os.environ.get("SFMTOOL_MIN_SPAN", "2")))
 
     # Patch-frame passthrough, snapshot-gated: the debug checkpoints are written
-    # through the bootstrap's `save_sfmr`, which builds each point's surfel frame
+    # through `seed_camera.save_sfmr`, which builds each point's surfel frame
     # from the member's stored 2x2 warp (the affine's leading block).  With
     # snapshots off (the default) the arrays are never built and the loader is
     # byte-identical to before.
@@ -1101,11 +1101,10 @@ def load_clusters():
     # The radius is read off the stored affines (no `.sift` read): the leading
     # 2x2 is the member's absolute shape S, whose two column norms average to
     # the detector's affine SCALE.  The patch half-extent in image pixels is
-    # `refine_radius x scale` -- the same reading `save_sfmr` sizes a surfel by
-    # (see `_cluster_detection_sizes` in the bootstrap).  ANY member over the
-    # bar qualifies the cluster: a coarse feature seen coarsely once is a coarse
-    # feature, and the cluster's other members are its own matches, not
-    # independent evidence.
+    # `refine_radius x scale` -- the same reading `seed_camera.save_sfmr` sizes
+    # a surfel by.  ANY member over the bar qualifies the cluster: a coarse
+    # feature seen coarsely once is a coarse feature, and the cluster's other
+    # members are its own matches, not independent evidence.
     #
     # The bar is stated as a POPULATION (keep the N coarsest), not as a
     # threshold.  The scene-scale forms this replaced (a pixel bar and a
