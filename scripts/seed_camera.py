@@ -31,6 +31,11 @@ from sfmtool._sfmtool.geometry import (
     reprojection_residuals as _reprojection_residuals,
 )
 
+# The workspace the writers resolve image names and `.sift` paths against.
+# This is the STANDALONE default only: a run installs its own workspace here
+# (``exp_fast_seed.bootstrap_module`` assigns it before anything reaches the
+# writers), so the argv reading is what a direct import of this module gets and
+# never what the seed pipeline uses.
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 MIN_SPAN_BA = int(  # min distinct images for a cluster to become a point
     os.environ.get("SFMTOOL_MIN_SPAN_BA", "2")
@@ -45,13 +50,14 @@ TRIM_PX = 4.0  # BA inter-round observation trim threshold
 WRITER_FRONTO_LAM = float(os.environ.get("SFMTOOL_WRITER_FRONTO_LAM", "0.3"))
 
 
-# The whole script works in the CANONICAL camera frame (-Z forward, +Y up):
-# poses are canonical world->camera, 3D points are world points, observations
-# are FULL (un-centered) pixel coordinates, and every projection goes through
-# the native `CameraIntrinsics` batch functions.  The world frame is the
-# COLMAP-world gauge inherited from the affine factorization (irrelevant to
-# the reprojection residuals and absorbed by the eval's similarity alignment);
-# only the writer rotates it by W to reach the .sfmr canonical world.
+# The whole seed pipeline works in the CANONICAL camera frame (-Z forward, +Y
+# up): poses are canonical world->camera, 3D points are world points,
+# observations are FULL (un-centered) pixel coordinates, and every projection
+# goes through the native `CameraIntrinsics` batch functions.  The world frame
+# is the COLMAP-world gauge inherited from the affine factorization
+# (irrelevant to the reprojection residuals and absorbed by the eval's
+# similarity alignment); only the writer rotates it by W to reach the .sfmr
+# canonical world.
 # (w, h) of the shared camera, part of the context below and installed by the
 # caller from the uniform image dims (``exp_fast_seed.capture_context`` does it
 # once per run); ``seed_snapshot`` falls back to the dims of the data it is
@@ -544,7 +550,7 @@ def p3p_resect(uv, x_pts, f0, wh):
     4x physical scale gap) defeats it, while minimal 3-point sampling finds
     the consensus routinely.  Uses the native Lambda Twist estimator
     (specs/core/geometry/absolute-pose.md); a tight 4 px threshold matches the
-    bootstrap's TRIM_PX (a loose consensus is mostly junk on a
+    seed's own TRIM_PX (a loose consensus is mostly junk on a
     wrong-match-heavy image and anchoring the verification BA on it drags
     the pose).  ``uv`` are full pixels.  Returns (rvec, tvec, inlier mask
     over the given obs) or None."""
@@ -560,7 +566,7 @@ def p3p_resect(uv, x_pts, f0, wh):
     if ans is None:
         return None
     # The estimator already returns a canonical world-to-camera pose, which
-    # is the frame the whole script works in — no flip.
+    # is the frame this module works in — no flip.
     q = np.asarray(ans["quaternion_wxyz"])
     rv = Rotation.from_quat(q[[1, 2, 3, 0]]).as_rotvec()
     tv = np.asarray(ans["translation"], dtype=np.float64)
@@ -796,9 +802,9 @@ def save_sfmr(
     release_grade=False,
     operation="cluster_bootstrap",
 ):
-    """Write the bootstrap as an ``embedded_patches`` reconstruction.
+    """Write the seed solve as an ``embedded_patches`` reconstruction.
 
-    The bootstrap's observations are the cluster patches' *refined*
+    The seed's observations are the cluster patches' *refined*
     positions, not the SIFT detections, so they are stored inline as
     ``keypoints_xy`` rather than as feature indexes into the ``.sift``
     files (which would silently resolve back to the unrefined seeds).
@@ -806,7 +812,7 @@ def save_sfmr(
     ``tool_options`` merges extra entries into the file's metadata (a debug
     snapshot declares what state it holds); ``operation`` names the stage that
     produced the artifact, which a reader takes the file's provenance from, and
-    stays the bootstrap's own unless the caller is a different stage;
+    stays ``cluster_bootstrap`` unless the caller is a different stage;
     ``quiet`` suppresses the summary
     line so an instrumented run stays readable.  ``release_grade`` stops at
     poses and points — no keypoint passthrough and no patch frames — which is
