@@ -12,7 +12,7 @@ import types
 import numpy as np
 import pytest
 
-from seed_relax import Options, pipeline, release
+from seed_relax import Options, evict, pipeline, release
 
 F = 500.0
 WIDTH, HEIGHT = 640, 480
@@ -278,18 +278,26 @@ def test_the_release_record_reads_as_an_unqualified_relaxed_member(relaxed):
 
 
 def test_the_hand_over_holds_where_the_member_states_no_shapes():
-    # The stage is on by default, but it reads the drawn footprint off the
-    # member's own affines; where the member states none it refuses, and a
-    # refusal is the same chain as the switch being off.
-    off = pipeline.run_member(_member(), _source(), Options(evict=False))
+    # The stage always runs, but it reads the drawn footprint off the member's
+    # own affines; where the member states none it refuses, and a refusal
+    # leaves the chain exactly as the stage was handed it.
+    from unittest.mock import patch
+
     on = pipeline.run_member(_member(), _source(), Options())
-    assert off.census["evict"] == {"held": "SFMTOOL_RELAX_EVICT"}
+    with patch.object(
+        evict,
+        "evict_stage",
+        lambda mx, cam, st, rr, floor, trace=None: (st, {"refused": "stubbed"}),
+    ):
+        off = pipeline.run_member(_member(), _source(), Options())
     assert on.census["evict"]["refused"] == ("the member states no affine shapes")
     for key in ("frames", "clusters", "quats", "trans", "points", "at_inf"):
         assert (
             np.asarray(off.state[key]).tobytes() == np.asarray(on.state[key]).tobytes()
         )
-    assert release.relaxation_block(off)["evict"] == {"held": "SFMTOOL_RELAX_EVICT"}
+    assert release.relaxation_block(on)["evict"] == {
+        "refused": "the member states no affine shapes"
+    }
     # A member the stage did not touch carries the metadata it always did, so
     # the released file is what it was before the stage existed.
     assert "evict" not in release.tool_options(off, 0)

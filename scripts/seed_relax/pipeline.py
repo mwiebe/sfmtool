@@ -183,34 +183,28 @@ def run_member(m, source, opts=None):
         )
 
     # -- stage 3b: the points that rest on one measurement ------------------
-    if opts.reconcile:
-        with timing.stage("relax.reconcile"):
-            mx, state, rcens = reconcile.reconcile_stage(
-                mx,
-                cam,
-                state,
-                getattr(source, "refine_radius", None),
-                tol_rad,
-                f_eq,
-                say,
-            )
-    else:
-        rcens = {"held": "SFMTOOL_RELAX_RECONCILE"}
+    with timing.stage("relax.reconcile"):
+        mx, state, rcens = reconcile.reconcile_stage(
+            mx,
+            cam,
+            state,
+            getattr(source, "refine_radius", None),
+            tol_rad,
+            f_eq,
+            say,
+        )
     census["reconcile"] = rcens
 
     # -- stage 4: the hand-over to the fill-in's own features --------------
-    if opts.evict:
-        with timing.stage("relax.evict"):
-            state, ecens = evict.evict_stage(
-                mx,
-                cam,
-                state,
-                getattr(source, "refine_radius", None),
-                fill_census.get("adm_floor_px"),
-                say,
-            )
-    else:
-        ecens = {"held": "SFMTOOL_RELAX_EVICT"}
+    with timing.stage("relax.evict"):
+        state, ecens = evict.evict_stage(
+            mx,
+            cam,
+            state,
+            getattr(source, "refine_radius", None),
+            fill_census.get("adm_floor_px"),
+            say,
+        )
     census["evict"] = ecens
 
     # -- stage 5: the late lens release ------------------------------------
@@ -295,11 +289,8 @@ def run_member(m, source, opts=None):
     census["tol_final_deg"] = math.degrees(float(tol_final))
 
     # -- stage 7: the depth the release states -----------------------------
-    if opts.depth:
-        with timing.stage("relax.depth"):
-            state, dcens = depth.depth_stage(mx, cam, state, f_eq_final, say)
-    else:
-        dcens = {"held": "SFMTOOL_RELAX_DEPTH"}
+    with timing.stage("relax.depth"):
+        state, dcens = depth.depth_stage(mx, cam, state, f_eq_final, say)
     census["depth"] = dcens
     final_inf = np.asarray(state["at_inf"], bool)
     census["n_points_final"] = int(len(final_inf))

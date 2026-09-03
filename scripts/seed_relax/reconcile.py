@@ -77,11 +77,6 @@ FINITE_VERDICTS = (0, 6)
 THIN_VERDICT = 2
 
 
-def reconcile_on(env):
-    """Whether the reconciliation stage runs (``SFMTOOL_RELAX_RECONCILE``)."""
-    return (env.get("SFMTOOL_RELAX_RECONCILE", "1") or "1").strip() != "0"
-
-
 def _ev():
     """The evaluation battery's member class, imported on use."""
     import seed_candidate_eval as EV

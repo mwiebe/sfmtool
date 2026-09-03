@@ -76,17 +76,11 @@ class Options:
     ``0`` meaning no count at all: a ring then admits its whole band, which is
     the population the band already states.  ``knots_fisheye`` and
     ``knots_pinhole`` are the late release's knot counts, one per radial
-    chart.  ``reconcile`` runs the reconciliation between the fill-in and the
-    hand-over, ``evict`` the hand-over itself and ``depth`` the depth reading
-    that closes the chain; with any of them off the chain is what it was before
-    that stage existed."""
+    chart."""
 
     ring_cap: int = 0
     knots_fisheye: int = DEFAULT_KNOTS_FISHEYE
     knots_pinhole: int = DEFAULT_KNOTS_PINHOLE
-    reconcile: bool = True
-    evict: bool = True
-    depth: bool = True
     trace: bool = False
 
 
@@ -105,23 +99,13 @@ def options():
 
     ``SFMTOOL_RELAX_RING_CAP`` (0, the default, admits a ring's whole band; a
     positive integer is an absolute count per ring),
-    ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count),
-    ``SFMTOOL_RELAX_RECONCILE`` (``0`` holds the reconciliation),
-    ``SFMTOOL_RELAX_EVICT`` (``0`` holds the hand-over stage),
-    ``SFMTOOL_RELAX_DEPTH`` (``0`` holds the depth reading) and
+    ``SFMTOOL_RELAX_KNOTS`` (the fisheye chart's late-release knot count) and
     ``SFMTOOL_RELAX_TRACE``.  The pinhole chart's knot count is not tunable:
     it is the seed's own."""
-    from .depth import depth_on
-    from .evict import evict_on
-    from .reconcile import reconcile_on
-
     return Options(
         ring_cap=max(0, _int_env("SFMTOOL_RELAX_RING_CAP", 0)),
         knots_fisheye=max(1, _int_env("SFMTOOL_RELAX_KNOTS", DEFAULT_KNOTS_FISHEYE)),
         knots_pinhole=DEFAULT_KNOTS_PINHOLE,
-        reconcile=reconcile_on(os.environ),
-        evict=evict_on(os.environ),
-        depth=depth_on(os.environ),
         trace=trace_on(),
     )
 
