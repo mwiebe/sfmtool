@@ -51,7 +51,7 @@ Panels
   ✓ Image Browser
   ✓ Image Detail
     Point Track
-    Intrinsics
+    Camera Intrinsics
     Action Log
   ─────────────
     Reset Layout
@@ -92,7 +92,7 @@ as nearly as the current arrangement allows. Three rules, tried in order:
    `show_panel`.)
 2. **A default group-mate is open:** push it into that node, behind the
    current tabs, then make it active. The default layout has two multi-tab
-   groups — Image Detail / Point Track / Intrinsics, and Image Browser /
+   groups — Image Detail / Point Track / Camera Intrinsics, and Image Browser /
    Action Log — and a panel from either goes home to whichever of its
    group-mates is still there.
 3. **Otherwise, split the main surface's root** along the panel's home edge,
@@ -103,7 +103,7 @@ as nearly as the current arrangement allows. Three rules, tried in order:
    | Scene | left | 0.18 |
    | 3D Viewer | *(takes the root)* | — |
    | Image Browser, Action Log | below | 0.20 |
-   | Image Detail, Point Track, Intrinsics | right | 0.33 |
+   | Image Detail, Point Track, Camera Intrinsics | right | 0.33 |
 
    "Takes the root" for the 3D Viewer means: if the dock is empty it becomes
    the root leaf; if not, it is pushed into the root's first leaf as a new
@@ -169,7 +169,7 @@ any floating windows. The default layout, as the viewer writes it:
           "active": "viewer_3d"
         },
         "second": {
-          "tabs": ["image_detail", "point_track", "intrinsics"],
+          "tabs": ["image_detail", "point_track", "camera_intrinsics"],
           "active": "image_detail"
         }
       },
@@ -200,7 +200,7 @@ which makes them greppable against the `Tab` enum and readable in a diff:
 | `image_browser` | `ImageBrowser` | Image Browser |
 | `image_detail` | `ImageDetail` | Image Detail |
 | `point_track` | `PointTrackDetail` | Point Track |
-| `intrinsics` | `IntrinsicsDetail` | Intrinsics |
+| `camera_intrinsics` | `IntrinsicsDetail` | Camera Intrinsics |
 | `action_log` | `ActionLog` | Action Log |
 
 The word is **panel**, on the wire as in the specs, which use it several
@@ -240,15 +240,15 @@ each with its message:
 - It equals `1`: `Layout version 2 is newer than this viewer reads (1)`, or
   `Layout version 0 is not one this viewer reads (1)`.
 - Every panel name is one of the seven: `unknown panel "viewer3d"; the panels
-  are scene, viewer_3d, image_browser, image_detail, point_track, intrinsics,
-  action_log`.
+  are scene, viewer_3d, image_browser, image_detail, point_track,
+  camera_intrinsics, action_log`.
 - **Every panel appears at most once** across `main` and every window:
   `panel "scene" appears more than once`. A `Tab` is a singleton — one struct
   draws it — and two tabs with one identity would draw one panel twice and
   confuse egui's widget ids. A panel that appears nowhere is simply closed.
 - Every leaf has at least one tab (`a leaf must have at least one tab`);
-  `active`, if present, is one of them (`active "intrinsics" is not one of this
-  leaf's tabs`).
+  `active`, if present, is one of them (`active "camera_intrinsics" is not one
+  of this leaf's tabs`).
 - Every `fraction` is strictly between 0 and 1: `fraction must be strictly
   between 0 and 1, not 1.5`.
 - **No unknown keys**, at any level: `unknown key "fracton"`. A typo silently
@@ -316,6 +316,11 @@ impl Layout {
     /// a typo. Walking by hand is also what lets an error carry its path —
     /// `main.second.first: unknown key "fracton"`.
     pub(crate) fn from_json(text: &str) -> Result<Self, LayoutError>;
+    /// The same, on an already-parsed document — which is how a layout arrives
+    /// over MCP, as a `set_layout` argument object. `from_json` is the JSON
+    /// parse and then this, so a document off the wire meets exactly the rules,
+    /// and exactly the messages, a file on disk meets.
+    pub(crate) fn from_value(value: &serde_json::Value) -> Result<Self, LayoutError>;
     /// Pretty-printed, keys in the order § "The layout file" shows them,
     /// trailing newline.
     pub(crate) fn to_json(&self) -> String;
@@ -482,7 +487,7 @@ nothing to raise.
 | `layout::LAYOUT_VERSION` | `1` | The `sfm_explorer_layout` value written and the only one read. |
 | Scene home | left, `0.18` | § "Home positions" rule 3 (`Tab::home`). |
 | Image Browser / Action Log home | below, `0.20` | Same. |
-| Image Detail / Point Track / Intrinsics home | right, `0.33` | Same. |
+| Image Detail / Point Track / Camera Intrinsics home | right, `0.33` | Same. |
 | Save dialog default name | `layout.json` | `layout::DEFAULT_LAYOUT_FILE_NAME`, Panels ▸ Save Layout... |
 
 ## Testing
@@ -537,9 +542,12 @@ egui's checkbox rather than anything this spec decides.
 - **Naming, duplicating, or parameterizing panels.** Seven singletons, one
   struct each. A second Image Detail panel is a different design.
 - **Logging drag rearrangements** (§ "In the Action Log").
-- **The MCP tools.** `get_layout`, `set_layout`, `show_panel`, `hide_panel`
-  are specified in [mcp-server.md](mcp-server.md) once they exist; this
-  spec is what they carry.
+- **The MCP tools.** `get_layout`, `set_layout`, `show_panel` and `hide_panel`
+  are specified in [mcp-server.md](mcp-server.md) § "`get_layout`" and the
+  sections after it; this spec is what they carry. They call the `AppState`
+  methods above and send the document this spec defines, so the wire adds no
+  schema of its own — which is why "the panel names" and "the validation rules"
+  have one home and not two.
 
 ## Open questions
 
