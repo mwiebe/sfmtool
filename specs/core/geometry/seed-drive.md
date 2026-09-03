@@ -59,12 +59,15 @@ members the set keeps.
 | `cull` | the points a cut removed carried the defect, and the core that is left passes the member gates |
 | `refuse` | the defect is the member |
 
-A refusal STANDS OUTRIGHT where a **pose-instability** channel fired and
-did not fire alone. Those channels say the member's own poses do not
-hold still: the settling family and its rotation-only twin, the hold-out
-pose deltas of both model families, and the rotation cycles. Nothing
-that can be taken out of a member repairs poses that will not hold, and
-one channel on its own is one reading.
+A refusal STANDS OUTRIGHT where at least two distinct
+**pose-instability** channels fired and they did not fire alone. Those
+channels say the member's own poses do not hold still: the settling
+family and its rotation-only twin, the hold-out pose deltas of both
+model families, and the rotation cycles. Nothing that can be taken out
+of a member repairs poses that will not hold -- but one pose reading is
+one reading, however much structure evidence stands beside it, so a
+lone pose channel sends the member to salvage rather than sealing the
+refusal itself.
 
 Every other member the gates would refuse reaches the **salvage** tier:
 the evidence against it is about structure, or about a single reading,
