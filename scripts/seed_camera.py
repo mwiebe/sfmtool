@@ -46,8 +46,8 @@ TRIM_PX = 4.0  # BA inter-round observation trim threshold
 
 # Fronto-parallel prior damping the seed writer's own tilt solve: the
 # out-of-plane slope b_z is the weakly observed, depth-like direction, so an
-# undamped solve on a narrow-baseline window is noise.  Exposed for sweeping.
-WRITER_FRONTO_LAM = float(os.environ.get("SFMTOOL_WRITER_FRONTO_LAM", "0.3"))
+# undamped solve on a narrow-baseline window is noise.
+WRITER_FRONTO_LAM = 0.3
 
 
 # The whole seed pipeline works in the CANONICAL camera frame (-Z forward, +Y

@@ -321,28 +321,6 @@ def test_a_confident_half_smaller_than_the_neighbourhood_refuses():
     assert census["n_demoted"] == 0
 
 
-# ------------------------------------------------------------- the kill switch
-
-
-@pytest.mark.parametrize(
-    "env,want",
-    [
-        ({}, True),
-        ({"SFMTOOL_RELAX_DEPTH": "1"}, True),
-        ({"SFMTOOL_RELAX_DEPTH": ""}, True),
-        ({"SFMTOOL_RELAX_DEPTH": "0"}, False),
-        ({"SFMTOOL_RELAX_DEPTH": " 0 "}, False),
-    ],
-)
-def test_the_kill_switch_reads_the_environment(env, want):
-    assert depth.depth_on(env) is want
-
-
-def test_the_switch_is_an_option_the_chain_carries():
-    assert Options().depth is True
-    assert Options(depth=False).depth is False
-
-
 # --------------------------------------------------------------- determinism
 
 
@@ -452,10 +430,20 @@ def _chain_source():
 
 @pytest.fixture(name="chain", scope="module")
 def _chain():
+    from unittest.mock import patch
+
     from seed_relax import pipeline
 
     on = pipeline.run_member(_chain_member(), _chain_source(), Options())
-    off = pipeline.run_member(_chain_member(), _chain_source(), Options(depth=False))
+    # The chain as the reading was handed it: the same run with the stage
+    # stubbed out to hand its state straight back, so the comparison below is
+    # against the state the reading acted on.
+    with patch.object(
+        depth,
+        "depth_stage",
+        lambda mx, cam, st, f_eq, trace=None: (st, {"refused": "stubbed"}),
+    ):
+        off = pipeline.run_member(_chain_member(), _chain_source(), Options())
     return on, off
 
 
@@ -486,12 +474,13 @@ def test_the_middle_band_is_what_the_reading_withdraws(chain):
     assert len(near & finite_on) > 0.9 * len(near)
 
 
-def test_the_switch_off_is_the_chain_from_before_the_stage(chain):
+def test_a_stage_that_states_no_reading_is_the_chain_from_before_it(chain):
     _on, off = chain
-    assert off.census["depth"] == {"held": "SFMTOOL_RELAX_DEPTH"}
+    assert off.census["depth"] == {"refused": "stubbed"}
     inf = np.asarray(off.state["at_inf"], bool)
     assert off.census["n_finite_final"] == int((~inf).sum())
-    # A held stage states nothing in the released file's own metadata.
+    # A stage that stated no reading states nothing in the released file's own
+    # metadata either.
     assert "depth" not in release.tool_options(off, 0)
 
 
@@ -502,7 +491,7 @@ def test_the_manifest_carries_the_readings_census(chain):
     assert block["k_support"] == depth.K_SUPPORT
     assert block["support_r12"] > 0.0
     assert len(block["bins"]) == len(depth.ANGLE_NAMES)
-    assert release.relaxation_block(off)["depth"] == {"held": "SFMTOOL_RELAX_DEPTH"}
+    assert release.relaxation_block(off)["depth"]["refused"] == "stubbed"
     # And the released file names what the stage did.
     assert release.tool_options(on, 0)["depth"].startswith(
         f"{on.census['depth']['n_demoted']} demoted"

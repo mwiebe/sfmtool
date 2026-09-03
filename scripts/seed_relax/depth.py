@@ -82,11 +82,6 @@ ANGLE_NAMES = ("under 1 deg", "1 to 2 deg", "2 to 4 deg", "4 to 8 deg", "over 8 
 PAIR_CHUNK = 1 << 22
 
 
-def depth_on(env):
-    """Whether the depth-uncertainty stage runs (``SFMTOOL_RELAX_DEPTH``)."""
-    return (env.get("SFMTOOL_RELAX_DEPTH", "1") or "1").strip() != "0"
-
-
 # ------------------------------------------------------------------ per point
 
 
