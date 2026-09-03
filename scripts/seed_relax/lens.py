@@ -19,12 +19,19 @@ construction and so exited degenerate at any positive floor; the kernel now
 counts every survivor, so the floor stands and the finite-residual refusal
 below is what catches an unusable solve.
 
-The base camera is never promoted in place: `promote` returns a new camera on
-the base's radial-spline model with an all-zero spline, which is the same map
-bit for bit, and what it buys is the coefficient slots the release needs.  The
-mechanics are restated here from `specs/formats/sfmtool-camera-models.md`
-rather than imported, because importing the bootstrap has argv and environment
-side effects.
+`promote` returns a new camera on the chart's radial-spline model with the
+coefficients it is given, leaving its input alone; an all-zero spline is the
+base map bit for bit, so promoting a base camera moves nothing and what it buys
+is the coefficient slots the release needs.  The mechanics are restated here
+from `specs/formats/sfmtool-camera-models.md` rather than imported, because
+importing the bootstrap has argv and environment side effects.
+
+This module is where the seed states the chart tables -- which models live on a
+fisheye chart (`FISHEYE_MODELS` / `family_of`) and which radial-spline model and
+domain-end parameter each chart carries (`SPLINE_MODEL`).  `seed_camera` reads
+them from here rather than keeping its own copy, so the seed has one statement
+of them; the dependency runs that way round because nothing here imports the
+seed scripts at module level.
 """
 
 from __future__ import annotations
@@ -34,7 +41,8 @@ import numpy as np
 from . import quat, structure
 
 #: The two radial-spline models and the parameter naming their domain end, by
-#: the BASE model they promote.
+#: the CHART they correct.  The seed's single statement of this mapping:
+#: `seed_camera` builds every camera it makes from this table.
 SPLINE_MODEL = {
     "pinhole": ("SFMTOOL_PINHOLE", "bspline_rho_max"),
     "fisheye": ("SFMTOOL_FISHEYE", "bspline_theta_max"),
@@ -52,6 +60,10 @@ DOMAIN_HEADROOM = 1.02
 #: tell apart from a focal error.
 RELEASE_CHART = "fisheye"
 
+#: The models whose radial coordinate is the incidence angle itself.  Read by
+#: `family_of`, and through it by everything that has to know which chart an
+#: arbitrary stored camera lives on -- including the base models the seed no
+#: longer builds but old releases still carry.
 FISHEYE_MODELS = {
     "EQUIDISTANT_FISHEYE",
     "SFMTOOL_FISHEYE",
@@ -118,11 +130,18 @@ def gate_early_release(cam):
 
 
 def promote(base_cam, f, coeffs, d_max):
-    """``base_cam`` at focal ``f`` on its base's radial-spline model.
+    """``base_cam`` at focal ``f`` on its CHART's radial-spline model.
 
     An all-zero ``coeffs`` is the base model's own map -- projection, inverse
     and pixel Jacobian alike -- so the promotion by itself moves nothing; what
-    it does is allocate the coefficient slots the release needs."""
+    it does is allocate the coefficient slots the release needs.
+
+    The seed now builds every camera on a spline model from the start, so on
+    that path this is the read-side NORMALIZER rather than a promotion: a camera
+    already on ``SFMTOOL_PINHOLE`` or ``SFMTOOL_FISHEYE`` comes back on the same
+    model, restated at the given focal, coefficients and domain.  It stays a
+    promotion for what rung 2 reads off disk, where a release written before the
+    seed carried a spline still stamps its base model."""
     from sfmtool._sfmtool.geometry import CameraIntrinsics
 
     fam = family_of(base_cam.model)
@@ -154,8 +173,18 @@ def base_focal(cam):
 
 
 def spline_domain(cam):
-    """The spline domain end of a spline camera, or ``None``."""
+    """The FITTED spline domain end of ``cam``, or ``None`` where it has none.
+
+    A camera at zero knots answers ``None`` even though it carries a domain-end
+    parameter.  The model requires a positive one whatever the knot count, so a
+    zero-knot camera stamps a placeholder -- the field its image corners
+    subtend -- and with no basis over it that number describes nothing.  Reading
+    it back as a fitted domain would have a later release grow its knots over a
+    span its observations never covered; answering ``None`` sends the caller to
+    the observed field, which is what a base-model camera has always done."""
     p = cam.parameters
+    if float(p.get("bspline_coeff_count", 0.0)) <= 0.0:
+        return None
     for k in ("bspline_rho_max", "bspline_theta_max"):
         if k in p:
             return float(p[k])
