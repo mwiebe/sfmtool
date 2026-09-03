@@ -1494,10 +1494,24 @@ def run_salvage_suite():
                 os.environ["SFMTOOL_RUNG2_SALVAGE"] = saved_env
         return rec["verdict"], "salvage tried" in (rec["verdict_reason"] or "")
 
-    verdict, offered = routing(("settling_rot_worst", "stranger_res_med"))
+    verdict, offered = routing(("settling_rot_worst", "loo_rot_worst"))
     check(
         verdict == "refuse" and not offered,
-        "a pose-instability channel that did not fire alone refuses outright",
+        "two pose-instability channels that did not fire alone refuse outright",
+    )
+    verdict, offered = routing(("settling_rot_worst", "stranger_res_med"))
+    check(
+        verdict == "refuse" and offered,
+        "one pose reading among structure evidence is one reading, and is salvaged",
+    )
+    os.environ["SFMTOOL_RUNG2_POSE_QUORUM"] = "1"
+    try:
+        verdict, offered = routing(("settling_rot_worst", "stranger_res_med"))
+    finally:
+        os.environ.pop("SFMTOOL_RUNG2_POSE_QUORUM", None)
+    check(
+        verdict == "refuse" and not offered,
+        "SFMTOOL_RUNG2_POSE_QUORUM=1 restores the single-channel short-circuit",
     )
     verdict, offered = routing(("settling_rot_worst",))
     check(

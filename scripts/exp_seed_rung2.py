@@ -876,12 +876,13 @@ def reseat_on():
 def pose_quorum():
     """How many distinct pose-instability channels an outright refusal needs.
 
-    The default 1 is the shipped rule -- any pose channel joined by a second
-    channel of any kind refuses outright.  ``SFMTOOL_RUNG2_POSE_QUORUM=2`` is
-    the plurality-of-evidence experiment: a single pose reading standing among
-    structure evidence is one reading, and the member goes to salvage.
+    The default 2 is the plurality rule: a single pose reading standing among
+    structure evidence is one reading, and the member goes to salvage; the
+    refusal stands outright only where the pose evidence corroborates itself.
+    ``SFMTOOL_RUNG2_POSE_QUORUM=1`` restores the older rule, where any pose
+    channel joined by a second channel of any kind refused outright.
     """
-    return int(os.environ.get("SFMTOOL_RUNG2_POSE_QUORUM", "1") or "1")
+    return int(os.environ.get("SFMTOOL_RUNG2_POSE_QUORUM", "2") or "2")
 
 
 #: One per-frame channel.  `eligible` is the per-frame record's own
