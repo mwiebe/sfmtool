@@ -209,8 +209,6 @@ def _reconcile(r):
     """The reconciliation's own counts, or its refusal."""
     if not r:
         return None
-    if r.get("held"):
-        return {"held": r["held"]}
     if r.get("refused"):
         return {"refused": r["refused"]}
     return {
@@ -233,10 +231,10 @@ def _reconcile(r):
 def _reconcile_option(r):
     """The reconciliation in one metadata string, where it ran.
 
-    ``None`` where it did not: a member the stage held or refused on carries
-    the metadata it carried before the stage existed, and the manifest is
-    where the holding or the refusal is recorded."""
-    if not r or r.get("held") or r.get("refused"):
+    ``None`` where it did not: a member the stage refused on carries the
+    metadata it carried before the stage existed, and the manifest is where the
+    refusal is recorded."""
+    if not r or r.get("refused"):
         return None
     return (
         f"{r.get('merged')}+{r.get('merged_bearing')} merged, "
@@ -249,8 +247,6 @@ def _evict(e):
     """The hand-over stage's own counts, or its refusal."""
     if not e:
         return None
-    if e.get("held"):
-        return {"held": e["held"]}
     if e.get("refused"):
         return {"refused": e["refused"]}
     return {
@@ -272,8 +268,6 @@ def _depth(d):
     """The depth reading's own counts, or its refusal."""
     if not d:
         return None
-    if d.get("held"):
-        return {"held": d["held"]}
     if d.get("refused"):
         return {"refused": d["refused"], "n_finite_before": d.get("n_finite_before")}
     return {
@@ -300,10 +294,10 @@ def _depth(d):
 def _depth_option(d):
     """The depth reading in one metadata string, where it ran.
 
-    ``None`` where it did not: a member the stage held or refused on carries
-    the metadata it carried before the stage existed, and the manifest is
-    where the holding or the refusal is recorded."""
-    if not d or d.get("held") or d.get("refused"):
+    ``None`` where it did not: a member the stage refused on carries the
+    metadata it carried before the stage existed, and the manifest is where the
+    refusal is recorded."""
+    if not d or d.get("refused"):
         return None
     return (
         f"{d.get('n_demoted')} demoted of {d.get('n_finite_before')} finite, "
@@ -326,10 +320,10 @@ def _head(c):
 def _evict_option(e):
     """The hand-over stage in one metadata string, where it ran.
 
-    ``None`` where it did not: a member the stage held or refused on carries
-    the metadata it carried before the stage existed, and the manifest is
-    where the holding or the refusal is recorded."""
-    if not e or e.get("held") or e.get("refused"):
+    ``None`` where it did not: a member the stage refused on carries the
+    metadata it carried before the stage existed, and the manifest is where the
+    refusal is recorded."""
+    if not e or e.get("refused"):
         return None
     return (
         f"{e.get('n_obs_evicted')}/{e.get('n_rows')} obs, "
