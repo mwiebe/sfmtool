@@ -59,7 +59,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from sfmtool._sfmtool.geometry import (
-    CameraIntrinsics,
     bundle_adjust as _bundle_adjust,
     estimate_absolute_pose,
     factorize_affine,
@@ -67,6 +66,13 @@ from sfmtool._sfmtool.geometry import (
     refine_absolute_pose as _refine_absolute_pose,
     reprojection_residuals as _reprojection_residuals,
 )
+
+# The seed's ONE camera context lives in `seed_camera` (see the block comment
+# below): the image size, the base model, the focal and any radial spline, and
+# every camera built from them.  This script installs it and reads it through
+# the same functions the writers do, so there is a single state to reason about.
+# `seed_camera` imports nothing from here, so the dependency runs one way.
+import seed_camera
 
 WS = Path(sys.argv[1] if len(sys.argv) > 1 else "e_seoul_ws")
 REF = Path(sys.argv[2]) if len(sys.argv) > 2 else None
@@ -240,8 +246,9 @@ _ORTHO_GRID_STEP = (_ORTHO_GRID_HI / _ORTHO_GRID_LO) ** (1.0 / (_ORTHO_GRID_N - 
 _FAMILY_DISAGREEMENT_BAND = 0.25
 
 # Canonical camera frame (-Z forward, +Y up) throughout; full-pixel
-# observations; shared SIMPLE_PINHOLE with the principal point at the centre.
-_CAM_WH = None
+# observations; one shared camera with the principal point at the centre.  The
+# image size lives with the rest of the camera context, in `seed_camera`;
+# `capture_context` installs it and everything here reads it back from there.
 _VOTE_POVERTY = 0.0  # set by focal_vote: median H/F inlier ratio over pairs
 _VOTE_ROT_N = 0  # set by focal_vote: number of rotation self-calibration votes
 # Set by focal_vote: the pinhole vote pool's own log-focal IQR — the
@@ -325,9 +332,15 @@ def timings_block():
 
 # ── Fisheye seed camera context (scripts/notes-fisheye-seed.md, Phases 1-6) ──
 #
-# A per-run CAMERA CONTEXT — (model, focal) — behind every camera this script
-# builds.  Default: SIMPLE_PINHOLE, which is the code path this script has
-# always run and stays byte-identical.
+# A per-run CAMERA CONTEXT — image size, base model, focal, and any radial
+# spline promoted onto them — behind every camera the seed builds.  Default:
+# SIMPLE_PINHOLE, which is the code path this script has always run.
+#
+# THE CONTEXT IS ONE OBJECT, and it lives in ``seed_camera``: the stage-1 solve
+# here and the writers there build their cameras out of the same state, so a
+# model installed on one side cannot be missing from the other.  The names below
+# are that module's own, re-exported so this script's callers (and the primitive
+# gate) can reach them under either name.
 #
 # ROUTING.  A CONFIRMED equidistant verdict from ``_escalate_camera_model`` —
 # the both-cells corroboration — installs the fisheye context, and it does so BY
@@ -375,7 +388,15 @@ def fisheye_routing_override(value):
 
 
 FISHEYE_SEED = fisheye_routing_override(os.environ.get("SFMTOOL_FISHEYE_SEED"))
-_CAM_CONTEXT = {"model": "SIMPLE_PINHOLE", "focal": None}
+
+# The shared context's own accessors, re-exported: `set_camera_context` installs
+# the base model and focal (and, from the finalization's spline rung, the
+# coefficients), `camera_context` reads it back, `make_cam` builds the context
+# camera, and `fisheye_stage1` asks whether the installed base is a fisheye one.
+set_camera_context = seed_camera.set_camera_context
+camera_context = seed_camera.camera_context
+make_cam = seed_camera.make_cam
+fisheye_stage1 = seed_camera.fisheye_stage1
 
 # ── Equidistant focal band (scripts/notes-fisheye-seed.md, Phase 3) ──────────
 #
@@ -417,7 +438,7 @@ RESECT_TRACE = os.environ.get("SFMTOOL_RESECT_TRACE", "0") == "1"
 
 def fisheye_focal_band():
     """The FOV-derived plausible equidistant focal band `(lo, hi)` in px."""
-    m = max(_CAM_WH)
+    m = max(seed_camera._CAM_WH)
     return FISHEYE_BAND[0] * m, FISHEYE_BAND[1] * m
 
 
@@ -426,7 +447,7 @@ def focal_floor():
     an equidistant context, the pinhole band's 0.3 x max(w, h) otherwise."""
     if fisheye_stage1():
         return fisheye_focal_band()[0]
-    return 0.3 * max(_CAM_WH)
+    return 0.3 * max(seed_camera._CAM_WH)
 
 
 def fisheye_focal_grid(f_center, n=5):
@@ -437,70 +458,17 @@ def fisheye_focal_grid(f_center, n=5):
     return np.clip(f_center * FISHEYE_SCAN_RATIO**k, lo, hi)
 
 
-def set_camera_context(model, focal=None):
-    """Install the per-run camera context (see the block comment above).
-
-    ``model`` is a COLMAP model name; ``focal`` is the context focal used by
-    ``make_cam()`` when no explicit focal is passed."""
-    _CAM_CONTEXT["model"] = model
-    _CAM_CONTEXT["focal"] = None if focal is None else float(focal)
-
-
-def camera_context():
-    """The active ``(model, focal)`` context as a plain dict (a copy)."""
-    return dict(_CAM_CONTEXT)
-
-
 def bootstrap_module():
-    """``seed_camera`` with THIS run's workspace and CAMERA CONTEXT
-    installed — the only way anything here reaches the seed writers.
+    """``seed_camera`` with THIS run's workspace installed — the only way
+    anything here reaches the seed writers.
 
-    The writers keep their own camera context, and they read it: the
-    densification (``dense_structure``) triangulates through ``make_cam`` and
-    the writer (``save_sfmr``) stamps that same camera on the file.  A
-    fisheye-routed run that skips this step therefore writes equidistant poses
-    with a PINHOLE densification under a ``SIMPLE_PINHOLE`` stamp — the poses
-    survive the mistake and the structure does not (measured on OmniHilltop's
-    hypothesis releases: own-track reprojection 9-110 px read as equidistant
-    against 1.0-2.0 px read as pinhole, i.e. a cloud that was never solved).
-    """
-    import seed_camera as B
-
-    B.WS = WS
-    # Stage 1 owns the model and the focal; it never owns a distortion (the
-    # spline rung is the finalization's, and it promotes the writers' own
-    # context in place).  Re-installing here must therefore not demote a
-    # promotion that already happened — a later call would otherwise reset
-    # the camera the finalized reconstruction was written with.  A promoted
-    # model is anything stage 1 itself never installs, so the check is over
-    # stage 1's own two models rather than a list of promotions.
-    if B.camera_context()["model"] in ("SIMPLE_PINHOLE", "EQUIDISTANT_FISHEYE"):
-        B.set_camera_context(_CAM_CONTEXT["model"], _CAM_CONTEXT["focal"])
-    return B
-
-
-def make_cam(f=None):
-    """The context camera at focal ``f`` (the context focal when omitted).
-
-    SIMPLE_PINHOLE by default; EQUIDISTANT_FISHEYE under a confirmed,
-    opted-in fisheye context.  Both models take the same three parameters —
-    one focal and a centred principal point — so this builds one dict."""
-    w, h = _CAM_WH
-    if f is None:
-        f = _CAM_CONTEXT["focal"]
-    params = {
-        "focal_length": float(f),
-        "principal_point_x": w / 2.0,
-        "principal_point_y": h / 2.0,
-    }
-    return CameraIntrinsics.from_dict(
-        {
-            "model": _CAM_CONTEXT["model"],
-            "width": int(w),
-            "height": int(h),
-            "parameters": params,
-        }
-    )
+    The workspace is the one piece of run state the module cannot derive: its
+    own module-level default is the standalone ``sys.argv`` one, and the
+    writers resolve every image name and `.sift` path against it.  The camera
+    context needs no handover, because it is the same context this script
+    installs and reads."""
+    seed_camera.WS = WS
+    return seed_camera
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -843,7 +811,7 @@ def equivalent_focal(B, f_chart, coeffs, d_max, r_obs, f0):
     th = B._theta_of_d(dd)
     rays = np.stack([np.sin(th), np.zeros_like(th), -np.cos(th)], axis=1)
     px = np.asarray(cam.ray_to_pixel_batch(np.ascontiguousarray(rays)))
-    r_map = px[:, 0] - float(_CAM_WH[0]) / 2.0
+    r_map = px[:, 0] - float(seed_camera._CAM_WH[0]) / 2.0
     ok = np.isfinite(r_map) & (dd > 0)
     if not ok.any():
         return float("nan")
@@ -863,8 +831,7 @@ def spline_release(obs_c, obs_i, u, rvec, tvec, pts, f0, n_img, n_cl, live):
     Returns the lens record, or ``None`` where there is no domain to promote
     onto at all."""
     B = bootstrap_module()
-    B._CAM_WH = _CAM_WH
-    cx, cy = float(_CAM_WH[0]) / 2.0, float(_CAM_WH[1]) / 2.0
+    cx, cy = float(B._CAM_WH[0]) / 2.0, float(B._CAM_WH[1]) / 2.0
     r_obs = np.hypot(u[live][:, 0] - cx, u[live][:, 1] - cy)
     field_r = float(r_obs.max()) if r_obs.size else 0.0
     d_max = BSPLINE_DOMAIN_HEADROOM * field_r / f0
@@ -1268,7 +1235,7 @@ def _low_confidence_vote(res):
     trigger.  Empty means the vote stands on its own and the camera-model
     columns are never asked for.  See the FISHEYE_THIN_POOL block above for
     where each cut point comes from."""
-    w, h = _CAM_WH
+    w, h = seed_camera._CAM_WH
     why = []
     if res["focal_px"] is None:
         why.append("no_consensus")
@@ -1319,7 +1286,7 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
     from sfmtool._sfmtool.geometry import focal_vote as _focal_vote
 
     global _VOTE_FISHEYE
-    w, h = _CAM_WH
+    w, h = seed_camera._CAM_WH
     two = _focal_vote(
         np.ascontiguousarray(obs_c, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
@@ -1430,7 +1397,7 @@ def focal_vote(obs_c, obs_i, u, n_img):
     run and never changes it — see ``_escalate_camera_model``."""
     from sfmtool._sfmtool.geometry import focal_vote as _focal_vote
 
-    w, h = _CAM_WH
+    w, h = seed_camera._CAM_WH
     res = _focal_vote(
         np.ascontiguousarray(obs_c, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
@@ -1482,7 +1449,7 @@ def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
     """
     from sfmtool._sfmtool.geometry import rotation_init
 
-    w, h = _CAM_WH
+    w, h = seed_camera._CAM_WH
     res = rotation_init(
         np.ascontiguousarray(o_c, dtype=np.uint32),
         np.ascontiguousarray(o_i, dtype=np.uint32),
@@ -1663,14 +1630,12 @@ FISHEYE_PAIR_PARALLAX_DEG = 1.0
 FISHEYE_ROT_MIN_INL = 20
 
 
-def fisheye_stage1():
-    """True when stage 1 runs its fisheye-native path.
-
-    The camera context is installed only on a CONFIRMED equidistant verdict
-    (which routes by default, unless SFMTOOL_FISHEYE_SEED=0 refuses it), so
-    this single test is the whole gate: a capture the
-    arbitration did not confirm as fisheye can never reach any code below."""
-    return _CAM_CONTEXT["model"] != "SIMPLE_PINHOLE"
+# ``fisheye_stage1`` -- True when stage 1 runs its fisheye-native path -- is the
+# shared context's own test, re-exported near the top of this module.  The
+# context is installed only on a CONFIRMED equidistant verdict (which routes by
+# default, unless SFMTOOL_FISHEYE_SEED=0 refuses it), so that single test is the
+# whole gate: a capture the arbitration did not confirm as fisheye can never
+# reach any code below.
 
 
 def fisheye_ray_tol(f):
@@ -3613,9 +3578,9 @@ def write_finite_release(idx, res, data, out):
     and it opens every posed image's `.sift` affine array).  Instrumentation
     must never kill the run it instruments, so a failure is a one-line warning.
 
-    The artifact is written under the CAPTURE'S OWN camera model
-    (`bootstrap_module`): a fisheye capture's hypotheses densify and reproject
-    through the equidistant context, never the pinhole default.
+    The artifact is written under the CAPTURE'S OWN camera model, which is what
+    the shared camera context carries: a fisheye capture's hypotheses densify
+    and reproject through the equidistant context, never the pinhole default.
 
     Returns the path written, or None when there was no reconstruction to write
     (a hypothesis with no multi-view point) — the manifest records which."""
@@ -3766,7 +3731,7 @@ def write_relaxed_release(idx, res, tool_options, out):
     ``w = 0``.  ``alive`` maps a written row back to the cluster it came from,
     which is what says which part.
 
-    The lens is installed in the bootstrap context for the write and taken back
+    The lens is installed in the camera context for the write and taken back
     out in ``finally``: the writer stamps whatever camera the context carries,
     and the next hypothesis must not write under this one's."""
     B = bootstrap_module()
@@ -4729,7 +4694,10 @@ def rotation_only_hypothesis(
         # camera frame the context actually installed.
         axis = np.asarray(
             cam.pixel_to_ray_batch(
-                np.ascontiguousarray([[_CAM_WH[0] / 2.0, _CAM_WH[1] / 2.0]], np.float64)
+                np.ascontiguousarray(
+                    [[seed_camera._CAM_WH[0] / 2.0, seed_camera._CAM_WH[1] / 2.0]],
+                    np.float64,
+                )
             )
         )[0]
         ok &= x_cam @ axis > 0
@@ -4992,7 +4960,7 @@ def capture_context():
     which every stage below reads, and starts the run's own timing breakdown:
     this is the first thing either driver builds, so it is where the buckets
     begin."""
-    global _CAM_WH, _RANK_O
+    global _RANK_O
     clear_timings()
     data, rung = load_clusters()
     # The FULL admission, held past the loop's complement rebinds: the
@@ -5001,7 +4969,7 @@ def capture_context():
     data_full = data
     obs_c, obs_i, u = data["obs_c"], data["obs_i"], data["obs_uv"]
     n_img, n_cl = data["n_img"], data["n_cl"]
-    _CAM_WH = tuple(data["dims"][0])
+    seed_camera._CAM_WH = tuple(data["dims"][0])
     _RANK_O = data["adm_rank"][obs_c]
     print(
         f"{WS}: {n_img} images, {n_cl} clusters "
@@ -5057,8 +5025,8 @@ def capture_context():
         )
     else:
         f_vote = None
-        f_probe = 0.9 * max(_CAM_WH)
-        f_grid = np.asarray(F_GRID) * max(_CAM_WH)
+        f_probe = 0.9 * max(seed_camera._CAM_WH)
+        f_grid = np.asarray(F_GRID) * max(seed_camera._CAM_WH)
         print(f"no focal vote (sparse pairs); probing at {f_probe:.1f}")
     if fisheye_stage1():
         # Under a confirmed, opted-in fisheye verdict stage 1 probes at the
