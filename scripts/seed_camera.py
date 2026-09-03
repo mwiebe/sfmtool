@@ -10,9 +10,11 @@ model-generic depth and field tests taken against it, the loader that turns a
 densification that triangulates every cluster at final poses, and the writers
 that put the result on disk (the final save and the debug seed snapshots).
 
-`scripts/exp_fast_seed.py` installs the context through `set_camera_context`
-and drives these writers; `scripts/check_fisheye_seed_primitives.py` exercises
-the same primitives against a synthetic capture.
+The camera context here is the seed's ONLY one: `scripts/exp_fast_seed.py`
+re-exports `set_camera_context`, `camera_context`, `make_cam` and
+`fisheye_stage1` from this module, installs the context through them and drives
+these writers; `scripts/check_fisheye_seed_primitives.py` exercises the same
+primitives against a synthetic capture.
 """
 
 import os
@@ -50,23 +52,26 @@ WRITER_FRONTO_LAM = float(os.environ.get("SFMTOOL_WRITER_FRONTO_LAM", "0.3"))
 # COLMAP-world gauge inherited from the affine factorization (irrelevant to
 # the reprojection residuals and absorbed by the eval's similarity alignment);
 # only the writer rotates it by W to reach the .sfmr canonical world.
-_CAM_WH = (
-    None  # (w, h) of the shared pinhole; set in main() from the uniform image dims
-)
+# (w, h) of the shared camera, part of the context below and installed by the
+# caller from the uniform image dims (``exp_fast_seed.capture_context`` does it
+# once per run); ``seed_snapshot`` falls back to the dims of the data it is
+# handed, so a standalone write still has a size to build a camera from.
+_CAM_WH = None
 
 
-# ── Fisheye seed camera context (scripts/notes-fisheye-seed.md, Phase 1) ─────
+# ── The seed camera context (scripts/notes-fisheye-seed.md, Phase 1) ─────────
 #
-# The finalization's twin of ``exp_fast_seed``'s camera context: a per-run
-# (model, focal) pair behind every camera this script builds.  Default
-# SIMPLE_PINHOLE — the code path this script has always run, byte-identical.
+# THE per-run camera context — base model, focal, and any radial spline — behind
+# every camera the seed builds, on both sides of the seed: ``exp_fast_seed``
+# re-exports these same functions, so its stage-1 solve and this module's
+# writers read one state.  Default SIMPLE_PINHOLE, the code path the seed has
+# always run.
 #
 # The context is INSTALLED BY THE CALLER, never inferred here: the confirmed
-# equidistant verdict lives in stage 1, and ``exp_fast_seed`` hands it over
-# through ``set_camera_context`` before ``finalize_seed_from_dict``.  A
-# standalone bootstrap run therefore stays pinhole unless the caller says
-# otherwise.  As in stage 1, the fisheye model is EQUIDISTANT_FISHEYE (the
-# SIMPLE_PINHOLE analog for `theta = r/f`, closed form both ways with an
+# equidistant verdict lives in stage 1, which calls ``set_camera_context``
+# before anything reaches the writers.  A standalone run therefore stays pinhole
+# unless the caller says otherwise.  The fisheye model is EQUIDISTANT_FISHEYE
+# (the SIMPLE_PINHOLE analog for `theta = r/f`, closed form both ways with an
 # analytic pixel Jacobian), and only the primitives that build their camera
 # through ``make_cam`` become equidistant — the photometric embed's patch
 # geometry is Phase 4.
@@ -150,9 +155,9 @@ def _theta_of_d(d, fisheye_base=None):
 
 
 def fisheye_stage1():
-    """Whether a FISHEYE-BASE camera context is installed — the finalization's
-    twin of ``exp_fast_seed.fisheye_stage1``, and the single test every Phase-4
-    branch is gated on.  A fisheye base only ever arrives through
+    """Whether a FISHEYE-BASE camera context is installed — the single test
+    every Phase-4 branch is gated on, and the one ``exp_fast_seed`` gates its
+    own fisheye-native path on.  A fisheye base only ever arrives through
     ``set_camera_context``, which stage 1 calls on a CONFIRMED both-cells verdict
     (routing by default, unless ``SFMTOOL_FISHEYE_SEED=0`` refuses it), so no
     capture the arbitration did not confirm as fisheye can reach any fisheye
