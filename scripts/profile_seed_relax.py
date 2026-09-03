@@ -376,16 +376,16 @@ def say_census(result):
             f"{fc.get('n_rings')} rings, {fc.get('n_added')} added"
         )
     rc = result.census.get("reconcile", {})
-    if rc.get("refused") or rc.get("held"):
-        print(f"  reconcile: {rc.get('refused') or 'held by ' + rc['held']}")
+    if rc.get("refused"):
+        print(f"  reconcile: {rc['refused']}")
     else:
         print(
             f"  reconcile: {rc.get('n_tangles')} tangles, {rc.get('merged')} merged, "
             f"{rc.get('culled')} culled, {rc.get('refused_tangles')} refused"
         )
     ec = result.census.get("evict", {})
-    if ec.get("refused") or ec.get("held"):
-        print(f"  hand-over: {ec.get('refused') or 'held by ' + ec['held']}")
+    if ec.get("refused"):
+        print(f"  hand-over: {ec['refused']}")
     else:
         print(
             f"  hand-over: {ec.get('n_obs_evicted')} observations retired of "
