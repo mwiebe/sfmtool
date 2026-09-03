@@ -2,9 +2,8 @@
 
 ## Purpose
 
-The staged robust bundle adjustment used by the cluster pinhole bootstrap
-(`specs/core/geometry/cluster-pinhole-bootstrap.md`,
-`scripts/exp_fast_seed.py` / `scripts/exp_pinhole_bootstrap.py`): given
+The staged robust bundle adjustment used by the seed pipeline
+(`scripts/exp_fast_seed.py`): given
 images sharing one camera model, camera poses, world points, and pixel
 observations tying them together, jointly refine the poses and points (and
 optionally the shared focal length and the shared distortion release — a
@@ -15,7 +14,7 @@ This is the optimizer that the trimmed pose-only refinement
 (`crates/sfmtool-core/src/geometry/pose_refine.rs`) is the single-pose
 special case of. It replaces the experiment scripts'
 `scipy.optimize.least_squares` BA, whose Python-side residual and sparsity
-handling dominated the bootstrap's wall-clock.
+handling dominated the seed's wall-clock.
 
 ## Definitions
 

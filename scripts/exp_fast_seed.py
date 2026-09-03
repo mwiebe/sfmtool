@@ -452,10 +452,10 @@ def camera_context():
 
 
 def bootstrap_module():
-    """``exp_pinhole_bootstrap`` with THIS run's workspace and CAMERA CONTEXT
-    installed — the only way anything here reaches the bootstrap's writers.
+    """``seed_camera`` with THIS run's workspace and CAMERA CONTEXT
+    installed — the only way anything here reaches the seed writers.
 
-    The bootstrap keeps its own camera context, and its writers read it: the
+    The writers keep their own camera context, and they read it: the
     densification (``dense_structure``) triangulates through ``make_cam`` and
     the writer (``save_sfmr``) stamps that same camera on the file.  A
     fisheye-routed run that skips this step therefore writes equidistant poses
@@ -464,11 +464,11 @@ def bootstrap_module():
     hypothesis releases: own-track reprojection 9-110 px read as equidistant
     against 1.0-2.0 px read as pinhole, i.e. a cloud that was never solved).
     """
-    import exp_pinhole_bootstrap as B
+    import seed_camera as B
 
     B.WS = WS
     # Stage 1 owns the model and the focal; it never owns a distortion (the
-    # spline rung is the finalization's, and it promotes the bootstrap's own
+    # spline rung is the finalization's, and it promotes the writers' own
     # context in place).  Re-installing here must therefore not demote a
     # promotion that already happened — a later call would otherwise reset
     # the camera the finalized reconstruction was written with.  A promoted
@@ -557,9 +557,9 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
     if want_warp:
         # The surfel writer wants the REFERENCE-RELATIVE warp, which v5 no
         # longer stores: recover it as W = S.S_ref^-1 through each cluster's
-        # own reference row (the bootstrap's shared helper, so this loader
+        # own reference row (the shared helper, so this loader
         # and B.load_clusters cannot drift apart).
-        import exp_pinhole_bootstrap as B
+        import seed_camera as B
 
         out["obs_warp"] = np.ascontiguousarray(
             B.relative_warps(shapes, obs_c, sel_h.reference_members),
@@ -2279,7 +2279,7 @@ def triangulate(obs_c, obs_i, u, rot, trans, used, n_cl, f, cam=None):
 # existing snapshot names do not move.
 # <a> counts probe attempts within the pass and <n> the factorization
 # hypotheses (two seed groups x two reflections per chunk).  Checkpoints 5-7
-# (dense / embed / culled) are written by exp_pinhole_bootstrap's finalization.
+# (dense / embed / culled) are written by the seed finalization.
 _SNAP = {"tag": "nosel", "n_affine": 0, "n_attempt": 0}
 
 
@@ -2309,8 +2309,8 @@ def _snap_full_frame(data, keep, rvec, tvec, posed, f):
 def stage1_census(tag, data, keep, posed):
     """Per-image cluster-observation census at a stage-1 checkpoint.
 
-    The finalization's per-image observation waterfall (`SFMTOOL_STAGE_DUMPS`
-    in ``exp_pinhole_bootstrap``) starts at the embed; this is its CEILING —
+    The finalization's per-image observation waterfall (`SFMTOOL_STAGE_DUMPS`)
+    starts at the embed; this is its CEILING —
     what the matcher's clusters offer each image before any photometric pass
     has had a say.  Two counts per image: every cluster observation it carries,
     and the subset on clusters at least two POSED frames see (the ones dense

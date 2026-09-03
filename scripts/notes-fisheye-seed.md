@@ -84,7 +84,7 @@ Landed: a `(model, focal)` camera context in both seed scripts, gated on
 `SFMTOOL_FISHEYE_SEED=1` **and** the confirmed both-cells verdict, with
 `make_cam` building `SIMPLE_RADIAL_FISHEYE { k1 = 0 }` at the verdict's
 equidistant focal; `exp_fast_seed` hands the context to
-`exp_pinhole_bootstrap` before finalization. The four script primitives
+`seed_camera` before finalization. The four script primitives
 (`triangulate`, `p3p_resect`, `pose_refine`, `reproj_res_one`) recover
 planted geometry to 1e-11 or better under that context on a synthetic
 equidistant scene with 117 observations past 90° —
@@ -1865,7 +1865,7 @@ The stage's input is the cluster selection stage 1 solved on (the derivation
 `exp_fast_seed.load_clusters` admitted: reference/kept members, the optional
 thinning restriction, the span filter). Once the seed images are chosen, the
 stage derives that selection again restricted to them, at `MIN_SPAN_BA`, and
-writes the result. `exp_pinhole_bootstrap.load_clusters(preselected=True)`
+writes the result. `seed_camera.load_clusters(preselected=True)`
 reshapes the written file as it stands: the file *is* the admission, and
 re-selecting it would drop every cluster whose reference member fell outside the
 restriction, since a derived file records those as the absent-reference
