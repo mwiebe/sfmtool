@@ -76,11 +76,6 @@ FOOTPRINT_FACTOR_PROVENANCE = {
 }
 
 
-def evict_on(env):
-    """Whether the eviction stage runs (``SFMTOOL_RELAX_EVICT``)."""
-    return (env.get("SFMTOOL_RELAX_EVICT", "1") or "1").strip() != "0"
-
-
 def octave_ratio(edges):
     """The radius ratio one band spans, read off the band grid itself.
 

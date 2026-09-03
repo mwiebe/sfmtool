@@ -9,7 +9,7 @@ import types
 import numpy as np
 import pytest
 
-from seed_relax import Options, evict, pairs, rings
+from seed_relax import evict, pairs, rings
 from seed_relax.fleet_constants import RING_RATIO_P1
 
 REFINE_RADIUS = 8.0
@@ -157,28 +157,6 @@ def test_the_bands_state_what_went_in_and_what_came_out():
         {"ring": 1, "obs": 2, "obs_kept": 2, "points": 1, "points_kept": 1},
         {"ring": 2, "obs": 1, "obs_kept": 1, "points": 1, "points_kept": 1},
     ]
-
-
-# ------------------------------------------------------------- the kill switch
-
-
-@pytest.mark.parametrize(
-    "env,want",
-    [
-        ({}, True),
-        ({"SFMTOOL_RELAX_EVICT": "1"}, True),
-        ({"SFMTOOL_RELAX_EVICT": ""}, True),
-        ({"SFMTOOL_RELAX_EVICT": "0"}, False),
-        ({"SFMTOOL_RELAX_EVICT": " 0 "}, False),
-    ],
-)
-def test_the_kill_switch_reads_the_environment(env, want):
-    assert evict.evict_on(env) is want
-
-
-def test_the_switch_is_an_option_the_chain_carries():
-    assert Options().evict is True
-    assert Options(evict=False).evict is False
 
 
 # ---------------------------------------------------------------- the refusals

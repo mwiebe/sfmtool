@@ -166,8 +166,8 @@ FAR_DOMINANT_POVERTY = 0.85
 #   REL kills a window measured far below its own attempt's siblings: 38.1%
 #     against 85.0%/92.3% siblings (20250706_204855796), while healthy commits
 #     sit at ratio 1.00 (Daegu) and 0.83 (vid2) of their attempt's max.
-PROBE_GATE_ABS = float(os.environ.get("SFMTOOL_PG_ABS", "0.15"))
-PROBE_GATE_REL = float(os.environ.get("SFMTOOL_PG_REL", "0.5"))
+PROBE_GATE_ABS = 0.15
+PROBE_GATE_REL = 0.5
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 
 # ── Camera-model escalation (specs/core/geometry/focal-vote.md § Camera-Model Columns) ─

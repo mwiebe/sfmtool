@@ -371,16 +371,6 @@ def test_the_stage_is_a_function_of_its_inputs():
         assert np.asarray(a[1][key]).tobytes() == np.asarray(b[1][key]).tobytes()
 
 
-# ------------------------------------------------------------- the kill switch
-
-
-def test_the_kill_switch_reads_the_environment():
-    assert reconcile.reconcile_on({}) is True
-    assert reconcile.reconcile_on({"SFMTOOL_RELAX_RECONCILE": "1"}) is True
-    assert reconcile.reconcile_on({"SFMTOOL_RELAX_RECONCILE": "0"}) is False
-    assert reconcile.reconcile_on({"SFMTOOL_RELAX_RECONCILE": " 0 "}) is False
-
-
 # ---------------------------------------------------------------- end to end
 
 N_FRAMES = 6
@@ -512,31 +502,18 @@ def test_the_manifest_block_states_what_the_stage_decided(relaxed):
     assert "merged" in opts["reconcile"]
 
 
-def test_the_kill_switch_leaves_the_chain_as_it_was(monkeypatch):
-    off = pipeline.run_member(_e2e_member(), _e2e_source(), Options(reconcile=False))
-    assert off.census["reconcile"] == {"held": "SFMTOOL_RELAX_RECONCILE"}
-    from seed_relax import release
-
-    assert release.relaxation_block(off)["reconcile"] == {
-        "held": "SFMTOOL_RELAX_RECONCILE"
-    }
-    assert "reconcile" not in release.tool_options(off, 0)
-
-    # The stage held is the stage absent: with the seam stubbed out to hand its
-    # inputs straight back, the chain produces the same arrays bit for bit.
+def test_a_seam_that_decides_nothing_leaves_the_chain_as_it_was(monkeypatch):
+    # With the seam stubbed out to hand its inputs straight back, the chain is
+    # the chain from before the stage existed: it states no reconciliation in
+    # the manifest and none in the released file's own metadata.
     monkeypatch.setattr(
         reconcile,
         "reconcile_stage",
-        lambda mx, cam, st, rr, tol, f_eq, trace=None: (mx, st, {"held": "stub"}),
+        lambda mx, cam, st, rr, tol, f_eq, trace=None: (mx, st, {"refused": "stubbed"}),
     )
     absent = pipeline.run_member(_e2e_member(), _e2e_source(), Options())
-    for key in ("frames", "clusters", "quats", "trans", "points", "at_inf"):
-        assert (
-            np.asarray(off.state[key]).tobytes()
-            == np.asarray(absent.state[key]).tobytes()
-        )
-    assert (
-        np.asarray(off.member.obs_c).tobytes()
-        == np.asarray(absent.member.obs_c).tobytes()
-    )
-    assert release.tool_options(off, 0) == release.tool_options(absent, 0)
+    from seed_relax import release
+
+    assert absent.census["reconcile"] == {"refused": "stubbed"}
+    assert release.relaxation_block(absent)["reconcile"] == {"refused": "stubbed"}
+    assert "reconcile" not in release.tool_options(absent, 0)
