@@ -3,7 +3,7 @@
 
 """Camera context, cluster loading and `.sfmr` writers of the seed pipeline.
 
-Holds the per-run camera context -- base model, focal, radial-spline
+Holds the per-run camera context -- image size, radial chart, focal, spline
 coefficients -- that every camera the seed builds is made from, the
 model-generic depth and field tests taken against it, the loader that turns a
 `*-clusters-patches.matches` file into flat observation arrays, the
@@ -61,193 +61,202 @@ _CAM_WH = None
 
 # ── The seed camera context (scripts/notes-fisheye-seed.md, Phase 1) ─────────
 #
-# THE per-run camera context — base model, focal, and any radial spline — behind
-# every camera the seed builds, on both sides of the seed: ``exp_fast_seed``
-# re-exports these same functions, so its stage-1 solve and this module's
-# writers read one state.  Default SIMPLE_PINHOLE, the code path the seed has
-# always run.
+# THE per-run camera context — image size, model, focal and radial spline —
+# behind every camera the seed builds, on both sides of the seed:
+# ``exp_fast_seed`` re-exports these same functions, so its stage-1 solve and
+# this module's writers read one state.
 #
-# The context is INSTALLED BY THE CALLER, never inferred here: the confirmed
+# THE MODEL IS ALWAYS A SPLINE MODEL, from the first camera of the run:
+# SFMTOOL_PINHOLE by default, SFMTOOL_FISHEYE once stage 1 confirms an
+# equidistant verdict.  It starts at ZERO KNOTS, and a zero-knot spline is its
+# chart's base map bit for bit — projection, inverse and pixel Jacobian alike —
+# so the seed's arithmetic is exactly what it was under SIMPLE_PINHOLE and
+# EQUIDISTANT_FISHEYE.  What it buys is that a lens is no longer a MODEL the run
+# has to be promoted onto part-way through: the lens rungs grow coefficients on
+# the model the capture has carried all along, and every artifact records the
+# camera it was actually solved under.
+#
+# The CHART is installed by the caller, never inferred here: the confirmed
 # equidistant verdict lives in stage 1, which calls ``set_camera_context``
-# before anything reaches the writers.  A standalone run therefore stays pinhole
-# unless the caller says otherwise.  The fisheye model is EQUIDISTANT_FISHEYE
-# (the SIMPLE_PINHOLE analog for `theta = r/f`, closed form both ways with an
-# analytic pixel Jacobian), and only the primitives that build their camera
-# through ``make_cam`` become equidistant — the photometric embed's patch
-# geometry is Phase 4.
+# before anything reaches the writers.  A standalone run therefore stays on the
+# perspective chart unless the caller says otherwise, and only the primitives
+# that build their camera through ``make_cam`` follow the chart — the
+# photometric embed's patch geometry is Phase 4.
 _CAM_CONTEXT = {
-    "model": "SIMPLE_PINHOLE",
+    "model": "SFMTOOL_PINHOLE",
     "focal": None,
-    "bspline": None,
-    "theta_max": None,
+    # The radial-spline coefficients.  EMPTY is the resting state, and it is a
+    # real state rather than a missing one: zero knots is the chart's own map.
+    "bspline": (),
+    # The end of the spline's domain, in the chart's own radial coordinate.
+    # ``None`` until a lens rung fits one, whereupon ``make_cam`` stamps the
+    # field the image corners subtend (see ``_corner_domain``).
+    "d_max": None,
 }
 
+#: The two models the context is ever on.
+CONTEXT_MODELS = ("SFMTOOL_PINHOLE", "SFMTOOL_FISHEYE")
 
-def set_camera_context(model, focal=None, bspline=None, theta_max=None):
+
+def set_camera_context(model, focal=None, bspline=None, d_max=None):
     """Install the per-run camera context (see the block comment above).
 
-    ``bspline`` / ``theta_max`` are the radial-spline coefficients and the END
-    OF THEIR DOMAIN, ignored by every other model.  The domain end is measured
-    in the base model's own radial coordinate — incidence angle under the
-    equidistant base, normalized image-plane radius under the pinhole one (see
-    ``_SPLINE_MODEL``) — and the keyword keeps its fisheye name over both.  The
-    finalization's spline rung is the only caller that ever passes them, and it
-    passes whichever coordinate its own base measures; stage 1 stays
-    base-model."""
+    ``model`` is one of :data:`CONTEXT_MODELS` and nothing else: the caller
+    always knows which chart it means, and a base-model name reaching here would
+    silently be a different camera from the one the run solved with.  Old
+    artifacts read off disk are normalized where they are read
+    (``seed_relax.lens.promote``), not here.
+
+    ``bspline`` / ``d_max`` are the radial-spline coefficients and the END OF
+    THEIR DOMAIN.  The domain end is measured in the chart's own radial
+    coordinate — incidence angle on the fisheye chart, normalized image-plane
+    radius ``rho = tan(theta)`` on the perspective one — and the lens rungs pass
+    whichever their own chart measures.  Both default to the resting state: no
+    coefficients, and no fitted domain."""
+    if model not in CONTEXT_MODELS:
+        raise ValueError(
+            f"camera context model must be one of {CONTEXT_MODELS}, got {model!r}"
+        )
     _CAM_CONTEXT["model"] = model
     _CAM_CONTEXT["focal"] = None if focal is None else float(focal)
     _CAM_CONTEXT["bspline"] = (
-        None if bspline is None else np.ascontiguousarray(bspline, dtype=np.float64)
+        () if bspline is None else np.ascontiguousarray(bspline, dtype=np.float64)
     )
-    _CAM_CONTEXT["theta_max"] = None if theta_max is None else float(theta_max)
+    _CAM_CONTEXT["d_max"] = None if d_max is None else float(d_max)
 
 
 def camera_context():
-    """The active ``(model, focal)`` context as a plain dict (a copy)."""
+    """The active context as a plain dict (a copy)."""
     return dict(_CAM_CONTEXT)
 
 
-# ── The radial-spline models, keyed off the base model ──────────────────────
+# ── The radial-spline models, keyed off the chart ───────────────────────────
 #
-# SFMTOOL_FISHEYE and SFMTOOL_PINHOLE are ONE model with two bases: a monotone
-# cubic B-spline over the base's own radial coordinate ``d``, added to ``d``
+# SFMTOOL_FISHEYE and SFMTOOL_PINHOLE are ONE model on two charts: a monotone
+# cubic B-spline over the chart's own radial coordinate ``d``, added to ``d``
 # before the focal scales it to pixels
 # (specs/formats/sfmtool-camera-models.md).  ``d`` is the incidence angle
-# ``theta`` under the equidistant base and the normalized image-plane radius
-# ``rho = tan(theta)`` under the pinhole one, and that is the ONLY difference:
+# ``theta`` on the fisheye chart and the normalized image-plane radius
+# ``rho = tan(theta)`` on the perspective one, and that is the ONLY difference:
 # same parameter head, same coefficients, same gauge, same monotonicity
-# invariant.  Everything this script does with a spline camera is therefore
-# written in ``d``, and this table is the single point where the base model
-# picks which coordinate that is.
-_SPLINE_MODEL = {
-    # base model -> (spline model, domain-end parameter, fisheye base?)
-    "SIMPLE_PINHOLE": ("SFMTOOL_PINHOLE", "bspline_rho_max", False),
-    "SFMTOOL_PINHOLE": ("SFMTOOL_PINHOLE", "bspline_rho_max", False),
-    "EQUIDISTANT_FISHEYE": ("SFMTOOL_FISHEYE", "bspline_theta_max", True),
-    "SIMPLE_RADIAL_FISHEYE": ("SFMTOOL_FISHEYE", "bspline_theta_max", True),
-    "SFMTOOL_FISHEYE": ("SFMTOOL_FISHEYE", "bspline_theta_max", True),
-}
+# invariant.  Everything this module does with a camera is therefore written in
+# ``d``, and the chart is what picks which coordinate that is.
+#
+# The tables themselves live in ``seed_relax.lens`` — which chart a model name
+# is on, and which spline model and domain-end parameter each chart carries —
+# because that module is the one that has to classify ARBITRARY stored cameras,
+# including the base models the seed no longer builds.  Reading them from there
+# keeps the seed's statement of them single.
 
 
 def spline_model(model=None):
-    """``(spline model, domain-end parameter, fisheye base?)`` of the
-    radial-spline promotion of ``model`` — the installed context's model when
-    omitted.  A model the table does not carry is read as a fisheye base, the
-    one this script promoted before the pinhole spline existed."""
+    """``(spline model, domain-end parameter, fisheye chart?)`` for ``model`` —
+    the installed context's model when omitted.
+
+    Takes any camera model name, not just a context one: the writer's field
+    tests ask it about the camera in their hands."""
+    from seed_relax.lens import SPLINE_MODEL, family_of
+
     m = _CAM_CONTEXT["model"] if model is None else model
-    return _SPLINE_MODEL.get(m, _SPLINE_MODEL["EQUIDISTANT_FISHEYE"])
+    chart = family_of(m)
+    return (*SPLINE_MODEL[chart], chart == "fisheye")
 
 
-def _d_of_theta(theta, fisheye_base=None):
-    """The base model's radial coordinate at incidence angle ``theta``: the
-    angle itself under a fisheye base, ``tan(theta)`` under a pinhole one."""
-    if fisheye_base is None:
-        fisheye_base = spline_model()[2]
-    return theta if fisheye_base else np.tan(theta)
+def _d_of_theta(theta, fisheye_chart=None):
+    """The chart's radial coordinate at incidence angle ``theta``: the angle
+    itself on the fisheye chart, ``tan(theta)`` on the perspective one."""
+    if fisheye_chart is None:
+        fisheye_chart = spline_model()[2]
+    return theta if fisheye_chart else np.tan(theta)
 
 
-def _theta_of_d(d, fisheye_base=None):
+def _theta_of_d(d, fisheye_chart=None):
     """The incidence angle at radial coordinate ``d`` — inverse of
     :func:`_d_of_theta`."""
-    if fisheye_base is None:
-        fisheye_base = spline_model()[2]
-    return d if fisheye_base else np.arctan(d)
+    if fisheye_chart is None:
+        fisheye_chart = spline_model()[2]
+    return d if fisheye_chart else np.arctan(d)
 
 
 def fisheye_stage1():
-    """Whether a FISHEYE-BASE camera context is installed — the single test
+    """Whether a FISHEYE-CHART camera context is installed — the single test
     every Phase-4 branch is gated on, and the one ``exp_fast_seed`` gates its
-    own fisheye-native path on.  A fisheye base only ever arrives through
+    own fisheye-native path on.  The fisheye chart only ever arrives through
     ``set_camera_context``, which stage 1 calls on a CONFIRMED both-cells verdict
     (routing by default, unless ``SFMTOOL_FISHEYE_SEED=0`` refuses it), so no
     capture the arbitration did not confirm as fisheye can reach any fisheye
     branch.
 
-    Read off ``_SPLINE_MODEL`` rather than as "not the pinhole default": the
-    spline rung promotes a PINHOLE capture too, and SFMTOOL_PINHOLE is a
-    non-default model whose base is still the pinhole one.  What the branches
-    gated here ask — the ray-range depth measure, the imaged-cone field test,
-    the writer's model-generic surfel arm — is a question about the base, not
-    about whether a distortion rung ran.  Every model reachable before that
-    promotion answers exactly as the old test did."""
+    A question about the CHART, not about the lens: what the branches gated here
+    ask — the ray-range depth measure, the imaged-cone field test, the writer's
+    model-generic surfel arm — is whether the map images past 90 degrees, which
+    is settled by the chart alone and unmoved by how many knots the run has
+    grown."""
     return spline_model()[2]
 
 
 # Absolute plausibility floor on a released focal, as a multiple of
-# max(w, h).  The pinhole value is the long-standing bound; the equidistant
-# one is the low end of the focal-vote kernel's FOV-derived band
+# max(w, h), by chart.  The perspective value is the long-standing bound; the
+# fisheye one is the low end of the focal-vote kernel's FOV-derived band
 # (specs/core/geometry/focal-vote.md), because `theta = r/f` ties focal to field of
 # view — a >180 deg capture's own focal sits BELOW the pinhole floor (kerry:
 # f ~ 138 px against 0.3 x 480 = 144), which would reject every honest solve.
-_FOCAL_FLOOR_MULT = {
-    "SIMPLE_PINHOLE": 0.3,
-    "EQUIDISTANT_FISHEYE": 0.075,
-    # The spline rung's promotion of the same lens: same floor as its base.
-    "SFMTOOL_FISHEYE": 0.075,
-    "SFMTOOL_PINHOLE": 0.3,
-}
+_FOCAL_FLOOR_MULT = {"pinhole": 0.3, "fisheye": 0.075}
 
 
 def focal_floor():
     """The context's absolute focal plausibility floor, px."""
-    return _FOCAL_FLOOR_MULT.get(_CAM_CONTEXT["model"], 0.075) * max(_CAM_WH)
-
-
-def make_cam(f=None):
-    """The context camera at focal ``f`` (the context focal when omitted).
-
-    SIMPLE_PINHOLE by default (principal point at the image centre);
-    EQUIDISTANT_FISHEYE under an installed fisheye context, or the matching
-    radial-spline model once the finalization's spline rung has promoted it
-    (same map plus the context's spline).  All of them share the same three
-    base parameters — a promoted model adds its distortion — so
-    this builds one dict.  The images share one size (see main()), so one
-    camera serves every projection; ``ray_to_pixel_batch`` /
-    ``pixel_to_ray_batch`` map canonical camera-space points <-> full
-    pixels."""
-    w, h = _CAM_WH
-    if f is None:
-        f = _CAM_CONTEXT["focal"]
-    params = {
-        "focal_length": float(f),
-        "principal_point_x": w / 2.0,
-        "principal_point_y": h / 2.0,
-    }
-    model = _CAM_CONTEXT["model"]
-    if model in ("SFMTOOL_FISHEYE", "SFMTOOL_PINHOLE"):
-        coeffs = np.asarray(_CAM_CONTEXT["bspline"], dtype=np.float64)
-        params[spline_model(model)[1]] = float(_CAM_CONTEXT["theta_max"])
-        params["bspline_coeff_count"] = float(len(coeffs))
-        for i, c in enumerate(coeffs):
-            params[f"bspline_c{i}"] = float(c)
-    return CameraIntrinsics.from_dict(
-        {
-            "model": model,
-            "width": int(w),
-            "height": int(h),
-            "parameters": params,
-        }
+    return _FOCAL_FLOOR_MULT["fisheye" if fisheye_stage1() else "pinhole"] * max(
+        _CAM_WH
     )
 
 
-def make_cam_bspline(f, coeffs, d_max):
-    """The context camera promoted to its radial-spline model at
-    ``(f, coeffs)`` on the spline domain ``[0, d_max]`` — SFMTOOL_FISHEYE
-    under an equidistant base, SFMTOOL_PINHOLE under a pinhole one, with
-    ``d_max`` in whichever radial coordinate that base measures
-    (see ``_SPLINE_MODEL``).
+def _corner_domain(f):
+    """The spline domain end to stamp when no lens rung has fitted one: the
+    chart coordinate the image CORNERS sit at, ``r_corner / f``.
 
-    An all-zero ``coeffs`` is the base model's own map — bit for bit,
-    projection, inverse and pixel Jacobian alike (the model's zero-spline
-    identity) — so the promotion itself moves nothing; the coefficients are
-    the dimensionless radial correction the base map cannot
-    express, with ``f`` staying the central scale under the model's
-    center-anchored gauge."""
+    The model requires a positive finite domain end at every knot count, and at
+    zero knots there is no basis over it, so the number has to be well-defined
+    rather than meaningful.  The corner field is the widest thing the sensor can
+    carry, so the placeholder never ends inside the field the first fit will
+    want; a fit restamps it from the observations
+    (``seed_relax.lens.observed_field``)."""
     w, h = _CAM_WH
+    return float(np.hypot(w / 2.0, h / 2.0)) / float(f)
+
+
+def make_cam(f=None, coeffs=None, d_max=None):
+    """The context camera at focal ``f`` (the context focal when omitted).
+
+    Always the context's radial-spline model with the principal point at the
+    image centre — SFMTOOL_PINHOLE, or SFMTOOL_FISHEYE under a fisheye context —
+    carrying the context's coefficients over the context's domain.  At the
+    resting state (no coefficients) that is a ZERO-KNOT spline, which is the
+    chart's base map bit for bit, so nothing about the geometry depends on
+    whether a lens rung has run.
+
+    ``coeffs`` / ``d_max`` override the context's own for one camera, which is
+    what a caller holding a hypothesis's lens wants (see
+    :func:`make_cam_bspline`).  Where neither the argument nor the context names
+    a domain end, the corner field is stamped (see :func:`_corner_domain`).
+
+    The images share one size, so one camera serves every projection;
+    ``ray_to_pixel_batch`` / ``pixel_to_ray_batch`` map canonical camera-space
+    points <-> full pixels."""
+    w, h = _CAM_WH
+    if f is None:
+        f = _CAM_CONTEXT["focal"]
+    f = float(f)
     model, d_key, _ = spline_model()
-    cc = np.asarray(coeffs, dtype=np.float64)
+    cc = np.asarray(
+        _CAM_CONTEXT["bspline"] if coeffs is None else coeffs, dtype=np.float64
+    )
+    if d_max is None:
+        d_max = _CAM_CONTEXT["d_max"]
+    if d_max is None:
+        d_max = _corner_domain(f)
     params = {
-        "focal_length": float(f),
+        "focal_length": f,
         "principal_point_x": w / 2.0,
         "principal_point_y": h / 2.0,
         d_key: float(d_max),
@@ -263,6 +272,20 @@ def make_cam_bspline(f, coeffs, d_max):
             "parameters": params,
         }
     )
+
+
+def make_cam_bspline(f, coeffs, d_max):
+    """The context camera at ``(f, coeffs)`` on the spline domain ``[0, d_max]``
+    — :func:`make_cam` with a lens the CALLER holds rather than the installed
+    one, with ``d_max`` in whichever radial coordinate the context's chart
+    measures.
+
+    An all-zero ``coeffs`` is the chart's base map — bit for bit, projection,
+    inverse and pixel Jacobian alike (the model's zero-spline identity) — so the
+    coefficients are the dimensionless radial correction the base map cannot
+    express, with ``f`` staying the central scale under the model's
+    center-anchored gauge."""
+    return make_cam(f, coeffs=coeffs, d_max=d_max)
 
 
 def _cam_depth(p_cam):
@@ -300,17 +323,16 @@ def _in_field(cam, p_cam):
 
 
 def _field_d_max(cam):
-    """The largest radial coordinate ``cam`` images: the base model's own
-    coordinate at the inscribed image circle's rim — the incidence angle
-    ``theta`` under a fisheye base, the normalized image-plane radius
-    ``rho = tan(theta)`` under a pinhole one.
+    """The largest radial coordinate ``cam`` images: its chart's coordinate at
+    the inscribed image circle's rim — the incidence angle ``theta`` on the
+    fisheye chart, the normalized image-plane radius ``rho = tan(theta)`` on the
+    perspective one.
 
-    Distortion-free the pixel radius is ``f * d`` either way, so the rim is
-    ``r_max / f`` outright.  Once a distortion rung has promoted the camera
-    (the spline rung's SFMTOOL_FISHEYE / SFMTOOL_PINHOLE, or a legacy
-    SIMPLE_RADIAL_FISHEYE) the pixel radius is ``f * (d + delta(d))``, not
-    ``f * d``, so the rim is read back through the model's own inverse rather
-    than divided out."""
+    On a model that can carry a radial correction (the seed's own
+    SFMTOOL_FISHEYE / SFMTOOL_PINHOLE, or a legacy SIMPLE_RADIAL_FISHEYE) the
+    pixel radius is ``f * (d + delta(d))``, so the rim is read back through the
+    model's own inverse.  On one that cannot it is ``f * d`` and the rim is
+    ``r_max / f`` outright."""
     r_max = 0.5 * min(cam.width, cam.height)
     if cam.model in ("SIMPLE_RADIAL_FISHEYE", "SFMTOOL_FISHEYE", "SFMTOOL_PINHOLE"):
         cx, cy = cam.principal_point
@@ -320,7 +342,7 @@ def _field_d_max(cam):
     return r_max / float(cam.focal_lengths[0])
 
 
-# The fisheye entry point: under a fisheye base the radial coordinate IS the
+# The fisheye entry point: on the fisheye chart the radial coordinate IS the
 # incidence angle, which is the reading ``_in_field`` and its callers take.
 _field_theta_max = _field_d_max
 
@@ -871,12 +893,12 @@ def save_sfmr(
         tx = int(np.clip(uv[k, 0] * th.shape[1] / w, 0, th.shape[1] - 1))
         colors[point_idx[k]] = th[ty, tx]
 
-    # The context camera, NOT a hardcoded SIMPLE_PINHOLE.  The structure this
-    # writes was triangulated through ``make_cam`` (equidistant rays under a
-    # fisheye context), so stamping a pinhole model on it hands every
-    # downstream consumer — the photometric embed, the reprojection culls, the
-    # finalization BA — a camera that does not describe the observations.
-    # Identical to the previous literal on the pinhole default.
+    # The context camera, whole — the chart, the focal AND whatever
+    # coefficients the context carries.  The structure this writes was
+    # triangulated through ``make_cam``, so a stamp that leaves any of that out
+    # hands every downstream consumer — the photometric embed, the reprojection
+    # culls, the finalization BA — a camera that does not describe the
+    # observations.
     camera = make_cam(float(f))
 
     opts = {"camera_model": _CAM_CONTEXT["model"], "focal_grid": F_GRID}

@@ -34,6 +34,18 @@ def _cam(model, focal=F_TRUE, **extra):
     )
 
 
+def _spline_cam(model, focal=F_TRUE, coeffs=(), d_max=1.2):
+    """A camera on a radial-spline model, as the seed now builds every one."""
+    cc = np.asarray(coeffs, float)
+    key = "bspline_theta_max" if "FISHEYE" in model else "bspline_rho_max"
+    extra = {key: float(d_max), "bspline_coeff_count": float(len(cc))}
+    extra.update({f"bspline_c{i}": float(c) for i, c in enumerate(cc)})
+    return _cam(model, focal=focal, **extra)
+
+
+# The seed no longer builds these, but releases written before it carried a
+# spline still stamp them, and rung 2 reads those off disk -- so `promote` has
+# to go on turning one into its chart's spline model without moving the map.
 @pytest.mark.parametrize("model", ["SIMPLE_PINHOLE", "EQUIDISTANT_FISHEYE"])
 def test_a_zero_spline_is_the_base_map(model):
     base = _cam(model)
@@ -57,6 +69,39 @@ def test_a_zero_spline_is_the_base_map(model):
     ok = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
     assert ok.any()
     assert float(np.abs(a[ok] - b[ok]).max()) == 0.0
+
+
+@pytest.mark.parametrize("model", ["SFMTOOL_PINHOLE", "SFMTOOL_FISHEYE"])
+def test_promote_passes_a_spline_camera_through_on_its_own_model(model):
+    # What the seed hands the relaxation now: a camera already on a spline
+    # model, at zero knots.  `promote` is then a restatement, not a promotion --
+    # same model, same chart, same map -- so the relaxation reads one lens
+    # whichever side of the change its member came from.
+    started = _spline_cam(model)
+    got = lens.promote(started, lens.base_focal(started), np.zeros(2), 1.2)
+    assert got.model == model
+    assert lens.family_of(got.model) == lens.family_of(started.model)
+    thetas = lens.sample_thetas(0.6)
+    assert (
+        float(
+            np.abs(
+                lens.radial_map(got, thetas) - lens.radial_map(started, thetas)
+            ).max()
+        )
+        == 0.0
+    )
+
+
+@pytest.mark.parametrize("model", ["SFMTOOL_PINHOLE", "SFMTOOL_FISHEYE"])
+def test_a_zero_knot_camera_reports_no_fitted_domain(model):
+    # A zero-knot camera carries a domain-end parameter because the model
+    # demands a positive one, but with no basis over it the number describes
+    # nothing -- so it reads as no domain, and a release restamps it from the
+    # observed field exactly as it does for a base-model camera.
+    assert lens.spline_domain(_spline_cam(model, d_max=9.0)) is None
+    assert lens.spline_domain(_cam("SIMPLE_PINHOLE")) is None
+    fitted = _spline_cam(model, coeffs=[0.01, -0.02], d_max=1.4)
+    assert lens.spline_domain(fitted) == 1.4
 
 
 def test_a_two_knot_map_is_reproduced_on_four_knots():
@@ -173,8 +218,18 @@ def test_a_member_with_no_field_refuses():
     assert cam is None and rots is None
 
 
-def test_the_gate_reads_the_base_chart():
-    take, why = lens.gate_early_release(_cam("EQUIDISTANT_FISHEYE"))
+@pytest.mark.parametrize(
+    ("fisheye", "pinhole"),
+    [
+        # What members carry now, and what old releases still carry.
+        ("SFMTOOL_FISHEYE", "SFMTOOL_PINHOLE"),
+        ("EQUIDISTANT_FISHEYE", "SIMPLE_PINHOLE"),
+    ],
+)
+def test_the_gate_reads_the_base_chart(fisheye, pinhole):
+    cam_f = _spline_cam(fisheye) if fisheye.startswith("SFMTOOL") else _cam(fisheye)
+    cam_p = _spline_cam(pinhole) if pinhole.startswith("SFMTOOL") else _cam(pinhole)
+    take, why = lens.gate_early_release(cam_f)
     assert take and "is the chart" in why
-    take, why = lens.gate_early_release(_cam("SIMPLE_PINHOLE"))
+    take, why = lens.gate_early_release(cam_p)
     assert not take and "is not the chart" in why
