@@ -7,7 +7,8 @@ Drives the seed scripts' four geometric primitives — ``triangulate``,
 ``p3p_resect``, ``pose_refine`` and ``reproj_res_one``, in BOTH
 ``exp_fast_seed`` and ``seed_camera`` — over a synthetic
 equidistant scene with planted poses and points, under the fisheye camera
-context (``EQUIDISTANT_FISHEYE``).  The scene is deliberately built
+context (``SFMTOOL_FISHEYE`` at zero knots, which is the equidistant map bit for
+bit -- see :func:`check_zero_knot_identity`).  The scene is deliberately built
 so a large share of its observations sit at theta >= 90 degrees, i.e. behind
 the image plane: the failure class this gate exists for is a hidden z = 1
 normalization or a z > 0 cheirality test that silently discards the periphery
@@ -138,6 +139,72 @@ def check_model_equivalence():
 
     d_rt = np.abs(back_n - rays).max()
     check(d_rt < 1e-12, "pixel -> ray inverts ray -> pixel exactly", f"max {d_rt:.2e}")
+
+
+def check_zero_knot_identity():
+    """The seed's resting camera IS its chart's base model, at the SCRIPT level.
+
+    The context carries a radial-spline model from the first camera of the run,
+    so every camera the seed builds is SFMTOOL_PINHOLE or SFMTOOL_FISHEYE even
+    before a lens rung has fitted anything.  That is only free if a zero-knot
+    spline is the base map EXACTLY, so this takes ``make_cam``'s own output --
+    the corner-field domain end and all -- against the base model built straight
+    from the bindings, and asks for bit equality in both directions.  The
+    model's own zero-spline identity is pinned in Rust; what is pinned here is
+    that the seed's camera BUILDER inherits it, domain-end policy included."""
+    from sfmtool._sfmtool.geometry import CameraIntrinsics
+
+    print("\nZero-knot identity — the resting context is its chart's base map")
+    w, h = WH
+    B._CAM_WH = WH
+    thetas = np.linspace(0.0, np.radians(140.0), 401)
+    rays = np.ascontiguousarray(
+        np.stack([np.sin(thetas), np.zeros_like(thetas), -np.cos(thetas)], axis=1)
+    )
+    for chart, spline, base, focal in (
+        ("perspective", "SFMTOOL_PINHOLE", "SIMPLE_PINHOLE", F_PIN),
+        ("fisheye", "SFMTOOL_FISHEYE", "EQUIDISTANT_FISHEYE", F_EQUI),
+    ):
+        B.set_camera_context(spline, focal)
+        got = B.make_cam(focal)
+        want = CameraIntrinsics.from_dict(
+            {
+                "model": base,
+                "width": w,
+                "height": h,
+                "parameters": {
+                    "focal_length": focal,
+                    "principal_point_x": w / 2.0,
+                    "principal_point_y": h / 2.0,
+                },
+            }
+        )
+        check(
+            got.model == spline and float(got.parameters["bspline_coeff_count"]) == 0.0,
+            f"{chart}: make_cam builds {spline} at zero knots with no lens fitted",
+            f"model {got.model}, params {sorted(got.parameters)}",
+        )
+        a = np.asarray(got.ray_to_pixel_batch(rays), float)
+        b = np.asarray(want.ray_to_pixel_batch(rays), float)
+        same_valid = bool((np.isfinite(a) == np.isfinite(b)).all())
+        ok = np.isfinite(a).all(axis=1)
+        d_fwd = float(np.abs(a[ok] - b[ok]).max()) if ok.any() else np.inf
+        check(
+            same_valid and ok.any() and d_fwd == 0.0,
+            f"{chart}: its rays project bit-identically to {base}",
+            f"max {d_fwd:.2e} px over {int(ok.sum())}/{len(ok)} rays, "
+            f"same validity {same_valid}",
+        )
+        px = np.ascontiguousarray(a[ok])
+        ba = np.asarray(got.pixel_to_ray_batch(px), float)
+        bb = np.asarray(want.pixel_to_ray_batch(px), float)
+        d_inv = float(np.abs(ba - bb).max())
+        check(
+            d_inv == 0.0,
+            f"{chart}: its pixels unproject bit-identically to {base}",
+            f"max {d_inv:.2e}",
+        )
+    B.set_camera_context("SFMTOOL_PINHOLE", None)
 
 
 def look_at(center):
@@ -330,7 +397,7 @@ def run_ray_suite():
     factorization could not do here."""
     print(f"\nexp_fast_seed — ray-space seed (Phase 2)  [equidistant @ {F_EQUI:g} px]")
     B._CAM_WH = WH
-    F.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
+    F.set_camera_context("SFMTOOL_FISHEYE", F_EQUI)
     cam = F.make_cam(F_EQUI)
     check(F.fisheye_stage1(), "fisheye_stage1() is armed by the camera context")
     check(
@@ -507,7 +574,7 @@ def run_release_suite():
     untouched, so the release is what moves it and not the trim schedule."""
     print("\nPhase 3b — equidistant focal scan and release")
     B._CAM_WH = WH
-    F.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
+    F.set_camera_context("SFMTOOL_FISHEYE", F_EQUI)
     check(F.fisheye_stage1(), "the fisheye stage-1 gate is armed")
 
     lo, hi = F.fisheye_focal_band()
@@ -608,7 +675,7 @@ def run_embed_suite():
        captures are measured against."""
     print("\nPhase 4 — embed / photometric layer under fisheye")
     B._CAM_WH = WH
-    B.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
+    B.set_camera_context("SFMTOOL_FISHEYE", F_EQUI)
     check(B.fisheye_stage1(), "the bootstrap's fisheye gate is armed")
     cam = B.make_cam(F_EQUI)
     s_flip = np.array([1.0, -1.0, -1.0])
@@ -682,13 +749,13 @@ def run_embed_suite():
         "_cam_depth is the ray range under fisheye (positive past 90 deg)",
         f"min {d_rng.min():.3f}",
     )
-    B.set_camera_context("SIMPLE_PINHOLE", F_PIN)
+    B.set_camera_context("SFMTOOL_PINHOLE", F_PIN)
     check(
         np.array_equal(B._in_field(cam, xc_can), -xc_can[:, 2] > 0)
         and np.allclose(B._cam_depth(xc_can), -xc_can[:, 2]),
         "both fall back to the pinhole half-space / -z reading with no context",
     )
-    B.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
+    B.set_camera_context("SFMTOOL_FISHEYE", F_EQUI)
 
     # The extent law, measured through the model rather than asserted.
     r_px = 6.0
@@ -759,7 +826,7 @@ def run_finalization_suite():
 
     print("\nPhase 5 — finalization chain under fisheye")
     B._CAM_WH = WH
-    B.set_camera_context("EQUIDISTANT_FISHEYE", F_EQUI)
+    B.set_camera_context("SFMTOOL_FISHEYE", F_EQUI)
     cam = B.make_cam(F_EQUI)
 
     # -- 1: a wide scene whose observations straddle 90 degrees -------------
@@ -898,10 +965,10 @@ def run_phase6_suite():
         return float(cloud[0].half_extent[0])
 
     try:
-        got_eq = feature_half("EQUIDISTANT_FISHEYE")
-        got_pin = feature_half("SIMPLE_PINHOLE")
+        got_eq = feature_half("SFMTOOL_FISHEYE")
+        got_pin = feature_half("SFMTOOL_PINHOLE")
     finally:
-        B.set_camera_context("SIMPLE_PINHOLE", None)
+        B.set_camera_context("SFMTOOL_PINHOLE", None)
     want_eq = factor * sigma * d / F_EQUI
     want_pin = factor * sigma * d * np.cos(th) / F_EQUI
     check(
@@ -931,35 +998,37 @@ def run_phase6_suite():
 
 
 def run_bspline_context_suite():
-    """The promoted SFMTOOL_FISHEYE context — the finalization's spline rung.
+    """A COEFFICIENT-BEARING SFMTOOL_FISHEYE context — what a lens rung installs.
 
-    Mirrors the Phase-3a representation cross-check for the spline model:
-    a ZERO spline parameterizes the SAME map as EQUIDISTANT_FISHEYE (the
-    promotion moves nothing), a bent spline still inverts past 90 degrees,
-    and the context plumbing (``make_cam``, ``fisheye_stage1``,
-    ``focal_floor``, ``_field_theta_max``) reads the promoted model rather
-    than falling through a default arm.  The model's own maps are pinned in
-    Rust (``camera/distortion/tests.rs``); this covers only the script layer
-    the promotion flows through."""
+    Mirrors the Phase-3a representation cross-check for a context carrying
+    explicit coefficient slots: eight ZERO coefficients parameterize the SAME
+    map as EQUIDISTANT_FISHEYE (allocating slots moves nothing), a bent spline
+    still inverts past 90 degrees, and the context plumbing (``make_cam``,
+    ``fisheye_stage1``, ``focal_floor``, ``_field_theta_max``) reads the
+    installed lens rather than falling through a default arm.  The model's own
+    maps are pinned in Rust (``camera/distortion/tests.rs``); this covers only
+    the script layer the lens flows through."""
     from sfmtool._sfmtool.geometry import CameraIntrinsics
 
-    print("\nSFMTOOL_FISHEYE — promoted spline context")
+    print("\nSFMTOOL_FISHEYE — a context carrying coefficients")
     w, h = WH
     B._CAM_WH = WH
     theta_max = 0.5 * min(WH) / F_EQUI  # the zero-spline rim angle
     B.set_camera_context(
-        "SFMTOOL_FISHEYE", F_EQUI, bspline=np.zeros(8), theta_max=theta_max
+        "SFMTOOL_FISHEYE", F_EQUI, bspline=np.zeros(8), d_max=theta_max
     )
-    check(B.fisheye_stage1(), "the promoted context arms the fisheye gate")
+    check(B.fisheye_stage1(), "a lens-bearing context still arms the fisheye gate")
     cam = B.make_cam(F_EQUI)
     check(
-        cam.model == "SFMTOOL_FISHEYE",
-        "make_cam builds the promoted model from the context",
-        f"model = {cam.model}",
+        cam.model == "SFMTOOL_FISHEYE"
+        and float(cam.parameters["bspline_coeff_count"]) == 8.0
+        and abs(float(cam.parameters["bspline_theta_max"]) - theta_max) < 1e-12,
+        "make_cam builds the installed lens: model, slots and domain",
+        f"model = {cam.model}, {int(cam.parameters['bspline_coeff_count'])} slots",
     )
     check(
         abs(B.focal_floor() - 0.075 * max(WH)) < 1e-12,
-        "focal_floor keeps the FOV-derived fisheye floor after promotion",
+        "focal_floor keeps the FOV-derived fisheye floor whatever the lens",
         f"{B.focal_floor():.1f} px",
     )
 
@@ -1662,17 +1731,19 @@ def run_salvage_suite():
 def main():
     print("Fisheye seed Phase-1 primitive gate")
     check_model_equivalence()
+    check_zero_knot_identity()
     for module, name in ((F, "exp_fast_seed"), (B, "seed_camera")):
         check(
-            module.camera_context()["model"] == "SIMPLE_PINHOLE",
-            f"{name}: default camera context is SIMPLE_PINHOLE",
+            module.camera_context()["model"] == "SFMTOOL_PINHOLE"
+            and len(module.camera_context()["bspline"]) == 0,
+            f"{name}: the resting context is SFMTOOL_PINHOLE at zero knots",
         )
         try:
             # Equidistant: rig inside a point shell, observations to 105 deg.
             run_suite(
                 module,
                 f"{name} — equidistant fisheye",
-                "EQUIDISTANT_FISHEYE",
+                "SFMTOOL_FISHEYE",
                 F_EQUI,
                 shell=6.0,
                 rig=1.2,
@@ -1683,7 +1754,7 @@ def main():
             run_suite(
                 module,
                 f"{name} — pinhole control",
-                "SIMPLE_PINHOLE",
+                "SFMTOOL_PINHOLE",
                 F_PIN,
                 shell=6.0,
                 rig=0.6,
@@ -1691,37 +1762,37 @@ def main():
                 min_behind=0,
             )
         finally:
-            module.set_camera_context("SIMPLE_PINHOLE", None)
+            module.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_ray_suite()
     finally:
-        F.set_camera_context("SIMPLE_PINHOLE", None)
+        F.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_release_suite()
     finally:
-        F.set_camera_context("SIMPLE_PINHOLE", None)
+        F.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_embed_suite()
     finally:
-        B.set_camera_context("SIMPLE_PINHOLE", None)
+        B.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_finalization_suite()
     finally:
-        B.set_camera_context("SIMPLE_PINHOLE", None)
+        B.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_phase6_suite()
     finally:
-        B.set_camera_context("SIMPLE_PINHOLE", None)
+        B.set_camera_context("SFMTOOL_PINHOLE", None)
 
     try:
         run_bspline_context_suite()
     finally:
-        B.set_camera_context("SIMPLE_PINHOLE", None)
+        B.set_camera_context("SFMTOOL_PINHOLE", None)
 
     run_salvage_suite()
 
