@@ -37,6 +37,7 @@ specced under [../gui/](../gui/README.md).
 | `sfm densify` | [densify-command.md](reconstruction/densify-command.md) |
 | `sfm motion` | [motion-command.md](reconstruction/motion-command.md) |
 | `sfm embed-patches` | [embed-patches-command.md](reconstruction/embed-patches-command.md) |
+| `sfm estimate-intrinsics` | [estimate-intrinsics-command.md](reconstruction/estimate-intrinsics-command.md) |
 | `sfm xform` | [xform/](reconstruction/xform/) — see below |
 
 ### `sfm xform` sub-commands
