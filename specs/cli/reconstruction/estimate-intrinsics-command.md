@@ -30,7 +30,7 @@ sfm estimate-intrinsics -i MATCHES [OPTIONS...]
 | `-i, --input MATCHES` | required | Cluster-bearing `.matches` file (from `sfm match --cluster`) |
 | `--model [auto\|pinhole\|fisheye]` | `auto` | Which camera-model columns to run: `auto` runs both and arbitrates; the named forms run one column and skip arbitration |
 | `--write-camrig PATH` | off | Write the estimate as a one-sensor `.camrig` at PATH (see below) |
-| `--pattern PATTERN` | derived | Image pattern stored in the `.camrig`; defaults to the matches' common image directory plus `/*<ext>` for the extension the image names share (`/*` when they mix) |
+| `--pattern PATTERN` | derived | Image pattern stored in the `.camrig`; defaults to the matches' common image directory plus one `*` segment per directory level below it, ending `*<ext>` for the extension the image names share (`*` when they mix) |
 | `--force` | off | Allow `--write-camrig` to overwrite an existing file |
 | `--json` | off | Emit the full vote result as JSON on stdout instead of the report |
 | `--seed N` | `0` | RANSAC / pair-sampling seed; same inputs + seed give bit-identical output |
@@ -91,11 +91,15 @@ Writes a one-sensor `.camrig` whose camera is the verdict model
 (`SIMPLE_PINHOLE` or `EQUIDISTANT_FISHEYE`) at the consensus focal, the
 matches' `width` / `height`, and the centred principal point, with identity
 sensor extrinsics -- the same shape `sfm camrig create` produces. The stored
-image pattern is `--pattern` when given, else the common directory of the
-matches' image names plus `/*<ext>` -- the extension those names share,
-falling back to a bare `/*` when they mix -- so a flat layout's derived
-pattern does not sweep up the workspace's own files. The pattern is
-validated the way `camrig create` validates one.
+image pattern is `--pattern` when given, else derived from the matches'
+image names: their common directory, one `*` segment per directory level
+between it and the names (a glob's `*` does not cross `/`, so a rig's
+per-sensor subdirectories need their own segment), ending in `*<ext>` for
+the extension the names share -- so a flat layout's derived pattern does
+not sweep up the workspace's own files. Names at mixed depths cannot be one
+glob; the derivation then keeps a single level and validation hands the
+caller a message naming `--pattern`. The pattern is validated the way
+`camrig create` validates one.
 
 The write refuses -- with the report still printed -- when:
 

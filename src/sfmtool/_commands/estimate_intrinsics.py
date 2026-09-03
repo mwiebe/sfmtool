@@ -279,12 +279,15 @@ def _report_lines(
 
 
 def _derive_pattern(image_names: list[str]) -> str:
-    """The matches' common image directory plus `/*<ext>`.
+    """The matches' common image directory plus one `*` per level below it.
 
     The image table is POSIX workspace-relative, so the common prefix is taken
-    on path segments -- never mid-name. The glob keeps the extension the
-    matches' names actually carry, so a flat layout does not sweep up the
-    workspace's own files; a mix of extensions falls back to a bare `*`.
+    on path segments -- never mid-name. A glob's `*` does not cross `/`, so
+    names sitting a uniform depth below the common directory (a rig's
+    per-sensor subdirectories, say) get one `*` segment per level. The final
+    glob keeps the extension the matches' names actually carry, so a flat
+    layout does not sweep up the workspace's own files; a mix of extensions
+    falls back to a bare `*`.
     """
     import os.path
 
@@ -293,11 +296,18 @@ def _derive_pattern(image_names: list[str]) -> str:
         common = parents.pop()
     else:
         common = Path(os.path.commonpath(sorted(parents))).as_posix()
+    if common in ("", "."):
+        common = ""
     exts = {Path(name).suffix for name in image_names}
     glob = f"*{exts.pop()}" if len(exts) == 1 and "" not in exts else "*"
-    if common in ("", "."):
-        return glob
-    return f"{common}/{glob}"
+    common_depth = len(Path(common).parts) if common else 0
+    depths = {len(Path(name).parts) - common_depth for name in image_names}
+    # One "*" per directory level between the common dir and the file names;
+    # mixed depths cannot be expressed as one glob, so they keep the single
+    # level and let validation hand the caller a message naming --pattern.
+    levels = depths.pop() if len(depths) == 1 else 1
+    segments = ["*"] * max(levels - 1, 0) + [glob]
+    return "/".join(([common] if common else []) + segments)
 
 
 def _write_camrig(
@@ -411,8 +421,8 @@ def _write_camrig(
     default=None,
     help=(
         "Image pattern stored in the .camrig; defaults to the matches' common "
-        "image directory plus '/*<ext>' for the extension the image names "
-        "share ('/*' when they mix)."
+        "image directory plus one '*' segment per directory level below it, "
+        "ending '*<ext>' for the extension the image names share."
     ),
 )
 @click.option(

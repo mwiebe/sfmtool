@@ -197,9 +197,12 @@ def test_diagonal_fov_is_none_without_a_focal_or_verdict():
     [
         (["images/a.jpg", "images/b.jpg"], "images/*.jpg"),
         (["a.jpg", "b.jpg"], "*.jpg"),
-        (["rig/cam0/a.jpg", "rig/cam1/b.jpg"], "rig/*.jpg"),
+        (["rig/cam0/a.jpg", "rig/cam1/b.jpg"], "rig/*/*.jpg"),
         (["images/a.jpg", "images/b.png"], "images/*"),
         (["a.jpg", "b"], "*"),
+        (["cam0/a.jpg", "cam1/b.jpg"], "*/*.jpg"),
+        (["rig/deep/cam0/a.jpg", "rig/deep/cam1/b.jpg"], "rig/deep/*/*.jpg"),
+        (["images/a.jpg", "images/cam1/b.jpg"], "images/*.jpg"),
     ],
 )
 def test_pattern_derives_from_the_common_image_directory(names, expected):
