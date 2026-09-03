@@ -5,7 +5,7 @@
 
 Drives the seed scripts' four geometric primitives — ``triangulate``,
 ``p3p_resect``, ``pose_refine`` and ``reproj_res_one``, in BOTH
-``exp_fast_seed`` and ``exp_pinhole_bootstrap`` — over a synthetic
+``exp_fast_seed`` and ``seed_camera`` — over a synthetic
 equidistant scene with planted poses and points, under the fisheye camera
 context (``EQUIDISTANT_FISHEYE``).  The scene is deliberately built
 so a large share of its observations sit at theta >= 90 degrees, i.e. behind
@@ -54,7 +54,7 @@ from scipy.spatial.transform import Rotation
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import exp_fast_seed as F  # noqa: E402
-import exp_pinhole_bootstrap as B  # noqa: E402
+import seed_camera as B  # noqa: E402
 
 WH = (480, 480)
 F_EQUI = 130.0  # equidistant focal: theta = r / f, image circle at ~105 deg
@@ -1659,7 +1659,7 @@ def run_salvage_suite():
 def main():
     print("Fisheye seed Phase-1 primitive gate")
     check_model_equivalence()
-    for module, name in ((F, "exp_fast_seed"), (B, "exp_pinhole_bootstrap")):
+    for module, name in ((F, "exp_fast_seed"), (B, "seed_camera")):
         check(
             module.camera_context()["model"] == "SIMPLE_PINHOLE",
             f"{name}: default camera context is SIMPLE_PINHOLE",
