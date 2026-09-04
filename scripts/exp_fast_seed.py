@@ -495,13 +495,14 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
     order = np.lexsort((np.arange(n_sel), -sizes))
     rank = np.empty(n_sel, np.int64)
     rank[order] = np.arange(n_sel)
-    aff_s = np.asarray(sel_h.member_affines)
-    # The affine's leading 2x2 is the member's ABSOLUTE affine shape S
-    # (.matches v5): the map from the detector's canonical unit frame onto
-    # this member's image pixels.  Only the warp passthrough reads it; the
-    # geometry the seed solves on is the last column (the keypoint), so no
-    # `.sift` file is opened here at all.
-    shapes = aff_s[:, :, :2]
+    # The backbone's own geometry (.matches v6), stored float32 and widened
+    # here because everything downstream solves in float64.  The shape is the
+    # member's ABSOLUTE affine shape S: the map from the detector's canonical
+    # unit frame onto this member's image pixels.  Only the warp passthrough
+    # reads it; the geometry the seed solves on is the position, so no `.sift`
+    # file is opened here at all.
+    uv_s = np.asarray(sel_h.member_positions(), dtype=np.float64)
+    shapes = np.asarray(sel_h.member_affine_shapes(), dtype=np.float64)
     obs_c = np.repeat(np.arange(n_sel, dtype=np.int64), sizes)
     out = {
         "names": names,
@@ -511,7 +512,7 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
         # image indexes are already in the loader's frame.
         "obs_i": np.asarray(sel_h.member_images, dtype=np.int64),
         "obs_f": np.asarray(sel_h.member_features, dtype=np.int64),
-        "obs_uv": np.ascontiguousarray(aff_s[:, :, 2], dtype=np.float64),
+        "obs_uv": np.ascontiguousarray(uv_s),
         "adm_rank": rank,
         "cl_quality": np.asarray(sel_h.cluster_worst_consistency(), dtype=np.float64),
         "n_img": len(names),
@@ -526,9 +527,9 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
         # exactly like `obs_uv`.
         out["obs_shape"] = np.ascontiguousarray(shapes, dtype=np.float64)
     if want_warp:
-        # The surfel writer wants the REFERENCE-RELATIVE warp, which v5 no
-        # longer stores: recover it as W = S.S_ref^-1 through each cluster's
-        # own reference row (the shared helper, so this loader
+        # The surfel writer wants the REFERENCE-RELATIVE warp, which the file
+        # does not store: recover it as W = S.S_ref^-1 through each cluster's
+        # own reference member (the shared helper, so this loader
         # and B.load_clusters cannot drift apart).
         import seed_camera as B
 
@@ -1112,13 +1113,13 @@ def load_clusters():
     # magnitude across a fleet, which means runs at "one bar" were never one
     # working set; they were the instruments of the sweep that found N, and the
     # sweep is done.
-    aff_s = np.asarray(sel_h.member_affines)
+    shp_s = np.asarray(sel_h.member_affine_shapes(), dtype=np.float64)
     radius = (
         0.5
         * float(mfile.refine_radius)
         * (
-            np.linalg.norm(aff_s[:, :, 0], axis=1)
-            + np.linalg.norm(aff_s[:, :, 1], axis=1)
+            np.linalg.norm(shp_s[:, :, 0], axis=1)
+            + np.linalg.norm(shp_s[:, :, 1], axis=1)
         )
     )
     starts_s = np.asarray(sel_h.cluster_starts, dtype=np.int64)
@@ -1171,7 +1172,9 @@ def load_clusters():
         rung.vote_obs = (
             m_cl,
             m_img,
-            np.ascontiguousarray(aff_s[:, :, 2], dtype=np.float64),
+            np.ascontiguousarray(
+                np.asarray(sel_h.member_positions(), dtype=np.float64)
+            ),
         )
         # Restrict the HANDLE, not the file: `restrict_cluster_ids` names
         # ids of the file it is called on, and the radii above are in

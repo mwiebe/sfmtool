@@ -26,14 +26,21 @@ from seed_relax.fleet_constants import RING_RATIO_P1
 
 
 def fake_source(names, starts, images, features, affines, refine_radius):
-    """A stand-in for the selection handle, carrying only what the join reads."""
+    """A stand-in for the selection handle, carrying only what the join reads.
+
+    Built from the 2x3 amalgam this file's reference implementation is written
+    against, and exposed the way the handle exposes it: a position array and a
+    shape array.
+    """
+    aff = np.asarray(affines, float)
     return types.SimpleNamespace(
         image_names=list(names),
         refine_radius=float(refine_radius),
         cluster_starts=np.asarray(starts, np.int64),
         member_images=np.asarray(images, np.int64),
         member_features=np.asarray(features, np.int64),
-        member_affines=np.asarray(affines, float),
+        member_positions=lambda: np.ascontiguousarray(aff[:, :, 2]),
+        member_affine_shapes=lambda: np.ascontiguousarray(aff[:, :, :2]),
     )
 
 
@@ -92,14 +99,15 @@ def reference(source, m, frames=None):
         return {"refused": "image table differs from the member's"}
     starts = np.asarray(source.cluster_starts, np.int64)
     n_cl = len(starts) - 1
-    aff = np.asarray(source.member_affines)
+    uv = np.asarray(source.member_positions())
+    shp = np.asarray(source.member_affine_shapes())
     img = np.asarray(source.member_images, np.int64)
     feat = np.asarray(source.member_features, np.int64)
     cl = np.repeat(np.arange(n_cl, dtype=np.int64), np.diff(starts))
     rad = (
         0.5
         * float(source.refine_radius)
-        * (np.linalg.norm(aff[:, :, 0], axis=1) + np.linalg.norm(aff[:, :, 1], axis=1))
+        * (np.linalg.norm(shp[:, :, 0], axis=1) + np.linalg.norm(shp[:, :, 1], axis=1))
     )
     cl_rad = np.zeros(n_cl)
     np.maximum.at(cl_rad, cl, rad)
@@ -132,8 +140,8 @@ def reference(source, m, frames=None):
         "obs_cl": cl[take],
         "obs_img": img[take],
         "obs_feat": feat[take],
-        "obs_uv": np.ascontiguousarray(aff[take][:, :, 2], float),
-        "obs_shape": np.ascontiguousarray(aff[take][:, :, :2], float),
+        "obs_uv": np.ascontiguousarray(uv[take], float),
+        "obs_shape": np.ascontiguousarray(shp[take], float),
     }
 
 
@@ -220,7 +228,13 @@ def test_a_handle_whose_image_table_differs_is_refused(source_and_member):
         np.asarray(source.cluster_starts),
         np.asarray(source.member_images),
         np.asarray(source.member_features),
-        np.asarray(source.member_affines),
+        np.concatenate(
+            [
+                np.asarray(source.member_affine_shapes()),
+                np.asarray(source.member_positions())[:, :, None],
+            ],
+            axis=2,
+        ),
         float(source.refine_radius),
     )
     out = source_clusters(other, m)
