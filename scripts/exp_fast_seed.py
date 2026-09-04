@@ -170,60 +170,23 @@ PROBE_GATE_ABS = 0.15
 PROBE_GATE_REL = 0.5
 F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 
-# ── Camera-model escalation (specs/core/geometry/focal-vote.md § Camera-Model Columns) ─
+# ── Camera-model escalation (specs/core/geometry/estimate-intrinsics.md) ─────
 #
 # The whole pipeline is pinhole-only.  Handed a fisheye capture it does not
 # announce that; it degrades quietly (kerry: a center-out solve at 59% inliers
 # that every per-image gate passes).  The vote kernel can arbitrate the camera
-# MODEL, but only by paying for two self-consistency scans per pair per column.
-# So the pinhole vote runs FIRST and alone, exactly as before, and the second
-# column is added only when that vote is itself LOW CONFIDENCE — the second
-# column then doubles as a cheap cross-check on a shaky pinhole consensus,
-# which is the only situation where paying for it buys anything.
+# MODEL, but only by paying for two self-consistency scans per pair per column,
+# and a capture whose pinhole vote is strong has nothing for that arbitration to
+# overturn.
 #
-# The trigger is a disjunction over the pinhole vote's OWN diagnostics.  Each
-# arm says "this consensus is not to be trusted", and each cut point comes
-# from the kernel's own constants or from the fleet's measured distribution —
-# no fitted magic numbers:
-#
-#   no_consensus         focal_px is None.  Fewer than MIN_POOL votes pooled;
-#                        there is no pinhole answer to trust.  (Fires on 0/40
-#                        of the current fleet; present because it is the
-#                        definitional case.)
-#   rotation_railed      The pooled focal came from the rotation family and
-#                        that family's answer sits within ONE GRID STEP of the
-#                        bottom of the orthogonality scan's grid.  The kernel
-#                        scans 48 log-spaced points over [0.3, 4.0] x max(w,h)
-#                        (ORTHO_GRID_{LO,HI,N}), so one step is
-#                        (4/0.3)^(1/47) = 1.0566; an answer there is a scan
-#                        that ran out of grid rather than one that found an
-#                        interior minimum.  This is the known fisheye rail:
-#                        kerry at 480 px lands exactly on the floor (ratio
-#                        1.000) while the nearest pinhole capture sits 2.2
-#                        grid steps above it (1.153).
-#   family_disagreement  The kernel's own FAMILY_DISAGREEMENT_BAND (0.25 in
-#                        log-focal) fired: the epipolar and rotation families
-#                        measured incompatible focals and the reported
-#                        consensus is one family's median with the other
-#                        thrown away.  Two independent estimators disagreeing
-#                        beyond the kernel's own bimodality band IS low
-#                        confidence, by the kernel's own definition.
-#   thin_pool            n_pool <= 9.  The one arm without a kernel constant
-#                        behind it: 9 is the tightest bar that still reaches
-#                        every fisheye capture on the fleet (KerryPark360 and
-#                        OmniTemple1 both pool exactly 9 and no other arm
-#                        catches them).  It happens to be half the kernel's
-#                        MAX_EPIPOLAR_PAIRS budget of 18.  The pinhole
-#                        datasets it additionally admits all pool 3-8, i.e.
-#                        strictly thinner still, so it is not admitting
-#                        healthy votes.
-#
-# Measured over the 40-dataset fleet: fires on 4/4 fisheye captures and 9/36
-# pinhole ones, at +0.4-0.8 s each on the pinhole side (5.3 s total, against a
-# 30-60 s seed run per dataset).  Every one of those 9 is a genuinely weak
-# pinhole vote — 7 tripped the kernel's own bimodality band, 5 pooled 8 or
-# fewer votes — so the extra column is a confidence cross-check there, not
-# waste.
+# So the vote here is ONE `estimate_intrinsics` call under its AUTO column
+# policy.  The kernel votes pinhole-only first, escalates to the camera-model
+# columns exactly when that vote comes back weak, and hands back which weak-vote
+# reasons fired (`escalation`), the verdict, whether the verdict is confirmed,
+# and — when it escalated — the pinhole vote it screened on (`screening_vote`),
+# which is where stage 1's own pinhole numbers come from.  The escalation
+# disjunction, its four cut points and the fleet measurement behind them live in
+# the kernel; this script reads the decision rather than restating it.
 #
 # VERDICT CONFIRMATION.  The arbitration's bare verdict is NOT trustworthy on
 # its own: run unconditionally it returns EquidistantFisheye on three
@@ -232,18 +195,13 @@ F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 # overlaps a true fisheye capture's (OmniTemple1, 1.46x), so no margin cut
 # separates them.  What does separate them, with no threshold at all, is WHICH
 # CELLS carry the equidistant column's evidence: all three false verdicts win
-# on the epipolar cell with EXACTLY ZERO model-informative rotation-cell mass,
-# while all four true fisheye captures earn mass in both cells (rotation-cell
-# mass 4 / 26 / 41 / 44).  That asymmetry is structural rather than lucky —
-# the rotation cell fits a pure rotation of unit RAYS, which a wrong ray map
-# cannot fake, whereas the epipolar cell's essentialness residual is a weaker
-# statement a wrong map can partially satisfy.  So the fisheye verdict is
-# recorded only when BOTH cells corroborate it.
-FISHEYE_THIN_POOL = int(os.environ.get("SFMTOOL_FISHEYE_THIN_POOL", "9"))
-# Mirrored from crates/sfmtool-core/src/geometry/focal_vote.rs.
-_ORTHO_GRID_LO, _ORTHO_GRID_HI, _ORTHO_GRID_N = 0.3, 4.0, 48
-_ORTHO_GRID_STEP = (_ORTHO_GRID_HI / _ORTHO_GRID_LO) ** (1.0 / (_ORTHO_GRID_N - 1))
-_FAMILY_DISAGREEMENT_BAND = 0.25
+# on the epipolar cell with EXACTLY ZERO certified rotation-cell mass, while all
+# four true fisheye captures earn mass in both cells (rotation-cell mass 4 / 26
+# / 41 / 44).  That asymmetry is structural rather than lucky — the rotation
+# cell fits a pure rotation of unit RAYS, which a wrong ray map cannot fake,
+# whereas the epipolar cell's essentialness residual is a weaker statement a
+# wrong map can partially satisfy.  The kernel owns that rule and reports it as
+# `confirmed`; this script routes on it and nothing else.
 
 # Canonical camera frame (-Z forward, +Y up) throughout; full-pixel
 # observations; one shared camera with the principal point at the centre.  The
@@ -345,10 +303,10 @@ def timings_block():
 # are that module's own, re-exported so this script's callers (and the primitive
 # gate) can reach them under either name.
 #
-# ROUTING.  A CONFIRMED equidistant verdict from ``_escalate_camera_model`` —
-# the both-cells corroboration — installs the fisheye context, and it does so BY
-# DEFAULT: routing needs no opt-in.  SFMTOOL_FISHEYE_SEED is an OVERRIDE on that
-# decision, not a precondition for it:
+# ROUTING.  A CONFIRMED equidistant verdict — the kernel's corroborated one,
+# acted on in ``_record_camera_model`` — installs the fisheye context, and it
+# does so BY DEFAULT: routing needs no opt-in.  SFMTOOL_FISHEYE_SEED is an
+# OVERRIDE on that decision, not a precondition for it:
 #
 #   unset (or anything but "0")  route on a confirmed verdict — the default.
 #   "0"                          never route: the verdict stays an annotation,
@@ -1235,47 +1193,27 @@ def load_clusters():
 # Structure-based release does the refinement.
 
 
-def _low_confidence_vote(res):
-    """Reasons the pinhole-only vote is low confidence — the escalation
-    trigger.  Empty means the vote stands on its own and the camera-model
-    columns are never asked for.  See the FISHEYE_THIN_POOL block above for
-    where each cut point comes from."""
-    w, h = seed_camera._CAM_WH
-    why = []
-    if res["focal_px"] is None:
-        why.append("no_consensus")
-    rot = res["rotation_focal_px"]
-    if (
-        res["family"] == "Rotation"
-        and rot is not None
-        and rot <= _ORTHO_GRID_STEP * _ORTHO_GRID_LO * max(w, h)
-    ):
-        why.append("rotation_railed")
-    fd = res["family_disagreement"]
-    if fd is not None and fd > _FAMILY_DISAGREEMENT_BAND:
-        why.append("family_disagreement")
-    if res["n_pool"] <= FISHEYE_THIN_POOL:
-        why.append("thin_pool")
-    return why
+def _record_camera_model(est, res, why):
+    """Record — and route on — the kernel's escalated camera-model verdict.
 
+    Called only when ``estimate_intrinsics`` escalated, i.e. when its AUTO
+    policy found the pinhole-only vote weak.  The verdict, its corroboration
+    and the verdict focal are the KERNEL's (``camera_model`` / ``confirmed`` /
+    ``focal_px``); what this function owns is the annotation
+    (``_VOTE_FISHEYE``), the transcript and the routing.
 
-def _escalate_camera_model(obs_c, obs_i, u, res, why):
-    """Escalated camera-model arbitration, run only on a low-confidence vote.
+    A CONFIRMED EquidistantFisheye verdict ROUTES by default: it installs the
+    equidistant camera context, so stage 1 and the finalization solve the map
+    the capture actually obeys instead of a pinhole approximation of it.
+    ``SFMTOOL_FISHEYE_SEED=0`` refuses the routing and leaves the verdict an
+    annotation (see the camera-context block above).
 
-    Re-votes with both camera-model columns (pinhole + equidistant fisheye) and
-    records a CONFIRMED EquidistantFisheye verdict in ``_VOTE_FISHEYE``.  That
-    verdict ROUTES by default: it installs the equidistant camera context, so
-    stage 1 and the finalization solve the map the capture actually obeys
-    instead of a pinhole approximation of it.  ``SFMTOOL_FISHEYE_SEED=0``
-    refuses the routing and leaves the verdict an annotation (see the
-    camera-context block above).
+    Two things make routing safe:
 
-    Two things did NOT change, and they are what make routing safe:
-
-      * The CONFIRMATION rule.  A verdict is recorded only when the epipolar
-        AND the rotation cell carry model-informative mass.  Run unconditionally
-        the bare verdict claims three rectilinear fleet captures, and all three
-        win on the epipolar cell alone (see VERDICT CONFIRMATION above).  An
+      * The CONFIRMATION rule.  A verdict is recorded only when the equidistant
+        column carries certified rotation-cell mass.  Run unconditionally the
+        bare verdict claims three rectilinear fleet captures, and all three win
+        on the epipolar cell alone (see VERDICT CONFIRMATION above).  An
         unconfirmed verdict is annotation-only under every override setting, so
         a wrong verdict still costs at most a wrong label.
       * An equidistant focal is not a pinhole focal.  It parameterizes
@@ -1288,19 +1226,11 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
         to a pinhole probe would still be a units error; what changed is that
         the probe is no longer a pinhole one.
     """
-    from sfmtool._sfmtool.geometry import focal_vote as _focal_vote
-
     global _VOTE_FISHEYE
-    w, h = seed_camera._CAM_WH
-    two = _focal_vote(
-        np.ascontiguousarray(obs_c, dtype=np.uint32),
-        np.ascontiguousarray(obs_i, dtype=np.uint32),
-        np.ascontiguousarray(u, dtype=np.float64),
-        int(w),
-        int(h),
-        seed=0,
-        columns=["pinhole", "equidistant"],
-    )
+    # The escalated vote table.  The verdict fields are read off `est`; the
+    # per-column masses and spreads the annotation and the transcript state are
+    # only in the table, so they are read there.
+    two = est["vote"]
     cols = {c["camera_model"]: c for c in two["columns"]}
     ph, eq = cols.get("Pinhole", {}), cols.get("EquidistantFisheye", {})
     m_p, m_e = int(ph.get("n_informative", 0)), int(eq.get("n_informative", 0))
@@ -1308,20 +1238,20 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
     m_rot = int(eq.get("n_informative_rotation", 0))
     lo, hi = min(m_p, m_e), max(m_p, m_e)
     margin = (hi / lo) if lo else float("inf") if hi else float("nan")
-    f_eq = eq.get("focal_px")
+    eq_focal = eq.get("focal_px")
     print(
-        f"  camera-model arbitration: verdict {two['camera_model']}, "
+        f"  camera-model arbitration: verdict {est['camera_model']}, "
         f"certified model-informative mass pinhole {m_p} / equidistant {m_e} "
         f"(margin {margin:.2f}x, equidistant cells epipolar {m_epi} / "
         f"rotation {m_rot}), equidistant focal "
-        f"{'none' if f_eq is None else f'{f_eq:.1f}'} px over "
+        f"{'none' if eq_focal is None else f'{eq_focal:.1f}'} px over "
         f"{eq.get('n_pool', 0)} votes at log-focal IQR "
         f"{float(eq.get('pool_spread') or 0.0):.4f}"
     )
-    if two["camera_model"] != "EquidistantFisheye":
+    if est["camera_model"] != "EquidistantFisheye":
         return
-    if not (m_epi > 0 and m_rot > 0):
-        # Verdict NOT corroborated by both cells — the false-positive
+    if est["confirmed"] is not True:
+        # Verdict NOT corroborated by the rotation cell — the false-positive
         # signature.  Report it and leave the run unannotated.
         print(
             "  camera-model verdict NOT confirmed: the equidistant column's "
@@ -1330,6 +1260,10 @@ def _escalate_camera_model(obs_c, obs_i, u, res, why):
             "Treating the capture as pinhole."
         )
         return
+    # The verdict's own focal, from the kernel.  It is the equidistant column's
+    # consensus (that column won), which is why the arbitration line above and
+    # this annotation carry the same number.
+    f_eq = est["focal_px"]
     _VOTE_FISHEYE = {
         "focal_px": f_eq,
         "margin": margin,
@@ -1397,20 +1331,28 @@ def focal_vote(obs_c, obs_i, u, n_img):
     beyond 0.25 in log-focal and the majority family's median stands alone.
     Returns (focal, n_pooled_votes), or None.
 
-    When that vote comes back LOW CONFIDENCE (``_low_confidence_vote``) it is
-    escalated to the two-column camera-model arbitration, which ANNOTATES the
-    run and never changes it — see ``_escalate_camera_model``."""
-    from sfmtool._sfmtool.geometry import focal_vote as _focal_vote
+    The call is ``estimate_intrinsics`` under its AUTO column policy
+    (specs/core/geometry/estimate-intrinsics.md): the kernel votes pinhole-only
+    and escalates to the two-column camera-model arbitration itself when that
+    vote comes back weak.  The numbers RETURNED here are always the pinhole
+    vote's — an escalated result reports the winning column at the top level, so
+    the pinhole answer is read off the screening vote — and the arbitration
+    ANNOTATES the run through ``_record_camera_model``."""
+    from sfmtool._sfmtool.geometry import estimate_intrinsics as _estimate
 
     w, h = seed_camera._CAM_WH
-    res = _focal_vote(
+    est = _estimate(
         np.ascontiguousarray(obs_c, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
         np.ascontiguousarray(u, dtype=np.float64),
         int(w),
         int(h),
         seed=0,
+        columns="auto",
     )
+    # Stage 1's own pinhole numbers: the vote the kernel screened on when it
+    # escalated, and the only vote it ran when it did not.
+    res = est["screening_vote"] or est["vote"]
 
     global _VOTE_POVERTY, _VOTE_ROT_N, _VOTE_SPREAD
     _VOTE_POVERTY = float(res["parallax_poverty"])
@@ -1428,13 +1370,13 @@ def focal_vote(obs_c, obs_i, u, n_img):
         f"  vote pool: {res['n_pool']} votes, log-focal IQR "
         f"{_VOTE_SPREAD:.4f} (the vote's own precision)"
     )
-    why = _low_confidence_vote(res)
+    why = est["escalation"]
     if why:
         print(
             f"  low-confidence pinhole vote ({','.join(why)}): escalating to "
             f"the camera-model columns"
         )
-        _escalate_camera_model(obs_c, obs_i, u, res, why)
+        _record_camera_model(est, res, why)
     if res["focal_px"] is None:
         return None
     return float(res["focal_px"]), int(res["n_pool"])
