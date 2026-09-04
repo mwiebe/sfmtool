@@ -408,7 +408,7 @@ def _chain_source():
     import types
 
     cam = _camera()
-    starts, images, features, affines = [0], [], [], []
+    starts, images, features, positions, shapes = [0], [], [], [], []
     for c in range(len(CHAIN_POINTS)):
         for f in range(CHAIN_FRAMES):
             px = _project(cam, CHAIN_POINTS[c : c + 1], CHAIN_CENTRES[f])[0]
@@ -416,15 +416,18 @@ def _chain_source():
                 continue
             images.append(f)
             features.append(f * CHAIN_STRIDE + c)
-            affines.append(np.array([[2.0, 0.0, px[0]], [0.0, 2.0, px[1]]]))
+            positions.append(np.asarray(px, float))
+            shapes.append(np.array([[2.0, 0.0], [0.0, 2.0]]))
         starts.append(len(images))
+    pos, shp = np.stack(positions), np.stack(shapes)
     return types.SimpleNamespace(
         image_names=[f"cam/{f:03d}.jpg" for f in range(CHAIN_FRAMES)],
         refine_radius=8.0,
         cluster_starts=np.array(starts, np.int64),
         member_images=np.array(images, np.int64),
         member_features=np.array(features, np.int64),
-        member_affines=np.stack(affines),
+        member_positions=lambda: pos,
+        member_affine_shapes=lambda: shp,
     )
 
 
