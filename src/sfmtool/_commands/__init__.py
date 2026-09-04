@@ -11,6 +11,7 @@ from .compare import compare
 from .densify import densify
 from .embed_patches import embed_patches_command
 from .epipolar import epipolar
+from .estimate_intrinsics import estimate_intrinsics
 from .explorer import explorer
 from .flow import flow
 from .from_colmap_bin import from_colmap_bin
@@ -41,6 +42,7 @@ __all__ = [
     "densify",
     "embed_patches_command",
     "epipolar",
+    "estimate_intrinsics",
     "explorer",
     "flow",
     "from_colmap_bin",

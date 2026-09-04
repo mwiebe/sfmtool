@@ -1,0 +1,519 @@
+# Copyright The SfM Tool Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Structure-free focal / camera-model estimate (`sfm estimate-intrinsics`).
+
+The CLI face of the structure-free focal vote (see
+`specs/cli/reconstruction/estimate-intrinsics-command.md` and
+`specs/core/geometry/focal-vote.md`): cluster tracks in, a shared focal and a
+camera-model verdict out, with no reconstruction in between.
+
+Unlike its siblings the command is not wrapped in `timed_command` -- `--json`
+puts the vote result on stdout, and a trailing timing line would stop that
+output being parseable.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import click
+
+
+# `--model` -> the `focal_vote` column set it evaluates. The named forms run a
+# single column, so the binding reports that column's own consensus and no
+# arbitration takes place.
+_MODEL_COLUMNS = {
+    "auto": ("pinhole", "equidistant"),
+    "pinhole": ("pinhole",),
+    "fisheye": ("equidistant",),
+}
+
+# The binding's camera-model names.
+_PINHOLE = "Pinhole"
+_EQUIDISTANT = "EquidistantFisheye"
+
+# The camera model each verdict is stored as in a `.camrig`. Both are
+# centred-principal-point, distortion-free maps, which is exactly what the
+# vote estimates.
+_CAMRIG_MODEL = {_PINHOLE: "SIMPLE_PINHOLE", _EQUIDISTANT: "EQUIDISTANT_FISHEYE"}
+
+
+def _resolve_dimensions(image_dims, image_names: list[str]) -> tuple[int, int]:
+    """The one `(width, height)` every image shares, or a `UsageError`.
+
+    The vote assumes a single shared camera with a centred principal point, so
+    a file mixing resolutions cannot be answered as one estimate.
+    """
+    import numpy as np
+
+    if image_dims is None:
+        raise click.UsageError(
+            "this .matches file stores no image dimensions (format version <= "
+            "3); re-run `sfm match` to produce a file the vote can read"
+        )
+    dims = np.asarray(image_dims, dtype=np.int64)
+    distinct, counts = np.unique(dims, axis=0, return_counts=True)
+    if len(distinct) != 1:
+        lines = []
+        for (w, h), count in zip(distinct, counts):
+            example = image_names[int(np.flatnonzero((dims == (w, h)).all(1))[0])]
+            lines.append(f"  {w}x{h}  ({count} image(s))  e.g. {example}")
+        raise click.UsageError(
+            "the images in this .matches file have more than one resolution, "
+            "and the vote estimates ONE shared camera:\n"
+            + "\n".join(lines)
+            + "\nSplit the images into per-camera .matches files and estimate "
+            "each separately."
+        )
+    return int(distinct[0][0]), int(distinct[0][1])
+
+
+def _positions_from_sift(mfile, selection, matches_path: Path, image_names: list[str]):
+    """Member keypoint positions read from the images' `.sift` files.
+
+    The cluster backbone stores feature INDEXES; only the `cluster_patches/`
+    enrichment carries positions. A file straight out of `sfm match --cluster`
+    therefore has to go back to the features the matcher indexed, which is what
+    this does -- one `.sift` read per image, capped at the highest index that
+    image contributes.
+    """
+    import numpy as np
+
+    from .._cluster_patches import _resolve_workspace
+    from .._sfmtool.io import read_sift_partial
+
+    ws_meta = mfile.metadata["workspace"]
+    workspace_dir = _resolve_workspace(matches_path, ws_meta)
+    prefix = ws_meta.get("contents", {}).get("feature_prefix_dir", "")
+
+    member_images = np.asarray(selection.member_images, dtype=np.int64)
+    member_features = np.asarray(selection.member_features, dtype=np.int64)
+    positions = np.zeros((len(member_features), 2), dtype=np.float64)
+    for image_index in np.unique(member_images):
+        on_image = member_images == image_index
+        features = member_features[on_image]
+        rel = Path(image_names[int(image_index)])
+        sift_path = workspace_dir / rel.parent / prefix / f"{rel.name}.sift"
+        if not sift_path.exists():
+            raise click.UsageError(
+                f"SIFT file not found: {sift_path}. The .matches file names "
+                "features by index, so the vote needs the .sift files that "
+                "matching ran on."
+            )
+        xy = read_sift_partial(sift_path, int(features.max()) + 1)["positions_xy"]
+        positions[on_image] = np.asarray(xy, dtype=np.float64)[features]
+    return positions
+
+
+def _load_observations(matches_path: Path) -> dict:
+    """Flat cluster-contiguous observation arrays for the whole `.matches` file.
+
+    Every cluster the file admits votes: the selection is the unrestricted one
+    (all images, the format's own member admission), because the vote is a
+    referee over the capture's full pair graph.
+    """
+    import numpy as np
+
+    from .._sfmtool.io import MatchesFile
+
+    mfile = MatchesFile(matches_path)
+    if not mfile.has_clusters:
+        raise click.UsageError(
+            f"{matches_path} has no clusters section; run `sfm match --cluster` "
+            "to produce a cluster-bearing .matches file"
+        )
+    image_names = list(mfile.image_names)
+    width, height = _resolve_dimensions(mfile.image_dims, image_names)
+
+    selection = mfile.select_clusters()
+    starts = np.asarray(selection.cluster_starts, dtype=np.int64)
+    cluster_indexes = np.repeat(
+        np.arange(len(starts) - 1, dtype=np.uint32), np.diff(starts)
+    )
+    image_indexes = np.asarray(selection.member_images, dtype=np.uint32)
+    if selection.has_cluster_patches:
+        positions = np.ascontiguousarray(
+            np.asarray(selection.member_positions(), dtype=np.float64)
+        )
+    else:
+        positions = _positions_from_sift(mfile, selection, matches_path, image_names)
+    if len(cluster_indexes) == 0:
+        raise click.UsageError(
+            f"{matches_path} holds no cluster observations to vote on"
+        )
+    return {
+        "image_names": image_names,
+        "width": width,
+        "height": height,
+        "cluster_indexes": cluster_indexes,
+        "image_indexes": image_indexes,
+        "positions": positions,
+        "cluster_count": len(starts) - 1,
+    }
+
+
+def _column(result: dict, camera_model: str) -> dict | None:
+    """The requested column's diagnostics dict, if the vote ran that column."""
+    for column in result["columns"]:
+        if column["camera_model"] == camera_model:
+            return column
+    return None
+
+
+def _fisheye_confirmed(result: dict, model_option: str) -> bool | None:
+    """Whether a Fisheye verdict is corroborated by rotation-cell mass.
+
+    A wrong ray map cannot fake a pure rotation of rays, so an equidistant
+    verdict carrying no certified rotation votes is an arbitration artifact
+    rather than a lens. `None` means the question does not arise: the verdict
+    is not Fisheye, or `--model` named a single column so nothing arbitrated.
+    """
+    if model_option != "auto" or result["camera_model"] != _EQUIDISTANT:
+        return None
+    column = _column(result, _EQUIDISTANT)
+    return bool(column is not None and column["n_certified_rotation"] > 0)
+
+
+def _diagonal_fov_deg(
+    camera_model: str | None, focal_px: float | None, width: int, height: int
+) -> float | None:
+    """Diagonal field of view implied by a focal under the verdict's ray map.
+
+    Both models are evaluated at the same corner radius `hypot(w, h) / 2`: the
+    pinhole map opens as `2 atan(r / f)`, the equidistant one as `2 r / f`.
+    """
+    if focal_px is None or focal_px <= 0.0 or camera_model is None:
+        return None
+    r_corner = math.hypot(width, height) / 2.0
+    if camera_model == _PINHOLE:
+        return math.degrees(2.0 * math.atan(r_corner / focal_px))
+    if camera_model == _EQUIDISTANT:
+        return math.degrees(2.0 * r_corner / focal_px)
+    return None
+
+
+def _num(value, digits: int = 4) -> str:
+    """A float for the report, or `n/a` when the vote produced none."""
+    if value is None:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def _report_lines(
+    result: dict, data: dict, model_option: str, confirmed: bool | None
+) -> list[str]:
+    """The human-readable report: the answer first, the diagnostics under it."""
+    width, height = data["width"], data["height"]
+    verdict = result["camera_model"]
+    focal = result["focal_px"]
+
+    lines = [
+        f"Images:        {len(data['image_names'])} @ {width}x{height}",
+        f"Clusters:      {data['cluster_count']} "
+        f"({len(data['cluster_indexes'])} observations)",
+        "",
+    ]
+
+    if verdict is None:
+        lines.append("Camera model:  no verdict (no column carried any vote)")
+    else:
+        marker = ""
+        if confirmed is True:
+            marker = "  CONFIRMED"
+        elif confirmed is False:
+            marker = "  UNCONFIRMED"
+        stored = _CAMRIG_MODEL.get(verdict, verdict)
+        lines.append(f"Camera model:  {verdict} ({stored}){marker}")
+
+    if focal is None:
+        lines.append(
+            f"Focal length:  no consensus ({result['n_pool']} pooled vote(s); "
+            "2 are needed)"
+        )
+    else:
+        lines.append(f"Focal length:  {focal:.2f} px")
+        fov = _diagonal_fov_deg(verdict, focal, width, height)
+        if fov is not None:
+            lines.append(f"Diagonal FOV:  {fov:.1f} deg")
+
+    if confirmed is False:
+        lines += [
+            "",
+            "The Fisheye verdict carries no certified rotation votes, so it is "
+            "not corroborated;",
+            "treat the capture as pinhole and re-run with `--model pinhole` "
+            "for its focal.",
+        ]
+
+    lines += [
+        "",
+        "Votes:",
+        f"  epipolar {result['n_epipolar']}, rotation {result['n_rotation']}, "
+        f"pooled {result['n_pool']} (majority family: "
+        f"{result['family'] or 'none'})",
+        f"  pool spread (log IQR):  {_num(result['pool_spread'])}",
+        f"  family disagreement:    {_num(result['family_disagreement'])}",
+    ]
+
+    if focal is None:
+        lines += [
+            "  rejections:  "
+            f"h-dominated {result['n_h_dominated']}, "
+            f"estimator failed {result['n_estimator_failed']}, "
+            f"out of band {result['n_band_rejected']}",
+        ]
+
+    if result["columns"]:
+        lines += ["", "Columns:"]
+        for column in result["columns"]:
+            lines.append(
+                f"  {column['camera_model']:<20}"
+                f"focal {_num(column['focal_px'], 2):>8} px  "
+                f"spread {_num(column['pool_spread'])}  "
+                f"certified epi/rot {column['n_certified_epipolar']}/"
+                f"{column['n_certified_rotation']}"
+            )
+    return lines
+
+
+def _derive_pattern(image_names: list[str]) -> str:
+    """The matches' common image directory plus one `*` per level below it.
+
+    The image table is POSIX workspace-relative, so the common prefix is taken
+    on path segments -- never mid-name. A glob's `*` does not cross `/`, so
+    names sitting a uniform depth below the common directory (a rig's
+    per-sensor subdirectories, say) get one `*` segment per level. The final
+    glob keeps the extension the matches' names actually carry, so a flat
+    layout does not sweep up the workspace's own files; a mix of extensions
+    falls back to a bare `*`.
+    """
+    import os.path
+
+    parents = {Path(name).parent.as_posix() for name in image_names}
+    if len(parents) == 1:
+        common = parents.pop()
+    else:
+        common = Path(os.path.commonpath(sorted(parents))).as_posix()
+    if common in ("", "."):
+        common = ""
+    exts = {Path(name).suffix for name in image_names}
+    glob = f"*{exts.pop()}" if len(exts) == 1 and "" not in exts else "*"
+    common_depth = len(Path(common).parts) if common else 0
+    depths = {len(Path(name).parts) - common_depth for name in image_names}
+    # One "*" per directory level between the common dir and the file names;
+    # mixed depths cannot be expressed as one glob, so they keep the single
+    # level and let validation hand the caller a message naming --pattern.
+    levels = depths.pop() if len(depths) == 1 else 1
+    segments = ["*"] * max(levels - 1, 0) + [glob]
+    return "/".join(([common] if common else []) + segments)
+
+
+def _write_camrig(
+    output_path: Path,
+    pattern: str | None,
+    result: dict,
+    data: dict,
+    confirmed: bool | None,
+    force: bool,
+) -> str:
+    """Commit the estimate as a one-sensor `.camrig`; returns a summary line.
+
+    Raises `click.ClickException` for every refusal, so the caller can print
+    the report first and still exit nonzero.
+    """
+    import numpy as np
+
+    from ..camrig.create import CamrigCreateError, find_images, normalize_pattern
+    from .._sfmtool.io import write_camrig
+
+    verdict = result["camera_model"]
+    focal = result["focal_px"]
+    if focal is None or verdict not in _CAMRIG_MODEL:
+        raise click.ClickException(
+            "no focal consensus to write: the vote produced no shared focal "
+            "for this capture."
+        )
+    if confirmed is False:
+        raise click.ClickException(
+            "refusing to write an UNCONFIRMED Fisheye estimate. Re-run with "
+            "`--model pinhole` to commit the pinhole estimate instead."
+        )
+    if output_path.exists() and not force:
+        raise click.ClickException(
+            f"{output_path} already exists; pass --force to overwrite it."
+        )
+
+    # The `.camrig` pattern is resolved against the rig root, which the format
+    # defines as the file's own directory.
+    rig_root = output_path.parent
+    try:
+        stored_pattern = normalize_pattern(
+            pattern if pattern else _derive_pattern(data["image_names"])
+        )
+        find_images(rig_root, stored_pattern)
+    except CamrigCreateError as e:
+        raise click.ClickException(
+            f"{e}\nPass --pattern to name the images this rig describes, "
+            f"relative to {rig_root}."
+        ) from None
+
+    camera = {
+        "model": _CAMRIG_MODEL[verdict],
+        "width": data["width"],
+        "height": data["height"],
+        "parameters": {
+            "focal_length": float(focal),
+            "principal_point_x": data["width"] / 2.0,
+            "principal_point_y": data["height"] / 2.0,
+        },
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_camrig(
+        path=str(output_path),
+        name=output_path.stem,
+        rig_type="generic",
+        cameras=[camera],
+        sensor_image_patterns=[stored_pattern],
+        camera_indexes=[0],
+        quaternions_wxyz=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float64),
+        translations_xyz=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+    )
+    return (
+        f"Wrote {output_path}\n"
+        f"  camera:   {camera['model']} {data['width']}x{data['height']}\n"
+        f"  focal:    {focal:.2f} px\n"
+        f"  pattern:  {stored_pattern}"
+    )
+
+
+@click.command("estimate-intrinsics")
+@click.help_option("--help", "-h")
+@click.option(
+    "-i",
+    "--input",
+    "input_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Cluster-bearing .matches file (from sfm match --cluster).",
+)
+@click.option(
+    "--model",
+    "model_option",
+    type=click.Choice(["auto", "pinhole", "fisheye"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help=(
+        "Camera-model columns to run: `auto` runs both and arbitrates between "
+        "them; the named forms run one column and skip arbitration."
+    ),
+)
+@click.option(
+    "--write-camrig",
+    "camrig_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write the estimate as a one-sensor .camrig at this path.",
+)
+@click.option(
+    "--pattern",
+    default=None,
+    help=(
+        "Image pattern stored in the .camrig; defaults to the matches' common "
+        "image directory plus one '*' segment per directory level below it, "
+        "ending '*<ext>' for the extension the image names share."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Allow --write-camrig to overwrite an existing file.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the full vote result as JSON on stdout instead of the report.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="RANSAC / pair-sampling seed; same inputs and seed give the same output.",
+)
+def estimate_intrinsics(
+    input_path,
+    model_option,
+    camrig_path,
+    pattern,
+    force,
+    as_json,
+    seed,
+):
+    """Estimate a shared focal length and camera model from cluster matches.
+
+    Image pairs drawn from the cluster tracks each vote through whichever
+    estimator their geometry can observe, and the pooled log-median is the
+    focal consensus. No structure is estimated, so the answer cannot be biased
+    by the depth/focal compensation of structure-based estimation. Under
+    `--model auto` the pinhole and equidistant-fisheye columns are both run and
+    arbitrated on their certified mass of model-informative scan votes.
+
+    The report is the product: a capture with no consensus still exits 0.
+    Passing --write-camrig also commits the estimate as a one-sensor .camrig,
+    which `sfm solve` picks up as the intrinsics prior for the images its
+    pattern matches.
+
+    \b
+    Example:
+        sfm estimate-intrinsics -i matches/clusters.matches
+        sfm estimate-intrinsics -i matches/clusters.matches \\
+            --write-camrig images.camrig
+    """
+    import json as json_module
+
+    from .._sfmtool.geometry import focal_vote
+
+    try:
+        data = _load_observations(Path(input_path))
+        result = focal_vote(
+            data["cluster_indexes"],
+            data["image_indexes"],
+            data["positions"],
+            data["width"],
+            data["height"],
+            seed=seed,
+            columns=list(_MODEL_COLUMNS[model_option.lower()]),
+        )
+    except click.UsageError:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from None
+    confirmed = _fisheye_confirmed(result, model_option.lower())
+
+    if as_json:
+        payload = dict(result)
+        payload["fisheye_confirmed"] = confirmed
+        equidistant = _column(result, _EQUIDISTANT)
+        payload["certified_rotation_mass"] = (
+            None if equidistant is None else int(equidistant["n_certified_rotation"])
+        )
+        payload["diagonal_fov_deg"] = _diagonal_fov_deg(
+            result["camera_model"], result["focal_px"], data["width"], data["height"]
+        )
+        click.echo(json_module.dumps(payload, indent=2))
+    else:
+        click.echo(
+            "\n".join(_report_lines(result, data, model_option.lower(), confirmed))
+        )
+
+    if camrig_path is not None:
+        summary = _write_camrig(
+            Path(camrig_path), pattern, result, data, confirmed, force
+        )
+        click.echo("")
+        click.echo(summary)

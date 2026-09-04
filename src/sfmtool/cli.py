@@ -18,6 +18,7 @@ from ._commands import (
     densify,
     embed_patches_command,
     epipolar,
+    estimate_intrinsics,
     explorer,
     flow,
     from_colmap_bin,
@@ -70,6 +71,7 @@ main.add_command_with_category(merge, category="Reconstruction")
 main.add_command_with_category(densify, category="Reconstruction")
 main.add_command_with_category(motion, category="Reconstruction")
 main.add_command_with_category(embed_patches_command, category="Reconstruction")
+main.add_command_with_category(estimate_intrinsics, category="Reconstruction")
 main.add_command_with_category(explorer, category="Visualization")
 main.add_command_with_category(epipolar, category="Visualization")
 main.add_command_with_category(flow, category="Image Processing")
