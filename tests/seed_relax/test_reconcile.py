@@ -444,7 +444,7 @@ def _e2e_member():
 
 def _e2e_source():
     cam = _cam()
-    starts, images, features, affines = [0], [], [], []
+    starts, images, features, positions, shapes = [0], [], [], [], []
     blocks = [
         (np.concatenate([FAR, NEAR]), 0, 2.0, False),
         (EXTRA, len(FAR) + len(NEAR), 1.0, False),
@@ -461,15 +461,18 @@ def _e2e_source():
                 images.append(f)
                 features.append(f * FEATURE_STRIDE + base + c)
                 s = scale if dup or c % 2 == 0 else 0.5 * scale
-                affines.append(np.array([[s, 0.0, px[0]], [0.0, s, px[1]]]))
+                positions.append(np.asarray(px, float))
+                shapes.append(np.array([[s, 0.0], [0.0, s]]))
             starts.append(len(images))
+    pos, shp = np.stack(positions), np.stack(shapes)
     return types.SimpleNamespace(
         image_names=[f"cam/{f:03d}.jpg" for f in range(N_FRAMES)],
         refine_radius=REFINE_RADIUS,
         cluster_starts=np.array(starts, np.int64),
         member_images=np.array(images, np.int64),
         member_features=np.array(features, np.int64),
-        member_affines=np.stack(affines),
+        member_positions=lambda: pos,
+        member_affine_shapes=lambda: shp,
     )
 
 

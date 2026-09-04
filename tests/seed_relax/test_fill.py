@@ -28,22 +28,23 @@ PLACED = [0, 1, 2]
 
 
 def _handle(names=NAMES):
-    starts, images, features, affines = [0], [], [], []
+    starts, images, features, positions, shapes = [0], [], [], [], []
     for members in SOURCE:
         for img, feat, scale in members:
             images.append(img)
             features.append(feat)
-            affines.append(
-                np.array([[scale, 0.0, 100.0 + feat], [0.0, scale, 200.0 + feat]])
-            )
+            positions.append(np.array([100.0 + feat, 200.0 + feat]))
+            shapes.append(np.array([[scale, 0.0], [0.0, scale]]))
         starts.append(len(images))
+    pos, shp = np.stack(positions), np.stack(shapes)
     return types.SimpleNamespace(
         image_names=list(names),
         refine_radius=REFINE_RADIUS,
         cluster_starts=np.array(starts, np.int64),
         member_images=np.array(images, np.int64),
         member_features=np.array(features, np.int64),
-        member_affines=np.stack(affines),
+        member_positions=lambda: pos,
+        member_affine_shapes=lambda: shp,
     )
 
 
