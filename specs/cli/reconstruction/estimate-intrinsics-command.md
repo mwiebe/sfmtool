@@ -126,7 +126,8 @@ The write refuses -- with the report still printed -- when:
 - The fisheye diagonal FOV is `2 * theta(r_corner)` under `theta = r / f`;
   the pinhole one is `2 * atan(r_corner / f)`. Both are reported from the
   same corner radius `hypot(width, height) / 2`.
-- The equidistant-vs-Kannala-Brandt model gap (a real fisheye lens is not
-  exactly equidistant) is a property of the estimate's model, not an
-  estimator error; the config this command writes is the equidistant
-  best-fit, which is what the solver-side model can represent.
+- A real fisheye lens is generally not exactly equidistant, so a calibrated
+  reference under a richer distortion model can sit a few percent from this
+  estimate. That gap is a property of the estimate's model, not an estimator
+  error; the `.camrig` this command writes is the equidistant best-fit,
+  which is what the solver-side model can represent.
