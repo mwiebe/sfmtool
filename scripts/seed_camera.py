@@ -489,7 +489,10 @@ def load_clusters(matches_data=None, preselected=False):
     starts = np.asarray(sel.cluster_starts, dtype=np.int64)
     sizes = np.diff(starts)
     n_cl = len(sizes)
-    aff = np.asarray(sel.member_affines)
+    # The backbone's own geometry, stored float32 and widened here because
+    # everything downstream solves in float64.
+    m_uv = np.asarray(sel.member_positions(), dtype=np.float64)
+    m_shape = np.asarray(sel.member_affine_shapes(), dtype=np.float64)
 
     obs_i = np.asarray(sel.member_images, dtype=np.int64)
     if preselected:
@@ -514,19 +517,18 @@ def load_clusters(matches_data=None, preselected=False):
 
     print(f"load_clusters: {time.perf_counter() - _t_load:.2f}s")
     obs_c = np.repeat(np.arange(n_cl, dtype=np.int64), sizes)
-    # The affine's last column is the member's absolute refined keypoint
-    # position; the 2x2 block is its ABSOLUTE affine shape (`S_ref | x_ref`
-    # for the reference row).  The surfel writer wants the reference-relative
-    # warp, so recover it through each cluster's reference row.
+    # The stored shape is the member's ABSOLUTE affine shape (the reference
+    # member's own row is `S_ref`).  The surfel writer wants the
+    # reference-relative warp, so recover it through that row.
     out = {
         "names": names,
         "dims": dims,
         "obs_c": obs_c,
         "obs_i": obs_i,
         "obs_f": np.asarray(sel.member_features, dtype=np.int64),
-        "obs_uv": np.ascontiguousarray(aff[:, :, 2], dtype=np.float64),
+        "obs_uv": np.ascontiguousarray(m_uv),
         "obs_warp": np.ascontiguousarray(
-            relative_warps(aff[:, :, :2], obs_c, sel.reference_members),
+            relative_warps(m_shape, obs_c, sel.reference_members),
             dtype=np.float64,
         ),
         "obs_ref": np.asarray(sel.member_status) == 0,
