@@ -1,46 +1,29 @@
 // Copyright The SfM Tool Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Structure-free focal-length estimation by pairwise voting
-//! ([`focal_vote`]). See `specs/core/geometry/focal-vote.md`.
+//! Structure-free focal-length estimation by pairwise voting ([`focal_vote`]).
 //!
 //! Image pairs drawn from cluster-track observations each cast one focal vote
-//! through whichever of two estimators their geometry can observe, and the
-//! consensus focal is the median of the pooled votes from both families:
+//! through whichever of two estimators their geometry can observe — the
+//! Bougnoux focal of a robustly estimated fundamental matrix for pairs carrying
+//! parallax, rotation self-calibration (`H = K R K⁻¹`) for pairs dominated by a
+//! parallax-free homography — and the consensus focal is the median of the
+//! pooled votes from both families.
 //!
-//! - **Epipolar** — pairs with parallax vote the Bougnoux focal of a robustly
-//!   estimated fundamental matrix. The two cameras share the focal, so the
-//!   pair's two directional focals (from `F` and `Fᵀ`) must agree; when they
-//!   do, the pair casts one vote — their geometric mean.
-//! - **Rotation** — pairs dominated by a parallax-free homography vote by
-//!   rotation self-calibration: `H = K R K⁻¹`, so the focal is the `f` that
-//!   makes `K⁻¹ H K` orthogonal. Each unordered image pair votes at most once:
-//!   the inverse homography over the same correspondences is the same
-//!   measurement, not a second one.
-//!
-//! Each estimator is degenerate exactly where the other is informative; per-pair
-//! gates (homography domination and direction agreement for epipolar pairs, the
-//! orthogonality residual for rotation pairs) keep each on its own ground, and
-//! every vote that survives its gate enters one pooled median. Because no
-//! structure is estimated, the vote cannot be biased by the depth/focal
-//! (bas-relief) compensation that afflicts structure-based focal estimation.
-//!
-//! Every focal median here is taken in log space (an even-length median is the
-//! geometric mean of the two central votes), consistent with the direction
-//! agreement band, the spreads, and the epipolar pair vote itself. When both
-//! families voted and their medians disagree by more than the
-//! family-disagreement band the pool is bimodal, and its blended median would
-//! be a value no pair voted for; the consensus is then the majority family's
-//! median instead.
+//! Every focal median in this module is taken in **log space**, so an
+//! even-length median is the geometric mean of the two central votes; the
+//! agreement bands and the reported spreads are log-focal quantities to match.
 //!
 //! Both families generalize over the camera model through the pixel→ray map, so
 //! the caller may ask for more than one **column** (camera-model hypothesis):
-//! see [`column_scan`]. The default is pinhole-only, which reproduces the
-//! behavior above exactly — no scan runs at all.
+//! see [`column_scan`]. The default is pinhole-only, and then no scan runs at
+//! all.
 //!
 //! The pair-table pass is deterministic and the RANSAC estimators derive their
 //! sampling from the input seed, so identical inputs and seed reproduce
 //! identical output.
+//!
+//! See `specs/core/geometry/focal-vote.md` for the design.
 
 use std::collections::{HashMap, HashSet};
 
@@ -423,8 +406,8 @@ fn log_median(vals: &[f64]) -> Option<f64> {
     Some(l.exp())
 }
 
-/// Per-image-pair accumulator from the sampled pass: how many clusters sampled
-/// this pair, and the sum of their feature displacements.
+/// Per-image-pair accumulator over the exhaustive per-cluster pass: how many
+/// clusters the pair shares, and the sum of their feature displacements.
 #[derive(Clone, Copy, Default)]
 struct PairAccum {
     count: f64,
@@ -643,9 +626,9 @@ pub fn focal_vote_with_options(
     // Each cluster's covisible member pairs contribute to their image pair's
     // shared-cluster count and mean feature displacement. The same pass builds,
     // per image, the (run, position) list used for the full-correspondence
-    // merge-join. Counts are the true shared-cluster covisibility (the sampled
-    // single-pair estimate of the spec undercounts too far to reach the 25/30
-    // thresholds on parallax-poor captures — see the spec's deviation note).
+    // merge-join. Counts are the true shared-cluster covisibility; a sampled
+    // single pair per cluster undercounts too far to reach the 25/30 cluster
+    // thresholds on parallax-poor captures — see the spec's "Pair tables".
     let mut image_clusters: ImageClusters = vec![Vec::new(); n_img];
     let mut pair_accum: HashMap<(u32, u32), PairAccum> = HashMap::new();
 
