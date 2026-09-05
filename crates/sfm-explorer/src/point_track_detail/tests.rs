@@ -821,51 +821,29 @@ fn the_printed_size_is_twice_the_affine_semi_axis() {
     }
 }
 
-// ── Shared metrics helpers ──────────────────────────────────────────────
-
-#[test]
-fn max_pairwise_angle_finds_the_widest_pair() {
-    // Three rays: 0°, 45° and 90° from +X. The widest pair is the outer two.
-    let s = std::f64::consts::FRAC_1_SQRT_2;
-    let rays = [[1.0, 0.0, 0.0], [s, s, 0.0], [0.0, 1.0, 0.0]];
-    let angle = super::compute_max_pairwise_angle(&rays);
-    assert!((angle - 90.0).abs() < 1e-4, "angle was {angle}");
-}
-
-#[test]
-fn max_pairwise_angle_of_fewer_than_two_rays_is_zero() {
-    assert_eq!(super::compute_max_pairwise_angle(&[]), 0.0);
-    assert_eq!(super::compute_max_pairwise_angle(&[[1.0, 0.0, 0.0]]), 0.0);
-}
-
-#[test]
-fn point_diagnostics_are_undefined_for_a_missing_point() {
-    let recon = SfmrReconstruction::demo(4);
-    let (cond, z) = super::compute_point_diagnostics(&recon, 999);
-    assert!(cond.is_nan());
-    assert!(z.is_nan());
-}
-
-#[test]
-fn point_diagnostics_are_finite_for_a_triangulated_point() {
-    let recon = SfmrReconstruction::demo(12);
-    let (cond, z) = super::compute_point_diagnostics(&recon, 5);
-    assert!(cond.is_finite() && cond >= 1.0, "condition number {cond}");
-    assert!(z.is_finite(), "inverse-depth z {z}");
-}
-
+/// The dots are the shared error ramp over this panel's fixed 0–2 px, with
+/// "no measurement" kept off the ramp entirely.
 #[test]
 fn error_color_ramps_from_green_through_yellow_to_red() {
-    let green = super::metrics::error_color(0.0);
-    let yellow = super::metrics::error_color(1.0);
-    let red = super::metrics::error_color(2.0);
+    use super::table::{error_dot_color, ERROR_RAMP_MAX_PX, NO_ERROR_COLOR};
+
+    let green = error_dot_color(0.0);
+    let yellow = error_dot_color(1.0);
+    let red = error_dot_color(2.0);
     assert_eq!((green.r(), green.b()), (0, 0));
     assert_eq!((yellow.r(), yellow.g(), yellow.b()), (255, 255, 0));
     assert_eq!((red.r(), red.g(), red.b()), (255, 0, 0));
     // Anything past the top of the ramp stays red; NaN is the "N/A" gray.
-    assert_eq!(super::metrics::error_color(50.0), red);
-    assert_eq!(
-        super::metrics::error_color(f32::NAN),
-        egui::Color32::from_rgb(128, 128, 128)
-    );
+    assert_eq!(error_dot_color(50.0), red);
+    assert_eq!(error_dot_color(f32::NAN), NO_ERROR_COLOR);
+
+    // And they are the Image Detail overlay's colours at the same range, which
+    // is the whole point of there being one `error_color`.
+    for error in [0.0_f32, 0.25, 0.5, 1.0, 1.75, 2.0] {
+        assert_eq!(
+            error_dot_color(error),
+            crate::colormap::error_color(error, 0.0, ERROR_RAMP_MAX_PX),
+            "error {error} px"
+        );
+    }
 }
