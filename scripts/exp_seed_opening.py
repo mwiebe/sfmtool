@@ -8,10 +8,10 @@ coarse cut, capture intrinsics, covisibility seed groups, and one ray-space
 probe per group -- as an evaluation of the sfmtool core surface: does each
 idea come out as one named call, and where does numpy glue creep in?
 
-Read-only: opens the workspace's cluster matches file and prints a transcript;
+Read-only: opens the given cluster ``.matches`` file and prints a transcript;
 nothing is written.
 
-    pixi run -e dev python scripts/exp_seed_opening.py <workspace>
+    pixi run -e dev python scripts/exp_seed_opening.py <clusters.matches>
 """
 
 import sys
@@ -34,15 +34,6 @@ GROUP_SIZE = 5  # images per covisibility seed group
 N_GROUPS = 8  # proposals probed per run
 TOL_PX = 3.0  # keypoint localization tolerance behind the ray consensus bound
 SEED = 0
-
-
-def cluster_matches(ws: Path) -> Path:
-    """The workspace's cluster backbone, patch-refined where one exists."""
-    for pattern in ("matches/*-clusters-patches.matches", "matches/*-clusters.matches"):
-        found = sorted(ws.glob(pattern))
-        if found:
-            return found[0]
-    sys.exit(f"no cluster matches under {ws}")
 
 
 def member_arrays(sel):
@@ -184,8 +175,7 @@ def probe_pair(cam, x1, x2, f):
 
 
 def main():
-    ws = Path(sys.argv[1])
-    path = cluster_matches(ws)
+    path = Path(sys.argv[1])
 
     # 1. Base admission: the loader's predicate as one native derivation.
     matches = MatchesFile(path)
