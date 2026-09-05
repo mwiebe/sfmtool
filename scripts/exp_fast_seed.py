@@ -1338,8 +1338,8 @@ def route_camera_model(vote):
         f"at the equidistant focal {f_eq:.1f} px.  Stage 1 now runs "
         "its ray-space seed (Phase 2): ray-space two-view pair init instead "
         "of the affine factorization, ray parallax, a ray-rotation far-field "
-        "core, and the focal held FIXED at this value (the equidistant scan "
-        "and the free-focal release are Phase 3).  Column diagnostics: "
+        "core, the equidistant scan grid about this value, and the "
+        "free-focal release under the scan-basin guard.  Column diagnostics: "
         f"parallax-poverty {vote['parallax_poverty']:.2f}, "
         f"rotation votes {vote['n_rotation']}."
     )
@@ -5009,11 +5009,16 @@ def capture_context():
         rung.vote_obs = ()
     if vote is not None:
         f_vote, n_votes = vote
-        # Bougnoux votes from noisy F run consistently LOW on this campaign
-        # (-1..-10%, one -22%): probe above the vote and skew the scan grid
-        # upward so the true focal stays inside it.
-        f_probe = 1.1 * f_vote
-        f_grid = np.array([0.8, 0.95, 1.1, 1.3, 1.55]) * f_vote
+        # The estimate is used RAW, with the scan grid log-symmetric about
+        # it -- the same treatment the fisheye verdict gets.  The +10% bias
+        # correction (and the upward-skewed grid that carried it) dated from
+        # the campaign whose Bougnoux votes ran -1..-10%; the reliability
+        # mining removed that bias at the source, and the 2026-09-04 fleet
+        # A/B measured the correction OVERCORRECTING (+9..13% estimates over
+        # near-truth releases).  Raw-vote arm: accepted-focal error median
+        # 3.7% -> 2.7% vs references, human-reviewed.
+        f_probe = float(f_vote)
+        f_grid = f_vote * FISHEYE_SCAN_RATIO ** (np.arange(5) - 2)
         print(
             f"pairwise focal vote: f ~ {f_vote:.1f} ({n_votes} votes) "
             f"[{elapsed():.1f}s]"
@@ -5025,12 +5030,11 @@ def capture_context():
         print(f"no focal vote (sparse pairs); probing at {f_probe:.1f}")
     if fisheye_stage1():
         # Under a confirmed, opted-in fisheye verdict stage 1 probes at the
-        # verdict's EQUIDISTANT focal.  The pinhole vote (and its +10% bias
-        # correction, and the grid centred on it) parameterizes
+        # verdict's EQUIDISTANT focal.  The pinhole vote parameterizes
         # r = f*tan(theta) and has no meaning for a theta = r/f map; probing
         # there is what made the Phase-1 gated runs mixed geometry.  The scan
-        # grid is the log-symmetric equidistant one about that verdict, inside
-        # the FOV-derived band.
+        # grid is the same log-symmetric one, about the verdict and clipped
+        # inside the FOV-derived band.
         f_probe = float(rung.intrinsics["fisheye"]["focal_px"])
         f_grid = fisheye_focal_grid(f_probe)
         lo, hi = fisheye_focal_band()
@@ -5554,24 +5558,23 @@ def run_pipeline(
     vote_rot_n = int(rung.intrinsics["n_rotation"])
 
     # The structure-free focal measurement COMMENSURABLE with what this pass
-    # solves, plus the bias correction that turns it into the comparator the
-    # scan tiebreak, the divergence guard and the flagged fallback all read.
-    # Pinhole: the pairwise vote, which runs ~10% low from noisy F.
-    # Equidistant: the verdict's own focal — same map as the solve, and no
-    # measured directional bias, so it is used raw.  The pinhole vote is NOT a
-    # fallback under a fisheye context; the two parameterize different maps.
+    # solves -- the comparator the scan tiebreak, the divergence guard and the
+    # flagged fallback all read.  Pinhole: the pairwise vote.  Equidistant: the
+    # verdict's own focal.  Both are used RAW (no measured directional bias
+    # survives in either family), and the pinhole vote is NOT a fallback under
+    # a fisheye context; the two parameterize different maps.
     if fisheye_stage1():
         fisheye = rung.intrinsics["fisheye"]
-        f_indep, f_bias = float(fisheye["focal_px"]), 1.0
+        f_indep = float(fisheye["focal_px"])
         vote_iqr = float(fisheye.get("pool_spread") or 0.0)
     else:
-        f_indep, f_bias = f_vote, 1.1
+        f_indep = f_vote
         vote_iqr = rung.intrinsics["pool_spread"]
     # The structure-free measurement AND ITS PRECISION, for the finalization's
     # vote-vs-structure arbitration (see `_finalize_seed`'s contradiction test).
-    # `f_center` is the measurement in the solve's parameterization, bias
-    # corrected; `f_band` is a multiplicative half-width in log-focal.
-    f_center = None if f_indep is None else f_bias * float(f_indep)
+    # `f_center` is the measurement in the solve's parameterization; `f_band`
+    # is a multiplicative half-width in log-focal.
+    f_center = None if f_indep is None else float(f_indep)
     f_band = None if f_center is None else max(vote_iqr, VOTE_BAND_FLOOR_LOG)
 
     def attempt(wk, nw, keep, rc_only=False, allow_rc=True):
@@ -6708,12 +6711,11 @@ def run_pipeline(
         if f_indep is not None:
             # A flat scan is f-degenerate structure with no opinion of its own
             # — marginal captures then flip basins on run-to-run noise.  The
-            # structure-free vote is an INDEPENDENT measurement, so the candidate
-            # nearest it (bias-corrected: the pinhole vote runs ~10% low, the
-            # equidistant verdict is used raw) always earns a refit slot when it
-            # ranks within noise of the leader, and it wins outright when the
+            # structure-free vote is an INDEPENDENT measurement, so the
+            # candidate nearest it always earns a refit slot when it ranks
+            # within noise of the leader, and it wins outright when the
             # refits tie.
-            near = min(coarse, key=lambda t: abs(np.log(t[1] / (f_bias * f_indep))))
+            near = min(coarse, key=lambda t: abs(np.log(t[1] / f_indep)))
             if (
                 near[1] not in (pick[0][1], pick[1][1])
                 and near[0] >= coarse[0][0] - 0.05
@@ -6726,7 +6728,7 @@ def run_pipeline(
             )
         best = max(finals, key=lambda t: t[0])
         if f_indep is not None and abs(finals[0][0] - finals[1][0]) < 0.05:
-            best = min(finals, key=lambda t: abs(np.log(t[1] / (f_bias * f_indep))))
+            best = min(finals, key=lambda t: abs(np.log(t[1] / f_indep)))
 
         inl0, f, rvec, tvec, pts = best
         print(f"scan winner: f = {f:.1f} [{elapsed():.1f}s]; releasing f")
@@ -6982,7 +6984,7 @@ def run_pipeline(
         # band on the full campaign datasets.
         flags = ["low_consensus"] if inl < 0.60 else []
         # Runtime guards from the casual-video fleet (no reference needed).  A
-        # release that leaves the bias-corrected vote's error band is bas-relief
+        # release that leaves the vote's error band is bas-relief
         # walking (ws2: vote +0.2% vs release -35% at 86% inliers), and a posed
         # set clustered in a sliver of the input sequence cannot observe focal
         # at all (scans rank meaninglessly below ~30% rig span).  Both bands are
@@ -6993,11 +6995,11 @@ def run_pipeline(
         # pinhole solve, the equidistant verdict for an equidistant one.  Reading
         # the pinhole vote against an equidistant release would be a units error
         # rather than a guard — the two maps agree only near the axis.
-        if f_indep is not None and abs(np.log(f / (f_bias * f_indep))) > np.log(1.35):
+        if f_indep is not None and abs(np.log(f / f_indep)) > np.log(1.35):
             flags.append("vote_divergence")
             print(
-                f"VOTE DIVERGENCE: release f = {f:.1f} left the corrected vote "
-                f"band ({f_bias * f_indep:.1f} +/- 35%); structure is bas-relief "
+                f"VOTE DIVERGENCE: release f = {f:.1f} left the vote "
+                f"band ({f_indep:.1f} +/- 35%); structure is bas-relief "
                 f"suspect"
             )
         final_reach = capture_reach_of(keep_w[np.nonzero(posed)[0]])
