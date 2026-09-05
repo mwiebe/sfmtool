@@ -21,11 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from sfmtool._sfmtool.analysis import triangulate_batch
-from sfmtool._sfmtool.geometry import (
-    CameraIntrinsics,
-    estimate_essential_rays,
-    estimate_intrinsics,
-)
+from sfmtool._sfmtool.geometry import estimate_essential_rays, estimate_intrinsics
 from sfmtool._sfmtool.io import MatchesFile
 from sfmtool._sfmtool.matching import ClusterCovisibility
 
@@ -76,33 +72,6 @@ def coarsest_clusters(sel, n):
     np.maximum.at(per_cluster, obs_c, radius)
     order = np.argsort(-per_cluster, kind="stable")
     return np.sort(order[: min(n, len(order))])
-
-
-def capture_camera(est, width, height):
-    """The camera the intrinsics estimate implies: the confirmed equidistant
-    verdict's own focal, else a pinhole at the (bias-corrected) vote focal."""
-    cx, cy = width / 2.0, height / 2.0
-    fisheye = est["camera_model"] == "EquidistantFisheye" and est["confirmed"]
-    if fisheye:
-        model, f = "EQUIDISTANT_FISHEYE", float(est["focal_px"])
-    else:
-        # The raw vote, exactly as the seed probes it (both charts read their
-        # estimate raw since the 2026-09-04 fleet A/B).
-        vote = est["screening_vote"] or est["vote"]
-        model, f = "SIMPLE_PINHOLE", float(vote["focal_px"])
-    cam = CameraIntrinsics.from_dict(
-        {
-            "model": model,
-            "width": width,
-            "height": height,
-            "parameters": {
-                "focal_length": f,
-                "principal_point_x": cx,
-                "principal_point_y": cy,
-            },
-        }
-    )
-    return cam, f, "equidistant" if fisheye else "pinhole"
 
 
 def pair_correspondences(obs_c, obs_i, uv, img_a, img_b):
@@ -195,7 +164,11 @@ def main():
     #    over the selection itself -- the file already states the observations
     #    in the layout the vote takes.
     est = estimate_intrinsics(sel, seed=SEED, columns="auto")
-    cam, f, chart = capture_camera(est, w, h)
+    cam = est["camera"]
+    if cam is None:
+        sys.exit(f"{path.name}: no consensus focal, so no camera to probe with")
+    f = cam.focal_lengths[0]
+    chart = "equidistant" if cam.model == "EQUIDISTANT_FISHEYE" else "pinhole"
     vote = est["screening_vote"] or est["vote"]
     print(
         f"intrinsics: {chart} f={f:.1f} px (vote {vote['focal_px']:.1f} over "
