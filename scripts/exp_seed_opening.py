@@ -39,8 +39,10 @@ SEED = 0
 def member_arrays(sel):
     """A selection's member-parallel view: (cluster, image, position) rows.
 
-    API-fit note: the file stores `cluster_starts`; every consumer wants the
-    member-parallel cluster column, so each one re-expands it.
+    API-fit note: the file stores `cluster_starts`, and the intrinsics vote
+    now takes the selection itself; what still re-expands the CSR index is
+    this script's own pair joins (steps 3-5), where the member-parallel
+    cluster column is the working shape.
     """
     starts = np.asarray(sel.cluster_starts, dtype=np.int64)
     obs_c = np.repeat(np.arange(len(starts) - 1), np.diff(starts))
@@ -186,16 +188,10 @@ def main():
     print(f"{path.name}: {n_img} images {w}x{h}, {n_cl} clusters, {len(obs_c)} members")
 
     # 2. Capture intrinsics, on the FULL admission (the referee must not
-    #    shrink with the solve's working set): focal AND camera model, one call.
-    est = estimate_intrinsics(
-        obs_c.astype(np.uint32),
-        obs_i.astype(np.uint32),
-        uv,
-        w,
-        h,
-        seed=SEED,
-        columns="auto",
-    )
+    #    shrink with the solve's working set): focal AND camera model, one call
+    #    over the selection itself -- the file already states the observations
+    #    in the layout the vote takes.
+    est = estimate_intrinsics(sel, seed=SEED, columns="auto")
     cam, f, chart = capture_camera(est, w, h)
     vote = est["screening_vote"] or est["vote"]
     print(

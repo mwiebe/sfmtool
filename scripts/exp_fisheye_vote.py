@@ -898,12 +898,11 @@ def run_dataset(spec: dict, quick: bool) -> dict:
         f"  [{time.perf_counter() - t0:.1f}s]"
     )
 
-    # Reference pinhole verdict from the shipped kernel.
+    # Reference pinhole verdict from the shipped kernel, over the file's own
+    # CSR index -- which is the layout the kernel takes.
     starts, mimg = data["starts"], data["member_images"]
-    sizes = np.diff(starts)
-    cl_of = np.repeat(np.arange(len(sizes)), sizes)
     native = native_focal_vote(
-        cl_of.astype(np.uint32), mimg.astype(np.uint32), pos, w, h, seed=0
+        starts.astype(np.uint32), mimg.astype(np.uint32), pos, w, h, seed=0
     )
 
     n_grid = N_GRID // 3 if quick else N_GRID
