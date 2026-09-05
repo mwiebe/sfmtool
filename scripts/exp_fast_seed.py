@@ -207,19 +207,9 @@ F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 # observations; one shared camera with the principal point at the centre.  The
 # image size lives with the rest of the camera context, in `seed_camera`;
 # `capture_context` installs it and everything here reads it back from there.
-_VOTE_POVERTY = 0.0  # set by focal_vote: median H/F inlier ratio over pairs
-_VOTE_ROT_N = 0  # set by focal_vote: number of rotation self-calibration votes
-# Set by focal_vote: the pinhole vote pool's own log-focal IQR — the
-# structure-free measurement's dispersion, i.e. how tightly the pairwise
-# evidence pins the focal with no structure involved.  Read as the vote's
-# PRECISION BAND by the finalization's arbitration (see `vote_band`).
-_VOTE_SPREAD = 0.0
-# Set by focal_vote when the escalated two-column vote returns a CONFIRMED
-# EquidistantFisheye verdict: {"focal_px", "margin", "mass_pinhole",
-# "mass_equidistant", "mass_epipolar", "mass_rotation", "trigger"}.  None
-# whenever the escalation did not run, the verdict was Pinhole, or the verdict
-# was not corroborated by both cells.
-_VOTE_FISHEYE = None
+# The capture's intrinsics estimate flows FUNCTIONALLY: `estimate_intrinsics`
+# returns it, `route_camera_model` acts on it at the call site, and it rides on
+# `Rung.intrinsics` for every later phase.  No module global carries it.
 
 
 def elapsed():
@@ -304,7 +294,7 @@ def timings_block():
 # gate) can reach them under either name.
 #
 # ROUTING.  A CONFIRMED equidistant verdict — the kernel's corroborated one,
-# acted on in ``_record_camera_model`` — installs the fisheye context, and it
+# acted on in ``route_camera_model`` — installs the fisheye context, and it
 # does so BY DEFAULT: routing needs no opt-in.  SFMTOOL_FISHEYE_SEED is an
 # OVERRIDE on that decision, not a precondition for it:
 #
@@ -571,6 +561,25 @@ class Rung:
     vote_obs: tuple = ()
     vote_clusters: int = 0
     vote_observations: int = 0
+    #: The capture's intrinsics estimate (`estimate_intrinsics`): the pinhole
+    #: screening numbers, the camera-model verdict and, when confirmed, the
+    #: fisheye block.  Starts as the neutral reading so the `SFMTOOL_F0` debug
+    #: path (which skips the vote) leaves every consumer well-defined.
+    intrinsics: dict = dataclasses.field(
+        default_factory=lambda: {
+            "focal_px": None,
+            "n_pool": 0,
+            "pool_spread": 0.0,
+            "parallax_poverty": 0.0,
+            "n_rotation": 0,
+            "escalation": [],
+            "camera_model": None,
+            "confirmed": None,
+            "fisheye": None,
+            "eq_parallax_poverty": None,
+            "eq_n_rotation": None,
+        }
+    )
     #: The same arrays, kept past the vote for the evaluation battery's
     #: two-view witness and released as soon as it has read them.  Empty
     #: whenever the battery is off, and whenever the coarse cut was a no-op
@@ -1193,40 +1202,22 @@ def load_clusters():
 # Structure-based release does the refinement.
 
 
-def _record_camera_model(est, res, why):
-    """Record — and route on — the kernel's escalated camera-model verdict.
+def _fill_verdict(out, est):
+    """Fill ``out`` with the kernel's escalated camera-model verdict.
 
-    Called only when ``estimate_intrinsics`` escalated, i.e. when its AUTO
-    policy found the pinhole-only vote weak.  The verdict, its corroboration
-    and the verdict focal are the KERNEL's (``camera_model`` / ``confirmed`` /
-    ``focal_px``); what this function owns is the annotation
-    (``_VOTE_FISHEYE``), the transcript and the routing.
+    Called only when ``estimate_intrinsics``'s AUTO policy found the
+    pinhole-only vote weak.  Pure reporting: it prints the arbitration
+    transcript and, when the verdict is corroborated, attaches the
+    confirmed-verdict block (``out["fisheye"]``) with the winning column's own
+    parallax diagnostics beside it for ``route_camera_model`` to swap in.
+    Nothing here routes or records.
 
-    A CONFIRMED EquidistantFisheye verdict ROUTES by default: it installs the
-    equidistant camera context, so stage 1 and the finalization solve the map
-    the capture actually obeys instead of a pinhole approximation of it.
-    ``SFMTOOL_FISHEYE_SEED=0`` refuses the routing and leaves the verdict an
-    annotation (see the camera-context block above).
-
-    Two things make routing safe:
-
-      * The CONFIRMATION rule.  A verdict is recorded only when the equidistant
-        column carries certified rotation-cell mass.  Run unconditionally the
-        bare verdict claims three rectilinear fleet captures, and all three win
-        on the epipolar cell alone (see VERDICT CONFIRMATION above).  An
-        unconfirmed verdict is annotation-only under every override setting, so
-        a wrong verdict still costs at most a wrong label.
-      * An equidistant focal is not a pinhole focal.  It parameterizes
-        `theta = r/f`, not `r = f*tan(theta)`; the two agree only near the axis
-        and diverge without bound at the periphery (kerry: equidistant 138 px
-        against a pinhole vote of 144 px).  A routed capture therefore does not
-        keep the pinhole vote as a fallback anywhere — the probe, the scan grid,
-        the divergence guard and the finalization's arbitration all read the
-        verdict's own equidistant focal instead.  Handing the equidistant number
-        to a pinhole probe would still be a units error; what changed is that
-        the probe is no longer a pinhole one.
-    """
-    global _VOTE_FISHEYE
+    The CONFIRMATION rule: a verdict is attached only when the equidistant
+    column carries certified rotation-cell mass.  Run unconditionally the
+    bare verdict claims three rectilinear fleet captures, and all three win
+    on the epipolar cell alone (see VERDICT CONFIRMATION above).  An
+    unconfirmed verdict is annotation-only under every override setting, so
+    a wrong verdict still costs at most a wrong label."""
     # The escalated vote table.  The verdict fields are read off `est`; the
     # per-column masses and spreads the annotation and the transcript state are
     # only in the table, so they are read there.
@@ -1262,9 +1253,9 @@ def _record_camera_model(est, res, why):
         return
     # The verdict's own focal, from the kernel.  It is the equidistant column's
     # consensus (that column won), which is why the arbitration line above and
-    # this annotation carry the same number.
+    # this block carry the same number.
     f_eq = est["focal_px"]
-    _VOTE_FISHEYE = {
+    out["fisheye"] = {
         "focal_px": f_eq,
         "margin": margin,
         "mass_pinhole": m_p,
@@ -1276,9 +1267,43 @@ def _record_camera_model(est, res, why):
         # vote-vs-structure arbitration reads it as the vote's precision band
         # (see `vote_band` in run_pipeline).
         "pool_spread": float(eq.get("pool_spread") or 0.0),
-        "trigger": ",".join(why),
+        "trigger": ",".join(out["escalation"]),
     }
-    pin_txt = "none" if res["focal_px"] is None else f"{res['focal_px']:.1f} px"
+    # The winning column's parallax diagnostics, staged for the routing swap:
+    # `parallax_poverty` is the median rotation/essential consensus ratio, and
+    # the pinhole column's version of it is measured through a ray map this
+    # capture does not obey.  The equidistant column measured the same
+    # quantity correctly.
+    out["eq_parallax_poverty"] = float(eq.get("parallax_poverty") or 0.0)
+    out["eq_n_rotation"] = int(eq.get("n_rotation") or 0)
+
+
+def route_camera_model(vote):
+    """Route on a confirmed equidistant verdict — the one place the intrinsics
+    estimate becomes capture state.
+
+    A CONFIRMED EquidistantFisheye verdict ROUTES by default: it installs the
+    equidistant camera context, so stage 1 and the finalization solve the map
+    the capture actually obeys instead of a pinhole approximation of it, and
+    it swaps ``vote``'s parallax diagnostics to the winning column's.
+    ``SFMTOOL_FISHEYE_SEED=0`` refuses the routing and leaves the verdict an
+    annotation (see the camera-context block above).  No confirmed verdict is
+    a no-op.
+
+    An equidistant focal is not a pinhole focal.  It parameterizes
+    `theta = r/f`, not `r = f*tan(theta)`; the two agree only near the axis
+    and diverge without bound at the periphery (kerry: equidistant 138 px
+    against a pinhole vote of 144 px).  A routed capture therefore does not
+    keep the pinhole vote as a fallback anywhere — the probe, the scan grid,
+    the divergence guard and the finalization's arbitration all read the
+    verdict's own equidistant focal instead.  Handing the equidistant number
+    to a pinhole probe would still be a units error; what changed is that
+    the probe is no longer a pinhole one."""
+    fs = vote["fisheye"]
+    if fs is None:
+        return
+    f_eq = fs["focal_px"]
+    pin_txt = "none" if vote["focal_px"] is None else f"{vote['focal_px']:.1f} px"
     eq_txt = "none" if f_eq is None else f"{f_eq:.1f} px"
     detected = (
         "FISHEYE DETECTED: the capture arbitrates to an equidistant-fisheye "
@@ -1304,13 +1329,10 @@ def _record_camera_model(est, res, why):
     print(detected)
     set_camera_context("SFMTOOL_FISHEYE", f_eq)
     # The parallax diagnostics that steer stage 1's seed-class choice must be
-    # read off the WINNING column: `parallax_poverty` is the median
-    # rotation/essential consensus ratio, and the pinhole column's version of
-    # it is measured through a ray map this capture does not obey.  The
-    # equidistant column measured the same quantity correctly.
-    global _VOTE_POVERTY, _VOTE_ROT_N
-    _VOTE_POVERTY = float(eq.get("parallax_poverty") or 0.0)
-    _VOTE_ROT_N = int(eq.get("n_rotation") or 0)
+    # read off the WINNING column (`_fill_verdict` staged them); the swap is
+    # part of the routing, so an unrouted verdict keeps the pinhole reading.
+    vote["parallax_poverty"] = float(vote["eq_parallax_poverty"])
+    vote["n_rotation"] = int(vote["eq_n_rotation"])
     print(
         "  ROUTED to the fisheye seed: camera context -> SFMTOOL_FISHEYE "
         f"at the equidistant focal {f_eq:.1f} px.  Stage 1 now runs "
@@ -1318,30 +1340,34 @@ def _record_camera_model(est, res, why):
         "of the affine factorization, ray parallax, a ray-rotation far-field "
         "core, and the focal held FIXED at this value (the equidistant scan "
         "and the free-focal release are Phase 3).  Column diagnostics: "
-        f"parallax-poverty {_VOTE_POVERTY:.2f}, rotation votes {_VOTE_ROT_N}."
+        f"parallax-poverty {vote['parallax_poverty']:.2f}, "
+        f"rotation votes {vote['n_rotation']}."
     )
 
 
-def focal_vote(obs_c, obs_i, u):
-    """Median focal over image pairs via the native structure-free vote kernel
-    (specs/core/geometry/focal-vote.md): Bougnoux votes from parallax-rich pairs,
-    rotation-self-calibration votes from rotation-dominated pairs (each
-    estimator is degenerate on the other's pairs).  One vote per image pair;
-    both families pool into one log-space median, unless their medians disagree
-    beyond 0.25 in log-focal and the majority family's median stands alone.
-    Returns (focal, n_pooled_votes), or None.
+def estimate_intrinsics(obs_c, obs_i, u):
+    """The capture's structure-free intrinsics estimate: pinhole focal AND
+    camera-model verdict, returned as one value the pipeline flows through.
 
-    The call is ``estimate_intrinsics`` under its AUTO column policy
-    (specs/core/geometry/estimate-intrinsics.md): the kernel votes pinhole-only
-    and escalates to the two-column camera-model arbitration itself when that
-    vote comes back weak.  The numbers RETURNED here are always the pinhole
-    vote's — an escalated result reports the winning column at the top level, so
-    the pinhole answer is read off the screening vote — and the arbitration
-    ANNOTATES the run through ``_record_camera_model``."""
-    from sfmtool._sfmtool.geometry import estimate_intrinsics
+    The call is the core ``estimate_intrinsics`` kernel under its AUTO column
+    policy (specs/core/geometry/estimate-intrinsics.md): Bougnoux votes from
+    parallax-rich pairs, rotation-self-calibration votes from
+    rotation-dominated pairs, pooled into one log-space median
+    (specs/core/geometry/focal-vote.md), escalating to the two-column
+    camera-model arbitration itself when that vote comes back weak.
+
+    Pure measurement: prints the transcript, returns the reading, and neither
+    routes nor records — routing is ``route_camera_model``, applied by the
+    caller, and the value rides on ``Rung.intrinsics`` for the later phases.
+    ``focal_px`` / ``n_pool`` / ``pool_spread`` / ``parallax_poverty`` /
+    ``n_rotation`` are the PINHOLE numbers (an escalated result reports the
+    winning column at the top level, so they are read off the screening
+    vote); ``fisheye`` is the CONFIRMED equidistant verdict block, else
+    None."""
+    from sfmtool._sfmtool import geometry
 
     w, h = seed_camera._CAM_WH
-    est = estimate_intrinsics(
+    est = geometry.estimate_intrinsics(
         np.ascontiguousarray(obs_c, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
         np.ascontiguousarray(u, dtype=np.float64),
@@ -1353,33 +1379,41 @@ def focal_vote(obs_c, obs_i, u):
     # Stage 1's own pinhole numbers: the vote the kernel screened on when it
     # escalated, and the only vote it ran when it did not.
     res = est["screening_vote"] or est["vote"]
-
-    global _VOTE_POVERTY, _VOTE_ROT_N, _VOTE_SPREAD
-    _VOTE_POVERTY = float(res["parallax_poverty"])
-    _VOTE_ROT_N = int(res["n_rotation"])
-    _VOTE_SPREAD = float(res["pool_spread"] or 0.0)
+    out = {
+        "focal_px": None if res["focal_px"] is None else float(res["focal_px"]),
+        "n_pool": int(res["n_pool"]),
+        # The pinhole vote pool's own log-focal IQR — the structure-free
+        # measurement's dispersion, read as the vote's PRECISION BAND by the
+        # finalization's arbitration (see `vote_band` in run_pipeline).
+        "pool_spread": float(res["pool_spread"] or 0.0),
+        "parallax_poverty": float(res["parallax_poverty"]),
+        "n_rotation": int(res["n_rotation"]),
+        "escalation": list(est["escalation"] or []),
+        "camera_model": est["camera_model"],
+        "confirmed": est["confirmed"],
+        "fisheye": None,
+        "eq_parallax_poverty": None,
+        "eq_n_rotation": None,
+    }
     if res["epipolar_focal_px"] is not None and res["rotation_focal_px"] is not None:
         print(
             f"  vote split: epipolar {res['epipolar_focal_px']:.0f} "
             f"({res['n_epipolar']} pair votes), "
             f"rotation {res['rotation_focal_px']:.0f} "
             f"({res['n_rotation']} pair votes), pool {res['n_pool']}, "
-            f"parallax-poverty {_VOTE_POVERTY:.2f}"
+            f"parallax-poverty {out['parallax_poverty']:.2f}"
         )
     print(
         f"  vote pool: {res['n_pool']} votes, log-focal IQR "
-        f"{_VOTE_SPREAD:.4f} (the vote's own precision)"
+        f"{out['pool_spread']:.4f} (the vote's own precision)"
     )
-    why = est["escalation"]
-    if why:
+    if out["escalation"]:
         print(
-            f"  low-confidence pinhole vote ({','.join(why)}): escalating to "
-            f"the camera-model columns"
+            f"  low-confidence pinhole vote ({','.join(out['escalation'])}): "
+            f"escalating to the camera-model columns"
         )
-        _record_camera_model(est, res, why)
-    if res["focal_px"] is None:
-        return None
-    return float(res["focal_px"]), int(res["n_pool"])
+        _fill_verdict(out, est)
+    return out
 
 
 def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
@@ -4428,7 +4462,7 @@ def write_candidate_solves(rung, win, f_vote, n_votes, extra=None):
         "vote": {
             "f": None if f_vote is None else float(f_vote),
             "n_votes": None if n_votes is None else int(n_votes),
-            "parallax_poverty": float(_VOTE_POVERTY),
+            "parallax_poverty": float(rung.intrinsics["parallax_poverty"]),
             "measured_on_clusters": rung.vote_clusters,
             "measured_on_observations": rung.vote_observations,
         },
@@ -4952,7 +4986,17 @@ def capture_context():
                 f"observations), not the restricted {n_cl}"
             )
             rung.vote_observations = int(len(vote_c))
-        vote = focal_vote(vote_c, vote_i, vote_u)
+        est = estimate_intrinsics(vote_c, vote_i, vote_u)
+        rung.intrinsics = est
+        # The routing is the pipeline's own step, taken in the open: a
+        # confirmed equidistant verdict installs the fisheye camera context
+        # and swaps the parallax diagnostics to the winning column's.
+        route_camera_model(est)
+        vote = (
+            None
+            if est["focal_px"] is None
+            else (float(est["focal_px"]), int(est["n_pool"]))
+        )
         # The referee has spoken; the arrays are not needed again, and a big
         # capture's full admission is not worth carrying through the loop.
         # THE ONE EXCEPTION is the evaluation battery's two-view witness, which
@@ -4987,7 +5031,7 @@ def capture_context():
         # there is what made the Phase-1 gated runs mixed geometry.  The scan
         # grid is the log-symmetric equidistant one about that verdict, inside
         # the FOV-derived band.
-        f_probe = float(_VOTE_FISHEYE["focal_px"])
+        f_probe = float(rung.intrinsics["fisheye"]["focal_px"])
         f_grid = fisheye_focal_grid(f_probe)
         lo, hi = fisheye_focal_band()
         print(
@@ -5295,7 +5339,7 @@ def capture_far_layer(rung, far_idx, data_full, f_rot, f_src):
     final."""
     print(
         f"\n=== hypothesis {far_idx}: the capture's far-field layer "
-        f"(parallax-poverty {_VOTE_POVERTY:.2f}) ==="
+        f"(parallax-poverty {rung.intrinsics['parallax_poverty']:.2f}) ==="
     )
     cap_far = rotation_only_hypothesis(rung, far_idx, data_full, float(f_rot), f_src)
     if cap_far is not None and evo_on():
@@ -5304,7 +5348,7 @@ def capture_far_layer(rung, far_idx, data_full, f_rot, f_src):
         s_cap = evo_candidate(
             "capture_rotation",
             scope="capture",
-            parallax_poverty=float(_VOTE_POVERTY),
+            parallax_poverty=float(rung.intrinsics["parallax_poverty"]),
         )
         evo_link(s_cap, far_idx)
         evo_copy_stage(
@@ -5343,15 +5387,15 @@ def write_evolution(ctx, rung, win, n_qual, budget=CANDIDATE_BUDGET, **extra):
         n_qualified=int(n_qual),
         vote_f=None if ctx.f_vote is None else float(ctx.f_vote),
         vote_n=None if ctx.vote is None else int(ctx.vote[1]),
-        vote_parallax_poverty=float(_VOTE_POVERTY),
-        vote_rotation_votes=int(_VOTE_ROT_N),
-        vote_spread_log=float(_VOTE_SPREAD),
+        vote_parallax_poverty=float(rung.intrinsics["parallax_poverty"]),
+        vote_rotation_votes=int(rung.intrinsics["n_rotation"]),
+        vote_spread_log=float(rung.intrinsics["pool_spread"]),
         fisheye_verdict=(
             None
-            if _VOTE_FISHEYE is None
+            if rung.intrinsics["fisheye"] is None
             else {
                 k: v
-                for k, v in _VOTE_FISHEYE.items()
+                for k, v in rung.intrinsics["fisheye"].items()
                 if isinstance(v, (int, float, str))
             }
         ),
@@ -5504,6 +5548,10 @@ def run_pipeline(
     # The pass index, bound here because ``hyp`` is rebound by a loop inside
     # ``attempt`` and the evolution records are stated per pass.
     pass_idx = int(hyp)
+    # The capture's vote diagnostics, read off the rung once for the seed-class
+    # heuristics in the closures below.
+    vote_poverty = float(rung.intrinsics["parallax_poverty"])
+    vote_rot_n = int(rung.intrinsics["n_rotation"])
 
     # The structure-free focal measurement COMMENSURABLE with what this pass
     # solves, plus the bias correction that turns it into the comparator the
@@ -5513,11 +5561,12 @@ def run_pipeline(
     # measured directional bias, so it is used raw.  The pinhole vote is NOT a
     # fallback under a fisheye context; the two parameterize different maps.
     if fisheye_stage1():
-        f_indep, f_bias = float(_VOTE_FISHEYE["focal_px"]), 1.0
-        vote_iqr = float(_VOTE_FISHEYE.get("pool_spread") or 0.0)
+        fisheye = rung.intrinsics["fisheye"]
+        f_indep, f_bias = float(fisheye["focal_px"]), 1.0
+        vote_iqr = float(fisheye.get("pool_spread") or 0.0)
     else:
         f_indep, f_bias = f_vote, 1.1
-        vote_iqr = _VOTE_SPREAD
+        vote_iqr = rung.intrinsics["pool_spread"]
     # The structure-free measurement AND ITS PRECISION, for the finalization's
     # vote-vs-structure arbitration (see `_finalize_seed`'s contradiction test).
     # `f_center` is the measurement in the solve's parameterization, bias
@@ -5891,7 +5940,7 @@ def run_pipeline(
         # seed that works — try it before the covis factorization chunks.
         # It reads the attempt's OWN (stage-A) set: it is a capture-wide
         # far-field fit, not a seed group.
-        if allow_rc and (rc_only or _VOTE_POVERTY >= 0.55):
+        if allow_rc and (rc_only or vote_poverty >= 0.55):
             tried_rc = True
             use_workset()
             cand = try_rotation_core()
@@ -6539,7 +6588,7 @@ def run_pipeline(
         # none has a weak far field — dino_dog_toy's orbit background) and
         # falls back to the full native attempt when the core produces
         # nothing.
-        rc_first = _VOTE_POVERTY >= 0.6 and _VOTE_ROT_N >= 3 and n0 >= 60
+        rc_first = vote_poverty >= 0.6 and vote_rot_n >= 3 and n0 >= 60
         att = attempt(
             wk,
             len(keep),
