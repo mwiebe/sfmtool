@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sfmtool._sfmtool.analysis import triangulate_batch
+from sfmtool._sfmtool.analysis import coarsest_clusters, triangulate_batch
 from sfmtool._sfmtool.geometry import estimate_essential_rays, estimate_intrinsics
 from sfmtool._sfmtool.io import MatchesFile
 from sfmtool._sfmtool.matching import ClusterCovisibility
@@ -45,33 +45,6 @@ def member_arrays(sel):
     obs_i = np.asarray(sel.member_images, dtype=np.int64)
     uv = np.asarray(sel.member_positions(), dtype=np.float64)
     return obs_c, obs_i, uv
-
-
-def coarsest_clusters(sel, n):
-    """Ids of the ``n`` coarsest clusters, radius descending, id ascending on
-    ties.
-
-    API-fit note: hand-rolled -- the radius convention (refine radius x mean
-    of the stored affine's column norms, a cluster taking its widest member)
-    already lives natively in `analysis::source_clusters`, and this ordering
-    is re-derived here and in exp_fast_seed at two scopes.  The candidate
-    native call is `sel.coarsest_clusters(n, images=None)`.
-    """
-    shapes = np.asarray(sel.member_affine_shapes(), dtype=np.float64)
-    radius = (
-        0.5
-        * float(sel.refine_radius)
-        * (
-            np.linalg.norm(shapes[:, :, 0], axis=1)
-            + np.linalg.norm(shapes[:, :, 1], axis=1)
-        )
-    )
-    starts = np.asarray(sel.cluster_starts, dtype=np.int64)
-    obs_c = np.repeat(np.arange(len(starts) - 1), np.diff(starts))
-    per_cluster = np.zeros(len(starts) - 1)
-    np.maximum.at(per_cluster, obs_c, radius)
-    order = np.argsort(-per_cluster, kind="stable")
-    return np.sort(order[: min(n, len(order))])
 
 
 def pair_correspondences(obs_c, obs_i, uv, img_a, img_b):
