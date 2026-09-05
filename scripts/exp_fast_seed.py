@@ -1322,7 +1322,7 @@ def _record_camera_model(est, res, why):
     )
 
 
-def focal_vote(obs_c, obs_i, u, n_img):
+def focal_vote(obs_c, obs_i, u):
     """Median focal over image pairs via the native structure-free vote kernel
     (specs/core/geometry/focal-vote.md): Bougnoux votes from parallax-rich pairs,
     rotation-self-calibration votes from rotation-dominated pairs (each
@@ -4952,7 +4952,7 @@ def capture_context():
                 f"observations), not the restricted {n_cl}"
             )
             rung.vote_observations = int(len(vote_c))
-        vote = focal_vote(vote_c, vote_i, vote_u, n_img)
+        vote = focal_vote(vote_c, vote_i, vote_u)
         # The referee has spoken; the arrays are not needed again, and a big
         # capture's full admission is not worth carrying through the loop.
         # THE ONE EXCEPTION is the evaluation battery's two-view witness, which
