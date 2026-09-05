@@ -40,9 +40,9 @@ def member_arrays(sel):
     """A selection's member-parallel view: (cluster, image, position) rows.
 
     API-fit note: the file stores `cluster_starts`, and the intrinsics vote
-    now takes the selection itself; what still re-expands the CSR index is
-    this script's own pair joins (steps 3-5), where the member-parallel
-    cluster column is the working shape.
+    now takes the selection itself; the one consumer left for the expanded
+    CSR index is this script's own pair joins (step 5), where the
+    member-parallel cluster column is the working shape.
     """
     starts = np.asarray(sel.cluster_starts, dtype=np.int64)
     obs_c = np.repeat(np.arange(len(starts) - 1), np.diff(starts))
@@ -70,8 +70,9 @@ def coarsest_clusters(sel, n):
             + np.linalg.norm(shapes[:, :, 1], axis=1)
         )
     )
-    obs_c, _, _ = member_arrays(sel)
-    per_cluster = np.zeros(obs_c.max() + 1)
+    starts = np.asarray(sel.cluster_starts, dtype=np.int64)
+    obs_c = np.repeat(np.arange(len(starts) - 1), np.diff(starts))
+    per_cluster = np.zeros(len(starts) - 1)
     np.maximum.at(per_cluster, obs_c, radius)
     order = np.argsort(-per_cluster, kind="stable")
     return np.sort(order[: min(n, len(order))])
@@ -182,10 +183,12 @@ def main():
     # 1. Base admission: the loader's predicate as one native derivation.
     matches = MatchesFile(path)
     sel = matches.select_clusters(min_span=2)
-    obs_c, obs_i, uv = member_arrays(sel)
-    n_cl, n_img = obs_c.max() + 1, len(sel.image_names)
+    n_cl, n_img = len(sel.cluster_starts) - 1, len(sel.image_names)
     (w, h) = sel.image_dims[0]
-    print(f"{path.name}: {n_img} images {w}x{h}, {n_cl} clusters, {len(obs_c)} members")
+    print(
+        f"{path.name}: {n_img} images {w}x{h}, {n_cl} clusters, "
+        f"{len(sel.member_images)} members"
+    )
 
     # 2. Capture intrinsics, on the FULL admission (the referee must not
     #    shrink with the solve's working set): focal AND camera model, one call
@@ -206,7 +209,6 @@ def main():
         sel = sel.select_clusters(
             min_span=2, restrict_cluster_ids=[int(c) for c in keep]
         )
-        obs_c, obs_i, uv = member_arrays(sel)
         print(f"coarse admission: kept {len(keep)}/{n_cl} coarsest clusters")
 
     # 4. Covisibility seed groups, off the capture-level graph.
@@ -214,7 +216,9 @@ def main():
     groups = list(islice(covis.seed_groups(GROUP_SIZE, 8), N_GROUPS))
     print(f"covisibility: {len(groups)} seed groups proposed")
 
-    # 5. One probe per group: the geometry arbitrates the proposals.
+    # 5. One probe per group: the geometry arbitrates the proposals.  The
+    #    pair joins are the first (and only) step that works member-parallel.
+    obs_c, obs_i, uv = member_arrays(sel)
     for group in groups:
         pairs = [
             (len(pair_correspondences(obs_c, obs_i, uv, a, b)[0]), a, b)
