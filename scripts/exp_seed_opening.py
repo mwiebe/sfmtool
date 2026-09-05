@@ -83,10 +83,10 @@ def capture_camera(est, width, height):
     if fisheye:
         model, f = "EQUIDISTANT_FISHEYE", float(est["focal_px"])
     else:
-        # Bougnoux votes from noisy F run ~10% low on this fleet; the probe
-        # sits above the vote (exp_fast_seed's correction, unchanged).
+        # The raw vote, exactly as the seed probes it (both charts read their
+        # estimate raw since the 2026-09-04 fleet A/B).
         vote = est["screening_vote"] or est["vote"]
-        model, f = "SIMPLE_PINHOLE", 1.1 * float(vote["focal_px"])
+        model, f = "SIMPLE_PINHOLE", float(vote["focal_px"])
     cam = CameraIntrinsics.from_dict(
         {
             "model": model,
