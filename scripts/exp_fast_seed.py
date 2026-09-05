@@ -1338,10 +1338,10 @@ def focal_vote(obs_c, obs_i, u, n_img):
     vote's — an escalated result reports the winning column at the top level, so
     the pinhole answer is read off the screening vote — and the arbitration
     ANNOTATES the run through ``_record_camera_model``."""
-    from sfmtool._sfmtool.geometry import estimate_intrinsics as _estimate
+    from sfmtool._sfmtool.geometry import estimate_intrinsics
 
     w, h = seed_camera._CAM_WH
-    est = _estimate(
+    est = estimate_intrinsics(
         np.ascontiguousarray(obs_c, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
         np.ascontiguousarray(u, dtype=np.float64),
