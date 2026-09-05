@@ -185,7 +185,7 @@ def main():
         print(f"coarse admission: kept {len(keep)}/{n_cl} coarsest clusters")
 
     # 4. Covisibility seed groups, off the capture-level graph.
-    covis = ClusterCovisibility.from_matches_file(path)
+    covis = ClusterCovisibility.from_matches(matches)
     groups = list(islice(covis.seed_groups(GROUP_SIZE, 8), N_GROUPS))
     print(f"covisibility: {len(groups)} seed groups proposed")
 
