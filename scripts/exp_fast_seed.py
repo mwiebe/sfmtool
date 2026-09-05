@@ -1367,8 +1367,13 @@ def estimate_intrinsics(obs_c, obs_i, u):
     from sfmtool._sfmtool import geometry
 
     w, h = seed_camera._CAM_WH
+    # The kernel takes the cluster-grouped (CSR) form the .matches backbone
+    # stores; the working arrays here are member-parallel, and `obs_c` is
+    # nondecreasing by construction, so one searchsorted is the exact index.
+    n_cl = int(obs_c[-1]) + 1 if len(obs_c) else 0
+    starts = np.searchsorted(obs_c, np.arange(n_cl + 1, dtype=obs_c.dtype))
     est = geometry.estimate_intrinsics(
-        np.ascontiguousarray(obs_c, dtype=np.uint32),
+        np.ascontiguousarray(starts, dtype=np.uint32),
         np.ascontiguousarray(obs_i, dtype=np.uint32),
         np.ascontiguousarray(u, dtype=np.float64),
         int(w),
