@@ -54,9 +54,25 @@ rust-version = "1.95"
 # and then cached (in CI, by the `cargo home` + target caches keyed on Cargo.lock).
 [profile.test]
 opt-level = 3
+# Debuginfo is most of what a `target` dir weighs, and the Linux coverage cache
+# had reached 2.4 GB — enough that seven such caches overrun GitHub's 10 GB
+# per-repo budget and start evicting each other. Line tables keep what the test
+# suite actually uses (a panic backtrace that names the failing line) and drop
+# the rest: no variable or type DWARF, which nothing in CI reads. Smaller
+# artifacts also compress faster, and the Windows cache save was six minutes of
+# compressing this bulk.
+#
+# Coverage is unaffected: llvm-cov reads the coverage-mapping section that
+# `-C instrument-coverage` embeds in the binary, not DWARF.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+# Dependencies get no debuginfo at all. `[profile.test]` above keeps line tables
+# for this workspace's own crates, which is where a backtrace needs to land;
+# nobody steps through image, wgpu or nalgebra from a CI failure, and their
+# DWARF is the larger half of the bulk.
+debug = false
 
 # `cargo doc` is a gate, not a suggestion: every rustdoc lint that is warn-by-
 # default is denied here, and every crate opts in with `[lints] workspace = true`.
