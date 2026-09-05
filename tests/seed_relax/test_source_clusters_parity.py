@@ -8,11 +8,16 @@ The reference below is `seed_relax.fill.source_clusters` and
 carried verbatim.  They are kept HERE and nowhere else, so the two can be run
 on the same handle and compared.
 
-Unlike the point estimation, this one IS bit-identical: nothing here is a
-linear solve.  The radius is the same arithmetic in the same association, the
-cluster radius is a maximum, the join is a sorted-key search with the same
-tie rule, and the band comparison is the same pair of inequalities.  The test
-asserts equality, not closeness.
+Unlike the point estimation, nothing here is a linear solve, so the join, the
+membership and the selected rows are compared to the bit: the sorted-key search
+uses the same tie rule and the cluster radius is a maximum, not a sum.
+
+The radius VALUES are the one exception, and by design.  The reference below
+computes them in float64, as the numpy pipeline did; the kernel reads them at
+float32, the width the shapes are stored at, so the two agree to that reading's
+rounding rather than to the bit.  Which band each candidate falls in is still
+compared exactly, on the kernel's own radii, so the band rule itself is under
+test rather than the width.
 """
 
 import types
@@ -158,30 +163,32 @@ def reference_rings(cand_radius, floor, edges):
 # ── The comparison ────────────────────────────────────────────────────────
 
 
+#: What a float32 reading of a float64-derived shape may differ by: one
+#: rounding of the value, not an accumulation over the cluster.
+RADIUS_RTOL = 1e-6
+
+
 def compare(source, m, frames=None):
-    """Run both and assert every key matches to the bit."""
+    """Run both and assert every key matches, the radii to the f32 reading."""
     want = reference(source, m, frames)
     got = source_clusters(source, m, frames)
     assert "refused" not in got, got.get("refused")
     for key in ("n_file_clusters", "n_admitted", "n_rows_matched", "n_rows_member"):
         assert got[key] == want[key], key
-    for key in (
-        "adm_radius",
-        "cand",
-        "cand_radius",
-        "obs_cl",
-        "obs_img",
-        "obs_feat",
-        "obs_uv",
-        "obs_shape",
-    ):
+    for key in ("cand", "obs_cl", "obs_img", "obs_feat", "obs_uv", "obs_shape"):
         np.testing.assert_array_equal(got[key], want[key], err_msg=key)
+    for key in ("adm_radius", "cand_radius"):
+        np.testing.assert_allclose(got[key], want[key], rtol=RADIUS_RTOL, err_msg=key)
     if len(want["adm_radius"]):
         floor = float(want["adm_radius"].min())
-        assert got["adm_floor_px"] == floor
+        assert got["adm_floor_px"] == pytest.approx(floor, rel=RADIUS_RTOL)
         edges = rings.octave_edges(RING_RATIO_P1)
+        # The band rule, on the radii the kernel actually read: a candidate
+        # sitting within an f32 rounding of an edge would otherwise make this a
+        # test of the width rather than of the rule.
         np.testing.assert_array_equal(
-            got["ring"], reference_rings(want["cand_radius"], floor, edges)
+            got["ring"],
+            reference_rings(got["cand_radius"], got["adm_floor_px"], edges),
         )
         np.testing.assert_array_equal(
             rings.assign_rings(want["cand_radius"], floor, edges),
