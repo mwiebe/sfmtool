@@ -73,19 +73,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-lint-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-lint-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-lint-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-target-
 
       - name: Ruff format
         run: pixi run -e lint ruff format --check src tests
@@ -109,15 +110,17 @@ jobs:
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
         # else, so PR runs skip the save entirely (and dodge the slow Windows
-        # compression). run_id keeps the key unique so each main push refreshes
-        # the cache instead of freezing on an already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-lint-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-lint-target-${{ hashFiles('Cargo.lock') }}
 
   # Builds the workspace with the *minimum* supported Rust, which is deliberately
   # older than the toolchain pixi.toml pins for development. The consumer is the
@@ -206,19 +209,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-coverage-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-coverage-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-coverage-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-target-
       - uses: prefix-dev/setup-pixi@v0.9.6
         with:
           environments: test-ci
@@ -270,15 +274,17 @@ jobs:
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
         # else, so PR runs skip the save entirely (and dodge the slow Windows
-        # compression). run_id keeps the key unique so each main push refreshes
-        # the cache instead of freezing on an already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-coverage-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-coverage-target-${{ hashFiles('Cargo.lock') }}
 
   # Non-Linux correctness check: runs the same Rust + Python suites as the
   # coverage job, but without LLVM coverage instrumentation (much faster to
@@ -314,19 +320,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-test-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-test-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-test-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-target-
       - uses: prefix-dev/setup-pixi@v0.9.6
         with:
           environments: test-ci
@@ -374,15 +381,17 @@ jobs:
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
         # else, so PR runs skip the save entirely (and dodge the slow Windows
-        # compression). run_id keeps the key unique so each main push refreshes
-        # the cache instead of freezing on an already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-test-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-test-target-${{ hashFiles('Cargo.lock') }}
 
   ui-test-windows:
     needs: changes
@@ -408,19 +417,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-ui-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ui-target-
 
       - name: UI tests
         run: pixi run -e ui ui-test
@@ -428,15 +438,17 @@ jobs:
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
         # else, so PR runs skip the save entirely (and dodge the slow Windows
-        # compression). run_id keeps the key unique so each main push refreshes
-        # the cache instead of freezing on an already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
 
   # macOS accessibility UI tests. Same xa11y-driven suite as the
   # ui-test-windows job, but macOS gates the AX API behind a TCC grant
@@ -469,19 +481,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-ui-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ui-target-
 
       # Compile the test binary (and the sfm-explorer bin it launches) without
       # running, then resolve the test binary's hashed path from cargo's JSON
@@ -509,16 +522,18 @@ jobs:
 
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
-        # else, so PR runs skip the save entirely. run_id keeps the key unique so
-        # each main push refreshes the cache instead of freezing on an
-        # already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # else, so PR runs skip the save entirely (and dodge the slow Windows
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
 
   # Linux accessibility UI tests. The same xa11y-driven suite as the Windows
   # and macOS jobs, but Linux is where the accessibility API has to be *stood
@@ -560,19 +575,20 @@ jobs:
           key: ${{ runner.os }}-cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-home-
       - name: Restore Rust target
+        id: target-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          # The exact key never matches (run_id), so restore always falls back via
-          # restore-keys to the latest cache — which is only ever written on main
-          # (see the Save step). Caches are branch-scoped: a main-saved cache is
-          # the one every PR can read, so PRs restore a warm target for free.
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-
-            ${{ runner.os }}-cargo-ui-target-
+          # Content-addressed: the key is the lockfile alone, so it hits outright
+          # whenever the dependencies are unchanged -- and the Save step below
+          # then leaves the existing entry alone instead of writing a fresh
+          # multi-GB copy. The prefix fallback still warms a run whose lockfile
+          # has just moved. Caches are branch-scoped and only main writes them,
+          # so the main-written entry is the one every PR restores.
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ui-target-
 
       - name: Set up accessibility environment
         uses: xa11y/setup-a11y@v1
@@ -588,16 +604,18 @@ jobs:
 
       - name: Save Rust target
         # Save only on main: branch scoping means PR-written caches help nobody
-        # else, so PR runs skip the save entirely. run_id keeps the key unique so
-        # each main push refreshes the cache instead of freezing on an
-        # already-existing key.
-        if: ${{ always() && github.ref == 'refs/heads/main' }}
+        # else, so PR runs skip the save entirely (and dodge the slow Windows
+        # compression). The cache-hit guard is what keeps the total bounded --
+        # seven of these caches rewritten on every main push overran GitHub's
+        # 10 GB per-repo budget, and the LRU eviction that followed is why a PR
+        # could find nothing and compile from scratch for 17 minutes.
+        if: ${{ always() && github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: |
             target
             !target/**/incremental/**
-          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-ui-target-${{ hashFiles('Cargo.lock') }}
 
   # Single stable check to mark as required in branch protection. Always runs
   # and reports a status, so docs-only PRs (which skip lint/test) aren't blocked.
