@@ -8,13 +8,18 @@ coarse cut, capture intrinsics, covisibility seed groups, and one ray-space
 probe per group -- as an evaluation of the sfmtool core surface: does each
 idea come out as one named call, and where does numpy glue creep in?
 
-Read-only: opens the given cluster ``.matches`` file and prints a transcript;
-nothing is written.
+Read-only against the workspace: opens the given cluster ``.matches`` file and
+prints a transcript.  When ``SFMTOOL_OPENING_METRICS`` names a path, the
+per-proposal metric rows are additionally written there as JSON (the input for
+the classification-utility mining); nothing else is ever written.
 
     pixi run -e dev python scripts/exp_seed_opening.py <clusters.matches>
 """
 
+import json
+import os
 import sys
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -82,10 +87,15 @@ def decompose_essential(e):
 
 
 def probe_pair(cam, x1, x2, f):
-    """Ray-space two-view init: cheiral support and median parallax.
+    """Ray-space two-view init: the pair's arbitration metrics, as a dict.
 
     The ray-native reading throughout: depth positive ALONG THE RAY in both
     cameras (`z > 0` is wrong past 90 degrees), midpoint triangulation.
+    Returns None when no consensus essential exists or cheiral support is
+    under 12 rays; otherwise n_corr / n_inlier / cheiral counts, median and
+    p90 triangulation parallax, the relative rotation magnitude, and the
+    estimator's essentialness -- the candidate features for classifying the
+    group's motion regime (a pan reads large rot_deg at near-zero parallax).
     API-fit note: one estimator call plus ~30 lines of decomposition,
     cheirality and parallax -- the block is a core-primitive candidate.
     """
@@ -108,17 +118,27 @@ def probe_pair(cam, x1, x2, f):
         good = np.isfinite(x).all(axis=1)
         good &= np.einsum("ij,ij->i", x, a1) > 0.0
         good &= np.einsum("ij,ij->i", x @ rot.T + t, a2) > 0.0
-        if best is None or good.sum() > best[0].sum():
-            best = (good, x, -rot.T @ t)
-    good, x, c2 = best
+        if best is None or good.sum() > best[1].sum():
+            best = (rot, good, x, -rot.T @ t)
+    rot, good, x, c2 = best
     if good.sum() < 12:
         return None
     xa = x[good]
     v1 = xa / np.linalg.norm(xa, axis=1, keepdims=True)
     v2 = xa - c2
     v2 /= np.linalg.norm(v2, axis=1, keepdims=True)
-    parallax = np.degrees(np.median(np.arccos(np.clip((v1 * v2).sum(1), -1, 1))))
-    return int(good.sum()), float(parallax), float(est["essentialness"])
+    par = np.degrees(np.arccos(np.clip((v1 * v2).sum(1), -1, 1)))
+    return {
+        "n_corr": int(len(x1)),
+        "n_inlier": int(inl.sum()),
+        "cheiral": int(good.sum()),
+        "par_med": float(np.median(par)),
+        "par_p90": float(np.percentile(par, 90)),
+        "rot_deg": float(
+            np.degrees(np.arccos(np.clip((np.trace(rot) - 1) / 2, -1, 1)))
+        ),
+        "essentialness": float(est["essentialness"]),
+    }
 
 
 def main():
@@ -164,40 +184,81 @@ def main():
     #    full admission -- is a different role and stays there.)
     covis = ClusterCovisibility.from_matches(sel)
 
-    # 5. The drive loop pulls proposals while it still wants probe outcomes:
-    #    each proposal names its seed pair and that pair's shared-cluster
-    #    count (the group's maximum-shared pair), so a starved proposal is
-    #    skipped joinlessly and costs no probe budget, and the iterator's
-    #    min_shared floor bounds the pull.  Each probe joins exactly one pair.
+    # 5. The drive loop pulls proposals while it still wants probe outcomes,
+    #    and probes TWO pairs per proposal chosen for opposite purposes: the
+    #    seed pair (maximum shared clusters -- best-conditioned essential) and
+    #    the widest pair (maximum mean keypoint displacement -- the honest
+    #    parallax ceiling; the max-shared pair of a video group is its most
+    #    adjacent, so it reads parallax near the group's minimum).  A starved
+    #    proposal is skipped joinlessly off seed_shared and costs no budget.
+    #    Each proposal's metric row goes to SFMTOOL_OPENING_METRICS when set.
     obs_c, obs_i, uv = member_arrays(sel)
     probed = starved = 0
+    rows = []
     for prop in covis.seed_image_groups(GROUP_SIZE):
         if probed >= N_PROBES:
             break
         # `images` is a uint32 numpy array; the transcript prints the group as
         # a plain list, so it is converted for the print rather than formatted
         # through numpy's own repr.
-        group, (a, b), shared = (
-            prop.images.tolist(),
-            prop.seed_pair,
-            prop.seed_shared,
-        )
+        group = prop.images.tolist()
+        (a, b), shared = prop.seed_pair, prop.seed_shared
+        pair_shared = prop.pair_shared
+        disp = prop.pair_displacement
+        pairs = list(combinations(range(len(group)), 2))  # condensed order
+        row = {
+            "images": group,
+            "seed_pair": [int(a), int(b)],
+            "seed_shared": int(shared),
+            "pair_shared_min": int(pair_shared.min()),
+            "pair_shared_med": float(np.median(pair_shared)),
+            "disp_med": float(np.median(disp)) if disp is not None else None,
+            "disp_max": float(disp.max()) if disp is not None else None,
+        }
+        rows.append(row)
         if shared < 20:
             starved += 1
+            row["starved"] = True
             print(f"  group {group}: starved ({shared} shared clusters at best)")
             continue
         probed += 1
         x1, x2 = pair_correspondences(obs_c, obs_i, uv, a, b)
-        probe = probe_pair(cam, x1, x2, f)
-        if probe is None:
-            print(f"  group {group}: pair ({a}, {b}) no consensus")
-            continue
-        cheiral, parallax, essentialness = probe
-        print(
-            f"  group {group}: pair ({a}, {b}) {cheiral} cheiral, "
-            f"parallax {parallax:.2f} deg, essentialness {essentialness:.4f}"
-        )
+        row["seed_probe"] = seed_probe = probe_pair(cam, x1, x2, f)
+        if seed_probe is None:
+            print(f"  group {group}: seed ({a}, {b}) no consensus")
+        else:
+            print(
+                f"  group {group}: seed ({a}, {b}) {seed_probe['cheiral']} cheiral, "
+                f"parallax {seed_probe['par_med']:.2f}|{seed_probe['par_p90']:.2f} deg, "
+                f"rot {seed_probe['rot_deg']:.2f} deg, "
+                f"essentialness {seed_probe['essentialness']:.4f}"
+            )
+        # The widest pair, when it is a different pair with enough shared
+        # clusters to estimate on at all.
+        if disp is not None:
+            wa, wb = (group[i] for i in pairs[int(np.argmax(disp))])
+            w_shared = int(pair_shared[int(np.argmax(disp))])
+            row["wide_pair"] = [int(wa), int(wb)]
+            row["wide_shared"] = w_shared
+            row["wide_disp_px"] = float(disp.max())
+            if (wa, wb) != (a, b) and w_shared >= 8:
+                x1, x2 = pair_correspondences(obs_c, obs_i, uv, wa, wb)
+                row["wide_probe"] = wide = probe_pair(cam, x1, x2, f)
+                if wide is None:
+                    print(f"    wide ({wa}, {wb}) shared {w_shared}: no consensus")
+                else:
+                    print(
+                        f"    wide ({wa}, {wb}) shared {w_shared}, "
+                        f"disp {row['wide_disp_px']:.1f}px: {wide['cheiral']} cheiral, "
+                        f"parallax {wide['par_med']:.2f}|{wide['par_p90']:.2f} deg, "
+                        f"rot {wide['rot_deg']:.2f} deg"
+                    )
     print(f"covisibility: {probed} proposals probed, {starved} starved skipped")
+    if out := os.environ.get("SFMTOOL_OPENING_METRICS"):
+        Path(out).write_text(
+            json.dumps({"file": path.name, "proposals": rows}, indent=1)
+        )
+        print(f"metrics: {len(rows)} proposal rows -> {out}")
 
 
 if __name__ == "__main__":
