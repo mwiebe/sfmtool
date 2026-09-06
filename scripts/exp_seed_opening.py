@@ -15,7 +15,7 @@ nothing is written.
 """
 
 import sys
-from itertools import combinations, islice
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -37,8 +37,10 @@ def member_arrays(sel):
 
     API-fit note: the file stores `cluster_starts`, and the intrinsics vote
     now takes the selection itself; the one consumer left for the expanded
-    CSR index is this script's own pair joins (step 5), where the
-    member-parallel cluster column is the working shape.
+    CSR index is this script's own pair join (step 5), where the
+    member-parallel cluster column is the working shape.  That consumer has
+    shrunk to one join per probed group, since a proposal names its seed
+    pair -- the expansion survives for the join's shape, not its volume.
     """
     starts = np.asarray(sel.cluster_starts, dtype=np.int64)
     obs_c = np.repeat(np.arange(len(starts) - 1), np.diff(starts))
@@ -52,6 +54,7 @@ def pair_correspondences(obs_c, obs_i, uv, img_a, img_b):
 
     API-fit note: numpy glue.  A selection keeps at most one reference/kept
     member per (cluster, image), so a cluster->row map per image joins them.
+    Called once per probed group, on the pair the proposal already named.
     """
     n_cl = obs_c.max() + 1
     row = {img: np.full(n_cl, -1, dtype=np.int64) for img in (img_a, img_b)}
@@ -155,20 +158,26 @@ def main():
         sel = sel.select_clusters(restrict_cluster_ids=keep)
         print(f"coarse admission: kept {len(keep)}/{total} coarsest clusters")
 
-    # 4. Covisibility seed groups, off the capture-level graph.
-    covis = ClusterCovisibility.from_matches(matches)
-    groups = list(islice(covis.seed_groups(GROUP_SIZE, 8), N_GROUPS))
-    print(f"covisibility: {len(groups)} seed groups proposed")
+    # 4. Covisibility seed groups, off the COARSE working set: the proposals
+    #    are read from the same graph the probe judges them on, so a group's
+    #    reported edge weight is the join the probe will actually get.  (The
+    #    referee principle of step 2 -- the intrinsics vote measured on the
+    #    full admission -- is a different role and stays there.)
+    covis = ClusterCovisibility.from_matches(sel)
+    proposals = list(islice(covis.seed_image_groups(GROUP_SIZE), N_GROUPS))
+    print(f"covisibility: {len(proposals)} seed groups proposed")
 
-    # 5. One probe per group: the geometry arbitrates the proposals.  The
-    #    pair joins are the first (and only) step that works member-parallel.
+    # 5. One probe per group: the geometry arbitrates the proposals.  Each
+    #    proposal already names its seed pair and that pair's shared-cluster
+    #    count -- the group's maximum-shared pair -- so the starved verdict
+    #    needs no join at all and the probe needs exactly one.
     obs_c, obs_i, uv = member_arrays(sel)
-    for group in groups:
-        pairs = [
-            (len(pair_correspondences(obs_c, obs_i, uv, a, b)[0]), a, b)
-            for a, b in combinations(group, 2)
-        ]
-        shared, a, b = max(pairs)
+    for prop in proposals:
+        group, (a, b), shared = (
+            prop["images"],
+            prop["seed_pair"],
+            prop["seed_shared"],
+        )
         if shared < 20:
             print(f"  group {group}: starved ({shared} shared clusters at best)")
             continue
