@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sfmtool._sfmtool.analysis import coarsest_clusters, triangulate_batch
+from sfmtool._sfmtool.analysis import coarsest_cluster_ids, triangulate_batch
 from sfmtool._sfmtool.geometry import estimate_essential_rays, estimate_intrinsics
 from sfmtool._sfmtool.io import MatchesFile
 from sfmtool._sfmtool.matching import ClusterCovisibility
@@ -150,11 +150,9 @@ def main():
     )
 
     # 3. Coarse cut: the alias-free working set, as a derived selection.
-    keep = coarsest_clusters(sel, N_COARSE)
+    keep = coarsest_cluster_ids(sel, N_COARSE)
     if len(keep) < n_cl:
-        sel = sel.select_clusters(
-            min_span=2, restrict_cluster_ids=[int(c) for c in keep]
-        )
+        sel = sel.select_clusters(restrict_cluster_ids=keep)
         print(f"coarse admission: kept {len(keep)}/{n_cl} coarsest clusters")
 
     # 4. Covisibility seed groups, off the capture-level graph.
