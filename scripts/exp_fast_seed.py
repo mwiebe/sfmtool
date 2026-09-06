@@ -5828,7 +5828,7 @@ def run_pipeline(
             }
 
         covis = build_covisibility(o_c, o_i, nw, n_cl)
-        groups = list(itertools.islice(covis.seed_groups(), 8))
+        groups = [g["images"] for g in itertools.islice(covis.seed_image_groups(), 8)]
         best = None  # best starved widened outcome across chunks
         flat = None  # best reach-healthy but focal-blind outcome
         # Deferred PROBES carry the working set they were probed on: under a
