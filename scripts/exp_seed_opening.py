@@ -15,7 +15,6 @@ nothing is written.
 """
 
 import sys
-from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +26,7 @@ from sfmtool._sfmtool.matching import ClusterCovisibility
 
 N_COARSE = 3000  # the fleet's seedability floor (see exp_fast_seed.py)
 GROUP_SIZE = 5  # images per covisibility seed group
-N_GROUPS = 8  # proposals probed per run
+N_PROBES = 8  # probe outcomes the drive loop pulls proposals until it holds
 TOL_PX = 3.0  # keypoint localization tolerance behind the ray consensus bound
 SEED = 0
 
@@ -164,23 +163,27 @@ def main():
     #    referee principle of step 2 -- the intrinsics vote measured on the
     #    full admission -- is a different role and stays there.)
     covis = ClusterCovisibility.from_matches(sel)
-    proposals = list(islice(covis.seed_image_groups(GROUP_SIZE), N_GROUPS))
-    print(f"covisibility: {len(proposals)} seed groups proposed")
 
-    # 5. One probe per group: the geometry arbitrates the proposals.  Each
-    #    proposal already names its seed pair and that pair's shared-cluster
-    #    count -- the group's maximum-shared pair -- so the starved verdict
-    #    needs no join at all and the probe needs exactly one.
+    # 5. The drive loop pulls proposals while it still wants probe outcomes:
+    #    each proposal names its seed pair and that pair's shared-cluster
+    #    count (the group's maximum-shared pair), so a starved proposal is
+    #    skipped joinlessly and costs no probe budget, and the iterator's
+    #    min_shared floor bounds the pull.  Each probe joins exactly one pair.
     obs_c, obs_i, uv = member_arrays(sel)
-    for prop in proposals:
+    probed = starved = 0
+    for prop in covis.seed_image_groups(GROUP_SIZE):
+        if probed >= N_PROBES:
+            break
         group, (a, b), shared = (
             prop["images"],
             prop["seed_pair"],
             prop["seed_shared"],
         )
         if shared < 20:
+            starved += 1
             print(f"  group {group}: starved ({shared} shared clusters at best)")
             continue
+        probed += 1
         x1, x2 = pair_correspondences(obs_c, obs_i, uv, a, b)
         probe = probe_pair(cam, x1, x2, f)
         if probe is None:
@@ -191,6 +194,7 @@ def main():
             f"  group {group}: pair ({a}, {b}) {cheiral} cheiral, "
             f"parallax {parallax:.2f} deg, essentialness {essentialness:.4f}"
         )
+    print(f"covisibility: {probed} proposals probed, {starved} starved skipped")
 
 
 if __name__ == "__main__":
