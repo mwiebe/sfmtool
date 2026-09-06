@@ -204,7 +204,7 @@ def main():
         group = prop.images.tolist()
         (a, b), shared = prop.seed_pair, prop.seed_shared
         pair_shared = prop.pair_shared
-        disp = prop.pair_displacement
+        disp = prop.pair_displacement_magnitude
         pairs = list(combinations(range(len(group)), 2))  # condensed order
         row = {
             "images": group,
