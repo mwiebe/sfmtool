@@ -125,11 +125,10 @@ def main():
     # 1. Base admission: the loader's predicate as one native derivation.
     matches = MatchesFile(path)
     sel = matches.select_clusters(min_span=2)
-    n_cl, n_img = len(sel.cluster_starts) - 1, len(sel.image_names)
-    (w, h) = sel.image_dims[0]
     print(
-        f"{path.name}: {n_img} images {w}x{h}, {n_cl} clusters, "
-        f"{len(sel.member_images)} members"
+        f"{path.name}: {sel.image_count} images "
+        f"{sel.image_width}x{sel.image_height}, "
+        f"{sel.cluster_count} clusters, {sel.member_count} members"
     )
 
     # 2. Capture intrinsics, on the FULL admission (the referee must not
@@ -151,9 +150,10 @@ def main():
 
     # 3. Coarse cut: the alias-free working set, as a derived selection.
     keep = coarsest_cluster_ids(sel, N_COARSE)
-    if len(keep) < n_cl:
+    if len(keep) < sel.cluster_count:
+        total = sel.cluster_count
         sel = sel.select_clusters(restrict_cluster_ids=keep)
-        print(f"coarse admission: kept {len(keep)}/{n_cl} coarsest clusters")
+        print(f"coarse admission: kept {len(keep)}/{total} coarsest clusters")
 
     # 4. Covisibility seed groups, off the capture-level graph.
     covis = ClusterCovisibility.from_matches(matches)
