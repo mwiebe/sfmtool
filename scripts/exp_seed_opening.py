@@ -174,10 +174,13 @@ def main():
     for prop in covis.seed_image_groups(GROUP_SIZE):
         if probed >= N_PROBES:
             break
+        # `images` is a uint32 numpy array; the transcript prints the group as
+        # a plain list, so it is converted for the print rather than formatted
+        # through numpy's own repr.
         group, (a, b), shared = (
-            prop["images"],
-            prop["seed_pair"],
-            prop["seed_shared"],
+            prop.images.tolist(),
+            prop.seed_pair,
+            prop.seed_shared,
         )
         if shared < 20:
             starved += 1
