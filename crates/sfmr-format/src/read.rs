@@ -302,6 +302,58 @@ pub fn read_sfmr(path: &Path) -> Result<SfmrData, SfmrError> {
         None
     };
 
+    // Optional per-point constraint triple (version 7+), flagged as one set and
+    // read through the same metadata entry's `point_constraint_names` legend.
+    // Absent means every point is free, so an older file — which carries
+    // neither the flag nor the arrays — simply reads as `None`.
+    let (point_constraints, constraint_distances, constraint_reference_images) = if points3d_meta
+        .get("has_point_constraints")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let legend =
+            read_point_constraint_legend(&points3d_meta).map_err(SfmrError::InvalidFormat)?;
+        let point_constraints: Vec<u8> = read_binary_array(
+            &mut archive,
+            &entries::points3d_point_constraints(point_count),
+            point_count,
+        )?;
+        let constraint_distances: Vec<f64> = read_binary_array(
+            &mut archive,
+            &entries::points3d_constraint_distances(point_count),
+            point_count,
+        )?;
+        let constraint_reference_images: Vec<u32> = read_binary_array(
+            &mut archive,
+            &entries::points3d_constraint_reference_images(point_count),
+            point_count,
+        )?;
+        // The legend settles what each code means; the triple's own rules are
+        // then checked on the constraints it named. The column is handed back on
+        // the canonical numbering rather than the file's, so a consumer reads it
+        // with the constants and the file's legend stops at this boundary.
+        let resolved = resolve_point_constraints(&point_constraints, &legend)
+            .map_err(SfmrError::InvalidFormat)?;
+        validate_point_constraints(
+            Some(&resolved),
+            Some(&constraint_distances),
+            Some(&constraint_reference_images),
+            &positions_xyzw,
+            point_count,
+            image_count,
+        )
+        .map_err(SfmrError::InvalidFormat)?;
+        (
+            Some(Array1::from_vec(
+                resolved.iter().map(|k| k.code()).collect(),
+            )),
+            Some(Array1::from_vec(constraint_distances)),
+            Some(Array1::from_vec(constraint_reference_images)),
+        )
+    } else {
+        (None, None, None)
+    };
+
     // Optional per-point patch frame (version 3+), stored beside the normals.
     // Takes the entry name rather than a field stem, so the name comes from
     // `entries` like every other read. The stem for the error message is
@@ -562,6 +614,9 @@ pub fn read_sfmr(path: &Path) -> Result<SfmrData, SfmrError> {
         reprojection_errors,
         normals_xyz,
         normal_confidence,
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
         patch_u_halfvec_xyz,
         patch_v_halfvec_xyz,
         patch_bitmaps_y_x_rgba,

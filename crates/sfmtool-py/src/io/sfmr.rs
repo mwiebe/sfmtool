@@ -73,6 +73,7 @@ where
 ///   (`list[bytes]`, 16 bytes each),
 ///   camera_indexes, quaternions_wxyz, translations_xyz, positions_xyzw,
 ///   colors_rgb, reprojection_errors, normals_xyz, normal_confidence,
+///   point_constraints, constraint_distances, constraint_reference_images,
 ///   patch_u_halfvec_xyz, patch_v_halfvec_xyz, patch_bitmaps_y_x_rgba,
 ///   image_indexes, feature_indexes, keypoints_xy, observation_confidence,
 ///   point_indexes, observation_counts, observed_depth_histogram_counts,
@@ -80,7 +81,11 @@ where
 ///
 /// `positions_xyzw` is the homogeneous `(P, 4)` point array. Every optional
 /// column is emitted as `None` when the file does not carry it: the normals and
-/// their `(P,)` uint8 `normal_confidence`, the per-point patch frame
+/// their `(P,)` uint8 `normal_confidence`, the per-point constraint triple
+/// (`(P,)` uint8 `point_constraints`, `(P,)` float64 `constraint_distances` and
+/// `(P,)` uint32 `constraint_reference_images`, which the archive names
+/// `points3d/point_constraints`, `points3d/constraint_distances` and
+/// `points3d/constraint_reference_images`), the per-point patch frame
 /// (`(P, 3)` float32 `patch_u_halfvec_xyz` / `patch_v_halfvec_xyz` and the
 /// `(P, R, R, 4)` uint8 `patch_bitmaps_y_x_rgba`), the mode-dependent
 /// observation columns, and the `(M,)` uint8 `observation_confidence`.
@@ -159,6 +164,23 @@ pub fn read_sfmr(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     match data.normal_confidence {
         Some(c) => dict.set_item("normal_confidence", c.into_pyarray(py))?,
         None => dict.set_item("normal_confidence", py.None())?,
+    }
+    // The per-point constraint triple: present together or absent together,
+    // absent meaning every point is free. The column is numeric -- a
+    // million-point reconstruction is not a million strings -- and in the
+    // canonical numbering `POINT_CONSTRAINT_NAMES` labels, whatever legend the
+    // file itself stored it on.
+    match data.point_constraints {
+        Some(k) => dict.set_item("point_constraints", k.into_pyarray(py))?,
+        None => dict.set_item("point_constraints", py.None())?,
+    }
+    match data.constraint_distances {
+        Some(r) => dict.set_item("constraint_distances", r.into_pyarray(py))?,
+        None => dict.set_item("constraint_distances", py.None())?,
+    }
+    match data.constraint_reference_images {
+        Some(c) => dict.set_item("constraint_reference_images", c.into_pyarray(py))?,
+        None => dict.set_item("constraint_reference_images", py.None())?,
     }
     // The per-point patch frame: `u` and `v` are present or absent together and
     // the bitmaps require them, so all three ride along as a set.
@@ -338,6 +360,20 @@ pub(crate) fn parse_sfmr_data_from_dict(
     let observation_confidence =
         optional_array::<u8, ndarray::Ix1>(data, "observation_confidence", "a 1D uint8 array")?;
 
+    // The per-point constraint triple. Its cross-array rules -- present
+    // together, constraint codes, a finite distance naming a real image, a ranged row's
+    // `w` agreeing with its distance -- are the format writer's to enforce, so
+    // only the per-array dtype and rank are checked here.
+    let point_constraints =
+        optional_array::<u8, ndarray::Ix1>(data, "point_constraints", "a 1D uint8 array")?;
+    let constraint_distances =
+        optional_array::<f64, ndarray::Ix1>(data, "constraint_distances", "a 1D float64 array")?;
+    let constraint_reference_images = optional_array::<u32, ndarray::Ix1>(
+        data,
+        "constraint_reference_images",
+        "a 1D uint32 array",
+    )?;
+
     // The per-point patch frame. `patch_u_halfvec_xyz`/`patch_v_halfvec_xyz`
     // must be present together and the bitmaps require them; those cross-array
     // rules and the row counts are the format writer's to enforce, so only the
@@ -413,6 +449,9 @@ pub(crate) fn parse_sfmr_data_from_dict(
             .into_owned(),
         normals_xyz,
         normal_confidence,
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
         patch_u_halfvec_xyz,
         patch_v_halfvec_xyz,
         patch_bitmaps_y_x_rgba,
@@ -438,7 +477,10 @@ pub(crate) fn parse_sfmr_data_from_dict(
 /// Every optional column `read_sfmr` emits is read back here, so a dict that
 /// came from `read_sfmr` writes out whatever the source file carried: the
 /// normals and their `normal_confidence`, the per-observation
-/// `observation_confidence`, and the per-point patch frame
+/// `observation_confidence`, the constraint triple (`point_constraints`,
+/// `constraint_distances`, `constraint_reference_images` -- written only when some point is not
+/// free, since an all-free set is the same statement as none at all), and the
+/// per-point patch frame
 /// (`patch_u_halfvec_xyz`, `patch_v_halfvec_xyz` and the optional
 /// `patch_bitmaps_y_x_rgba`). A missing or `None` value means the column is
 /// absent — which is what a `sift_files` dict carries for the patch frame,
@@ -479,6 +521,13 @@ pub fn verify_sfmr(path: PathBuf) -> PyResult<(bool, Vec<String>)> {
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // The name of each `point_constraints` code, in code order, so a consumer
+    // can label a column without hard-coding the numbering: a code indexes a
+    // legend on disk, and this is the legend every column reaching Python is on.
+    m.add(
+        "POINT_CONSTRAINT_NAMES",
+        pyo3::types::PyTuple::new(m.py(), sfmr_format::PointConstraint::NAMES)?,
+    )?;
     m.add_function(wrap_pyfunction!(read_sfmr, m)?)?;
     m.add_function(wrap_pyfunction!(read_sfmr_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(read_sfmr_content_hash, m)?)?;

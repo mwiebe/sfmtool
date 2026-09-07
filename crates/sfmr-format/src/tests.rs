@@ -135,6 +135,9 @@ fn make_test_data() -> SfmrData {
             .unwrap(),
         ),
         normal_confidence: None,
+        point_constraints: None,
+        constraint_distances: None,
+        constraint_reference_images: None,
         patch_u_halfvec_xyz: None,
         patch_v_halfvec_xyz: None,
         patch_bitmaps_y_x_rgba: None,
@@ -922,6 +925,9 @@ fn test_empty_reconstruction() {
         reprojection_errors: Array1::from_vec(vec![]),
         normals_xyz: Some(Array2::zeros((0, 3))),
         normal_confidence: None,
+        point_constraints: None,
+        constraint_distances: None,
+        constraint_reference_images: None,
         patch_u_halfvec_xyz: None,
         patch_v_halfvec_xyz: None,
         patch_bitmaps_y_x_rgba: None,
@@ -1159,6 +1165,597 @@ fn rewrite_without_meta_key(
         }
     }
     zip.finish().unwrap();
+}
+
+/// `points3d/metadata.json` of a written `.sfmr`, as JSON.
+fn read_points3d_metadata(path: &std::path::Path) -> serde_json::Value {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut compressed = Vec::new();
+    archive
+        .by_name("points3d/metadata.json.zst")
+        .unwrap()
+        .read_to_end(&mut compressed)
+        .unwrap();
+    serde_json::from_slice(&zstd::stream::decode_all(&compressed[..]).unwrap()).unwrap()
+}
+
+/// Copy a `.sfmr` archive, replacing the decompressed payload of every entry
+/// `edit` hands back a new one for -- the shape of a file some other writer, or
+/// a hand edit, produced. Section hashes are not recomputed, so `verify_sfmr`
+/// reports the section's own mismatch alongside whatever the edit broke.
+fn rewrite_entries(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    edit: impl Fn(&str, &[u8]) -> Option<Vec<u8>>,
+) {
+    use std::io::{Read, Write};
+
+    let file = std::fs::File::open(src).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+
+    let out = std::fs::File::create(dst).unwrap();
+    let mut zip = zip::ZipWriter::new(out);
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    for name in &names {
+        let mut compressed = Vec::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_end(&mut compressed)
+            .unwrap();
+        zip.start_file(name, stored).unwrap();
+        let raw = zstd::stream::decode_all(&compressed[..]).unwrap();
+        match edit(name, &raw) {
+            Some(replacement) => zip
+                .write_all(&zstd::bulk::compress(&replacement, 3).unwrap())
+                .unwrap(),
+            None => zip.write_all(&compressed).unwrap(),
+        }
+    }
+    zip.finish().unwrap();
+}
+
+/// Copy a `.sfmr` archive with `edit` applied to `points3d/metadata.json`.
+fn rewrite_points3d_metadata(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    edit: impl Fn(&mut serde_json::Value),
+) {
+    rewrite_entries(src, dst, |name, raw| {
+        (name == "points3d/metadata.json.zst").then(|| {
+            let mut json: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            edit(&mut json);
+            serde_json::to_vec(&json).unwrap()
+        })
+    });
+}
+
+/// A constraint triple over `make_test_data`'s five points: point 1 held,
+/// point 2 ranged at 12.5 m from image 2, point 3 ranged at infinity (so its
+/// `w` is set to 0 by the caller), and the rest free.
+fn with_point_constraints(data: &mut SfmrData) {
+    data.point_constraints = Some(Array1::from_vec(vec![
+        POINT_CONSTRAINT_FREE,
+        POINT_CONSTRAINT_HELD,
+        POINT_CONSTRAINT_RANGED,
+        POINT_CONSTRAINT_RANGED,
+        POINT_CONSTRAINT_FREE,
+    ]));
+    data.constraint_distances = Some(Array1::from_vec(vec![
+        f64::NAN,
+        f64::NAN,
+        12.5,
+        f64::INFINITY,
+        f64::NAN,
+    ]));
+    data.constraint_reference_images = Some(Array1::from_vec(vec![
+        NO_REFERENCE_IMAGE,
+        NO_REFERENCE_IMAGE,
+        2,
+        NO_REFERENCE_IMAGE,
+        NO_REFERENCE_IMAGE,
+    ]));
+    // A ranged point at an infinite distance is a direction, which is what its
+    // `w` has to say.
+    data.positions_xyzw[[3, 3]] = 0.0;
+    data.metadata.infinity_point_count = 1;
+}
+
+#[test]
+fn test_point_constraints_round_trip() {
+    // The three columns are written verbatim, read back identically, and the
+    // file still verifies.
+    let mut data = make_test_data();
+    with_point_constraints(&mut data);
+    let expected = (
+        data.point_constraints.clone().unwrap(),
+        data.constraint_reference_images.clone().unwrap(),
+    );
+
+    let dir = std::env::temp_dir().join("sfmr_test_point_constraints");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+    write_sfmr(&path, &mut data).unwrap();
+
+    let loaded = read_sfmr(&path).unwrap();
+    assert_eq!(loaded.point_constraints, Some(expected.0));
+    assert_eq!(loaded.constraint_reference_images, Some(expected.1));
+    // NaN is not equal to itself, so the distances are compared bit for bit.
+    let distances = loaded.constraint_distances.unwrap();
+    assert!(distances[0].is_nan() && distances[1].is_nan() && distances[4].is_nan());
+    assert_eq!(distances[2], 12.5);
+    assert_eq!(distances[3], f64::INFINITY);
+
+    let file = std::fs::File::open(&path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    for name in [
+        "points3d/point_constraints.5.uint8.zst",
+        "points3d/constraint_distances.5.float64.zst",
+        "points3d/constraint_reference_images.5.uint32.zst",
+    ] {
+        assert!(archive.by_name(name).is_ok(), "missing {name}");
+    }
+
+    let (valid, errors) = verify_sfmr(&path).unwrap();
+    assert!(valid, "constraint verification failed: {errors:?}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_point_constraint_code_is_its_place_in_the_legend() {
+    // The writer emits `NAMES` as the legend and `code()` as the row, so a code
+    // is only readable if the two agree entry for entry.
+    for (i, constraint) in PointConstraint::ALL.into_iter().enumerate() {
+        assert_eq!(constraint.code() as usize, i);
+        assert_eq!(constraint.name(), PointConstraint::NAMES[i]);
+        assert_eq!(
+            PointConstraint::from_name(constraint.name()),
+            Some(constraint)
+        );
+    }
+    assert_eq!(PointConstraint::from_name("Free"), None);
+    assert_eq!(PointConstraint::from_name("fixed"), None);
+}
+
+#[test]
+fn test_point_constraint_legend_round_trip() {
+    // The column is numeric and the legend beside it says what each number
+    // means, so the file explains its own codes -- and a file that constrains
+    // nothing has no codes to explain.
+    let mut data = make_test_data();
+    with_point_constraints(&mut data);
+
+    let dir = std::env::temp_dir().join("sfmr_test_constraint_legend");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+    write_sfmr(&path, &mut data).unwrap();
+
+    // The writer states the whole canonical legend, in the order that makes each
+    // name's position the code stored for it.
+    let meta = read_points3d_metadata(&path);
+    assert_eq!(
+        meta.get("point_constraint_names").unwrap(),
+        &serde_json::json!(["free", "ranged", "held"])
+    );
+    let loaded = read_sfmr(&path).unwrap();
+    let named: Vec<&str> = loaded
+        .point_constraints
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|&code| PointConstraint::ALL[code as usize].name())
+        .collect();
+    assert_eq!(named, ["free", "held", "ranged", "ranged", "free"]);
+
+    // Writing back what was read reproduces the section byte for byte: reading
+    // a canonical file changes nothing about its column or its legend.
+    let mut again = loaded;
+    let round_tripped = dir.join("again.sfmr");
+    write_sfmr(&round_tripped, &mut again).unwrap();
+    assert_eq!(
+        read_sfmr(&round_tripped)
+            .unwrap()
+            .content_hash
+            .points3d_xxh128,
+        read_sfmr(&path).unwrap().content_hash.points3d_xxh128
+    );
+
+    // A file with no constraints carries no legend to read them through.
+    let mut plain = make_test_data();
+    let plain_path = dir.join("plain.sfmr");
+    write_sfmr(&plain_path, &mut plain).unwrap();
+    assert!(read_points3d_metadata(&plain_path)
+        .get("point_constraint_names")
+        .is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_point_constraints_read_through_a_permuted_legend() {
+    // A file another writer numbered differently is legal, and the reader
+    // normalises it: the codes a consumer sees are the canonical ones whatever
+    // legend the file stored its column on.
+    let dir = std::env::temp_dir().join("sfmr_test_permuted_constraint_legend");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.sfmr");
+    let mut data = make_test_data();
+    with_point_constraints(&mut data);
+    write_sfmr(&good, &mut data).unwrap();
+
+    // held = 0, free = 1, ranged = 2 in this file.
+    let permuted = [
+        PointConstraint::Held,
+        PointConstraint::Free,
+        PointConstraint::Ranged,
+    ];
+    let permuted_path = dir.join("permuted.sfmr");
+    rewrite_entries(&good, &permuted_path, |name, raw| {
+        if name == "points3d/metadata.json.zst" {
+            let mut json: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            json.as_object_mut().unwrap().insert(
+                "point_constraint_names".into(),
+                serde_json::json!(permuted.map(|k| k.name())),
+            );
+            Some(serde_json::to_vec(&json).unwrap())
+        } else if name == "points3d/point_constraints.5.uint8.zst" {
+            Some(
+                raw.iter()
+                    .map(|&code| {
+                        let constraint = PointConstraint::ALL[code as usize];
+                        permuted.iter().position(|&k| k == constraint).unwrap() as u8
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    });
+
+    let loaded = read_sfmr(&permuted_path).unwrap();
+    assert_eq!(
+        loaded.point_constraints.unwrap().to_vec(),
+        vec![
+            POINT_CONSTRAINT_FREE,
+            POINT_CONSTRAINT_HELD,
+            POINT_CONSTRAINT_RANGED,
+            POINT_CONSTRAINT_RANGED,
+            POINT_CONSTRAINT_FREE,
+        ]
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_point_constraints_read_through_a_subset_legend() {
+    // A legend names only the constraints its file uses: a file with no ranged
+    // point may carry `["held", "free"]`, two codes, and the reader still
+    // normalises onto the canonical numbering.
+    let dir = std::env::temp_dir().join("sfmr_test_subset_constraint_legend");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.sfmr");
+    let mut data = make_test_data();
+    data.point_constraints = Some(Array1::from_vec(vec![
+        POINT_CONSTRAINT_FREE,
+        POINT_CONSTRAINT_HELD,
+        POINT_CONSTRAINT_FREE,
+        POINT_CONSTRAINT_HELD,
+        POINT_CONSTRAINT_FREE,
+    ]));
+    data.constraint_distances = Some(Array1::from_vec(vec![f64::NAN; 5]));
+    data.constraint_reference_images = Some(Array1::from_vec(vec![NO_REFERENCE_IMAGE; 5]));
+    write_sfmr(&good, &mut data).unwrap();
+
+    // held = 0, free = 1 in this file; ranged has no code at all.
+    let subset = [PointConstraint::Held, PointConstraint::Free];
+    let subset_path = dir.join("subset.sfmr");
+    rewrite_entries(&good, &subset_path, |name, raw| {
+        if name == "points3d/metadata.json.zst" {
+            let mut json: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            json.as_object_mut().unwrap().insert(
+                "point_constraint_names".into(),
+                serde_json::json!(subset.map(|k| k.name())),
+            );
+            Some(serde_json::to_vec(&json).unwrap())
+        } else if name == "points3d/point_constraints.5.uint8.zst" {
+            Some(
+                raw.iter()
+                    .map(|&code| {
+                        let constraint = PointConstraint::ALL[code as usize];
+                        subset.iter().position(|&k| k == constraint).unwrap() as u8
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    });
+
+    let loaded = read_sfmr(&subset_path).unwrap();
+    assert_eq!(
+        loaded.point_constraints.unwrap().to_vec(),
+        vec![
+            POINT_CONSTRAINT_FREE,
+            POINT_CONSTRAINT_HELD,
+            POINT_CONSTRAINT_FREE,
+            POINT_CONSTRAINT_HELD,
+            POINT_CONSTRAINT_FREE,
+        ]
+    );
+    verify_sfmr(&subset_path).unwrap();
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_malformed_point_constraint_legend_rejected() {
+    // Every rule the legend is held to, applied to the archive bytes of a file
+    // that was valid when written -- which is where a hand-edited or
+    // foreign-written legend shows up. Each case is refused by the reader and
+    // reported by `verify_sfmr`.
+    let dir = std::env::temp_dir().join("sfmr_test_bad_constraint_legend");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.sfmr");
+    let mut data = make_test_data();
+    with_point_constraints(&mut data);
+    write_sfmr(&good, &mut data).unwrap();
+
+    /// One rejection case: what is broken, the legend the file ends up with
+    /// (`None` removes the key), and the phrase the resulting error carries.
+    type Case = (&'static str, Option<serde_json::Value>, &'static str);
+    let cases: Vec<Case> = vec![
+        (
+            "a code past the end of the legend",
+            Some(serde_json::json!(["free", "ranged"])),
+            "past the 2 names its legend gives",
+        ),
+        (
+            "a name the format does not define",
+            Some(serde_json::json!(["free", "ranged", "holded"])),
+            "not one of",
+        ),
+        (
+            "a name given two codes",
+            Some(serde_json::json!(["free", "free", "held"])),
+            "repeats",
+        ),
+        (
+            "no legend at all",
+            None,
+            "carries no point_constraint_names",
+        ),
+        (
+            "a legend that is not a list of names",
+            Some(serde_json::json!("free")),
+            "not a list of names",
+        ),
+        (
+            "a legend naming nothing",
+            Some(serde_json::json!([])),
+            "names no constraint at all",
+        ),
+    ];
+
+    for (what, legend, expected) in cases {
+        let path = dir.join("bad.sfmr");
+        let _ = std::fs::remove_file(&path);
+        rewrite_points3d_metadata(&good, &path, |meta| {
+            let object = meta.as_object_mut().unwrap();
+            match &legend {
+                Some(value) => {
+                    object.insert("point_constraint_names".into(), value.clone());
+                }
+                None => {
+                    object.remove("point_constraint_names");
+                }
+            }
+        });
+
+        let err = match read_sfmr(&path) {
+            Ok(_) => panic!("{what}: the reader accepted it"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains(expected),
+            "{what}: expected {expected:?} in {err:?}"
+        );
+        let (valid, errors) = verify_sfmr(&path).unwrap();
+        assert!(!valid, "{what}: verify accepted it");
+        assert!(
+            errors.iter().any(|e| e.contains(expected)),
+            "{what}: expected {expected:?} in {errors:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_all_free_point_constraints_are_not_written() {
+    // A set in which every point is free says exactly what carrying no set
+    // says, so the writer drops it and the reader reports `None`.
+    let mut data = make_test_data();
+    data.point_constraints = Some(Array1::from_vec(vec![POINT_CONSTRAINT_FREE; 5]));
+    data.constraint_distances = Some(Array1::from_vec(vec![f64::NAN; 5]));
+    data.constraint_reference_images = Some(Array1::from_vec(vec![NO_REFERENCE_IMAGE; 5]));
+
+    let dir = std::env::temp_dir().join("sfmr_test_all_free_constraints");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+    write_sfmr(&path, &mut data).unwrap();
+
+    let loaded = read_sfmr(&path).unwrap();
+    assert!(loaded.point_constraints.is_none());
+    assert!(loaded.constraint_distances.is_none());
+    assert!(loaded.constraint_reference_images.is_none());
+
+    let file = std::fs::File::open(&path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    assert!(archive
+        .by_name("points3d/point_constraints.5.uint8.zst")
+        .is_err());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_round_trip_without_point_constraints() {
+    // Absent by default: no entries, no flag, and every point reads as free.
+    let mut data = make_test_data();
+    assert!(data.point_constraints.is_none());
+
+    let dir = std::env::temp_dir().join("sfmr_test_no_point_constraints");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.sfmr");
+    write_sfmr(&path, &mut data).unwrap();
+
+    let loaded = read_sfmr(&path).unwrap();
+    assert!(loaded.point_constraints.is_none());
+    assert!(loaded.constraint_distances.is_none());
+    assert!(loaded.constraint_reference_images.is_none());
+
+    let file = std::fs::File::open(&path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    for name in [
+        "points3d/point_constraints.5.uint8.zst",
+        "points3d/constraint_distances.5.float64.zst",
+        "points3d/constraint_reference_images.5.uint32.zst",
+    ] {
+        assert!(archive.by_name(name).is_err(), "unexpected {name}");
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_point_constraints_covered_by_points3d_hash() {
+    // Changing a constraint changes the section digest, so the columns are
+    // inside the integrity envelope rather than beside it.
+    let dir = std::env::temp_dir().join("sfmr_test_point_constraints_hash");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut a = make_test_data();
+    with_point_constraints(&mut a);
+    let pa = dir.join("a.sfmr");
+    write_sfmr(&pa, &mut a).unwrap();
+
+    let mut b = make_test_data();
+    with_point_constraints(&mut b);
+    b.point_constraints.as_mut().unwrap()[0] = POINT_CONSTRAINT_HELD;
+    let pb = dir.join("b.sfmr");
+    write_sfmr(&pb, &mut b).unwrap();
+
+    let mut c = make_test_data();
+    let pc = dir.join("c.sfmr");
+    write_sfmr(&pc, &mut c).unwrap();
+
+    let ha = read_sfmr(&pa).unwrap().content_hash.points3d_xxh128;
+    let hb = read_sfmr(&pb).unwrap().content_hash.points3d_xxh128;
+    let hc = read_sfmr(&pc).unwrap().content_hash.points3d_xxh128;
+    assert_ne!(ha, hb);
+    assert_ne!(ha, hc);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_malformed_point_constraints_rejected() {
+    // Every rule the triple is held to, each as its own write attempt. The
+    // table names what is broken so a failure says which rule stopped firing.
+    let dir = std::env::temp_dir().join("sfmr_test_bad_point_constraints");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bad.sfmr");
+
+    /// One rejection case: what is broken, the edit that breaks it, and the
+    /// phrase the resulting error has to carry.
+    type Case = (&'static str, Box<dyn Fn(&mut SfmrData)>, &'static str);
+    let cases: Vec<Case> = vec![
+        (
+            "only the constraint column",
+            Box::new(|d: &mut SfmrData| {
+                d.constraint_distances = None;
+                d.constraint_reference_images = None;
+            }),
+            "present together",
+        ),
+        (
+            "a code outside the canonical numbering",
+            Box::new(|d: &mut SfmrData| d.point_constraints.as_mut().unwrap()[0] = 3),
+            "past the 3 names its legend gives",
+        ),
+        (
+            "a distance on a free row",
+            Box::new(|d: &mut SfmrData| d.constraint_distances.as_mut().unwrap()[0] = 4.0),
+            "carries no distance",
+        ),
+        (
+            "a reference on a held row",
+            Box::new(|d: &mut SfmrData| d.constraint_reference_images.as_mut().unwrap()[1] = 0),
+            "measured from nothing",
+        ),
+        (
+            "a ranged row with no distance",
+            Box::new(|d: &mut SfmrData| d.constraint_distances.as_mut().unwrap()[2] = f64::NAN),
+            "strictly positive distance",
+        ),
+        (
+            "a finite distance measured from no image",
+            Box::new(|d: &mut SfmrData| {
+                d.constraint_reference_images.as_mut().unwrap()[2] = NO_REFERENCE_IMAGE
+            }),
+            "past the 3 images",
+        ),
+        (
+            "a finite distance measured from an image past the end",
+            Box::new(|d: &mut SfmrData| d.constraint_reference_images.as_mut().unwrap()[2] = 3),
+            "past the 3 images",
+        ),
+        (
+            "a `w` that disagrees with an infinite distance",
+            Box::new(|d: &mut SfmrData| {
+                d.positions_xyzw[[3, 3]] = 1.0;
+                d.metadata.infinity_point_count = 0;
+            }),
+            "a direction exactly at an infinite distance",
+        ),
+        (
+            "a short column",
+            Box::new(|d: &mut SfmrData| {
+                d.point_constraints = Some(Array1::from_vec(vec![POINT_CONSTRAINT_FREE; 4]))
+            }),
+            "len 4 != point_count 5",
+        ),
+    ];
+
+    for (what, break_it, expected) in cases {
+        let mut data = make_test_data();
+        with_point_constraints(&mut data);
+        break_it(&mut data);
+        let err = write_sfmr(&path, &mut data).unwrap_err().to_string();
+        assert!(
+            err.contains(expected),
+            "{what}: expected {expected:?} in {err:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2044,6 +2641,18 @@ fn entry_names_are_pinned() {
         e::tracks_observation_counts(13),
         "tracks/observation_counts.13.uint32.zst"
     );
+    assert_eq!(
+        e::points3d_point_constraints(13),
+        "points3d/point_constraints.13.uint8.zst"
+    );
+    assert_eq!(
+        e::points3d_constraint_distances(13),
+        "points3d/constraint_distances.13.float64.zst"
+    );
+    assert_eq!(
+        e::points3d_constraint_reference_images(13),
+        "points3d/constraint_reference_images.13.uint32.zst"
+    );
 
     // Version-dependent names: both spellings, since `read` and `verify` still
     // have to open legacy archives.
@@ -2096,6 +2705,7 @@ fn archive_entry_names_pin_call_sites() {
     // Turn on the optional columns that have their own entries.
     let mut data = make_test_data();
     data.observation_confidence = Some(Array1::from_vec(vec![255u8; 8]));
+    with_point_constraints(&mut data);
     write_sfmr(&path, &mut data).unwrap();
 
     let f = std::fs::File::open(&path).unwrap();
@@ -2120,8 +2730,11 @@ fn archive_entry_names_pin_call_sites() {
         "images/translations_xyz.3.3.float64.zst",
         "metadata.json.zst",
         "points3d/colors_rgb.5.3.uint8.zst",
+        "points3d/constraint_distances.5.float64.zst",
+        "points3d/constraint_reference_images.5.uint32.zst",
         "points3d/metadata.json.zst",
         "points3d/normals_xyz.5.3.float32.zst",
+        "points3d/point_constraints.5.uint8.zst",
         "points3d/positions_xyzw.5.4.float64.zst",
         "points3d/reprojection_errors.5.float32.zst",
         "tracks/feature_indexes.8.uint32.zst",

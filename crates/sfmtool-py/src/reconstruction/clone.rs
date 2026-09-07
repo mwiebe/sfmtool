@@ -92,6 +92,13 @@ pub(crate) fn clone_with_changes(
     let mut new_image_file_hashes: Option<Vec<[u8; 16]>> = None;
     let mut new_keypoints_xy: Option<ndarray::Array2<f32>> = None;
     let mut new_feature_source: Option<String> = None;
+    // The constraint triple, collected here and applied once the point count is
+    // settled. The outer `Option` is "was the kwarg passed", the inner one
+    // "with an array, or with `None` to drop the set".
+    let mut new_point_constraints: Option<Option<Vec<u8>>> = None;
+    let mut new_constraint_distances: Option<Option<Vec<f64>>> = None;
+    let mut new_constraint_reference_images: Option<Option<Vec<u32>>> = None;
+    let old_point_count = recon.points.len();
 
     for (key, value) in kw.iter() {
         let key_str: String = key.extract()?;
@@ -245,6 +252,34 @@ pub(crate) fn clone_with_changes(
                     }
                     recon.normal_confidence = Some(s.to_vec());
                 }
+            }
+            // The constraint triple. Each is recorded rather than applied here:
+            // the three columns are one statement and the point count may still
+            // be changing in this same call, so they are settled together after
+            // the loop.
+            "point_constraints" => {
+                new_point_constraints = Some(if value.is_none() {
+                    None
+                } else {
+                    let arr = extract_array1!(value, "point_constraints", u8)?;
+                    Some(to_contiguous!(arr).into_owned())
+                });
+            }
+            "constraint_distances" => {
+                new_constraint_distances = Some(if value.is_none() {
+                    None
+                } else {
+                    let arr = extract_array1!(value, "constraint_distances", f64)?;
+                    Some(to_contiguous!(arr).into_owned())
+                });
+            }
+            "constraint_reference_images" => {
+                new_constraint_reference_images = Some(if value.is_none() {
+                    None
+                } else {
+                    let arr = extract_array1!(value, "constraint_reference_images", u32)?;
+                    Some(to_contiguous!(arr).into_owned())
+                });
             }
             "patches" => {
                 if value.is_none() {
@@ -658,6 +693,14 @@ pub(crate) fn clone_with_changes(
         recon.observation_counts = new_counts;
     }
 
+    apply_point_constraints(
+        &mut recon,
+        old_point_count,
+        new_point_constraints,
+        new_constraint_distances,
+        new_constraint_reference_images,
+    )?;
+
     // Recompute derived fields
     recon.rebuild_derived_fields();
 
@@ -669,8 +712,85 @@ pub(crate) fn clone_with_changes(
     recon.validate_observation_columns().map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("clone_with_changes(): {e}"))
     })?;
+    // The same guard on the point axis: the constraint columns can be replaced
+    // in the same call that replaces the images a distance references.
+    recon.validate_point_columns().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("clone_with_changes(): {e}"))
+    })?;
 
     Ok(recon)
+}
+
+/// Settle the per-point constraint triple once the point count is final.
+///
+/// The three columns are one statement, so they are replaced together or
+/// dropped together; passing one of them alone is refused rather than merged
+/// into whatever the source carried, which would leave a constraint describing a
+/// distance the caller never wrote.
+///
+/// A call that changes the point count without supplying new constraints drops
+/// whatever the source carried: those rows described points this reconstruction
+/// no longer has, and there is no mapping from the old point set to the new one
+/// for the columns to follow. Dropping them is every point free, which is what a
+/// freshly rebuilt point set is.
+fn apply_point_constraints(
+    recon: &mut SfmrReconstruction,
+    old_point_count: usize,
+    point_constraints: Option<Option<Vec<u8>>>,
+    constraint_distances: Option<Option<Vec<f64>>>,
+    constraint_reference_images: Option<Option<Vec<u32>>>,
+) -> PyResult<()> {
+    let given = [
+        point_constraints.is_some(),
+        constraint_distances.is_some(),
+        constraint_reference_images.is_some(),
+    ];
+    if given.iter().all(|&g| !g) {
+        if recon.points.len() != old_point_count {
+            recon.point_constraints = None;
+        }
+        return Ok(());
+    }
+    if !given.iter().all(|&g| g) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "clone_with_changes(): 'point_constraints', 'constraint_distances' and \
+             'constraint_reference_images' are one statement and must be passed together",
+        ));
+    }
+    let (point_constraints, constraint_distances, constraint_reference_images) = (
+        point_constraints.unwrap(),
+        constraint_distances.unwrap(),
+        constraint_reference_images.unwrap(),
+    );
+    let (Some(point_constraints), Some(constraint_distances), Some(constraint_reference_images)) = (
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
+    ) else {
+        recon.point_constraints = None;
+        return Ok(());
+    };
+    let n_pt = recon.points.len();
+    for (name, len) in [
+        ("point_constraints", point_constraints.len()),
+        ("constraint_distances", constraint_distances.len()),
+        (
+            "constraint_reference_images",
+            constraint_reference_images.len(),
+        ),
+    ] {
+        if len != n_pt {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "clone_with_changes(): '{name}' length ({len}) must match point count ({n_pt})"
+            )));
+        }
+    }
+    recon.point_constraints = Some(sfmtool_core::PointConstraintColumns {
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
+    });
+    Ok(())
 }
 
 /// Recombine the (optionally updated) observation-source columns into the

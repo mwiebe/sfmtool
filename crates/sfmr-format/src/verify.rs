@@ -265,6 +265,26 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
         .get("patch_bitmap_resolution")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    // The per-point constraint triple is optional from version 7 (default
+    // `false`), and the three columns are flagged together. The flag also
+    // promises the `point_constraint_names` legend the codes index; a file that
+    // sets the flag without a readable legend says nothing about its own column,
+    // which is an error rather than a reason to guess a numbering.
+    let has_point_constraints = points3d_meta
+        .get("has_point_constraints")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let point_constraint_legend = if has_point_constraints {
+        match read_point_constraint_legend(&points3d_meta) {
+            Ok(legend) => Some(legend),
+            Err(e) => {
+                errors.push(e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut points3d_hasher = Xxh3::new();
 
@@ -273,6 +293,23 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
         &mut archive,
         &entries::points3d_colors_rgb(point_count),
     )?);
+    // points3d/constraint_distances and points3d/constraint_reference_images
+    // (optional, version 7+; sort after colors_rgb, before metadata.json)
+    let (distances_raw, reference_images_raw) = if has_point_constraints {
+        let distances = read_zst_entry(
+            &mut archive,
+            &entries::points3d_constraint_distances(point_count),
+        )?;
+        points3d_hasher.update(&distances);
+        let reference_images = read_zst_entry(
+            &mut archive,
+            &entries::points3d_constraint_reference_images(point_count),
+        )?;
+        points3d_hasher.update(&reference_images);
+        (Some(distances), Some(reference_images))
+    } else {
+        (None, None)
+    };
     // points3d/metadata.json
     points3d_hasher.update(&points3d_meta_raw);
     // points3d/normal_confidence (optional, version 5+; sorts before normals_xyz)
@@ -304,6 +341,18 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
             &entries::points3d_patch_v_halfvec_xyz(point_count),
         )?);
     }
+    // points3d/point_constraints (optional, version 7+; sorts after the patch
+    // frame, before positions_xyzw)
+    let constraints_raw = if has_point_constraints {
+        let raw = read_zst_entry(
+            &mut archive,
+            &entries::points3d_point_constraints(point_count),
+        )?;
+        points3d_hasher.update(&raw);
+        Some(raw)
+    } else {
+        None
+    };
     // points3d/positions_xyz (version 1) or positions_xyzw (version 2)
     let positions_name = entries::points3d_positions(is_v1, point_count);
     let positions_raw = read_zst_entry(&mut archive, &positions_name)?;
@@ -363,6 +412,58 @@ pub fn verify_sfmr(path: &Path) -> Result<(bool, Vec<String>), SfmrError> {
                 "positions_xyzw byte length {} != point_count {point_count} * 32",
                 positions_raw.len()
             ));
+        }
+    }
+
+    // === Validate the per-point constraint triple (version 7+) ===
+    // The rules are the reader's and the writer's, stated once in
+    // `validate_point_constraints`; here they are re-read straight off the
+    // archive bytes, positions included, so a hand-edited file is caught.
+    if let (Some(constraints), Some(legend), Some(distances), Some(reference_images)) = (
+        &constraints_raw,
+        &point_constraint_legend,
+        &distances_raw,
+        &reference_images_raw,
+    ) {
+        let expect = |name: &str, got: usize, row: usize| {
+            (got == point_count * row).then_some(()).ok_or(format!(
+                "points3d/{name} byte length {got} != point_count {point_count} * {row}"
+            ))
+        };
+        let check = expect("point_constraints", constraints.len(), 1)
+            .and(expect("constraint_distances", distances.len(), 8))
+            .and(expect(
+                "constraint_reference_images",
+                reference_images.len(),
+                4,
+            ))
+            .and(expect("positions_xyzw", positions_raw.len(), 32))
+            .and_then(|()| {
+                let floats: Vec<f64> = positions_raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_le_bytes(*b))
+                    .collect();
+                let positions = ndarray::Array2::from_shape_vec((point_count, 4), floats).unwrap();
+                let distances: Vec<f64> = distances
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_le_bytes(*b))
+                    .collect();
+                let resolved = resolve_point_constraints(constraints, legend)?;
+                validate_point_constraints(
+                    Some(&resolved),
+                    Some(&distances),
+                    Some(raw_to_u32(reference_images).as_ref()),
+                    &positions,
+                    point_count,
+                    image_count,
+                )
+            });
+        if let Err(e) = check {
+            errors.push(e);
         }
     }
 

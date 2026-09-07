@@ -188,6 +188,29 @@ pub(crate) fn points3d_normal_confidence(point_count: impl std::fmt::Display) ->
     format!("points3d/normal_confidence.{point_count}.uint8.zst")
 }
 
+/// `points3d/point_constraints` — the constraint code per point (v7+,
+/// optional).
+///
+/// Each of the three constraint entries is named for the [`SfmrData`] field
+/// that carries it, the way every other column in this format is.
+///
+/// [`SfmrData`]: crate::SfmrData
+pub(crate) fn points3d_point_constraints(point_count: impl std::fmt::Display) -> String {
+    format!("points3d/point_constraints.{point_count}.uint8.zst")
+}
+
+/// `points3d/constraint_distances` — a ranged point's distance from its
+/// reference (v7+, optional).
+pub(crate) fn points3d_constraint_distances(point_count: impl std::fmt::Display) -> String {
+    format!("points3d/constraint_distances.{point_count}.float64.zst")
+}
+
+/// `points3d/constraint_reference_images` — the image a finite distance is
+/// measured from (v7+, optional).
+pub(crate) fn points3d_constraint_reference_images(point_count: impl std::fmt::Display) -> String {
+    format!("points3d/constraint_reference_images.{point_count}.uint32.zst")
+}
+
 /// `points3d/patch_u_halfvec_xyz` — patch-frame `u` half-axis per point.
 pub(crate) fn points3d_patch_u_halfvec_xyz(point_count: impl std::fmt::Display) -> String {
     format!("points3d/patch_u_halfvec_xyz.{point_count}.3.float32.zst")

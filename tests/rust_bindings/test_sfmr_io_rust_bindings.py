@@ -13,7 +13,12 @@ frame.
 import numpy as np
 import pytest
 
-from sfmtool._sfmtool.io import read_sfmr, write_sfmr
+from sfmtool._sfmtool.io import (
+    POINT_CONSTRAINT_NAMES,
+    read_sfmr,
+    verify_sfmr,
+    write_sfmr,
+)
 from sfmtool._sfmtool.patches import PatchCloud
 from sfmtool._sfmtool.reconstruction import SfmrReconstruction
 
@@ -29,6 +34,9 @@ ARRAY_KEYS = (
     "reprojection_errors",
     "normals_xyz",
     "normal_confidence",
+    "point_constraints",
+    "constraint_distances",
+    "constraint_reference_images",
     "patch_u_halfvec_xyz",
     "patch_v_halfvec_xyz",
     "patch_bitmaps_y_x_rgba",
@@ -200,4 +208,172 @@ class TestPatchColumnValidation:
         with pytest.raises(
             ValueError, match=r"'patch_bitmaps_y_x_rgba' must have shape"
         ):
+            write_sfmr(tmp_path / "bad.sfmr", data, skip_recompute_depth_stats=True)
+
+
+# ── Per-point constraints (points3d/point_constraints,
+#    /constraint_distances, /constraint_reference_images) ──────────────────
+
+_NO_REFERENCE_IMAGE = np.uint32(0xFFFFFFFF)
+# The column is numeric, and this is the numbering every column reaching Python
+# is on -- the module constant is what a consumer labels a code with.
+_FREE, _RANGED, _HELD = 0, 1, 2
+
+
+def _constraint_columns(positions_xyzw, n_img):
+    """Hold the first finite point and range the second at 12.5 from image 0.
+
+    Returns the triple, plus the two point indexes it constrained, so a caller
+    can assert on the rows it wrote rather than on a fixed index.
+    """
+    n = positions_xyzw.shape[0]
+    finite = np.flatnonzero(positions_xyzw[:, 3] != 0.0)
+    assert finite.size >= 2 and n_img >= 1
+    held, ranged = int(finite[0]), int(finite[1])
+
+    constraints = np.zeros(n, dtype=np.uint8)
+    constraints[held] = _HELD
+    constraints[ranged] = _RANGED
+    distance = np.full(n, np.nan)
+    distance[ranged] = 12.5
+    reference = np.full(n, _NO_REFERENCE_IMAGE, dtype=np.uint32)
+    reference[ranged] = 0
+    return (constraints, distance, reference), held, ranged
+
+
+class TestPointConstraints:
+    def test_dict_round_trip(self, seoul_bull_sfmr_only, tmp_path):
+        # The three columns go out through `write_sfmr` and come back through
+        # `read_sfmr` unchanged, and the file still verifies.
+        data = read_sfmr(seoul_bull_sfmr_only)
+        assert data["point_constraints"] is None
+        (constraints, distance, reference), held, ranged = _constraint_columns(
+            data["positions_xyzw"], len(data["image_names"])
+        )
+        data["point_constraints"] = constraints
+        data["constraint_distances"] = distance
+        data["constraint_reference_images"] = reference
+
+        out = tmp_path / "constrained.sfmr"
+        write_sfmr(out, data, skip_recompute_depth_stats=True)
+        reloaded = read_sfmr(out)
+        _assert_columns_identical(data, reloaded)
+
+        valid, errors = verify_sfmr(out)
+        assert valid, errors
+        assert reloaded["constraint_distances"][ranged] == 12.5
+
+        # The column stays a uint8 array, and the module constant is what names
+        # its codes.
+        codes = reloaded["point_constraints"]
+        assert codes.dtype == np.uint8
+        assert POINT_CONSTRAINT_NAMES == ("free", "ranged", "held")
+        assert POINT_CONSTRAINT_NAMES[codes[held]] == "held"
+        assert POINT_CONSTRAINT_NAMES[codes[ranged]] == "ranged"
+
+    def test_all_free_columns_are_dropped(self, seoul_bull_sfmr_only, tmp_path):
+        # An all-free set says what carrying no set says, so it is not written.
+        data = read_sfmr(seoul_bull_sfmr_only)
+        n = data["positions_xyzw"].shape[0]
+        data["point_constraints"] = np.zeros(n, dtype=np.uint8)
+        data["constraint_distances"] = np.full(n, np.nan)
+        data["constraint_reference_images"] = np.full(
+            n, _NO_REFERENCE_IMAGE, dtype=np.uint32
+        )
+
+        out = tmp_path / "free.sfmr"
+        write_sfmr(out, data, skip_recompute_depth_stats=True)
+        assert read_sfmr(out)["point_constraints"] is None
+
+    def test_finite_distance_needs_a_real_image(self, seoul_bull_sfmr_only, tmp_path):
+        data = read_sfmr(seoul_bull_sfmr_only)
+        (constraints, distance, reference), _held, ranged = _constraint_columns(
+            data["positions_xyzw"], len(data["image_names"])
+        )
+        reference[ranged] = 10_000
+        data["point_constraints"] = constraints
+        data["constraint_distances"] = distance
+        data["constraint_reference_images"] = reference
+        with pytest.raises(OSError, match="past the"):
+            write_sfmr(tmp_path / "bad.sfmr", data, skip_recompute_depth_stats=True)
+
+    def test_columns_survive_a_point_filter(self, seoul_bull_sfmr_only, tmp_path):
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        (constraints, distance, reference), held, ranged = _constraint_columns(
+            np.asarray(recon.positions_xyzw), len(recon.image_names)
+        )
+        recon = recon.clone_with_changes(
+            point_constraints=constraints,
+            constraint_distances=distance,
+            constraint_reference_images=reference,
+        )
+
+        # Drop everything but the two constrained points, in their own order.
+        mask = np.zeros(recon.point_count, dtype=bool)
+        mask[[held, ranged]] = True
+        out = recon.filter_points_by_mask(mask)
+
+        assert out.point_count == 2
+        npt = np.asarray(out.point_constraints)
+        assert list(npt) == [_HELD, _RANGED]
+        assert np.isnan(np.asarray(out.constraint_distances)[0])
+        assert np.asarray(out.constraint_distances)[1] == 12.5
+        assert list(np.asarray(out.constraint_reference_images)) == [
+            _NO_REFERENCE_IMAGE,
+            0,
+        ]
+
+    def test_dropping_the_referenced_image_frees_the_point(self, seoul_bull_sfmr_only):
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        (constraints, distance, reference), held, ranged = _constraint_columns(
+            np.asarray(recon.positions_xyzw), len(recon.image_names)
+        )
+        recon = recon.clone_with_changes(
+            point_constraints=constraints,
+            constraint_distances=distance,
+            constraint_reference_images=reference,
+        )
+        n_img = len(recon.image_names)
+
+        # Image 0 kept, at a new index: the distance follows it.
+        order = np.array(list(range(1, n_img)) + [0], dtype=np.uint32)
+        kept = recon.subset_by_image_indices(order, False)
+        assert np.asarray(kept.point_constraints)[ranged] == _RANGED
+        assert np.asarray(kept.constraint_reference_images)[ranged] == n_img - 1
+
+        # Image 0 gone: nothing is left to measure the distance from, so the
+        # point is released.
+        dropped = recon.subset_by_image_indices(
+            np.arange(1, n_img, dtype=np.uint32), False
+        )
+        assert np.asarray(dropped.point_constraints)[ranged] == _FREE
+        assert np.isnan(np.asarray(dropped.constraint_distances)[ranged])
+        assert (
+            np.asarray(dropped.constraint_reference_images)[ranged]
+            == _NO_REFERENCE_IMAGE
+        )
+        # A held point names no image, so the same subset leaves it held.
+        assert np.asarray(dropped.point_constraints)[held] == _HELD
+
+    def test_the_triple_must_be_passed_together(self, seoul_bull_sfmr_only):
+        recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+        with pytest.raises(ValueError, match="passed together"):
+            recon.clone_with_changes(
+                point_constraints=np.zeros(recon.point_count, dtype=np.uint8)
+            )
+
+    def test_a_code_outside_the_numbering_is_refused(
+        self, seoul_bull_sfmr_only, tmp_path
+    ):
+        # The codes are the canonical numbering, so a column carrying anything
+        # else has no name and is not written.
+        data = read_sfmr(seoul_bull_sfmr_only)
+        (constraints, distance, reference), _held, _ranged = _constraint_columns(
+            data["positions_xyzw"], len(data["image_names"])
+        )
+        constraints[0] = len(POINT_CONSTRAINT_NAMES)
+        data["point_constraints"] = constraints
+        data["constraint_distances"] = distance
+        data["constraint_reference_images"] = reference
+        with pytest.raises(OSError, match="its legend gives"):
             write_sfmr(tmp_path / "bad.sfmr", data, skip_recompute_depth_stats=True)

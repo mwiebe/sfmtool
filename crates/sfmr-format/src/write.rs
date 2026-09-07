@@ -441,6 +441,11 @@ pub fn write_sfmr_with_options(
     // `patch_v_halfvec_xyz`, and an optional `patch_bitmaps_y_x_rgba`) lives in
     // this section, beside the normal.
     validate_patch_dimensions(data, point_count)?;
+    // The constraint triple is written only when it says something: a set in
+    // which every point is free is exactly the absent set, and dropping it
+    // keeps a file whose caller never used constraints byte-identical to one
+    // written before the columns existed.
+    let constraints = point_constraints_to_write(data, point_count, image_count)?;
     let mut points3d_hasher = Xxh3::new();
 
     // points3d/colors_rgb
@@ -452,16 +457,45 @@ pub fn write_sfmr_with_options(
         &mut points3d_hasher,
     )?;
 
-    // points3d/metadata.json (records which optional per-point arrays are present)
+    // points3d/constraint_distances and points3d/constraint_reference_images
+    // (optional, version 7+; lexicographically after colors_rgb, before
+    // metadata.json). Two of the constraint triple; the third sorts much later.
+    if let Some((_, constraint_distances, constraint_reference_images)) = constraints {
+        write_binary_entry_hashed(
+            &mut zip,
+            &entries::points3d_constraint_distances(point_count),
+            bytemuck::cast_slice(constraint_distances),
+            options.zstd_level,
+            &mut points3d_hasher,
+        )?;
+        write_binary_entry_hashed(
+            &mut zip,
+            &entries::points3d_constraint_reference_images(point_count),
+            bytemuck::cast_slice(constraint_reference_images),
+            options.zstd_level,
+            &mut points3d_hasher,
+        )?;
+    }
+
+    // points3d/metadata.json (records which optional per-point arrays are
+    // present, and -- when the constraint columns are -- the legend their codes
+    // index).
     let patch_bitmap_resolution = data.patch_bitmaps_y_x_rgba.as_ref().map(|b| b.shape()[1]);
-    let points3d_meta = serde_json::json!({
+    let mut points3d_meta = serde_json::json!({
         "point_count": point_count,
         "has_normals": normals_xyz.is_some(),
         "has_normal_confidence": data.normal_confidence.is_some(),
+        "has_point_constraints": constraints.is_some(),
         "has_uv_frames": data.patch_u_halfvec_xyz.is_some(),
         "has_patch_bitmaps": data.patch_bitmaps_y_x_rgba.is_some(),
         "patch_bitmap_resolution": patch_bitmap_resolution,
     });
+    if constraints.is_some() {
+        points3d_meta.as_object_mut().unwrap().insert(
+            "point_constraint_names".into(),
+            serde_json::json!(PointConstraint::NAMES),
+        );
+    }
     let bytes = write_json_entry(
         &mut zip,
         entries::points3d_metadata(),
@@ -521,6 +555,19 @@ pub fn write_sfmr_with_options(
             &mut zip,
             &entries::points3d_patch_v_halfvec_xyz(point_count),
             bytemuck::cast_slice(v.as_slice().unwrap()),
+            options.zstd_level,
+            &mut points3d_hasher,
+        )?;
+    }
+
+    // points3d/point_constraints (optional, version 7+; lexicographically after
+    // the patch frame, before positions_xyzw). The third of the constraint
+    // triple.
+    if let Some((point_constraints, _, _)) = constraints {
+        write_binary_entry_hashed(
+            &mut zip,
+            &entries::points3d_point_constraints(point_count),
+            point_constraints,
             options.zstd_level,
             &mut points3d_hasher,
         )?;
@@ -661,6 +708,73 @@ pub fn write_sfmr_with_options(
 
     zip.finish()?;
     Ok(())
+}
+
+/// The three constraint columns as borrowed slices: the constraint per point,
+/// the distance it is held at, and the image that distance is measured from.
+type PointConstraintSlices<'a> = (&'a [u8], &'a [f64], &'a [u32]);
+
+/// The per-point constraint triple to write, or `None` when the file carries
+/// none.
+///
+/// The column arrives on the canonical numbering -- what a reader hands back,
+/// and what this writer states as the file's `point_constraint_names` -- so
+/// resolving it through [`PointConstraint::ALL`] both refuses a code outside
+/// that numbering and gives [`validate_point_constraints`] the constraints to
+/// hold the rest of the triple to.
+///
+/// The triple is then dropped when every point is free, which is the same
+/// statement as its absence: a caller that never constrained a point writes the
+/// archive a pre-version-7 writer would have. The slices borrow `data`, so the
+/// caller writes them directly.
+fn point_constraints_to_write(
+    data: &SfmrData,
+    point_count: usize,
+    image_count: usize,
+) -> Result<Option<PointConstraintSlices<'_>>, SfmrError> {
+    let point_constraints = data
+        .point_constraints
+        .as_ref()
+        .map(|a| a.as_slice().unwrap());
+    let resolved = point_constraints
+        .map(|c| resolve_point_constraints(c, &PointConstraint::ALL))
+        .transpose()
+        .map_err(SfmrError::InvalidFormat)?;
+    let constraint_distances = data
+        .constraint_distances
+        .as_ref()
+        .map(|a| a.as_slice().unwrap());
+    let constraint_reference_images = data
+        .constraint_reference_images
+        .as_ref()
+        .map(|a| a.as_slice().unwrap());
+    validate_point_constraints(
+        resolved.as_deref(),
+        constraint_distances,
+        constraint_reference_images,
+        &data.positions_xyzw,
+        point_count,
+        image_count,
+    )
+    .map_err(SfmrError::InvalidFormat)?;
+    let (Some(point_constraints), Some(constraint_distances), Some(constraint_reference_images)) = (
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
+    ) else {
+        return Ok(None);
+    };
+    if point_constraints
+        .iter()
+        .all(|&k| k == POINT_CONSTRAINT_FREE)
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        point_constraints,
+        constraint_distances,
+        constraint_reference_images,
+    )))
 }
 
 /// Validate the optional per-point patch frame arrays: `patch_u_halfvec_xyz`
