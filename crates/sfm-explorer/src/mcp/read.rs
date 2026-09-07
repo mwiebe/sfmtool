@@ -254,7 +254,7 @@ pub(super) fn get_point(state: &mut AppState, query: &crate::goto_point::PointQu
                 keypoints_xy,
             );
             let (reproj_error, _) =
-                crate::metrics::compute_observation_metrics(&point.position, image, camera, xy);
+                crate::metrics::compute_observation_metrics(point, image, camera, xy);
             json!({
                 "camera_image_index": image_index,
                 "name": image.name,

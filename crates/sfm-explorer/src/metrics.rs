@@ -15,29 +15,37 @@
 //! definition and no panel owns it.
 
 use nalgebra::Vector3;
-use sfmtool_core::SfmrReconstruction;
+use sfmtool_core::{Point3D, SfmrReconstruction};
 
 #[cfg(test)]
 mod tests;
 
 /// Compute per-observation reprojection error and ray angle for one observation.
 ///
-/// Returns `(reproj_error_px, ray_angle_deg)`. If the point is behind the
-/// camera, returns `(NaN, NaN)`.
+/// Returns `(reproj_error_px, ray_angle_deg)`. Both are defined for a point at
+/// infinity too: its stored direction rotates into camera space without
+/// translating and then projects like any homogeneous coordinate. If the point
+/// (or direction) is behind the camera, returns `(NaN, NaN)`.
 ///
 /// Crate-visible because the MCP surface reports the same number in a point
 /// track (`mcp::read::get_point`), and an agent told one figure while the human
 /// beside it reads another off this panel is the failure that boundary exists
 /// to avoid.
 pub(crate) fn compute_observation_metrics(
-    point_pos: &nalgebra::Point3<f64>,
+    point: &Point3D,
     image: &sfmtool_core::SfmrImage,
     camera: &sfmtool_core::CameraIntrinsics,
     feature_xy: [f32; 2],
 ) -> (f32, f32) {
-    // Transform point from world to camera space: p_cam = R * p_world + t
+    // Transform into camera space. A finite point takes the full rigid
+    // transform `R * p + t`; a point at infinity is a pure direction, which
+    // rotates but does not translate.
     let r = image.quaternion_wxyz.to_rotation_matrix();
-    let p_cam = r * point_pos.coords + image.translation_xyz;
+    let p_cam = if point.is_at_infinity() {
+        r * point.position.coords
+    } else {
+        r * point.position.coords + image.translation_xyz
+    };
 
     // Canonical cameras look down -Z, so in-front points have z < 0 and depth
     // is -z. Point behind camera — return NaN to signal invalid.

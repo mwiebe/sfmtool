@@ -43,7 +43,7 @@ impl PointTrackDetail {
         self.stored_patch_texture = build_stored_patch_texture(ctx, recon, point_idx);
         self.rendered_patch_textures.clear();
 
-        let point_pos = recon.points[point_idx].position;
+        let point3d = &recon.points[point_idx];
         // Keypoints come from one of two sources: SIFT feature positions read
         // into the cache (`sift_files`, via `feature_indexes`) or keypoints
         // stored inline on the reconstruction (`embedded_patches`, via
@@ -94,14 +94,20 @@ impl PointTrackDetail {
 
             // --- Compute per-observation reprojection error and ray angle ---
             let (reproj_error, ray_angle_deg) =
-                compute_observation_metrics(&point_pos, image, camera, feature_xy);
+                compute_observation_metrics(point3d, image, camera, feature_xy);
 
-            // Collect world-space ray for max-angle computation
-            let cam_center = image.camera_center();
-            let dir = point_pos - cam_center;
-            let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
-            if len > 1e-12 {
-                world_rays.push([dir.x / len, dir.y / len, dir.z / len]);
+            // Collect world-space ray for max-angle computation. Every camera
+            // sees a point at infinity along the same stored unit direction,
+            // so its max pairwise angle is honestly zero.
+            if point3d.is_at_infinity() {
+                let d = point3d.position.coords;
+                world_rays.push([d.x, d.y, d.z]);
+            } else {
+                let dir = point3d.position - image.camera_center();
+                let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+                if len > 1e-12 {
+                    world_rays.push([dir.x / len, dir.y / len, dir.z / len]);
+                }
             }
 
             let image_full_name = image.name.clone();
