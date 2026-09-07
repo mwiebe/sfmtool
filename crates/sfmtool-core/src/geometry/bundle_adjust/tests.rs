@@ -2555,7 +2555,9 @@ fn directions_participate_in_the_curvature_rung() {
 
 // ── The spline rung: opt_bspline under SFMTOOL_FISHEYE ──────────────────────
 
-use crate::camera::distortion::bspline::delta as bspline_delta;
+use crate::camera::distortion::bspline::{
+    delta as bspline_delta, delta_and_deriv as bspline_delta_deriv,
+};
 
 /// Spline-domain end used by the spline-rung scenes: slightly beyond the
 /// 105° image circle, so the outermost observations sit inside the basis.
@@ -2651,11 +2653,12 @@ fn worst_map_err_px(f: f64, a: &[f64], b: &[f64], lo: f64, hi: f64) -> f64 {
 /// the projection in each coefficient, over the whole field including past
 /// 90°.
 ///
-/// The columns are `f·Bᵢ(θ)·û` because every coefficient enters as
-/// `θ_d = θ + Σ cᵢ·Bᵢ(θ)` with `θ` read off the ray, never off a pixel
-/// radius — the projection is exactly LINEAR in each coefficient, so a
-/// central difference must reproduce the column to rounding (the same bar as
-/// the k1 column's).
+/// The columns are `f·Bᵢ(θ)·û` inside the domain, and
+/// `f·(Bᵢ(θ_max) + B'ᵢ(θ_max)·(θ − θ_max))·û` on the linear tail, because every
+/// coefficient enters as `θ_d = θ + Σ cᵢ·Bᵢ(θ)` with `θ` read off the ray,
+/// never off a pixel radius — the projection is exactly LINEAR in each
+/// coefficient on both branches, so a central difference must reproduce the
+/// column to rounding (the same bar as the k1 column's).
 #[test]
 fn bspline_columns_match_a_central_difference() {
     let f = 130.0;
@@ -2663,6 +2666,7 @@ fn bspline_columns_match_a_central_difference() {
     let n = PLANTED_BSPLINE.len();
     let mut worst: f64 = 0.0;
     let mut n_past_90 = 0usize;
+    let mut n_past_seam = 0usize;
     for ti in 0..17 {
         let theta = (5.0 + 10.0 * ti as f64).to_radians();
         for ai in 0..5 {
@@ -2674,6 +2678,9 @@ fn bspline_columns_match_a_central_difference() {
                 let r = [scale * opt.x, -scale * opt.y, -scale * opt.z];
                 if theta > std::f64::consts::FRAC_PI_2 {
                     n_past_90 += 1;
+                }
+                if theta > THETA_MAX {
+                    n_past_seam += 1;
                 }
                 // The kernel's columns, assembled per coefficient.
                 let (first, cols) = bspline_columns(
@@ -2715,6 +2722,7 @@ fn bspline_columns_match_a_central_difference() {
         }
     }
     assert!(n_past_90 >= 100, "not enough periphery: {n_past_90}");
+    assert!(n_past_seam >= 30, "linear tail thin: {n_past_seam}");
     assert!(
         worst < 1e-9,
         "analytic spline columns vs central difference: worst relative error {worst}"
@@ -2870,9 +2878,9 @@ fn opt_bspline_is_gated_on_the_sfmtool_fisheye_model() {
 }
 
 /// The step guard: `θ_d = θ + δ(θ)` must stay strictly increasing over the
-/// spline's whole domain, or the projection folds — two incidence angles
-/// onto one pixel radius, and `pixel_to_ray`'s Newton solve losing its
-/// bracket.
+/// spline's whole domain **and** its linear tail, or the projection folds — two
+/// incidence angles onto one pixel radius, and `pixel_to_ray`'s Newton solve
+/// losing its bracket.
 #[test]
 fn bspline_step_guard_rejects_a_folded_spline() {
     // The identity and the (gently flattening) planted spline pass.
@@ -2885,9 +2893,14 @@ fn bspline_step_guard_rejects_a_folded_spline() {
     // A fold in the outermost span is rejected too: the guard covers the
     // whole domain, not just where this round's data happens to sit, because
     // the accepted spline is persisted into the camera and its Newton
-    // inverse needs the global bracket.
+    // inverse needs the global bracket. It also drags the tail's slope
+    // `1 + δ'(θ_max)` negative, which would fold the extrapolation as well.
     let rim_folded = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5];
     assert!(!bspline_step_admissible(&rim_folded, THETA_MAX));
+    assert!(
+        1.0 + bspline_delta_deriv(&rim_folded, THETA_MAX, THETA_MAX).1 <= 0.0,
+        "rim fixture no longer folds the tail"
+    );
     // Non-finite steps never pass.
     let mut bad = PLANTED_BSPLINE;
     bad[3] = f64::NAN;
@@ -3260,7 +3273,7 @@ fn pinhole_bspline_columns_match_a_central_difference() {
             }
         }
     }
-    assert!(n_past_seam >= 45, "held-constant tail thin: {n_past_seam}");
+    assert!(n_past_seam >= 45, "linear tail thin: {n_past_seam}");
     assert!(
         worst < 1e-9,
         "analytic spline columns vs central difference: worst relative error {worst}"

@@ -87,13 +87,15 @@ Consequences of the basis that the rest of the models rest on:
   needs at least two coefficients. A shorter spline (the empty one included)
   evaluates as the identity `δ ≡ 0`, as does a `d_max` that is not positive
   and finite.
-- **Held-constant tail.** Beyond `d_max` the correction is held at `δ(d_max)`
-  with `δ'(d) = 0`, so the radial distortion map continues linearly,
-  `r(d) = f·(d + δ(d_max))`, with slope `f`.
+- **Linear tail.** Beyond `d_max` the correction continues along its end
+  tangent, `δ(d) = δ(d_max) + δ'(d_max)·(d − d_max)` with
+  `δ'(d) = δ'(d_max)`, so `δ` is `C¹` at the domain end and the radial
+  distortion map continues linearly with slope `f·(1 + δ'(d_max))` — the
+  trend the spline ends on, not a bend back to the base model's `f`.
 
 `d_max` places the spline's resolution: the `N` coefficients are spent
-uniformly on `[0, d_max]`, and beyond it the map carries only the held
-constant. Its intended placement is the radial extent of the imaged field,
+uniformly on `[0, d_max]`, and beyond it the map carries only that end value
+and end slope. Its intended placement is the radial extent of the imaged field,
 the largest `d` any sensor pixel reaches: the incidence angle at the far
 corner for the fisheye, the normalized image-plane radius at the far corner
 for the pinhole. A smaller `d_max` leaves the outer field without shape
@@ -110,9 +112,11 @@ fitting, so `d_max` is chosen once and held.
 1 + δ'(d) > 0        for every d ∈ [0, d_max]
 ```
 
-Beyond `d_max` the slope is exactly `1`, so the spline's own domain is the
-entire risk region. The invariant is what makes the radial distortion map
-injective and therefore exactly invertible. It is a **construction**
+Beyond `d_max` the map's slope is the constant `1 + δ'(d_max)`, so the whole
+linear tail is decided by that one number and the risk region is the spline's
+own domain plus that single inequality. The invariant is what makes the radial
+distortion map injective and therefore exactly invertible. It is a
+**construction**
 invariant: enforced where a spline is produced, and relied on where one is
 read. A spline that violates it has left the map's increasing branch wherever
 `d + δ(d) ≤ 0` at a positive `d`; projection and derivative are both undefined
@@ -205,9 +209,9 @@ tangent of the incidence angle, and the model projects
 ```
 
 The domain is the base pinhole's: the map is defined for `θ < 90°` only, and
-`ρ` grows without bound toward it, which is why the held-constant tail beyond
-`bspline_rho_max` matters: past the calibrated field the map continues as a
-pure pinhole with an offset, monotone to the edge of the domain.
+`ρ` grows without bound toward it, which is why the linear tail beyond
+`bspline_rho_max` matters: past the calibrated field the map continues along
+the tangent the spline ends on, monotone to the edge of the domain.
 
 The zero-spline base is `SIMPLE_PINHOLE`, the one-focal pinhole.
 

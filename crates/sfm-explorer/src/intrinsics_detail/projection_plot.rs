@@ -427,10 +427,10 @@ fn markers(camera: &CameraIntrinsics, derived: &Derived, x_max: f64) -> Vec<Mark
         });
     }
 
-    // Past the spline's domain end `δ` is held constant, so the radial map
-    // continues linearly rather than following the fitted curve — a lens whose
-    // frame reaches past this rule is being extrapolated, benignly but
-    // visibly.
+    // Past the spline's domain end `δ` continues along its end tangent, so the
+    // radial map continues linearly rather than following the fitted curve — a
+    // lens whose frame reaches past this rule is being extrapolated, benignly
+    // but visibly.
     let spline_end = match &camera.model {
         CameraModel::SfmtoolFisheye {
             bspline_theta_max, ..

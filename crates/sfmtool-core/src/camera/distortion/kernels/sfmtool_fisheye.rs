@@ -70,16 +70,20 @@ pub(in crate::camera::distortion) fn undistort_sfmtool_fisheye(
 /// normalized image-plane radius `ρ` for `SFMTOOL_PINHOLE`, with `d_max` the
 /// matching domain end.
 ///
-/// Beyond the spline's domain the map is exactly linear
-/// (`r_d = d + δ(d_max)`), so `r_d ≥ d_max + δ(d_max)` inverts in closed
-/// form. Inside `[0, d_max]` a safeguarded Newton iteration solves the
-/// monotone `d_d(d)` — monotonicity is the model's construction invariant, so
-/// the bracket `[0, d_max]` always contains exactly one root; the bisection
+/// Beyond the spline's domain the map is exactly affine with the spline's end
+/// slope (`r_d = rd_end + (1 + δ'(d_max))·(d − d_max)`), so
+/// `r_d ≥ rd_end = d_max + δ(d_max)` inverts in closed form. Inside
+/// `[0, d_max]` a safeguarded Newton iteration solves the monotone `d_d(d)` —
+/// monotonicity is the model's construction invariant, so the bracket
+/// `[0, d_max]` always contains exactly one root; the bisection
 /// safeguard keeps the iteration well-defined even for a spline that
 /// violates the invariant (it converges to *a* root of the folded map).
-/// `converged` is `false` only when `d_d(d_max) ≤ 0` — a spline folded so
-/// far that no radius is representable — mirroring
-/// [`recover_theta_equidistant`](super::recover_theta_equidistant)'s unreachable-`r_d` report.
+/// `converged` is `false` where no radius is representable, mirroring
+/// [`recover_theta_equidistant`](super::recover_theta_equidistant)'s unreachable-`r_d` report: when
+/// `d_d(d_max) ≤ 0` (a spline folded so far that nothing is), and when
+/// `r_d > rd_end` while the end slope `1 + δ'(d_max)` is non-positive, which
+/// makes `rd_end` the map's maximum and leaves the radius with no preimage at
+/// all. Both need a spline that violates the invariant.
 pub(in crate::camera::distortion) fn recover_radial_bspline(
     r_d: f64,
     coeffs: &[f64],
@@ -88,14 +92,18 @@ pub(in crate::camera::distortion) fn recover_radial_bspline(
     if r_d <= 0.0 {
         return (0.0, true);
     }
-    let delta_end = bspline::delta(coeffs, d_max, d_max);
+    let (delta_end, deriv_end) = bspline::delta_and_deriv(coeffs, d_max, d_max);
     let rd_end = d_max + delta_end;
     if rd_end <= 0.0 {
         return (0.0, false);
     }
     if r_d >= rd_end {
         // Linear region: exact inverse, no iteration.
-        return (r_d - delta_end, true);
+        let slope_end = 1.0 + deriv_end;
+        if slope_end > 0.0 {
+            return (d_max + (r_d - rd_end) / slope_end, true);
+        }
+        return (d_max, r_d == rd_end);
     }
     // Bracketed Newton on g(d) = d + δ(d) − r_d over [0, d_max]:
     // g(0) = −r_d < 0 and g(d_max) = rd_end − r_d > 0.

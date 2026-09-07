@@ -82,10 +82,13 @@ and `ρ` here, unchanged.
   `sfmtool_fisheye_to_ray` applies to the same report, and it is unreachable
   through a solve, which cannot persist a spline that folded
   ([Monotonicity enforcement](#monotonicity-enforcement)).
-- On the **linear tail** (`r_d ≥ ρ_max + δ(ρ_max)`) the inverse is closed form:
-  `ρ = r_d − δ(ρ_max)`, no iteration. The tail carries the periphery of every
-  real image: `ρ` grows without bound toward `θ = 90°`, so a calibrated
-  `ρ_max` is crossed well inside the frame.
+- On the **linear tail** (`r_d ≥ r_end = ρ_max + δ(ρ_max)`) the map is affine
+  with the spline's end slope, so the inverse is closed form:
+  `ρ = ρ_max + (r_d − r_end)/(1 + δ'(ρ_max))`, no iteration. The tail carries
+  the periphery of every real image: `ρ` grows without bound toward `θ = 90°`,
+  so a calibrated `ρ_max` is crossed well inside the frame — which is why the
+  tail follows the fitted trend rather than flattening back to the base
+  pinhole's slope.
 - Inside the spline's domain, a **bracket-safeguarded Newton** solves
   `g(ρ) = ρ + δ(ρ) − r_d` over `[0, ρ_max]`, where `g(0) = −r_d < 0` and
   `g(ρ_max) > 0`. The start is the identity guess `min(r_d, ρ_max)`; each
@@ -151,11 +154,12 @@ The limits:
 ## Monotonicity enforcement
 
 `bspline_is_monotone` decides the model's invariant, `1 + δ'(ρ) > 0` over
-`[0, ρ_max]`, by the two-stage procedure specified in
+`[0, ρ_max]` and over the linear tail past it, by the procedure specified in
 [sfmtool-fisheye-kernels.md](sfmtool-fisheye-kernels.md) § "Monotonicity
-enforcement": the derivative spline's control points, then a dense sampling
-when the conservative test fails. The procedure is arithmetic on the
-coefficients and the domain end, so it is the same code for both models.
+enforcement": the tail's single `1 + δ'(ρ_max) > 0` inequality, then the
+derivative spline's control points, then a dense sampling when the conservative
+test fails. The procedure is arithmetic on the coefficients and the domain end,
+so it is the same code for both models.
 
 Enforcement sites:
 

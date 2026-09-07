@@ -202,6 +202,33 @@ def test_projection_batches_round_trip_past_ninety_degrees():
     assert (u, v) == pytest.approx((pixels[5, 0], pixels[5, 1]), abs=0.0)
 
 
+def test_the_radial_map_continues_linearly_past_theta_max():
+    """Past ``bspline_theta_max`` the correction follows its end tangent.
+
+    The map is then exactly affine in theta with slope
+    ``f * (1 + delta'(theta_max))``, so equally spaced angles give equally
+    spaced radii -- and that slope is the spline's own, not the base
+    equidistant ``f``.
+    """
+    cam = CameraIntrinsics.from_dict(SFMTOOL)
+    theta_max_deg = math.degrees(BSPLINE["bspline_theta_max"])
+    step = 8.0
+    thetas = np.array([theta_max_deg + step * (i + 1) for i in range(4)])
+    rays = np.array([_ray_at(t, 37.0) for t in thetas], dtype=np.float64)
+    pixels = np.asarray(cam.ray_to_pixel_batch(np.ascontiguousarray(rays)))
+    cx, cy = cam.principal_point
+    radii = np.hypot(pixels[:, 0] - cx, pixels[:, 1] - cy)
+    # Affine in theta: the second differences vanish.
+    np.testing.assert_allclose(np.diff(radii, n=2), 0.0, atol=1e-9)
+    # The flattening spline ends on a negative slope, so the tail keeps rising
+    # more slowly than the equidistant base instead of resuming its rate.
+    slope = np.diff(radii)[0] / math.radians(step)
+    assert 0.0 < slope < F - 1.0
+    # And the tail inverts back exactly.
+    back = np.asarray(cam.pixel_to_ray_batch(np.ascontiguousarray(pixels)))
+    np.testing.assert_allclose(back, rays, atol=1e-12)
+
+
 def test_zero_bspline_equals_equidistant_fisheye_exactly():
     """Empty and all-zero splines short-circuit to the equidistant kernels.
 

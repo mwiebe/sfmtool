@@ -94,7 +94,7 @@ def _ray_at(rho, phi_deg):
 
 def _rays():
     # Out to rho = 1.5 (theta ~ 56 deg): across the rho_max = 0.9 seam, so
-    # both the Newton branch and the held-constant tail are exercised.
+    # both the Newton branch and the linear tail are exercised.
     return np.array(
         [
             _ray_at(r, p)
@@ -212,6 +212,33 @@ def test_projection_batches_round_trip_across_the_rho_max_seam():
     # Scalar and batch paths agree.
     u, v = cam.ray_to_pixel(rays[5])
     assert (u, v) == pytest.approx((pixels[5, 0], pixels[5, 1]), abs=0.0)
+
+
+def test_the_radial_map_continues_linearly_past_rho_max():
+    """Past ``bspline_rho_max`` the correction follows its end tangent.
+
+    The map is then exactly affine in rho with slope
+    ``f * (1 + delta'(rho_max))``, so equally spaced radii in rho give equally
+    spaced pixel radii -- and that slope is the spline's own, not the base
+    pinhole ``f``.
+    """
+    cam = CameraIntrinsics.from_dict(SFMTOOL)
+    rho_max = BSPLINE["bspline_rho_max"]
+    step = 0.4
+    rhos = np.array([rho_max + step * (i + 1) for i in range(4)])
+    rays = np.array([_ray_at(r, 37.0) for r in rhos], dtype=np.float64)
+    pixels = np.asarray(cam.ray_to_pixel_batch(np.ascontiguousarray(rays)))
+    cx, cy = cam.principal_point
+    radii = np.hypot(pixels[:, 0] - cx, pixels[:, 1] - cy)
+    # Affine in rho: the second differences vanish.
+    np.testing.assert_allclose(np.diff(radii, n=2), 0.0, atol=1e-9)
+    # The expanding spline ends on a positive slope, so the tail keeps rising
+    # FASTER than the base pinhole instead of falling back to its rate.
+    slope = np.diff(radii)[0] / step
+    assert slope > F + 1.0
+    # And the tail inverts back exactly.
+    back = np.asarray(cam.pixel_to_ray_batch(np.ascontiguousarray(pixels)))
+    np.testing.assert_allclose(back, rays, atol=1e-12)
 
 
 def test_behind_the_camera_has_no_projection():

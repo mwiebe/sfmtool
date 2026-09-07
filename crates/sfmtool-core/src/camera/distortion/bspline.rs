@@ -17,9 +17,11 @@
 //! The basis is a cubic open-uniform (clamped) B-spline on `[0, d_max]` with
 //! the **first two** functions of the full clamped basis omitted and their
 //! coefficients pinned to zero — the center-anchored gauge, which fixes
-//! `δ(0) = 0` and `δ'(0) = 0` by construction. Beyond `d_max` the correction is
-//! held constant at `δ(d_max)` with zero slope, so the map continues linearly
-//! with `r' = f`.
+//! `δ(0) = 0` and `δ'(0) = 0` by construction. Beyond `d_max` the correction
+//! continues linearly with the spline's end slope,
+//! `δ(d) = δ(d_max) + δ'(d_max)·(d − d_max)`, so `δ` is `C¹` across the domain
+//! end and the map continues with the constant slope `f·(1 + δ'(d_max))`
+//! rather than bending back to `f`.
 //!
 //! See `specs/core/camera/sfmtool-fisheye-kernels.md` for the design — basis
 //! evaluation, the monotonicity invariant and where it is enforced — and
@@ -166,9 +168,10 @@ pub(crate) fn basis_at(
 /// Below [`MIN_BSPLINE_COEFFS`] coefficients (or a `d_max` that is not
 /// positive and finite — `+∞` included, which would put every knot at
 /// infinity and turn the basis recurrence into `inf · 0`) this is the
-/// identity `(0, 0)`. Beyond `d_max` the correction is held constant:
-/// `δ(d) = δ(d_max)` with `δ'(d) = 0`, so the radial map continues with unit
-/// slope there.
+/// identity `(0, 0)`. Beyond `d_max` the correction continues linearly with
+/// the spline's end slope — `δ(d) = δ(d_max) + δ'(d_max)·(d − d_max)` and
+/// `δ'(d) = δ'(d_max)` — so the pair is `C¹` across the domain end and the
+/// radial map continues with the constant slope `1 + δ'(d_max)`.
 pub(crate) fn delta_and_deriv(bspline: &[f64], d_max: f64, d: f64) -> (f64, f64) {
     if bspline.len() < MIN_BSPLINE_COEFFS || d_max <= 0.0 || !d_max.is_finite() {
         return (0.0, 0.0);
@@ -186,7 +189,9 @@ pub(crate) fn delta_and_deriv(bspline: &[f64], d_max: f64, d: f64) -> (f64, f64)
         deriv += c * derivatives[j];
     }
     if d > d_max {
-        deriv = 0.0;
+        // `basis_at` clamped, so `delta` and `deriv` are the endpoint values;
+        // carry the slope out along the tangent.
+        delta += deriv * (d - d_max);
     }
     (delta, deriv)
 }
@@ -197,13 +202,24 @@ pub(crate) fn delta(bspline: &[f64], d_max: f64, d: f64) -> f64 {
 }
 
 /// Whether the radial map `d_d(d) = d + δ(d)` is strictly increasing
-/// (`1 + δ'(d) > 0`) over `[0, min(d_span, d_max)]`.
+/// (`1 + δ'(d) > 0`) over `[0, min(d_span, d_max)]` **and** over the whole
+/// linear continuation beyond `d_max`.
 ///
-/// Beyond `d_max` the slope is exactly 1, so only the spline's own domain
-/// needs checking. Two-stage: a **sufficient** convexity test on the derivative
-/// spline's control points, which proves monotonicity outright over the whole
-/// domain when it passes, and — only when that conservative test fails — a
-/// dense sampling of `δ'` over the requested span.
+/// The continuation carries the spline's end slope, so its whole half-line is
+/// decided by the single inequality `1 + δ'(d_max) > 0` — checked here
+/// unconditionally, ahead of the domain tests. It has to be unconditional
+/// because `d_span` may stop short of `d_max`: a spline whose sampled prefix
+/// rises while its end slope is non-positive would otherwise pass, and the
+/// Newton inverse of an extrapolated radius would lose the bracket
+/// monotonicity is there to guarantee. When the sufficient test below passes it
+/// implies the same inequality (`δ'(d_max)` is the derivative spline's last
+/// control point), so the extra check costs one basis evaluation and never a
+/// legitimate spline.
+///
+/// The domain itself is two-stage: a **sufficient** convexity test on the
+/// derivative spline's control points, which proves monotonicity outright over
+/// the whole domain when it passes, and — only when that conservative test
+/// fails — a dense sampling of `δ'` over the requested span.
 ///
 /// This is the bundle adjustment's spline step guard's primitive
 /// (`bspline_step_admissible`).
@@ -213,6 +229,9 @@ pub(crate) fn bspline_is_monotone(bspline: &[f64], d_max: f64, d_span: f64) -> b
         // `delta_and_deriv`'s exactly, or a `d_max` this reports monotone
         // on would still evaluate a basis (and `+∞` knots evaluate to NaN).
         return true;
+    }
+    if 1.0 + delta_and_deriv(bspline, d_max, d_max).1 <= 0.0 {
+        return false;
     }
     let m = bspline.len() + 2;
     let coeff = |i: usize| if i < 2 { 0.0 } else { bspline[i - 2] };

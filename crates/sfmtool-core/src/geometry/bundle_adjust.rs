@@ -243,9 +243,11 @@ fn k1_step_admissible(f: f64, k1: f64, field_r: f64) -> bool {
 /// `f·Bᵢ(d)·(ûx, ûy)` — exact everywhere in the field, since `d` comes from
 /// the ray rather than from a pixel radius (the same property as
 /// [`k1_column`], with `Bᵢ(d)` in place of `θ³`), the fisheye's periphery past
-/// 90° included. Past `d_max` the correction is held constant at `δ(d_max)`,
-/// whose coefficient derivative is `Bᵢ(d_max)` — exactly what the clamp inside
-/// `basis_at` evaluates, so the column is exact on the linear tail too.
+/// 90° included. Past `d_max` the correction continues along its end tangent,
+/// `δ(d) = δ(d_max) + δ'(d_max)·(d − d_max)`, so the exact coefficient
+/// derivative there is `Bᵢ(d_max) + B'ᵢ(d_max)·(d − d_max)`; the clamped
+/// `basis_at` returns both terms, and the column carries that tail exactly
+/// rather than approximating it by the endpoint basis alone.
 /// `(ûx, ûy)` is the unit image direction in the OPTICAL frame
 /// (`S = diag(1, −1, −1)` off canonical), like the `k1` column.
 ///
@@ -277,20 +279,24 @@ fn bspline_columns(
         SplineRadial::IncidenceAngle => rho.atan2(rz),
         SplineRadial::ImagePlaneRadius => rho / rz,
     };
-    let (first, values, _derivs) = basis_at(n_coeffs, d_max, d);
+    let (first, values, derivs) = basis_at(n_coeffs, d_max, d);
+    // Zero inside the domain; the tail's lever arm past it. `basis_at` clamped,
+    // so `values`/`derivs` are the endpoint basis and its slope there.
+    let over = (d - d_max).max(0.0);
     let (ux, uy) = (rx / rho, ry / rho);
     let mut cols = [[0.0; 2]; BSPLINE_SUPPORT];
-    for (col, &b) in cols.iter_mut().zip(&values) {
-        // f·Bᵢ(d)·û.
-        let s = f * b;
+    for ((col, &b), &bp) in cols.iter_mut().zip(&values).zip(&derivs) {
+        // f·(Bᵢ(d) + B'ᵢ(d)·over)·û.
+        let s = f * (b + bp * over);
         *col = [s * ux, s * uy];
     }
     (first, cols)
 }
 
 /// Whether candidate coefficients keep `d_d = d + δ(d)` strictly increasing
-/// over the spline's whole domain `[0, d_max]` — the plausibility guard on a
-/// spline step, the counterpart of [`k1_step_admissible`]. The check is
+/// over the spline's whole domain `[0, d_max]` and its linear continuation past
+/// it — the plausibility guard on a spline step, the counterpart of
+/// [`k1_step_admissible`]. The check is
 /// arithmetic on the coefficients and the domain end, so it reads the same for
 /// either radial coordinate.
 ///
@@ -298,10 +304,11 @@ fn bspline_columns(
 /// is the model's construction invariant: it is what gives the Newton solve
 /// behind `pixel_to_ray` a guaranteed bracket, and the accepted spline is
 /// persisted into a camera whose inverse must stay well-defined everywhere.
-/// Beyond `d_max` the slope is exactly `1`, so `[0, d_max]` is the entire
-/// risk region — and coefficient slots with no observation support are
-/// pinned at their input values, so past the data the spline never moves
-/// and the wider check costs no legitimate steps.
+/// Beyond `d_max` the map continues with the constant slope `1 + δ'(d_max)`,
+/// which `bspline_is_monotone` decides along with the domain — and coefficient
+/// slots with no observation support are pinned at their input values, so past
+/// the data the spline never moves and the wider check costs no legitimate
+/// steps.
 fn bspline_step_admissible(bspline: &[f64], d_max: f64) -> bool {
     bspline.iter().all(|c| c.is_finite()) && bspline_is_monotone(bspline, d_max, d_max)
 }
