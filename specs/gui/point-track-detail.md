@@ -157,7 +157,7 @@ Below the header, the panel shows a vertically scrollable table of observations
 | Name | Image filename (truncated with leading `…/` for long paths). |
 | Feat # | Feature index within the image's SIFT file (or the observation index for embedded-keypoint reconstructions with no SIFT file). |
 | Size | The feature's full extent in pixels — see "Size column" below. For SIFT observations the affine shape comes from the cached `affine_shapes`; for embedded keypoints it is derived by projecting the point's patch frame into the image. Shows `N/A` when unavailable (zero). |
-| Error | Per-observation reprojection error in pixels (`N/A` when undefined). |
+| Error | Per-observation reprojection error in pixels (`N/A` when undefined). Defined for points at infinity too: the stored unit direction rotates into camera space without translating and projects like any homogeneous coordinate, so only a point (or direction) behind the camera is undefined. |
 
 **The thumbnail dot's colour** is `colormap::error_color` — the same
 green→yellow→red ramp the Image Detail panel's reprojection-error overlay
@@ -170,7 +170,7 @@ question is which features in *this* frame are the bad ones. An observation
 with no error to show — the point is behind the camera, so the metrics came
 back `NaN` — is grey, deliberately off the ramp: "no measurement" is not a
 position on a green-to-red scale.
-| Angle | Angular discrepancy between observation ray and point direction, in degrees. |
+| Angle | Angular discrepancy between observation ray and point direction, in degrees. Follows the Error column's rule for points at infinity: the direction is the point, so the angle is measured to it directly. |
 | Feature (x, y) | Feature position in image pixel coordinates. |
 
 **Size column**: the columns of an observation's affine-shape matrix are the
