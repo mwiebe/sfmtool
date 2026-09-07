@@ -2591,8 +2591,8 @@ fn simple_radial_fisheye_jacobian_on_axis_is_the_pinhole_limit_for_any_k1() {
 //
 // `θ_d(θ) = θ + δ(θ)` with `δ` a cubic open-uniform B-spline on
 // `[0, θ_max]` whose first two basis functions are omitted (`δ(0) = 0`,
-// `δ'(0) = 0` — the center-anchored gauge) and which is held constant past
-// `θ_max`. Zero coefficients ≡ EQUIDISTANT_FISHEYE bit for bit.
+// `δ'(0) = 0` — the center-anchored gauge) and which continues along its end
+// tangent past `θ_max`. Zero coefficients ≡ EQUIDISTANT_FISHEYE bit for bit.
 // -----------------------------------------------------------------------
 
 /// A gently flattening 8-coefficient spline out to `θ_max = 2.0` rad
@@ -2728,7 +2728,7 @@ fn sfmtool_fisheye_degenerate_theta_max_is_bitwise_the_equidistant_model() {
 fn sfmtool_fisheye_round_trips_with_a_live_bspline_past_90_degrees() {
     // Forward/inverse consistency with a non-trivial flattening spline,
     // from the axis out past 90° and beyond θ_max (where the map continues
-    // linearly with slope f and the inverse is closed-form).
+    // linearly with the spline's end slope and the inverse is closed-form).
     let f = 130.0;
     let cam = sfmtool_fisheye_at(f, FLATTENING_BSPLINE.to_vec());
     let mut worst_px = 0.0f64;
@@ -2756,7 +2756,7 @@ fn sfmtool_fisheye_round_trips_with_a_live_bspline_past_90_degrees() {
     assert!(past_90 >= 30, "not enough periphery: {past_90}");
     assert!(
         past_theta_max >= 10,
-        "held-constant region unexercised: {past_theta_max}"
+        "linear tail unexercised: {past_theta_max}"
     );
     eprintln!("[sfmtool-fisheye-rt] worst {worst_rad:.3e} rad / {worst_px:.3e} px");
     assert!(
@@ -2914,7 +2914,7 @@ const BSPLINE_RHO_MAX: f64 = 0.9;
 /// An `SFMTOOL_PINHOLE` at focal `f` with the given coefficients, principal
 /// point centred in a 480² frame — the perspective sibling of
 /// `sfmtool_fisheye_at`. At `f = 250` the frame corner sits at `ρ ≈ 1.36`,
-/// well past `ρ_max`, so the held-constant tail is ordinary in-frame domain.
+/// well past `ρ_max`, so the linear tail is ordinary in-frame domain.
 fn sfmtool_pinhole_at(f: f64, coeffs: Vec<f64>) -> CameraIntrinsics {
     CameraIntrinsics {
         model: CameraModel::SfmtoolPinhole {
@@ -3057,8 +3057,8 @@ fn sfmtool_pinhole_degenerate_rho_max_is_bitwise_the_simple_pinhole_model() {
 #[test]
 fn sfmtool_pinhole_round_trips_with_a_live_bspline_across_the_rho_max_seam() {
     // Forward/inverse consistency with a non-trivial expanding spline, from
-    // the axis out past ρ_max (where the map continues linearly with slope f
-    // and the inverse is closed-form).
+    // the axis out past ρ_max (where the map continues linearly with the
+    // spline's end slope and the inverse is closed-form).
     let f = 250.0;
     let cam = sfmtool_pinhole_at(f, PINCUSHION_BSPLINE.to_vec());
     let mut worst_px = 0.0f64;
@@ -3086,7 +3086,7 @@ fn sfmtool_pinhole_round_trips_with_a_live_bspline_across_the_rho_max_seam() {
     assert!(inside >= 40, "Newton branch unexercised: {inside}");
     assert!(
         past_rho_max >= 20,
-        "held-constant tail unexercised: {past_rho_max}"
+        "linear tail unexercised: {past_rho_max}"
     );
     eprintln!("[sfmtool-pinhole-rt] worst {worst_rad:.3e} rad / {worst_px:.3e} px");
     assert!(
@@ -3096,8 +3096,8 @@ fn sfmtool_pinhole_round_trips_with_a_live_bspline_across_the_rho_max_seam() {
     // The angle floor is acos() conditioning at dot ≈ 1 (√ε ≈ 1.5e-8), not
     // inverse error — the pixel round trip above is the sharp gate.
     assert!(worst_rad < 1e-7, "ray round-trip {worst_rad} rad");
-    // The spline pushes the periphery OUT versus the pinhole map, and does so
-    // by a held-constant offset past ρ_max.
+    // The spline pushes the periphery OUT versus the pinhole map, and keeps
+    // widening the gap past ρ_max along the tail's slope.
     let plain = simple_pinhole_at(f);
     for rho in [0.5f64, 0.9, 1.4] {
         let ray = ray_at(rho.atan(), 0.4);
@@ -3338,7 +3338,8 @@ fn sfmtool_pinhole_fits_an_undistorted_pinhole() {
 
 // -----------------------------------------------------------------------
 // The radial spline itself (`distortion::bspline`): gauge anchoring,
-// derivative correctness, the held-constant tail, and partition of unity.
+// derivative correctness, partition of unity, and the linear tail — including
+// how that tail reaches both models' forward, inverse and Jacobian maps.
 // -----------------------------------------------------------------------
 
 #[test]
@@ -3393,18 +3394,168 @@ fn bspline_derivative_matches_central_difference() {
 }
 
 #[test]
-fn bspline_is_held_constant_beyond_theta_max() {
+fn bspline_continues_linearly_beyond_theta_max() {
+    // The tail contract: δ carries the domain end's value AND slope out along
+    // the tangent, so it grows at exactly δ'(θ_max) and never bends.
     let coeffs = FLATTENING_BSPLINE.to_vec();
-    let (end, _) = bspline::delta_and_deriv(&coeffs, BSPLINE_THETA_MAX, BSPLINE_THETA_MAX);
+    let (end, slope) = bspline::delta_and_deriv(&coeffs, BSPLINE_THETA_MAX, BSPLINE_THETA_MAX);
+    assert!(slope != 0.0, "fixture has no end slope to extrapolate");
     for theta in [
         BSPLINE_THETA_MAX + 1e-9,
         BSPLINE_THETA_MAX + 0.5,
         std::f64::consts::PI,
     ] {
         let (d, dp) = bspline::delta_and_deriv(&coeffs, BSPLINE_THETA_MAX, theta);
-        assert_eq!(d.to_bits(), end.to_bits());
-        assert_eq!(dp, 0.0);
+        assert_eq!(dp.to_bits(), slope.to_bits());
+        assert_relative_eq!(
+            d,
+            end + slope * (theta - BSPLINE_THETA_MAX),
+            epsilon = 1e-15
+        );
     }
+    // Equal steps out give equal increments — linear, not merely increasing.
+    let step = 0.31;
+    let one = bspline::delta(&coeffs, BSPLINE_THETA_MAX, BSPLINE_THETA_MAX + step);
+    let two = bspline::delta(&coeffs, BSPLINE_THETA_MAX, BSPLINE_THETA_MAX + 2.0 * step);
+    assert_relative_eq!(two - one, slope * step, epsilon = 1e-14);
+}
+
+#[test]
+fn bspline_is_c1_across_the_domain_end() {
+    // Value and one-sided derivatives agree at the seam: the tail is the
+    // domain's tangent line, not a separate branch.
+    for (coeffs, d_max) in [
+        (FLATTENING_BSPLINE.to_vec(), BSPLINE_THETA_MAX),
+        (PINCUSHION_BSPLINE.to_vec(), BSPLINE_RHO_MAX),
+    ] {
+        let (end, slope) = bspline::delta_and_deriv(&coeffs, d_max, d_max);
+        let h = 1e-6;
+        let inside = bspline::delta(&coeffs, d_max, d_max - h);
+        let outside = bspline::delta(&coeffs, d_max, d_max + h);
+        // Continuity: the two one-sided limits meet the endpoint value.
+        assert_relative_eq!(inside, end - slope * h, epsilon = 1e-11);
+        assert_relative_eq!(outside, end + slope * h, epsilon = 1e-15);
+        // C¹: one-sided slopes agree with each other and with δ'(θ_max).
+        let left = (end - inside) / h;
+        let right = (outside - end) / h;
+        assert_relative_eq!(left, right, epsilon = 1e-5);
+        assert_relative_eq!(right, slope, epsilon = 1e-9);
+        assert_relative_eq!(left, slope, epsilon = 1e-5);
+    }
+}
+
+#[test]
+fn bspline_monotone_rejects_a_negative_tail_slope_under_a_short_span() {
+    // The tail's slope is `1 + δ'(θ_max)`, so a spline that plunges only in its
+    // LAST span leaves the map decreasing past the domain end while every
+    // sample below the span stays fine. The guard checks the end slope
+    // unconditionally, so a `d_span` that stops short of θ_max — the case the
+    // dense sampling would never reach — still rejects it.
+    let coeffs = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.6];
+    let (_, slope) = bspline::delta_and_deriv(&coeffs, BSPLINE_THETA_MAX, BSPLINE_THETA_MAX);
+    assert!(
+        1.0 + slope <= 0.0,
+        "fixture tail slope is not folded: 1 + δ' = {}",
+        1.0 + slope
+    );
+    // The prefix the short span samples is monotone on its own.
+    for i in 0..=32 {
+        let theta = 0.5 * BSPLINE_THETA_MAX * i as f64 / 32.0;
+        let (_, dp) = bspline::delta_and_deriv(&coeffs, BSPLINE_THETA_MAX, theta);
+        assert!(1.0 + dp > 0.0, "prefix already folded at θ = {theta}");
+    }
+    for span in [0.1, 0.5 * BSPLINE_THETA_MAX, BSPLINE_THETA_MAX, 10.0] {
+        assert!(
+            !bspline::bspline_is_monotone(&coeffs, BSPLINE_THETA_MAX, span),
+            "span {span} accepted a negative tail slope"
+        );
+    }
+}
+
+#[test]
+fn sfmtool_fisheye_round_trips_beyond_theta_max_with_a_live_bspline() {
+    // The closed-form tail inverse against the linear forward branch, on rays
+    // whose incidence angle is comfortably past the domain end.
+    let f = 130.0;
+    let cam = sfmtool_fisheye_at(f, FLATTENING_BSPLINE.to_vec());
+    for deg in [118.0f64, 130.0, 150.0, 170.0] {
+        let theta = deg.to_radians();
+        assert!(theta > BSPLINE_THETA_MAX);
+        for phi_deg in [0.0f64, 97.0, 241.0] {
+            let ray = ray_at(theta, phi_deg.to_radians());
+            let (u, v) = cam.ray_to_pixel(ray).unwrap();
+            let back = cam.pixel_to_ray(u, v);
+            let (u2, v2) = cam.ray_to_pixel(back).unwrap();
+            assert!(
+                (u2 - u).hypot(v2 - v) < 1e-9,
+                "θ={deg}° φ={phi_deg}° round trip missed"
+            );
+        }
+    }
+}
+
+#[test]
+fn sfmtool_pinhole_round_trips_beyond_rho_max_with_a_live_bspline() {
+    // The perspective sibling's tail: ρ past ρ_max is ordinary in-frame domain
+    // here, so the closed-form inverse carries the whole periphery.
+    let f = 250.0;
+    let cam = sfmtool_pinhole_at(f, PINCUSHION_BSPLINE.to_vec());
+    for rho in [1.0f64, 1.36, 2.0, 4.0] {
+        assert!(rho > BSPLINE_RHO_MAX);
+        for phi_deg in [0.0f64, 97.0, 241.0] {
+            let ray = ray_at(rho.atan(), phi_deg.to_radians());
+            let (u, v) = cam.ray_to_pixel(ray).unwrap();
+            let back = cam.pixel_to_ray(u, v);
+            let (u2, v2) = cam.ray_to_pixel(back).unwrap();
+            assert!(
+                (u2 - u).hypot(v2 - v) < 1e-9,
+                "ρ={rho} φ={phi_deg}° round trip missed"
+            );
+        }
+    }
+}
+
+#[test]
+fn sfmtool_spline_jacobians_match_a_central_difference_beyond_the_domain_end() {
+    // The analytic Jacobians consume the (δ, δ') pair, so the tail's non-zero
+    // δ' has to reach them: pin both models against a central difference at
+    // radial coordinates past their domain ends.
+    let h = 1e-6;
+    let fisheye = sfmtool_fisheye_at(130.0, FLATTENING_BSPLINE.to_vec());
+    let pinhole = sfmtool_pinhole_at(250.0, PINCUSHION_BSPLINE.to_vec());
+    let beyond: [(&CameraIntrinsics, Vec<f64>); 2] = [
+        (
+            &fisheye,
+            vec![120.0f64.to_radians(), 140.0f64.to_radians(), 2.9],
+        ),
+        (&pinhole, vec![1.0f64.atan(), 1.6f64.atan(), 3.0f64.atan()]),
+    ];
+    let mut samples = 0usize;
+    for (cam, thetas) in &beyond {
+        for &theta in thetas {
+            for phi_deg in [11.0f64, 133.0, 288.0] {
+                let ray = ray_at(theta, phi_deg.to_radians());
+                let (_, jac) = cam.ray_to_pixel_with_jacobian(ray).unwrap();
+                for c in 0..3 {
+                    let mut rp = ray;
+                    let mut rm = ray;
+                    rp[c] += h;
+                    rm[c] -= h;
+                    let (up, vp) = cam.ray_to_pixel(rp).unwrap();
+                    let (um, vm) = cam.ray_to_pixel(rm).unwrap();
+                    for (a, fd) in [
+                        (jac[0][c], (up - um) / (2.0 * h)),
+                        (jac[1][c], (vp - vm) / (2.0 * h)),
+                    ] {
+                        let rel = (a - fd).abs() / (1.0 + a.abs());
+                        assert!(rel <= 1e-6, "∂/∂r[{c}]: analytic {a} vs {fd} (rel {rel})");
+                    }
+                    samples += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(samples, 54);
 }
 
 #[test]

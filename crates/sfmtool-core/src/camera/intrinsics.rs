@@ -178,8 +178,9 @@ pub enum CameraModel {
     /// two functions of the full clamped basis, pinning `δ(0) = 0` and
     /// `δ'(0) = 0`: the spline cannot express a central-scale correction
     /// (that is `f`'s job), only how the lens departs from equidistant away
-    /// from the axis. Beyond `bspline_theta_max` the correction is held
-    /// constant, so the radial map continues linearly with slope `f`.
+    /// from the axis. Beyond `bspline_theta_max` the correction continues
+    /// along its end tangent, so the radial map continues linearly with the
+    /// slope it had at the domain end.
     ///
     /// An empty or all-zero `bspline` short-circuits to the exact
     /// [`CameraModel::EquidistantFisheye`] arithmetic, bit for bit, and so
@@ -205,7 +206,7 @@ pub enum CameraModel {
         principal_point_x: f64,
         principal_point_y: f64,
         /// Domain end of the spline basis in radians of incidence angle;
-        /// `δ` is held constant beyond it.
+        /// `δ` continues linearly with its end slope beyond it.
         bspline_theta_max: f64,
         /// Dimensionless spline coefficients `c₀..c_{N−1}`. Serialized as
         /// `bspline_c0..bspline_c{N−1}` in [`sfmr_format::SfmrCamera`] parameters.
@@ -224,10 +225,10 @@ pub enum CameraModel {
     /// the full clamped basis, pinning `δ(0) = 0` and `δ'(0) = 0`: the spline
     /// cannot express a central-scale correction (that is `f`'s job), only how
     /// the lens departs from a pinhole away from the axis. Beyond
-    /// `bspline_rho_max` the correction is held constant, so the radial map
-    /// continues linearly with slope `f` — which matters here because the
-    /// domain is the pinhole's, `θ < 90°`, and `ρ` grows without bound toward
-    /// it.
+    /// `bspline_rho_max` the correction continues along its end tangent, so the
+    /// radial map continues linearly with the slope it had at the domain end —
+    /// which matters here because the domain is the pinhole's, `θ < 90°`, and
+    /// `ρ` grows without bound toward it.
     ///
     /// An empty or all-zero `bspline` short-circuits to the exact
     /// [`CameraModel::SimplePinhole`] arithmetic, bit for bit, and so does a
@@ -252,7 +253,7 @@ pub enum CameraModel {
         principal_point_x: f64,
         principal_point_y: f64,
         /// Domain end of the spline basis in normalized image-plane radius;
-        /// `δ` is held constant beyond it.
+        /// `δ` continues linearly with its end slope beyond it.
         bspline_rho_max: f64,
         /// Dimensionless spline coefficients `c₀..c_{N−1}`. Serialized as
         /// `bspline_c0..bspline_c{N−1}` in [`sfmr_format::SfmrCamera`] parameters.

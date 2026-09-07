@@ -135,8 +135,8 @@ pub(super) struct AxisGeometry {
     /// The contour at [`super::CameraLayer::limit_deg`], past which the model
     /// is extrapolating rather than describing a lens.
     pub trustworthy_edge: Option<Contour>,
-    /// The contour at a spline model's domain end, past which its correction is
-    /// held constant and the radial map continues linearly.
+    /// The contour at a spline model's domain end, past which its correction
+    /// continues along its end tangent and the radial map continues linearly.
     pub spline_domain: Option<Contour>,
 }
 

@@ -41,10 +41,13 @@ whose full index is below 2 are the anchored pair and carry no coefficient
 `MIN_BSPLINE_COEFFS = 2` evaluates as the identity `δ ≡ 0`, as does a `θ_max`
 that is not positive and finite.
 
-`basis_at` clamps `θ` into `[0, θ_max]`, so a coefficient derivative on the
-held-constant tail is exactly `Bᵢ(θ_max)`, the derivative of the held
-constant. `δ` and `δ'` at a point come from one `basis_at` evaluation
-(`delta_and_deriv`).
+`basis_at` clamps `θ` into `[0, θ_max]`, so on the linear tail it reports the
+endpoint basis and its slope; `delta_and_deriv` reads both from that one
+evaluation and continues the correction along its end tangent,
+`δ(θ) = δ(θ_max) + δ'(θ_max)·(θ − θ_max)` with `δ'(θ) = δ'(θ_max)`. The pair is
+therefore `C¹` at `θ_max`, and a coefficient derivative on the tail is
+`Bᵢ(θ_max) + B'ᵢ(θ_max)·(θ − θ_max)` — both terms available from the same
+clamped call.
 
 ## Forward projection
 
@@ -67,8 +70,12 @@ inverting `r_d = θ + δ(θ)` in `recover_radial_bspline`, then returning
 `(x_d·sin θ/r_d, y_d·sin θ/r_d, cos θ)`.
 
 - `r_d ≤ 0` is `θ = 0`.
-- On the **linear tail** (`r_d ≥ θ_max + δ(θ_max)`) the inverse is closed form:
-  `θ = r_d − δ(θ_max)`, no iteration.
+- On the **linear tail** (`r_d ≥ r_end = θ_max + δ(θ_max)`) the map is affine
+  with the spline's end slope, so the inverse is closed form:
+  `θ = θ_max + (r_d − r_end)/(1 + δ'(θ_max))`, no iteration. A non-positive end
+  slope makes `r_end` the map's maximum instead, so a radius past it has no
+  preimage and is reported as non-convergence; only a spline that violates the
+  monotonicity invariant reaches that.
 - Inside the spline's domain, a **bracket-safeguarded Newton** solves
   `g(θ) = θ + δ(θ) − r_d` over `[0, θ_max]`, where `g(0) = −r_d < 0` and
   `g(θ_max) > 0`. The start is the identity guess `min(r_d, θ_max)`; each
@@ -76,9 +83,11 @@ inverting `r_d = θ + δ(θ)` in `recover_radial_bspline`, then returning
   outside the bracket (or non-finite, or on a non-positive `g'`) is replaced by
   a bisection. The bounds are inclusive: an underflowed step that reproduces
   `θ` is convergence, not a reason to bisect away from the root.
-- Non-convergence is reported only when `θ_d(θ_max) ≤ 0` (a spline folded so
-  far that no radius is representable) and is answered with the identity
-  equidistant ray, since there is no inverse to return.
+- Non-convergence is reported where the radius has no preimage at all —
+  `θ_d(θ_max) ≤ 0` (a spline folded so far that nothing is representable), or a
+  radius past `r_end` under a non-positive end slope — and is answered with the
+  identity equidistant ray, since there is no inverse to return. Both need a
+  spline that violates the monotonicity invariant.
 
 There is **no wide-angle blend**: the map is monotone by construction, so the
 recovery is the exact inverse at every angle. A blend would drop the spline
@@ -117,7 +126,18 @@ together.
 ## Monotonicity enforcement
 
 `bspline_is_monotone` decides the model's invariant, `1 + δ'(θ) > 0` over
-`[0, θ_max]`, in two stages:
+`[0, θ_max]` and over the linear tail past it.
+
+The tail carries the constant slope `1 + δ'(θ_max)`, so its whole half-line is
+decided by that single inequality, checked first and unconditionally. It has to
+be unconditional because the caller may ask about a span shorter than `θ_max`:
+a spline whose sampled prefix rises while its end slope is non-positive would
+otherwise pass, and the Newton inverse of an extrapolated radius would lose the
+bracket the invariant exists to guarantee. Stage 1 below implies the same
+inequality whenever it passes, since `δ'(θ_max)` is the derivative spline's last
+control point.
+
+The domain itself is decided in two stages:
 
 1. The **sufficient** condition on the derivative spline's control points. `δ'`
    is a quadratic B-spline whose control points are
@@ -192,8 +212,10 @@ which is what delivers the format spec's promotion contract.
   and Jacobian out of domain together (`None` from both).
 - **Basis unit tests**: `δ(0) = 0` and `δ'(0) = 0` (the gauge); the basis is a
   partition of unity; equal coefficients plateau once the anchored pair dies
-  out; `δ'` matches a central difference of `δ`; `δ` is held constant beyond
-  `θ_max`; a spline below the minimum length is the identity.
+  out; `δ'` matches a central difference of `δ`; `δ` is `C¹` across `θ_max` and
+  grows linearly at `δ'(θ_max)` beyond it; the monotone check rejects a
+  non-positive tail slope even when the requested span stops short of `θ_max`;
+  a spline below the minimum length is the identity.
 - **Classification**: the model reports fisheye, ray-path and analytic-Jacobian
   support, and reports no distortion for an empty or all-zero spline.
 - **Python surface** (`tests/rust_bindings/`): batch projection round trip

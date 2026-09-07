@@ -322,9 +322,10 @@ The unbounded classifications are each their own argument, not a default:
   and with the reasoning written on `simple_radial_fisheye_to_ray`: with one
   coefficient `θ_d = θ·(1 + k1·θ²)` there is nothing to distrust. This section
   is that argument generalised.
-- The two spline models hold `δ` constant past `bspline_*_max`, so their radial
-  map continues linearly with slope `f`, and they enforce `1 + δ'(θ) > 0` as a
-  construction invariant. There is no peak to approach at any angle.
+- The two spline models continue `δ` along its end tangent past
+  `bspline_*_max`, so their radial map continues linearly there, and they
+  enforce `1 + δ'(θ) > 0` as a construction invariant on that tail as well as
+  on the domain. There is no peak to approach at any angle.
 - The exact maps — the plain pinholes, `EQUIDISTANT_FISHEYE`, `EQUIRECTANGULAR`
   — have no polynomial, and the perspective polynomials are already hard
   bounded at the 90° their projective divide refuses.
@@ -791,9 +792,10 @@ one-cell cap is in image pixels on both sides and is view-independent already.
 
 **Spline domain marker.** For `SfmtoolFisheye` / `SfmtoolPinhole`, an extra
 dashed iso-contour at `bspline_theta_max` / `atan(bspline_rho_max)`, labelled
-`spline domain`. Beyond it the correction is held constant and the map continues
-linearly, so a lens whose image corners fall outside that contour is being
-extrapolated — a fact worth seeing on the image, since it explains residuals
+`spline domain`. Beyond it the correction continues along its end tangent and
+the map continues linearly, so a lens whose image corners fall outside that
+contour is being extrapolated — a fact worth seeing on the image, since it
+explains residuals
 that appear only at the corners.
 
 **Equirectangular.** The axes and rings are drawn from the same ray maths with

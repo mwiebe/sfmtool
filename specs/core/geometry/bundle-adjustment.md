@@ -166,7 +166,9 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   spline never moves past the data. **Step guard.** Inside the damping
   ladder, exactly where a non-positive focal or a folded `k1` is rejected, a
   candidate spline that is non-finite or violates the model's monotonicity
-  invariant `1 + δ'(d) > 0` anywhere on `[0, d_max]` is rejected and the step
+  invariant `1 + δ'(d) > 0` anywhere on `[0, d_max]` — or on the linear tail
+  past it, where the single `1 + δ'(d_max) > 0` decides the whole half-line —
+  is rejected and the step
   re-damped. The whole domain rather than the imaged field: monotonicity is
   the model's construction invariant (the bracket behind its inverse) and the
   accepted spline is persisted into the camera, while unsupported
@@ -203,9 +205,10 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   model's radial coordinate `d` (`θ` for `SFMTOOL_FISHEYE`, `ρ = ρ_xy/rz`
   for `SFMTOOL_PINHOLE`), all with `d` and `û` read from the ray in the
   optical frame, so all are exact over the whole field, the fisheye's
-  periphery past 90° included; on the spline's held-constant tail past
-  `d_max` the basis is evaluated at `d_max`, which is exactly the derivative
-  of the held constant. A direction (point at infinity) takes every one of these
+  periphery past 90° included; on the spline's linear tail past `d_max` the
+  correction continues along its end tangent, so the column is the exact
+  `f·(Bᵢ(d_max) + B'ᵢ(d_max)·(d − d_max))·(ûx, ûy)`, both terms read from the
+  one clamped basis evaluation. A direction (point at infinity) takes every one of these
   columns unchanged — it projects through the very same map, at `R·d`
   instead of `R·X + t`. Cubic local support means at most four spline
   columns are non-zero at one observation, so the per-observation camera
