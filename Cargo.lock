@@ -4950,6 +4950,7 @@ version = "0.2.0"
 dependencies = [
  "approx",
  "bytemuck",
+ "chrono",
  "dunce",
  "nalgebra",
  "ndarray",
@@ -4996,8 +4997,10 @@ dependencies = [
  "rayon",
  "serde_json",
  "sfmr-format",
+ "sfmtool-archive-io",
  "sift-format",
  "wgpu",
+ "xxhash-rust",
  "zip",
  "zstd",
 ]
