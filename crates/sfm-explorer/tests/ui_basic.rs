@@ -97,11 +97,22 @@ impl Guard {
 
     /// The same, with the viewer's command line spelled out.
     fn with_args(args: &[&str]) -> Self {
-        let _lock = ui_test_lock();
+        Guard::with_args_under(ui_test_lock(), args)
+    }
+
+    /// The same again, under a lock the caller already holds.
+    ///
+    /// A test that has to put something in place *before* the viewer starts,
+    /// such as a default layout file in the home directory, has to do that
+    /// under the serialization lock too: two tests writing that one file would
+    /// otherwise each read the other's. So the lock is taken first, the file is
+    /// written, and the lock is handed on to the guard that owns it for the
+    /// rest of the test.
+    fn with_args_under(lock: MutexGuard<'static, ()>, args: &[&str]) -> Self {
         Guard {
             child: RefCell::new(launch_with(args)),
             args: Some(args.iter().map(|a| (*a).to_string()).collect()),
-            _lock,
+            _lock: lock,
         }
     }
 
@@ -577,9 +588,16 @@ struct DefaultLayoutFile {
 }
 
 impl DefaultLayoutFile {
-    /// Put `contents` at `~/.sfm-explorer-default-layout.json`, preserving
-    /// whatever was there.
-    fn written(contents: &str) -> Self {
+    /// Take the serialization lock, put `contents` at
+    /// `~/.sfm-explorer-default-layout.json` preserving whatever was there, and
+    /// hand the lock back for [`Guard::with_args_under`].
+    ///
+    /// The lock comes first because the file is one file: two tests writing it
+    /// at once would each launch a viewer on the other's layout. Nothing here
+    /// launches anything, so the caller passes the lock straight on to the
+    /// guard that owns the viewer.
+    fn written(contents: &str) -> (Self, MutexGuard<'static, ()>) {
+        let lock = ui_test_lock();
         #[allow(deprecated)] // Un-deprecated in 1.85, below the workspace MSRV.
         let home = std::env::home_dir().expect("a home directory");
         let path = home.join(".sfm-explorer-default-layout.json");
@@ -589,7 +607,7 @@ impl DefaultLayoutFile {
             saved
         });
         std::fs::write(&path, contents).expect("write a default layout file");
-        DefaultLayoutFile { path, saved }
+        (DefaultLayoutFile { path, saved }, lock)
     }
 }
 
@@ -611,7 +629,7 @@ impl Drop for DefaultLayoutFile {
 /// that the file was read.
 #[test]
 fn a_saved_default_layout_is_loaded_at_startup() {
-    let _file = DefaultLayoutFile::written(
+    let (_file, lock) = DefaultLayoutFile::written(
         r#"{
   "sfm_explorer_layout": 2,
   "layout": {
@@ -625,7 +643,7 @@ fn a_saved_default_layout_is_loaded_at_startup() {
 "#,
     );
     // Launched *without* `--no-default-layout`, unlike every other test here.
-    let guard = Guard::with_args(&[]);
+    let guard = Guard::with_args_under(lock, &[]);
     let app = attach(guard.child());
 
     app.locator(r#"button[name="Latest"]"#)
@@ -637,6 +655,48 @@ fn a_saved_default_layout_is_loaded_at_startup() {
             .is_err(),
         "the 3D viewer is still docked, so the stock grid was used"
     );
+}
+
+/// The Edit History panel reaches a real window: with a node loaded it lists that
+/// node's one version, the file as it was opened.
+///
+/// The panel is put in front by a default layout file naming it alone, as the
+/// startup-load test above puts the Action Log there: the stock grid keeps the
+/// Edit History tab behind the Image Browser, and `egui_dock`'s tab bar is painted
+/// rather than built out of widgets, so there is no tab in the accessibility
+/// tree to press. A layout file is the deterministic way in, since the panel is
+/// in front from the viewer's first frame. Everything the panel decides is
+/// exercised headlessly in `edit_history_panel/tests.rs`.
+#[test]
+fn the_edit_history_panel_lists_the_loaded_version() {
+    let (_file, lock) = DefaultLayoutFile::written(
+        r#"{
+  "sfm_explorer_layout": 2,
+  "layout": {
+    "main": {
+      "tabs": ["edit_history"],
+      "active": "edit_history"
+    },
+    "windows": []
+  }
+}
+"#,
+    );
+    // Launched *without* `--no-default-layout`, so the file above is read.
+    let guard = Guard::with_args_under(lock, &[]);
+    let app = attach(guard.child());
+    load_demo_data(&app);
+
+    // The demo node is labeled "demo" and has been through no edit, so both
+    // strings are fixed by the fixture.
+    for text in [
+        "1 version",
+        "demo has not been edited; its one version is the file as it was opened.",
+    ] {
+        app.locator(&format!(r#"static_text[name="{text}"]"#))
+            .wait_attached(CONTENT_TIMEOUT)
+            .unwrap_or_else(|_| panic!("Edit History panel text '{text}' did not appear"));
+    }
 }
 
 // --- The MCP screenshot, against a real frame ---
