@@ -202,6 +202,17 @@ bulk edits in this sense. The two compose: a run of point edits on a base, then
 a bulk edit that materialises them into the next base, then more point edits on
 that.
 
+A bulk edit owes its caller the same thing a materialisation does: where the
+points went. It does not return one, though, because a bulk edit is written as
+a function from a reconstruction to a reconstruction and nothing else -- an
+image subset, a point-mask filter, a similarity transform, a bundle adjustment
+-- and giving each of them a second spelling that also returns a map would be
+one more thing to keep in step per edit. Instead the map is derived, once, from
+the two values: `RowMap::by_scan(before, after, image_map)` walks the two point
+lists side by side and reads off what happened between them. "Scanning the
+answer" is described in full under [The scanned row map](#the-scanned-row-map)
+below.
+
 ### Indexes are stable
 
 A base point keeps its index while the base lives; a deleted index is a hole
@@ -267,6 +278,14 @@ impl EditedReconstruction {
     pub fn base_content_hash(&self) -> Result<&ContentHash, SfmrError>;
     pub fn point_edit_hash(&self, records: &[PointRecord]) -> Result<String, SfmrError>;
     pub fn materialize(&self) -> (SfmrReconstruction, RowMap);
+}
+
+impl RowMap {
+    /// The map a whole-value edit performed, read off its input and its output.
+    /// `image_map` is one entry per image of `before`, or `None` when the edit
+    /// left the image table alone.
+    pub fn by_scan(before: &SfmrReconstruction, after: &SfmrReconstruction,
+        image_map: Option<&[Option<u32>]>) -> Result<RowMap, EditError>;
 }
 
 pub struct PointRecord {
@@ -382,6 +401,61 @@ so it is not the file the base came from and must not claim to be.
 The result becomes the base of the next version, with empty edits. Older
 versions keep their own base and their own edits, so the history's budget counts
 one copy of the light columns per materialisation rather than per edit.
+
+## The scanned row map
+
+A materialisation knows what it did and hands back the map for it. Every other
+whole-value edit is a plain function from a reconstruction to a reconstruction,
+so the map has to be recovered afterwards, from the two values.
+`RowMap::by_scan(before, after, image_map)` does that. `image_map` says where
+each image of `before` went, one entry per image, holding its index in `after`
+or nothing for an image the edit dropped; `None` for the whole argument means
+the image table did not move, which is every bulk edit but an image subset.
+
+**The invariant it rests on is that a bulk edit never reorders the points that
+survive it.** Every one of them is a selection or a per-point rewrite over the
+existing list, in its existing order: the image subset filters and renumbers,
+the point mask filters, a similarity transform and a bundle adjustment rewrite
+every point in place, and a materialisation puts each point back in the slot it
+came from. A bulk edit may **drop** points, and may **create** them (a densify,
+a fresh triangulation pass, a materialisation's appended additions); the scan
+reports both. What it cannot follow is a list whose survivors changed places.
+
+**The walk.** Two heads move through the two point lists. The after point at the
+write head matches the before point at the read head when its track is a
+non-empty subsequence of that before point's track, once the before track is put
+through the image map and the observations of dropped images are removed. On a
+match both heads advance. Otherwise the scan looks ahead through the remaining
+before points for the first one the after point matches: found, everything
+skipped over is a deletion; not found, the after point is one the edit created,
+and only the write head advances. Whatever the write head never accounts for is
+a deletion too. A created row has no old index, so `inverse` answers `None` for
+it, exactly as it does for a materialisation's appended additions.
+
+**What identifies a sighting.** The image it is in, plus its feature index when
+the reconstruction carries one (`sift_files`). The inline keypoint of an
+`embedded_patches` reconstruction is deliberately not compared: a refinement
+moves a keypoint by a fraction of a pixel without making it a different
+sighting, so matching on it would report a point that an adjustment merely
+improved as one the edit deleted. An `embedded_patches` point is therefore
+identified by the images that see it and nothing finer, and two adjacent points
+seen by the same images in the same order are indistinguishable to the scan.
+That ambiguity is reachable only when one of the two is deleted and the other
+kept, and the answer it gives then is one of the two rows, both of which hold a
+point the same images saw. A point left with no observations at all identifies
+nothing and is reported as created rather than carried over.
+
+**Cost.** One pass over both point lists when the edit created nothing, or
+appended what it created, which is what every bulk edit here does. A created
+point that is *interleaved* costs a look-ahead to the end of the before list, so
+a value whose new points are scattered through it in quantity degrades toward
+quadratic.
+
+**What the map holds.** A scanned map is two dense arrays, one entry per point
+of each side, rather than the sorted holes a materialisation's map is. It has to
+be: with rows the edit created, interleaved anywhere, a survivor's new index is
+no longer its old one less the holes below it, and no amount of hole counting
+recovers it. Both directions are then a lookup.
 
 ## Reading through the overlay
 
@@ -562,6 +636,16 @@ invents one is a visible failure. What they pin:
 - The hash a materialised value reports equals the `content_xxh128` a save of it
   writes, read back off the file, and two saves a moment apart write that same
   hash and two different timestamps.
+- The scanned map is a bijection from the points an edit kept onto the rows that
+  hold them, over an image subset (where it equals the subset's own
+  renumbering), a point-mask filter (where it equals the mask) and a similarity
+  transform (where it is the identity). Over a value whose points were both
+  interleaved and appended it maps every survivor and reports every new row as
+  created. Over a materialisation it agrees with the map `materialize` returned
+  on every base point the overlay left alone, and the one place they differ is
+  the one place they are answering different questions: a replaced base index
+  stopped resolving in the *edited* index space the materialisation's map is
+  over, while the scan follows the point's identity into the row it landed in.
 
 `crates/sfmr-format/src/tests.rs` pins the hashing itself: that
 `content_hash_of` agrees section for section with what a write of the same data
@@ -577,10 +661,12 @@ timestamp it stored and verifies against the hashes it stored.
 - Branching, or an edit applied to a version other than the one in hand. The
   overlay is one version's worth of edits on one base.
 - Persisting the overlay. A file is always a materialisation.
-- The policy that decides *when* to materialise, the GPU-side consequences of
-  the deleted set and the additions buffer, and the point-id version graph that
-  tracks a point's identity across versions. Those are proposed in
+- The policy that decides *when* to materialise, and the point-id minting and
+  resolution built on the version graph. Those are proposed in
   [`../../drafts/sfm-explorer-editing-overlay.md`](../../drafts/sfm-explorer-editing-overlay.md).
+  What the viewer does with the deleted set and the additions on the GPU, and
+  the per-node history the versions live in, are in
+  [`../../gui/document-model.md`](../../gui/document-model.md).
 - Sharing between reconstructions beyond the two heavy columns. The track
   columns are most of the remaining bytes and are untouched by every bulk edit
   but an image deletion, so they could be shared too; they are not, until there
