@@ -49,6 +49,7 @@ fn make_test_data() -> SfmrData {
             frame_count: None,
             world_space_unit: None,
             feature_source: FEATURE_SOURCE_SIFT_FILES.to_string(),
+            lineage: Vec::new(),
         },
         content_hash: ContentHash {
             metadata_xxh128: String::new(),
@@ -899,6 +900,7 @@ fn test_empty_reconstruction() {
             frame_count: None,
             world_space_unit: None,
             feature_source: FEATURE_SOURCE_SIFT_FILES.to_string(),
+            lineage: Vec::new(),
         },
         content_hash: ContentHash {
             metadata_xxh128: String::new(),
@@ -2908,6 +2910,181 @@ fn a_file_written_before_the_split_keeps_its_timestamp_and_its_hashes() {
     assert_eq!(read_sfmr(&legacy).unwrap().metadata.timestamp, stamp);
     let (ok, errors) = verify_sfmr(&legacy).unwrap();
     assert!(ok, "a pre-split file verifies unchanged: {errors:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Lineage (version 9) ─────────────────────────────────────────────────
+
+#[test]
+fn a_monotone_map_says_where_every_surviving_row_went() {
+    // Ancestor rows 0..5 with row 2 gone, and a row of this file (row 1) that
+    // no ancestor row landed in.
+    let map = LineageMap::Monotone {
+        source_rows: 5,
+        deleted: vec![2],
+        created: vec![1],
+    };
+    assert_eq!(map.source_rows(), 5);
+    assert_eq!(map.forward(0), Some(0));
+    assert_eq!(map.forward(1), Some(2));
+    assert_eq!(map.forward(2), None);
+    assert_eq!(map.forward(3), Some(3));
+    assert_eq!(map.forward(4), Some(4));
+}
+
+#[test]
+fn a_monotone_map_refuses_a_row_at_or_past_its_source_count() {
+    // `deleted` and `created` name only the rows that changed, so they do not
+    // imply how many rows the ancestor had. `source_rows` is what says where the
+    // map's domain ends: without it row 5 below would answer `Some(5)`, naming a
+    // row of this file for an ancestor row that never existed.
+    let map = LineageMap::Monotone {
+        source_rows: 5,
+        deleted: vec![2],
+        created: vec![1],
+    };
+    assert_eq!(map.forward(4), Some(4));
+    assert_eq!(map.forward(5), None);
+    assert_eq!(map.forward(6), None);
+    assert_eq!(map.forward(u32::MAX), None);
+
+    // The degenerate case the same rule covers: a map over no rows at all
+    // describes no row, rather than describing row zero.
+    let empty = LineageMap::Monotone {
+        source_rows: 0,
+        deleted: vec![],
+        created: vec![],
+    };
+    assert_eq!(empty.source_rows(), 0);
+    assert_eq!(empty.forward(0), None);
+}
+
+#[test]
+fn a_dense_map_says_it_row_by_row_and_may_reorder() {
+    let map = LineageMap::Dense {
+        rows: vec![Some(2), None, Some(0)],
+    };
+    assert_eq!(map.forward(0), Some(2));
+    assert_eq!(map.forward(1), None);
+    assert_eq!(map.forward(2), Some(0));
+    // Past the end is not a row of the ancestor at all.
+    assert_eq!(map.source_rows(), 3);
+    assert_eq!(map.forward(3), None);
+}
+
+#[test]
+fn lineage_round_trips_through_a_write_and_reaches_the_content_hash() {
+    let dir = std::env::temp_dir().join("sfmr_test_lineage");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let lineage = vec![
+        LineageEntry {
+            hash: "0123456789abcdef0123456789abcdef".to_string(),
+            kind: LINEAGE_KIND_BASE.to_string(),
+            map: LineageMap::Monotone {
+                source_rows: 4,
+                deleted: vec![1],
+                created: vec![],
+            },
+        },
+        LineageEntry {
+            hash: "fedcba9876543210fedcba9876543210".to_string(),
+            kind: LINEAGE_KIND_POINT_EDIT.to_string(),
+            map: LineageMap::Dense {
+                rows: vec![Some(0), None],
+            },
+        },
+    ];
+
+    let bare = dir.join("bare.sfmr");
+    let mut data = make_test_data();
+    write_sfmr(&bare, &mut data).unwrap();
+    let bare_hash = read_sfmr_content_hash(&bare).unwrap();
+
+    let with = dir.join("with.sfmr");
+    let mut data = make_test_data();
+    data.metadata.lineage = lineage.clone();
+    write_sfmr(&with, &mut data).unwrap();
+
+    // It comes back exactly as it went in, and the file verifies.
+    let loaded = read_sfmr(&with).unwrap();
+    assert_eq!(loaded.metadata.lineage, lineage);
+    assert_eq!(loaded.metadata.version, SFMR_FORMAT_VERSION);
+    let (ok, errors) = verify_sfmr(&with).unwrap();
+    assert!(ok, "{errors:?}");
+
+    // And it is content: the same reconstruction with a different account of
+    // where its rows came from is a different file.
+    let with_hash = read_sfmr_content_hash(&with).unwrap();
+    assert_ne!(with_hash.metadata_xxh128, bare_hash.metadata_xxh128);
+    assert_ne!(with_hash.content_xxh128, bare_hash.content_xxh128);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn metadata_with_no_lineage_key_reads_as_an_empty_list() {
+    // What every file below version 9 carries, and what a version 9 file with
+    // no ancestor writes: the key is absent rather than an empty array, so an
+    // unedited file's metadata bytes did not change with the bump.
+    let mut data = make_test_data();
+    let json = serde_json::to_string(&data.metadata).unwrap();
+    assert!(!json.contains("lineage"), "{json}");
+
+    let parsed: SfmrMetadata = serde_json::from_str(&json).unwrap();
+    assert!(parsed.lineage.is_empty());
+
+    data.metadata.lineage = vec![LineageEntry {
+        hash: "0123456789abcdef0123456789abcdef".to_string(),
+        kind: LINEAGE_KIND_BASE.to_string(),
+        map: LineageMap::Monotone {
+            source_rows: 1,
+            deleted: vec![],
+            created: vec![],
+        },
+    }];
+    let json = serde_json::to_string(&data.metadata).unwrap();
+    assert!(json.contains("\"form\":\"monotone\""), "{json}");
+}
+
+// ── Atomic writes ───────────────────────────────────────────────────────
+
+#[test]
+fn a_write_that_fails_leaves_an_existing_file_byte_identical() {
+    // The case that matters is a save over the file it is replacing: the target
+    // is the only copy, so a writer that truncated it on open would destroy it
+    // on any failure. What this asserts is that `write_sfmr` goes through the
+    // temporary file and cleans it up: the previous bytes are still there and
+    // nothing is left beside them. The failure *after* bytes have been streamed
+    // is asserted where it can be injected, in
+    // `sfmtool-archive-io`'s `a_failed_write_leaves_the_previous_target_untouched`.
+    let dir = std::env::temp_dir().join("sfmr_test_atomic_write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("recon.sfmr");
+
+    let mut good = make_test_data();
+    write_sfmr(&path, &mut good).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    // A value the writer rejects: the metadata's point count disagrees with the
+    // arrays, which validation catches after the target would have been opened.
+    let mut bad = make_test_data();
+    bad.metadata.point_count += 7;
+    let error = write_sfmr(&path, &mut bad).expect_err("dimension validation");
+
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "the previous file survived the failed write ({error})"
+    );
+    // And nothing was left lying beside it.
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["recon.sfmr".to_string()], "{names:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

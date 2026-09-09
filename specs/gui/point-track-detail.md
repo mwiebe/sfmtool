@@ -79,7 +79,7 @@ pt3d_a1b2c3d4_12345 | xyz: (1.234, -0.567, 2.891) | error: 0.42px | track: 7 obs
 
 | Field | Source | Description |
 |-------|--------|-------------|
-| Point ID | `selected_point` + `content_xxh128` | Copy-pastable ID (see Point ID section below) |
+| Point ID | `selected_point`, minted over the node's version graph | Copy-pastable ID (see Point ID section below) |
 | Position | `recon.points[idx].position` | World-space XYZ coordinates |
 | Error | `recon.points[idx].error` | RMS reprojection error in pixels |
 | Track length | `recon.observation_counts[idx]` | Number of observing images |
@@ -115,6 +115,20 @@ The Point ID format is `pt3d_{hash}_{index}`, e.g., `pt3d_a1b2c3d4_12345`.
 The hash prefix is derived from the `.sfmr` file's `content_xxh128` hash, and
 the entire ID uses only `[a-zA-Z0-9_]` characters so it can be
 selected with a single double-click in any terminal or browser.
+
+The header shows, and *Copy Point ID* copies, `pt3d_{hash}_{index}`, minted over
+the node's version graph by the rule **disk state first, earliest otherwise**:
+the hash is the content the point sits in on disk when its identity reaches
+that version, and the oldest content its identity reaches otherwise
+([goto-point.md](goto-point.md) § "The ID forms and the version graph"). So the
+ID copied out of this header is, in the ordinary case, one a reader of the file
+on disk resolves as it stands. Nothing in it names the node it was copied from:
+the point is that content's row wherever that content is loaded.
+
+The ID is **recomputed every frame** rather than on selection change. An edit,
+an undo or a save can change which content the ID names without the selection
+moving at all, so an ID cached against the selection would go on showing the
+content of a version the node has left.
 
 For the full format specification, design rationale, and `.sfmr` file resolution
 strategy, see the [Point ID section in the sfmr file format
