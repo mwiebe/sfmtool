@@ -365,7 +365,9 @@ fn edit_menu_items() {
         .press()
         .expect("press Edit menu button");
 
-    for item in ["Delete Image", "Bundle Adjust..."] {
+    // Named without their shortcuts, for the reason `file_menu_items` gives:
+    // the shortcut is in the button's text and is spelled by the platform.
+    for item in ["Delete Image", "Cancel Camera Move", "Bundle Adjust..."] {
         app.locator(&format!(r#"button[name="{item}"]"#))
             .wait_attached(CONTENT_TIMEOUT)
             .unwrap_or_else(|_| panic!("Edit menu item '{item}' did not appear"));
@@ -1129,4 +1131,105 @@ fn dump_tree() {
         app.dump(Some(5))
             .unwrap_or_else(|e| format!("dump error: {e}"))
     );
+}
+
+/// Taking a camera in hand, in a real window: the Edit menu and the lock's
+/// release.
+///
+/// The one part of the Move Camera family a headless frame cannot reach. Every
+/// decision it makes -- the snap, the pending pose, the dead band, the commit --
+/// is asserted in `camera_lock/tests.rs`; what this asks is whether the menu
+/// entry and the release reach a live viewport at all. The banner is painted
+/// rather than built of widgets, so it is not in the accessibility tree and is
+/// covered headlessly instead.
+///
+/// The pose is deliberately not moved here. Synthetic mouse input on Windows
+/// arrives through `WM_POINTER` (`EnableMouseInPointer`, see the right-click
+/// test), and winit renders a moving contact as a touch rather than a drag, so
+/// an injected drag moves no camera in this app -- with a lock held or without
+/// one. What a real window can be asked, and is asked below, is whether the
+/// menu takes the camera in hand and gives it back.
+///
+/// Windows-only for the reason the right-click test is: injecting real input is
+/// platform code, and one platform proves the wiring.
+#[cfg(windows)]
+#[test]
+fn taking_a_camera_in_hand_reaches_a_real_window() {
+    let viewer = McpViewer::launch();
+    let app = viewer.wait_for_window();
+    viewer.initialize();
+    load_demo_data(&app);
+
+    // The 3D viewer alone in the dock, so nothing but the viewport is under
+    // the menu the test drives.
+    viewer.call(
+        "set_window_layout",
+        serde_json::json!({
+            "layout": { "main": { "tabs": ["viewer_3d"], "active": "viewer_3d" }, "windows": [] },
+        }),
+    );
+    viewer.call(
+        "set_view",
+        serde_json::json!({ "look_through": { "camera_image": 0 } }),
+    );
+
+    // The menu button toggles, so one opening is one place to look: reopening
+    // it to find a second item would close it instead.
+    let open_edit_menu = || {
+        app.locator(r#"button[name="Edit"]"#)
+            .press()
+            .expect("press Edit menu button");
+    };
+    // Matched on a name *prefix*, for the reason `edit_menu_items` gives: both
+    // spellings of the Move Camera item carry the `M` shortcut in the button's
+    // text, and the shortcut is spelled by the platform.
+    let edit_item = |item: &str| {
+        app.locator(&format!(r#"button[name^="{item}"]"#))
+            .wait_attached(CONTENT_TIMEOUT)
+            .unwrap_or_else(|_| panic!("Edit menu item '{item}' did not appear"))
+    };
+    let log_texts = || -> Vec<String> {
+        let log = viewer.call(
+            "get_action_log",
+            serde_json::json!({ "since_revision": 0, "limit": 200 }),
+        );
+        log["structuredContent"]["entries"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| e["text"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let wait_for_line = |prefix: &str| {
+        let deadline = Instant::now() + CONTENT_TIMEOUT;
+        loop {
+            let texts = log_texts();
+            if texts.iter().any(|text| text.starts_with(prefix)) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no '{prefix}' line; the log holds {texts:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    open_edit_menu();
+    edit_item("Move Camera")
+        .press()
+        .expect("press Edit menu item 'Move Camera'");
+    wait_for_line("Moving the camera of image_000.jpg");
+
+    // One opening for both: with a lock held the same entry commits rather
+    // than takes, and the entry beside it gives the camera back.
+    open_edit_menu();
+    edit_item("Commit Camera Move");
+    edit_item("Cancel Camera Move")
+        .press()
+        .expect("press Edit menu item 'Cancel Camera Move'");
+    wait_for_line("Cancelled the camera move of image_000.jpg");
 }
