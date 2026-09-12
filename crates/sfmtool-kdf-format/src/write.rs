@@ -11,8 +11,6 @@ use zip::ZipWriter;
 
 use crate::types::*;
 
-const NODE_COLUMNS: usize = 10;
-
 struct PackedChunk<S: KdfScalar> {
     logical_nodes: Vec<u32>,
     nodes: Vec<DecodedNode<S>>,
@@ -544,7 +542,31 @@ fn write_into<W: Write + Seek, S: KdfScalar>(
     };
 
     let (storage_digest, descriptor_digests) = if let Some(q) = descriptor_rows {
-        let order = &data.trees[0].feature_ids;
+        let tree_zero = &data.trees[0].feature_ids;
+        let order: &[u32] = match data.descriptor_order {
+            Some(explicit) => {
+                if explicit.len() != data.feature_count {
+                    return Err(KdfError::ShapeMismatch(format!(
+                        "descriptor_order has {} entries, expected {}",
+                        explicit.len(),
+                        data.feature_count
+                    )));
+                }
+                let mut seen = vec![false; data.feature_count];
+                for &id in explicit {
+                    let slot = seen.get_mut(id as usize).ok_or_else(|| {
+                        KdfError::InvalidFormat("descriptor_order has an out-of-range ID".into())
+                    })?;
+                    if std::mem::replace(slot, true) {
+                        return Err(KdfError::InvalidFormat(
+                            "descriptor_order repeats an ID".into(),
+                        ));
+                    }
+                }
+                explicit
+            }
+            None => tree_zero,
+        };
         let mut storage_rows = vec![0u32; data.feature_count];
         for (row, &id) in order.iter().enumerate() {
             storage_rows[id as usize] = row as u32;
@@ -558,29 +580,45 @@ fn write_into<W: Write + Seek, S: KdfScalar>(
         )?;
         let sd = xxh3_128(raw);
         section_digests.push(sd);
+        // One container entry of independent per-block frames, plus the offsets
+        // that address them. Each frame is still compressed and hashed exactly
+        // as a standalone block entry was, so a block read decodes one frame and
+        // the digest list is unchanged; what goes away is one ZIP directory
+        // record per block, which at small block sizes is most of the file's
+        // entries and most of its open cost.
         let mut ds = Vec::new();
-        for (b, ids) in order.chunks(q).enumerate() {
+        // Stream frames directly: buffering the container duplicates the entire
+        // compressed corpus in memory. ZIP64 permits a stream larger than 4 GiB.
+        zip.start_file(
+            corpus_entry_name::<S>(data.feature_count, data.dimension),
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(true),
+        )?;
+        let mut stored = 0u64;
+        let mut offsets = vec![0u64];
+        for ids in order.chunks(q) {
             let mut block = Vec::with_capacity(ids.len() * data.dimension);
             for &id in ids {
                 let base = id as usize * data.dimension;
                 block.extend_from_slice(&data.vectors[base..base + data.dimension]);
             }
-            let raw = bytemuck::cast_slice(block.as_slice());
-            write_binary_entry(
-                &mut zip,
-                &format!(
-                    "features/blocks/{b}/vectors.{}.{}.{}.zst",
-                    ids.len(),
-                    data.dimension,
-                    S::TYPE_NAME
-                ),
-                raw,
-                options.compression_level,
-            )?;
+            let raw: &[u8] = bytemuck::cast_slice(block.as_slice());
+            let frame = zstd::encode_all(raw, options.compression_level)?;
+            zip.write_all(&frame)?;
+            stored += frame.len() as u64;
+            offsets.push(stored);
             let d = xxh3_128(raw);
             ds.push(d);
             section_digests.push(d);
         }
+        let offsets_raw: &[u8] = bytemuck::cast_slice(offsets.as_slice());
+        write_binary_entry(
+            &mut zip,
+            &block_offsets_entry_name(offsets.len()),
+            offsets_raw,
+            options.compression_level,
+        )?;
         (Some(sd), Some(ds))
     } else {
         (None, None)
@@ -617,48 +655,33 @@ fn write_into<W: Write + Seek, S: KdfScalar>(
                     DecodedNode::Leaf { start, .. } => columns[9 * chunk.nodes.len() + i] = start,
                 }
             }
-            let nb = bytemuck::cast_slice(columns.as_slice());
-            let sb = bytemuck::cast_slice(splits.as_slice());
-            let fb = bytemuck::cast_slice(chunk.feature_ids.as_slice());
-            let prefix = format!("trees/{ti}/chunks/{ci}");
+            // The three integer arrays share one entry: they are always read
+            // together — decoding a node needs the columns and the splits, and
+            // reaching a leaf needs the IDs — and they compress alike. Vectors
+            // stay separate despite also always being read with them, because
+            // bulk descriptor bytes in the same zstd frame as these columns make
+            // both compress worse.
+            let nb: &[u8] = bytemuck::cast_slice(columns.as_slice());
+            let sb: &[u8] = bytemuck::cast_slice(splits.as_slice());
+            let fb: &[u8] = bytemuck::cast_slice(chunk.feature_ids.as_slice());
+            let mut payload = Vec::with_capacity(nb.len() + sb.len() + fb.len());
+            payload.extend_from_slice(nb);
+            payload.extend_from_slice(sb);
+            payload.extend_from_slice(fb);
             write_binary_entry(
                 &mut zip,
-                &format!(
-                    "{prefix}/nodes.{NODE_COLUMNS}.{}.uint32.zst",
-                    chunk.nodes.len()
-                ),
-                nb,
+                &chunk_entry_name::<S>(ti, ci, chunk.nodes.len(), chunk.feature_ids.len()),
+                &payload,
                 options.compression_level,
             )?;
-            write_binary_entry(
-                &mut zip,
-                &format!("{prefix}/splits.{}.{}.zst", chunk.nodes.len(), S::TYPE_NAME),
-                sb,
-                options.compression_level,
-            )?;
-            write_binary_entry(
-                &mut zip,
-                &format!(
-                    "{prefix}/feature_ids.{}.uint32.zst",
-                    chunk.feature_ids.len()
-                ),
-                fb,
-                options.compression_level,
-            )?;
+            // The digest keeps its defined order: topology, then vectors.
             let mut h = Xxh3::new();
-            h.update(nb);
-            h.update(sb);
-            h.update(fb);
+            h.update(&payload);
             if let Some(v) = &chunk.vectors {
-                let vb = bytemuck::cast_slice(v.as_slice());
+                let vb: &[u8] = bytemuck::cast_slice(v.as_slice());
                 write_binary_entry(
                     &mut zip,
-                    &format!(
-                        "{prefix}/vectors.{}.{}.{}.zst",
-                        chunk.feature_ids.len(),
-                        data.dimension,
-                        S::TYPE_NAME
-                    ),
+                    &chunk_vectors_entry_name::<S>(ti, ci, chunk.feature_ids.len(), data.dimension),
                     vb,
                     options.compression_level,
                 )?;

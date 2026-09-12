@@ -230,12 +230,15 @@ def test_summary_describes_the_file_it_was_given(tmp_path, layout, extra):
 def test_the_layouts_differ_in_exactly_the_sections_they_should(tmp_path):
     """This is the measurement the bindings exist for.
 
-    Tree-local keeps one vector copy per tree; shared keeps one corpus plus a
-    row map. Topology is identical either way, so the tree node, split and
-    feature-ID sections must match byte for byte — if they did not, a size
-    comparison between the layouts would be measuring two different forests.
+    Tree-local keeps one vector copy per tree; shared keeps one corpus plus a row
+    map. A chunk's integer arrays share one entry but its vectors do not, which is
+    what keeps this comparison honest: `tree_chunks` must be byte-identical across
+    the layouts, so any size difference between the files is descriptors and
+    nothing else.
     """
-    forest = _forest(_descriptors())
+    trees = 4
+    descriptors = _descriptors()
+    forest = _forest(descriptors, num_trees=trees)
     local = kdf_file_summary(str(_export(tmp_path, forest, "tree_local", {})))
     shared = kdf_file_summary(
         str(
@@ -248,22 +251,52 @@ def test_the_layouts_differ_in_exactly_the_sections_they_should(tmp_path):
     def section(summary, name):
         return next((s for s in summary["sections"] if s["section"] == name), None)
 
-    for name in ("tree_nodes", "tree_splits", "tree_feature_ids"):
-        assert section(local, name) == section(shared, name), (
-            f"{name} should be identical"
-        )
+    # Same forest, same partition. If these differed, a size comparison would be
+    # measuring two different trees rather than two ways of storing one.
+    assert local["chunks_per_tree"] == shared["chunks_per_tree"]
+    assert local["nodes_per_tree"] == shared["nodes_per_tree"]
 
-    assert section(local, "tree_vectors") is not None
-    assert section(shared, "tree_vectors") is None, (
-        "shared layout stores no tree-local vectors"
-    )
+    assert section(local, "shared_vectors") is None
+    assert section(local, "shared_row_map") is None
     assert section(shared, "shared_vectors") is not None
     assert section(shared, "shared_row_map") is not None
+    assert section(shared, "shared_block_offsets") is not None
 
-    # Four trees, so the shared corpus should be far smaller than four copies.
+    # Identical topology bytes: the only thing that moved is the descriptors.
+    assert section(local, "tree_chunks") == section(shared, "tree_chunks")
+
+    # Tree-local holds T copies; the shared corpus holds one.
+    corpus = section(shared, "shared_vectors")["decoded_bytes"]
+    assert corpus == _N * _DIM
+    assert section(local, "tree_vectors")["decoded_bytes"] == trees * corpus
+    assert section(shared, "tree_vectors") is None
+
+
+def test_summary_reports_real_decoded_sizes_not_the_stored_frame(tmp_path):
+    """Decoded bytes must be the uncompressed length, not the frame length.
+
+    `.kdf` entries are ZIP STORE wrapping a zstd frame, so the ZIP directory's
+    "uncompressed" size equals the compressed size. A summary built on it reports
+    every section at exactly 100% — a plausible-looking number rather than an
+    obvious failure. Compressible descriptors make the difference unmistakable.
+    """
+    # All-zero descriptors compress to almost nothing, so a decoded size that
+    # merely echoed the stored frame would be off by orders of magnitude.
+    descriptors = np.zeros((_N, _DIM), dtype=np.uint8)
+    descriptors[:, 0] = np.arange(_N, dtype=np.uint8)  # keep the tree splittable
+    forest = _forest(descriptors)
+    summary = kdf_file_summary(str(_export(tmp_path, forest, "tree_local", {})))
+
+    vectors = next(s for s in summary["sections"] if s["section"] == "tree_vectors")
+    # Four trees, each holding one uint8 vector row per feature.
+    assert vectors["decoded_bytes"] == 4 * _N * _DIM
+    assert vectors["compressed_bytes"] < vectors["decoded_bytes"] // 10
+
+    # And the whole payload compresses, rather than reporting a 1.0 ratio.
+    assert summary["payload_compressed_bytes"] < summary["payload_decoded_bytes"]
     assert (
-        section(shared, "shared_vectors")["decoded_bytes"]
-        < section(local, "tree_vectors")["decoded_bytes"]
+        sum(s["decoded_bytes"] for s in summary["sections"])
+        == (summary["payload_decoded_bytes"])
     )
 
 
@@ -412,3 +445,117 @@ def test_opening_a_file_that_is_not_a_kdf_is_an_os_error(tmp_path):
 def test_a_missing_file_is_a_file_not_found_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         LazyKdForest(str(tmp_path / "absent.kdf"))
+
+
+# ── Descriptor ordering ───────────────────────────────────────────────────
+
+
+def test_leaf_layout_describes_every_leaf(tmp_path):
+    """The leaf hypergraph an ordering policy is optimized against."""
+    descriptors = _descriptors()
+    forest = _forest(descriptors, num_trees=3, leaf_size=8)
+    assert forest.num_trees == 3
+    seen = set()
+    for tree in range(forest.num_trees):
+        ids, starts = forest.leaf_layout(tree)
+        # Every point appears exactly once in a tree's leaf order.
+        assert sorted(ids.tolist()) == list(range(_N))
+        assert starts[0] == 0
+        assert list(starts) == sorted(starts)
+        assert starts[-1] < len(ids)
+        # Leaves partition the ids, and none is empty.
+        bounds = list(starts) + [len(ids)]
+        assert all(b > a for a, b in zip(bounds, bounds[1:]))
+        seen.add(tuple(ids.tolist()))
+    # Randomized trees give different orders, which is why one tree's order
+    # cannot serve the others.
+    assert len(seen) == 3
+
+
+def test_leaf_layout_rejects_a_tree_that_does_not_exist(tmp_path):
+    forest = _forest(_descriptors(), num_trees=2)
+    with pytest.raises(IndexError, match="out of range"):
+        forest.leaf_layout(2)
+
+
+def test_an_explicit_descriptor_order_changes_no_answer(tmp_path):
+    """Reordering the corpus is invisible above the storage layer.
+
+    This is what makes an ordering policy safe to try: the stored row map is what
+    a reader follows, so a different order is a different file with identical
+    results.
+    """
+    descriptors = _descriptors()
+    forest = _forest(descriptors)
+    queries = descriptors[:16]
+
+    default = LazyKdForest(
+        str(
+            _export(
+                tmp_path, forest, "shared", {"descriptor_block_bytes": _BLOCK_BYTES}
+            )
+        )
+    )
+    want = default.query(queries, k=3, max_leaf_checks=64)
+
+    rng = np.random.default_rng(1)
+    shuffled = rng.permutation(_N).astype(np.uint32).tolist()
+    path = tmp_path / "reordered.kdf"
+    write_kdf(
+        forest,
+        str(path),
+        layout="shared",
+        chunk_bytes=_CHUNK_BYTES,
+        descriptor_block_bytes=_BLOCK_BYTES,
+        descriptor_order=shuffled,
+    )
+    got = LazyKdForest(str(path)).query(queries, k=3, max_leaf_checks=64)
+    assert np.array_equal(want[0], got[0])
+    assert np.allclose(want[1], got[1])
+    assert verify_kdf(str(path))["features"] == _N
+
+
+def test_a_malformed_descriptor_order_is_refused(tmp_path):
+    forest = _forest(_descriptors())
+    for order, match in [
+        (list(range(_N - 1)), "expected"),
+        ([0] * _N, "repeats"),
+    ]:
+        with pytest.raises((ValueError, OSError)):
+            write_kdf(
+                forest,
+                str(tmp_path / f"bad{len(order)}{order[0]}.kdf"),
+                layout="shared",
+                descriptor_block_bytes=_BLOCK_BYTES,
+                descriptor_order=order,
+            )
+
+
+def test_kdf_matcher_validates_before_self_join(tmp_path):
+    from sfmtool._sfmtool.matching import background_floor_clusters_kdf
+
+    desc = _descriptors(n=16)
+    path = _export(tmp_path, _forest(desc), "shared", {"descriptor_block_bytes": 128})
+    for d, starts in [(2**64 - 1, [0, 16]), (2, [0, 17]), (2, [1, 16])]:
+        with pytest.raises(ValueError):
+            background_floor_clusters_kdf(
+                str(path), np.array(starts, dtype=np.uint32), d=d
+            )
+    with pytest.raises(FileNotFoundError):
+        background_floor_clusters_kdf(
+            str(tmp_path / "missing.kdf"), np.array([0, 16], dtype=np.uint32)
+        )
+
+
+def test_reloaded_forest_preserves_default_check_budget(tmp_path):
+    from sfmtool._sfmtool.spatial import read_kdf
+
+    desc = _descriptors()
+    forest = KdForest(desc, num_trees=4, max_leaf_checks=32)
+    path = _export(tmp_path, forest, "shared", {"descriptor_block_bytes": 128})
+    loaded = read_kdf(str(path))
+    assert loaded.max_leaf_checks == 32
+    for actual, expected in zip(
+        loaded.query(desc[:10]), forest.query(desc[:10]), strict=True
+    ):
+        np.testing.assert_array_equal(actual, expected)

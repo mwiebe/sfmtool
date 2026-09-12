@@ -19,14 +19,19 @@ use std::path::Path;
 
 use zip::ZipArchive;
 
-use crate::types::{KdfError, Metadata};
+use crate::types::{KdfError, Metadata, NODE_COLUMNS};
 
 /// One bucket of entries, named by the role its entries play.
 ///
-/// `decoded_bytes` is what the arrays occupy in memory, `compressed_bytes` what
-/// they occupy on disk. Their ratio is the compression the corpus actually
-/// achieved in the order this file stored it, which is the number the format
-/// spec's size projections could only estimate from proxy orderings.
+/// `decoded_bytes` is what the arrays occupy in memory, `compressed_bytes` the
+/// zstd frame stored on disk, excluding ZIP headers. Their ratio is the
+/// compression the corpus actually achieved in the order this file stored it,
+/// which is the number the format spec's size projections could only estimate
+/// from proxy orderings.
+///
+/// The decoded size comes from the shape in each entry's name, not from the ZIP
+/// directory: entries are STORE-wrapped zstd frames, so the directory's
+/// "uncompressed" size is the frame length and would make every ratio 100%.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KdfSection {
     /// Role of the entries in this bucket, e.g. `"tree_vectors"`.
@@ -68,6 +73,87 @@ pub struct KdfSummary {
     pub sections: Vec<KdfSection>,
 }
 
+/// Decoded size of an array entry, from the shape its name encodes.
+///
+/// **The ZIP directory cannot answer this.** Entries are STORE-compressed
+/// wrappers around an independent zstd frame, so both sizes the directory
+/// carries are the *frame* length; taking `uncompressed_size` for the decoded
+/// size reports a compression ratio of exactly 100% for every entry in every
+/// file, which is wrong in a way that looks entirely plausible.
+///
+/// The names carry the shape instead, which is what they are for. Every array
+/// entry ends `{...}.{counts}.{dtype}.zst`, so the decoded length is the product
+/// of the decimal counts and the scalar width. Returns `None` for `.json.zst`
+/// entries, whose size their name does not describe.
+fn scalar_width(name: &str) -> Option<u64> {
+    match name {
+        "uint8" => Some(1),
+        "float32" => Some(4),
+        "uint32" => Some(4),
+        "uint64" => Some(8),
+        "uint128" => Some(16),
+        _ => None,
+    }
+}
+
+fn decoded_bytes_from_name(name: &str) -> Option<u64> {
+    let file = name.rsplit('/').next()?;
+    let mut parts: Vec<&str> = file.split('.').collect();
+    let suffix = parts.pop()?;
+
+    // `chunk.{M}.{P}[.{D}].{scalar}.zst` is the one heterogeneous entry: ten
+    // uint32 node columns, then one split per node, then one uint32 per feature.
+    // The generic product-of-counts rule below cannot express a sum of arrays.
+    if parts.first() == Some(&"chunk") && suffix == "zst" {
+        let width = scalar_width(parts.pop()?)?;
+        let counts: Vec<u64> = parts[1..]
+            .iter()
+            .map(|t| t.parse().ok())
+            .collect::<Option<_>>()?;
+        let [nodes, features] = counts.as_slice() else {
+            return None;
+        };
+        let columns = NODE_COLUMNS as u64;
+        return columns
+            .checked_mul(*nodes)?
+            .checked_mul(4)?
+            .checked_add(nodes.checked_mul(width)?)?
+            .checked_add(features.checked_mul(4)?);
+    }
+
+    // `corpus.{N}.{D}.{scalar}.frames` holds one zstd frame per descriptor
+    // block, so it must be sized from the name rather than decoded: decoding it
+    // would expand the entire corpus to learn a number the name already gives.
+    if parts.first() == Some(&"corpus") && suffix == "frames" {
+        let width = scalar_width(parts.pop()?)?;
+        let counts: Vec<u64> = parts[1..]
+            .iter()
+            .map(|t| t.parse().ok())
+            .collect::<Option<_>>()?;
+        let [features, dimension] = counts.as_slice() else {
+            return None;
+        };
+        return features.checked_mul(*dimension)?.checked_mul(width);
+    }
+
+    if suffix != "zst" {
+        return None;
+    }
+    let width = scalar_width(parts.pop()?)?;
+    // Trailing decimal tokens are the shape; the leading token is the stem.
+    let mut elements: u64 = 1;
+    let mut saw_count = false;
+    for token in parts.iter().skip(1) {
+        let count: u64 = token.parse().ok()?;
+        elements = elements.checked_mul(count)?;
+        saw_count = true;
+    }
+    if !saw_count {
+        return None;
+    }
+    elements.checked_mul(width)
+}
+
 /// Classify an entry by the role its name encodes.
 ///
 /// Names are structural in this format (`trees/{t}/chunks/{c}/...`), so the role
@@ -83,17 +169,17 @@ fn section_of(name: &str) -> &'static str {
         "origins"
     } else if name.starts_with("features/storage_rows.") {
         "shared_row_map"
-    } else if name.starts_with("features/blocks/") {
+    } else if name.starts_with("features/block_offsets.") {
+        "shared_block_offsets"
+    } else if name.starts_with("features/corpus.") {
         "shared_vectors"
     } else if name.starts_with("trees/") {
-        // Tree entries split four ways, and the split is the entire point:
-        // `tree_vectors` is what the shared layout removes T-1 copies of.
+        // A chunk's three integer arrays share one entry; its vectors do not, so
+        // `tree_vectors` is still exactly what the shared layout removes T-1
+        // copies of, and `tree_chunks` is identical between the two layouts.
         match name.rsplit('/').next().unwrap_or("") {
-            n if n.starts_with("nodes.") => "tree_nodes",
-            n if n.starts_with("splits.") => "tree_splits",
-            n if n.starts_with("feature_ids.") => "tree_feature_ids",
             n if n.starts_with("vectors.") => "tree_vectors",
-            _ => "tree_other",
+            _ => "tree_chunks",
         }
     } else {
         "other"
@@ -132,6 +218,7 @@ pub fn kdf_summary(path: &Path, max_metadata_bytes: usize) -> Result<KdfSummary,
     let mut payload_compressed = 0u64;
     let mut payload_decoded = 0u64;
     let mut metadata_index = None;
+    let mut json_entries: Vec<(usize, String)> = Vec::new();
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
         if entry.is_dir() {
@@ -144,7 +231,18 @@ pub fn kdf_summary(path: &Path, max_metadata_bytes: usize) -> Result<KdfSummary,
         if name == "metadata.json.zst" {
             metadata_index = Some(i);
         }
-        let (compressed, decoded) = (entry.compressed_size(), entry.size());
+        // `entry.size()` is the stored zstd frame, not the decoded array; see
+        // `decoded_bytes_from_name`. JSON entries carry no shape in their name,
+        // so they are decoded after this pass — there are at most four of them
+        // and they are small.
+        let compressed = entry.compressed_size();
+        let decoded = match decoded_bytes_from_name(&name) {
+            Some(bytes) => bytes,
+            None => {
+                json_entries.push((i, name.clone()));
+                0
+            }
+        };
         payload_compressed += compressed;
         payload_decoded += decoded;
         let key = section_of(&name);
@@ -159,6 +257,24 @@ pub fn kdf_summary(path: &Path, max_metadata_bytes: usize) -> Result<KdfSummary,
         bucket.decoded_bytes += decoded;
     }
 
+    // Decode the JSON entries for their true size, so a per-section ratio means
+    // the same thing everywhere in the table.
+    for (i, name) in &json_entries {
+        let mut entry = archive.by_index(*i)?;
+        if entry.size() > max_metadata_bytes as u64 {
+            return Err(KdfError::ResourceLimit(format!(
+                "{name} is over the {max_metadata_bytes}-byte limit"
+            )));
+        }
+        let mut frame = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut frame)?;
+        let decoded = zstd::bulk::decompress(&frame, max_metadata_bytes)?.len() as u64;
+        payload_decoded += decoded;
+        if let Some(bucket) = buckets.get_mut(section_of(name)) {
+            bucket.decoded_bytes += decoded;
+        }
+    }
+
     let index = metadata_index
         .ok_or_else(|| KdfError::InvalidFormat("metadata.json.zst is missing".into()))?;
     let metadata: Metadata = {
@@ -171,7 +287,7 @@ pub fn kdf_summary(path: &Path, max_metadata_bytes: usize) -> Result<KdfSummary,
         }
         let mut frame = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut frame)?;
-        serde_json::from_slice(&zstd::decode_all(&frame[..])?)?
+        serde_json::from_slice(&zstd::bulk::decompress(&frame, max_metadata_bytes)?)?
     };
 
     Ok(KdfSummary {
@@ -194,4 +310,39 @@ pub fn kdf_summary(path: &Path, max_metadata_bytes: usize) -> Result<KdfSummary,
         payload_decoded_bytes: payload_decoded,
         sections: buckets.into_values().collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_shapes_are_sized_without_decoding() {
+        assert_eq!(
+            decoded_bytes_from_name("features/block_offsets.303001.uint64.zst"),
+            Some(303001 * 8)
+        );
+        assert_eq!(
+            decoded_bytes_from_name("trees/0/chunks/0/chunk.18446744073709551615.1.uint8.zst"),
+            None
+        );
+    }
+
+    #[test]
+    fn metadata_expansion_is_bounded() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.kdf");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        zip.start_file(
+            "metadata.json.zst",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(&zstd::bulk::compress(&vec![b' '; 1 << 20], 1).unwrap())
+            .unwrap();
+        zip.finish().unwrap();
+        assert!(kdf_summary(&path, 1024).is_err());
+    }
 }
