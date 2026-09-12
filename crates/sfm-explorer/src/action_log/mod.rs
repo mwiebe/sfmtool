@@ -338,6 +338,16 @@ impl ActionLog {
     /// rest of the operation out of its own entry.
     pub(crate) const DETAIL_EVENTS: usize = 128;
 
+    /// The row an entry gathers the frame's own stages under.
+    ///
+    /// Named for what it is from the operation's point of view. Putting a
+    /// reconstruction on the screen is not part of reading it off the disk,
+    /// and a reader who takes the upload for the load draws the wrong
+    /// conclusion about where a slow action went. It is the last thing an
+    /// expanded entry shows, under a rule, after everything the operation
+    /// itself accounted for.
+    pub(crate) const OVERHEAD: &'static str = "overhead: uploading and drawing";
+
     /// A log formatting in the system's local time zone.
     pub(crate) fn new() -> Self {
         Self::with_zone(TimeZone::system())
@@ -574,13 +584,27 @@ impl ActionLog {
     /// after it -- anything the egui pass handled, which is every click and
     /// keystroke -- has not, and waits for the next frame.
     ///
+    /// `frame` is what the frame itself reported: the uploads, the two draws
+    /// and the present. They go to the newest entry this stamps, which is the
+    /// action whose effect the frame was uploading, and that entry says how
+    /// many others waited alongside it. A frame that stamps nothing has nobody
+    /// to charge and drops them.
+    ///
     /// Called once per frame from the viewer's frame loop, at the end.
-    pub(crate) fn settle(&mut self, uploads_began: Instant) {
+    ///
+    /// One consequence looks like a bug and is not. An entry written during the
+    /// egui pass (which is every click, every key and every menu item) does
+    /// not carry the tail of the frame it was written in: it was written after
+    /// that frame's upload phase, so it is not stamped until the *next* frame,
+    /// and the next frame is the one that shows its result. The millisecond or
+    /// two of its own frame lands in `elsewhere`.
+    pub(crate) fn settle(&mut self, uploads_began: Instant, frame: Vec<Detail>) {
         if self.pending.is_empty() {
             return;
         }
         let now = Instant::now();
         let mut still_waiting = Vec::new();
+        let mut stamped = Vec::new();
         for (revision, written) in std::mem::take(&mut self.pending) {
             if written > uploads_began {
                 still_waiting.push((revision, written));
@@ -596,9 +620,112 @@ impl ActionLog {
                 .find(|entry| entry.revision == revision)
             {
                 entry.took = Some(now.duration_since(written));
+                stamped.push(revision);
             }
         }
         self.pending = still_waiting;
+        self.share_frame(&stamped, frame);
+    }
+
+    /// Give the frame's own events to the one entry they belong to.
+    ///
+    /// That is the newest entry the frame stamped, because the uploads reflect
+    /// the state as of the last action recorded before they began: the earlier
+    /// entries a frame settles did not cause its work, they waited through it.
+    /// Copying the table onto all of them instead would make a log of a
+    /// startup read as though the file had been opened three times, once per
+    /// row that happened to be pending. Those rows keep an honest `took`, which
+    /// is the wait they really had, and say nothing about work that was not
+    /// theirs; this one says how many waited with it.
+    fn share_frame(&mut self, stamped: &[u64], frame: Vec<Detail>) {
+        let Some(&newest) = stamped.iter().max() else {
+            return;
+        };
+        if frame.is_empty() {
+            return;
+        }
+        let waited = stamped.len() - 1;
+        // From the back: what a frame stamps was written in it, so the entry
+        // it belongs to is among the newest there are.
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.revision == newest)
+        else {
+            return;
+        };
+        let mut detail = std::mem::take(&mut entry.detail);
+        detail.extend(Self::under_one_row(frame, waited));
+        // Capped again rather than trusted: the write capped what the
+        // operation reported, and the frame's events arrive after it.
+        entry.detail = Self::capped(detail);
+    }
+
+    /// The frame's rows, gathered under one [`Self::OVERHEAD`] row a level above
+    /// them.
+    ///
+    /// Uploading a reconstruction to the GPU is not part of reading it off the
+    /// disk. It happens because the document changed and it happens in the next
+    /// frame, since that is where uploads happen, and it is inside the wait the
+    /// entry reports, which is why one entry carries both. It is still not the
+    /// operation, so it is named as the overhead it is and the panel rules a
+    /// line above it.
+    ///
+    /// That row costs what its own stages cost between them, so `elsewhere` is
+    /// unchanged by the gathering and the entry still reconciles with its own
+    /// headline.
+    ///
+    /// How many entries only waited for this frame is the row's note rather
+    /// than a line of its own: it is a fact about the frame, and it belongs
+    /// beside it.
+    fn under_one_row(frame: Vec<Detail>, waited: usize) -> Vec<Detail> {
+        let took = frame
+            .iter()
+            .filter_map(|row| match row {
+                Detail::Phase { depth: 0, took, .. } => Some(*took),
+                _ => None,
+            })
+            .sum();
+        let note = (waited > 0).then(|| {
+            let entries = if waited == 1 { "entry" } else { "entries" };
+            format!("also settled {waited} earlier {entries}")
+        });
+        let mut rows = Vec::with_capacity(frame.len() + 1);
+        rows.push(Detail::Phase {
+            name: Self::OVERHEAD,
+            depth: 0,
+            took,
+            cpu: None,
+            note,
+            note_last: None,
+            runs: 1,
+        });
+        rows.extend(frame.into_iter().map(|row| match row {
+            Detail::Phase {
+                name,
+                depth,
+                took,
+                cpu,
+                note,
+                note_last,
+                runs,
+            } => Detail::Phase {
+                name,
+                depth: depth.saturating_add(1),
+                took,
+                cpu,
+                note,
+                note_last,
+                runs,
+            },
+            Detail::Message { level, depth, text } => Detail::Message {
+                level,
+                depth: depth.saturating_add(1),
+                text,
+            },
+        }));
+        rows
     }
 
     /// Whether `entry` should replace the newest entry rather than follow it.
@@ -848,8 +975,16 @@ impl ActionLog {
     /// entry's on the clipboard as it does in the panel.
     fn detail_line(entry: &Entry, row: usize) -> String {
         let row = panel::detail_row(entry, row);
+        // The rule the panel paints above the overhead, in the one spelling a
+        // text buffer has for it. Without it a pasted breakdown reads as though
+        // the operation did the uploading.
+        let rule = if row.rules_above {
+            format!("{:19}  {:<6}  {:>7}  ---\n", "", "", "")
+        } else {
+            String::new()
+        };
         format!(
-            "{:19}  {:<6}  {:>7}  {}",
+            "{rule}{:19}  {:<6}  {:>7}  {}",
             "",
             "",
             row.cost,
