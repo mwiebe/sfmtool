@@ -463,49 +463,58 @@ place:
 
 ```
 - 14:09:22  MCP       2.36 s  Undo: Resected dino_dog_toy_09.jpg in place (v3 → v2)
-                              undo                    4.1 ms
-                                history step          0.3 ms
-                                selection follow      3.8 ms
-                              uploads              1874.2 ms
-                                points             1203.4 ms
-                                patch atlas         502.1 ms
-                                thumbnails               --  reused
-                                deleted mask          1.1 ms
-                                track rays          167.6 ms
-                              scene render          412.0 ms
-                              egui pass              71.3 ms
-                              elsewhere               2.1 ms
+                      4.1 ms  undo
+                      0.3 ms    history step
+                      3.8 ms    selection follow
+                   1874.2 ms  uploads
+                   1203.4 ms    points
+                    502.1 ms    patch atlas
+                      <1 ms    thumbnails  reused
+                      1.1 ms    deleted mask
+                    167.6 ms    track rays
+                    412.0 ms  scene render
+                     71.3 ms  egui pass
+                      2.1 ms  elsewhere
 ```
 
 and with detail on, a bundle adjustment reads as a transcript:
 
 ```
 - 14:12:03  User      41.7 s  Bundle adjusted guard: 85 images, 44 912 points, …
-                              materialise             412.0 ms
-                              gather arrays           208.4 ms
+                    412.0 ms  materialise
+                    208.4 ms  gather arrays
                               • 85 images, 44 912 points, 198 331 observations
-                              residuals before        301.7 ms
-                              solve                    40.3 s
-                                round x3               40.2 s
-                                  linearise x180       12.1 s   cpu 94.4 s
-                                  normal equations x180  26.4 s   cpu 201.7 s
-                                  damping ladder x180    1.7 s
+                    301.7 ms  residuals before
+                              • median 1.104 px over 198 331 observations
+                     40.3 s   solve
+                              • 3 rounds, trim 50/12/4 px
+                     40.2 s     round x3
+            94.4 s   12.1 s       linearise x180
+           201.7 s   26.4 s       normal equations x180
+                      1.7 s       damping ladder x180
+                              • median 0.318 px over 198 328 observations
                               ! 3 points left unsupported and were dropped
-                              write back               71.3 ms
-                              push version            302.1 ms
-                              elsewhere                 8.4 ms
+                     71.3 ms  write back
+                    302.1 ms  push version
+                      8.4 ms  elsewhere
 ```
 
-A detail line is a **row of the same height as any other**, indented two spaces
-per level, with a phase's cost in the same right-aligned column the entry's own
-cost sits in. A message is marked `•` for `Info` and `!` for `Warn`, the latter
-in `error_fg_color`. Expansion inserts rows rather than making one row tall,
+A detail line is a **row of the same height as any other**. Its cost sits in the
+same right-aligned column the entry's own cost sits in, so every stage lines up
+under the number it is a breakdown of, and the two-space-per-level indent falls
+on the name instead. A stage that ran more than once under its parent carries
+its count after the name (`linearise x180`), and one that ran once carries none.
+A `cpu` figure, where a stage reports one, is right-aligned in the space the
+time and actor columns leave blank, immediately left of the cost. A message is
+marked `•` for `Info` and `!` for `Warn`, the latter in `error_fg_color`.
+Expansion inserts rows rather than making one row tall,
 which is what keeps the list virtualized on a uniform row height and ten
 thousand entries free to scroll.
 
-A phase that ran and cost nothing worth printing shows `--` and says why in its
-note. `reused` is the common case and the useful one: it is how the reader tells
-a phase that was skipped from one that was merely fast.
+A phase that cost under a millisecond reads `<1 ms`, the same spelling the entry
+column it breaks down uses, rather than one of its own. What tells a phase that
+was skipped from one that was merely fast is its note, `reused` being the common
+case and the useful one.
 
 Expansion is per entry and survives new entries arriving and the panel being
 docked elsewhere. **Clear** collapses everything, because the entries it was
@@ -607,6 +616,13 @@ solve                      40.9 s
 Ordering is by first appearance. A phase that ran once is drawn as it would have
 been anyway, with no count, and a message keeps its own place.
 
+**A note is a claim about what a stage did, and one run's words are not true of
+a row that folded three of them.** So a folded row keeps both ends, the first
+thing any run said and the last where the two differ, and draws them
+`first ... last`. A run that says nothing is not a disagreement, so a `reused`
+survives the next silent trip through the loop, and runs that came back to what
+the first one said leave one note rather than a span that is not there.
+
 Folding happens as the events arrive, so `DETAIL_EVENTS` counts rows kept rather
 than phases opened, and a kernel in a long loop cannot push the rest of the
 operation out of its own entry.
@@ -699,7 +715,7 @@ about the worker rather than about the parameter.
 ```rust
 pub(crate) enum Detail {
     Phase { name: &'static str, depth: u8, took: Duration, cpu: Option<Duration>,
-            note: Option<String>, runs: u32 },
+            note: Option<String>, note_last: Option<String>, runs: u32 },
     Message { level: Level, depth: u8, text: String },
 }
 
@@ -831,6 +847,9 @@ pair exists for.
   carrying the summed time and the count, ordered by first appearance, while the
   same name under two different parents stays two rows. A phase that ran once
   carries no count. A message between two foldable phases keeps its place.
+- **A folded note keeps both ends.** Runs that said different things leave the
+  first and the last on the row, drawn `first ... last`; a silent run leaves an
+  earlier note standing; runs that came back to the first note leave one.
 - Folding happens before the cap: an operation opening one phase six hundred
   times leaves one row, not a truncated entry.
 - Past `DETAIL_EVENTS` the entry keeps the first `DETAIL_EVENTS` and reports the
