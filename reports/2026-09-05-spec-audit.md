@@ -138,6 +138,26 @@ were not read this run.
 
 ### 4. Opening paragraphs
 
+> _Status (2026-09-12): **Done** as `ecc6ac56` — every spec named below now
+> opens with a sentence saying what the thing is and what it is for. That is 35
+> files, not 34: a fifth `specs/drafts/*-amendment.md` has landed since this
+> audit ran, and the five amendments keep their `**Status:** Draft` line and
+> their "Amends …" back-link, with a new sentence before it saying what each
+> one proposes. Ten of the 15 drafted sentences below were adopted in
+> substance; five were changed after checking them against the code —
+> `embed-patches-command` (the inline artefact is a keypoint per observation,
+> not a patch per observation), `estimate-intrinsics` (the result carries a
+> built camera **and** the full vote, so "rather than a diagnostic table"
+> overstated it), `cluster-patches` (the draft nearly duplicated the opening of
+> `cluster-patch-refinement`, cited as exemplary two blocks below),
+> `source-clusters` ("large" there means wide features, not populous groups)
+> and `covisibility-selection`. Two openings carried dead content that had to
+> go with them: `bundle-adjustment` named `scripts/exp_fast_pinhole.py`,
+> `scripts/exp_pinhole_bootstrap.py` and
+> `specs/core/geometry/cluster-pinhole-bootstrap.md`, none of which exist.
+> Nothing else in any spec was touched. The corpus has since grown 130 → 152,
+> so roughly 22 specs were never assessed against this test._
+
 Mechanical pre-pass over all 130 first sentences: 40 carry a backticked identifier,
 6 start with a symbol or link, 2 contain a link. Most backticks are file extensions in
 CLI specs (`.sfmr`, `.matches`) and are fine. The bulk read is in the next block.
@@ -680,6 +700,11 @@ one below), so all but one of these are spec fixes.
    Mechanical findings §4 proposes a first sentence for the 15 worst. It is the cheapest
    fix in the report and the one every future reader hits first; do it as one PR with
    no other content so it reviews in minutes.
+
+   > _Status (2026-09-12): **Done** as `ecc6ac56` — 35 spec openings rewritten
+   > (34 listed plus a fifth amendment draft that landed after this audit), one
+   > PR, openings only. Five of the 15 drafted sentences were changed against
+   > the code; see §4 above for which and why._
 
 Two patterns worth naming for the next writer rather than the next fixer. First, third
 copies drift in both directions: where the code doc re-derives the spec (`extract_sfmtool.py`
