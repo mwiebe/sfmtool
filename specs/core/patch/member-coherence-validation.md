@@ -2,6 +2,16 @@
 
 ## Overview
 
+Reconstruction assumes that all the observations gathered under one 3D point
+really are pictures of the same spot on the same surface. Sometimes they are
+not: two different surfaces get merged into one point, and because the point is
+then fitted to both, nothing about the point itself looks wrong. This catches
+that by comparing the observations against **each other** instead of against
+the point — every pair of them, scored — and deciding from the resulting
+pattern whether the point is sound, whether a clear majority of its
+observations belong together and the rest should go, or whether the evidence is
+split so evenly that the point cannot be trusted at all.
+
 A track's members are the observations of one 3D point. Some tracks are
 **chimeras**: their members image two different surfaces. Scoring each member
 against the fused cross-view consensus does not find them — the consensus is

@@ -1,5 +1,15 @@
 # The Matches File Format
 
+A `.matches` file holds the correspondences between a set of photographs — which
+detected feature in one image is the same real-world point as which feature in
+another — together with the record of what produced them and enough identity
+information to tell whether the images and features behind them have since
+changed. Matching is the expensive middle step between extracting features and
+solving a reconstruction, and its output is otherwise thrown away inside a
+solver's scratch database; a `.matches` file makes it a durable artifact that can
+be inspected, subsetted, combined with matches from another strategy, and reused
+across as many solves as one wants.
+
 ## Motivation
 
 The `.sift` format lets us extract features once and experiment with subsets. The `.sfmr` format

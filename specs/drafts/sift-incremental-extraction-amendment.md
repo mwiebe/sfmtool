@@ -2,7 +2,17 @@
 
 **Status:** Draft
 
-Amends two standing specs, which describe the shipped behaviour:
+Feature extraction currently computes a full description of every keypoint it
+finds, all at once, even though a later stage may only ever need a fraction of
+them. This draft proposes splitting the two halves apart so they can happen at
+different times: find the keypoints and write them out, then fill in
+descriptions for the ones that turn out to be wanted, appending to the same
+file rather than rewriting it. That takes a new lifecycle on the command line
+(`sfm sift --detect` / `--describe`, and describe-on-demand inside `sfm match`)
+and a second version of the `.sift` format that can grow after it is written;
+neither is useful without the other.
+
+It amends two standing specs, which describe the shipped behaviour:
 [`../core/features/sift.md`](../core/features/sift.md) (the SIFT detector and
 its split detect/describe interface) and
 [`../formats/sift-file-format.md`](../formats/sift-file-format.md) (the `.sift`

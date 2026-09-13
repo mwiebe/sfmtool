@@ -1,11 +1,19 @@
 # SIFT
 
+Feature extraction is the first step of every reconstruction: find the spots in
+a photograph that can be recognized again in another photograph of the same
+scene, and describe each one as a vector that can be compared. SIFT is the
+classical way of doing that, and this is sfmtool's own implementation of it, in
+Rust — a detector that finds keypoints across scales and a descriptor that
+summarizes the image around each one — so the CLI, the matcher and the GUI can
+extract features without handing the image to an external program.
+
 ## Motivation
 
-sfmtool relies on COLMAP and OpenCV for many of its algorithms; one of those is SIFT
-feature extraction (`src/sfmtool/sift/extract_colmap.py` and `extract_opencv.py`, both
-wrapping external binaries). Adding a Rust implementation directly in sfmtool-core — like
-the native optical-flow implementation — would give us more room for flexibility:
+sfmtool also reaches COLMAP and OpenCV for SIFT feature extraction
+(`src/sfmtool/sift/extract_colmap.py` and `extract_opencv.py`, both wrapping
+external binaries). A Rust implementation directly in sfmtool-core — like the
+native optical-flow implementation — gives more room for flexibility:
 
 - Use in the Rust-only GUI for interactive feature inspection
 - Control over the algorithm for SfM-specific tuning (e.g. custom contrast/edge

@@ -1,5 +1,16 @@
 # Photometric refinement via per-tile RANSAC subset partition
 
+When several photographs all see the same direction, they rarely agree about
+what is there: one may be looking past an obstruction the others see, another
+may be close enough that parallax moves the scene, and a moving object may pass
+through only one of them. This picks, for each small patch of direction, the
+largest group of photographs whose pixels genuinely agree, so that direction is
+coloured from a consensus of the sources that support it
+rather than from an average of everything pointed at it — and the photographs
+left out of that group are themselves the answer to a second question, marking
+where the capture sees an occlusion, a parallax shift, or something at a
+different distance.
+
 [`PerSphericalTileSourceStack`]: per-spherical-tile-source-stack.md
 [`SphericalTileRig`]: spherical-tiles-rig.md
 

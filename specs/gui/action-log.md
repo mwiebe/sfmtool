@@ -2,6 +2,17 @@
 
 ## Purpose
 
+The Action Log is the viewer's running history. It is a dock panel, docked by
+default as a second tab beside the Image Browser strip, showing a scrolling,
+timestamped, terminal-style list of every action taken in SfM Explorer:
+opening and closing files, changing the scene graph, moving the selection,
+framing the view, playing the image animation, editing a reconstruction and
+walking its history, saving it, and every call the MCP endpoint applies. Each
+entry says which of three actors did it — the user at the window, an agent over
+MCP, or the viewer itself — because this is a window two parties operate at the
+same time, and without a written record neither can tell afterwards what the
+other did.
+
 A viewer that a human and an agent both drive needs a record of who did what,
 and when. SfM Explorer already reports each action in a one-line status
 message painted on the 3D viewport, and the MCP control surface prefixes its
@@ -11,16 +22,9 @@ the previous one is gone; there is no way to scroll back, no way to copy it
 into a bug report or an agent transcript, and no time on it to correlate with
 anything else.
 
-The Action Log is the longer-term record that status line was standing in for.
-It is a dock panel, docked by default as a second tab beside the Image Browser
-strip, that shows a scrolling, timestamped, terminal-style list of every action
-taken in the viewer: opening and closing files, changing the scene graph,
-moving the selection, framing the view, playing the image animation, editing a
-reconstruction and walking its history, saving it, and every call the MCP
-endpoint applies. Each entry says which of three actors did it —
-the user at the window, an agent over MCP, or the viewer itself — and the
-viewport status line becomes a view of the log's most recent entry rather than
-a separate piece of state.
+The Action Log is the longer-term record that status line was standing in for,
+and the viewport status line becomes a view of the log's most recent entry
+rather than a separate piece of state.
 
 The log records outcomes, not intentions. An action that changed nothing
 (selecting the image already selected) writes no entry. A request that failed

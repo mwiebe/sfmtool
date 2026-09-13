@@ -2,11 +2,19 @@
 
 ## Purpose
 
-Three queries over a set of images' shared-cluster counts: how far apart two
-covisible images are in appearance, which subset survives redundancy-thinning,
-and how much of the capture a chosen subset connects to. All three are
-order-free — nothing depends on image ordering — and deterministic given a
-seed.
+Before reconstructing a capture it is worth asking which of its photographs are
+actually worth using: a hundred frames of a slow walk-around mostly repeat each
+other, while a handful of them carry all the viewpoint change there is. These
+are the three questions a caller asks to decide that, and all three are
+answered from one measurement — how many groups of matched features each pair
+of images has in common:
+
+- how different two overlapping views look from one another,
+- which photographs a set can drop without losing coverage,
+- and how much of the capture a chosen subset still reaches.
+
+All three are order-free — nothing depends on image ordering — and
+deterministic given a seed.
 
 ## Construction
 

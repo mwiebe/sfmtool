@@ -2,11 +2,21 @@
 
 ## Overview
 
-Convert a `sift_files` reconstruction into an `embedded_patches` `.sfmr` — a
-wholesale switch of `feature_source`. Each observation's reference into an
-external `.sift` file is replaced by an inline, patch-derived 2D keypoint, and a
-**new** `.sfmr` is written that needs no `.sift` companion. The input file is
-never modified.
+Makes a reconstruction stand on its own, re-measuring its observations on the
+way. A freshly solved reconstruction does not store its own 2D measurements: every
+observation is a pointer into an external feature file sitting beside it, and
+losing those files loses the reconstruction's link to the images. This command
+re-derives each of those measurements by lining a point's views up against one
+another photographically, and writes them into the reconstruction itself,
+alongside the small oriented piece of surface each point sits on. The result is
+a single `.sfmr` that needs nothing else, whose keypoints are sub-pixel
+registrations rather than independent detections.
+
+In the file format's terms, this converts a `sift_files` reconstruction into an
+`embedded_patches` `.sfmr` — a wholesale switch of `feature_source`. Each
+observation's reference into an external `.sift` file is replaced by an inline,
+patch-derived 2D keypoint, and a **new** `.sfmr` is written that needs no
+`.sift` companion. The input file is never modified.
 
 The conversion:
 

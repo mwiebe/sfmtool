@@ -2,7 +2,14 @@
 
 **Status:** Draft
 
-Amends [`../gui/patch-rendering.md`](../gui/patch-rendering.md), which specifies
+A reconstruction can know which way each of its points faces without carrying
+the scrap of photograph that goes on it, and the viewer draws nothing at all
+for such a reconstruction today: the surfel renderer needs the picture, so
+without it the surfaces are invisible. This draft proposes drawing them anyway,
+as plain coloured tiles at the orientation the point holds — enough to see the
+shape of a surface and judge whether the facing directions are right.
+
+It amends [`../gui/patch-rendering.md`](../gui/patch-rendering.md), which specifies
 the shipped textured-surfel renderer and points back here.
 
 A reconstruction can carry per-point patch *frames* — the centre, the normal and

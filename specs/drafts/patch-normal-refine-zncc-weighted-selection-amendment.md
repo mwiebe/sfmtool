@@ -2,7 +2,15 @@
 
 **Status:** Draft
 
-Amends
+When a point is seen from many angles, only a few of those views are used to
+work out which way its surface faces, and they are chosen purely on geometry:
+the views spread widest apart. Those are also, by construction, the views that
+see the surface most edge-on and therefore photograph it worst. This draft
+proposes weighting the choice by how well each view actually matches the
+others, so a well-placed but unusable view stops being picked over a slightly
+less well-placed but clean one.
+
+It amends
 [`../core/patch/patch-normal-refine-view-subset.md`](../core/patch/patch-normal-refine-view-subset.md),
 which specifies the shipped D-optimal view-subset selection and points back here.
 

@@ -2,7 +2,14 @@
 
 **Status:** Draft
 
-Amends [`../gui/edits/move-camera.md`](../gui/edits/move-camera.md), which
+Dragging a camera into place in the viewer currently leaves the scene points
+where they were until the move is committed, at which point they jump to their
+re-solved positions. This draft proposes an optional preview — a toggle in the
+Move Camera banner — that draws the points this camera observes where the
+commit would put them, so a reviewer lining up a photograph can see the
+consequence of the move before accepting it.
+
+It amends [`../gui/edits/move-camera.md`](../gui/edits/move-camera.md), which
 specifies the shipped lock and points back here.
 
 While the Move Camera lock is held, every point stands where the value has it:

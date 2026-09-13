@@ -1,5 +1,15 @@
 # Cluster Match Census
 
+A cluster census grades a finished reconstruction against evidence the solve
+never used. Matching produces far more correspondences between the images than
+any one solve consumes; the census takes the leftovers, asks of each whether
+the reconstruction can possibly be right about it, and reports the fraction
+that cannot be satisfied. That fraction is a measurable signal for the two
+failures a reconstruction's own error numbers cannot see — a group of cameras
+attached to the rest at the wrong pose, and geometry quietly bent to absorb a
+wrong focal length — both of which look perfect against the tracks the solve
+itself chose.
+
 ## Problem
 
 A reconstruction can be internally consistent and wrong. Two failure shapes

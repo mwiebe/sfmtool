@@ -1,5 +1,14 @@
 # Flow-Based Feature Matching
 
+Footage shot as a sequence gives matching an advantage that a pile of
+unordered photographs does not: consecutive frames barely differ, so where a
+feature went next can be read off the motion of the pixels instead of being
+searched for by comparing descriptions of it. Flow-based matching does that —
+it follows each detected feature frame to frame with dense optical flow, chains
+those short hops into longer ones to get correspondences between frames that
+are further apart, and checks the result against the feature descriptors before
+believing it.
+
 ## The Idea
 
 Traditional SfM feature matching compares SIFT descriptors between image pairs to find

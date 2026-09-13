@@ -2,12 +2,23 @@
 
 ## Overview
 
-Refines a cluster-bearing `.matches` file into **patch clusters**: per
-cluster, a reference member plus, for every other member, a photometrically
-refined and vetted affine warp that maps the reference's local patch onto
-that member's image. The result is written as the `cluster_patches/` section
-of a **new** `.matches` file that copies the input's images and clusters
-sections verbatim (write-once workflow, like adding two-view geometries).
+Takes a set of feature matches and checks each one against the pictures. For
+every group of features the matcher believes are the same point, this nominates
+one of them as the reference, cuts the small square of image around it, and
+searches for the stretch-and-skew of that square which best reproduces what
+each of the other images actually shows there — keeping the members that fit,
+marking the ones that do not. The result is a matching file that carries not
+just "these detections go together" but a measured account of how well they do
+and how the surface appears in each view, all established before any camera
+pose exists.
+
+In the format's terms, it refines a cluster-bearing `.matches` file into
+**patch clusters**: per cluster, a reference member plus, for every other
+member, a photometrically refined and vetted affine warp that maps the
+reference's local patch onto that member's image. The result is written as the
+`cluster_patches/` section of a **new** `.matches` file that copies the input's
+images and clusters sections verbatim (write-once workflow, like adding
+two-view geometries).
 
 Design: [`specs/core/patch/cluster-patches.md`](../../core/patch/cluster-patches.md).
 Implementation (Rust kernel, algorithm, bindings):

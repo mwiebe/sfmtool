@@ -2,6 +2,16 @@
 
 ## Purpose
 
+Reconstruction normally has a bootstrapping problem: to place a camera you need
+to know where the scene points are, and to place the points you need to know
+where the cameras are. Factorization sidesteps it. If the scene is far enough
+away, or the lens long enough, that perspective can be ignored across the group
+of photographs in hand, then all the observations together form a matrix of
+rank three, and factoring that matrix recovers every camera and every point at
+once — no initial guess, no seed pair, no incremental growth. That
+approximation is what this implements, as a way to get a whole small group of
+images placed in one step.
+
 Given 2D observations of clusters across a small group of images — with
 most (cluster, image) combinations unobserved and some observations junk —
 jointly estimate:

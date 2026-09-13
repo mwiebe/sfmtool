@@ -2,6 +2,15 @@
 
 ## Purpose
 
+Works out what camera took a set of photographs — which lens model, and what
+focal length — from the correspondences between the images alone, with no
+camera poses and no 3D structure to lean on. That answer is what a solve needs
+before it can start, and getting it wrong is a failure that hides: a
+reconstruction built on a bad focal bends smoothly to accommodate it and
+reports clean error numbers. The estimate here is a single verdict a caller can
+act on, together with a camera object built from it and the underlying evidence
+kept intact for anyone who wants to argue with it.
+
 `estimate_intrinsics` is the high-level face of the structure-free focal
 vote ([focal-vote.md](focal-vote.md)): it takes the same cluster-track
 observation arrays the vote takes, runs the camera-model columns, and

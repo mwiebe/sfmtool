@@ -1,12 +1,18 @@
 # Optical Flow
 
-A pure-Rust DIS (Dense Inverse Search) optical flow implementation in sfmtool-core,
-with Python bindings via sfmtool-py and GPU acceleration via wgpu compute shaders.
+Dense optical flow answers, for every pixel of one photograph, where that piece
+of the scene ended up in the next one. On footage shot as a sequence it is the
+cheapest correspondence signal there is — neighbouring frames barely move, so
+following the pixels is far less work than describing and comparing features —
+and it is how sfmtool generates candidate tracks from video. This is sfmtool's
+own DIS (Dense Inverse Search) implementation in Rust, in `sfmtool-core`, with
+Python bindings via `sfmtool-py` and GPU acceleration via wgpu compute shaders,
+so flow is available to the pipeline and the viewer without an OpenCV
+round-trip.
 
 ## Motivation
 
-Dense optical flow is useful as a candidate track generator for video-based SfM. A
-Rust implementation (rather than wrapping OpenCV) gives us:
+A Rust implementation (rather than wrapping OpenCV) gives us:
 
 - Use in the Rust-only GUI for visualization and interactive features
 - Control over the algorithm for SfM-specific optimizations

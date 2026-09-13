@@ -2,6 +2,14 @@
 
 ## Purpose
 
+This is the interface that lets a program drive the viewer. With it switched
+on, SfM Explorer listens on a local network port and accepts the same
+instructions a person gives it with the mouse — open this reconstruction,
+select that camera, look at it from here, show me the panel — and, crucially,
+hands back a picture of what is on screen. An AI agent working on this
+repository can then see a reconstruction rather than only read the file behind
+it.
+
 SfM Explorer is a viewer you drive by hand: you open reconstructions, click a
 camera, look at where its rays land, notice that one image is in the wrong
 place, and go and fix it somewhere else. An AI coding agent working on this

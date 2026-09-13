@@ -1,5 +1,12 @@
 # Track-Cluster Matching
 
+Track-cluster matching finds, in one pass over a whole set of photographs, the
+groups of detected features that are all pictures of the same point on the
+scene. It indexes every image's feature descriptors together and reads those
+groups straight out of the index as mutually-near neighbourhoods, so a point
+seen in twelve images arrives as one group of twelve, rather than being
+assembled afterwards out of sixty-six separate pairwise comparisons.
+
 ## The Idea
 
 Traditional SfM feature matching is pair-centric. It enumerates image pairs,

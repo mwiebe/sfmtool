@@ -1,5 +1,15 @@
 # Randomized KD-Tree Forest
 
+Matching features means asking, over and over, which of a very large pile of
+128-number descriptions is closest to the one in hand. Checking them all is
+exact and far too slow at scale, and the classical spatial index that would fix
+that stops working at this many dimensions. A randomized kd-tree forest is the
+standard way around it: several trees, each splitting the descriptions along
+differently chosen directions, searched together under one shared budget, which
+finds the true nearest neighbour the large majority of the time at a small
+fraction of the cost. This is sfmtool's implementation of that index — how it
+is built, how it is searched, and what it guarantees.
+
 Forests can be persisted and searched under a bounded decoded-data cache as
 specified in [lazy-kdforest-query.md](lazy-kdforest-query.md).
 

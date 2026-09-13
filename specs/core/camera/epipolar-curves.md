@@ -1,5 +1,14 @@
 # Epipolar Curves for Non-Perspective Cameras
 
+Pick a feature in one photograph and ask where it could possibly appear in
+another photograph of the same scene: the answer is a curve, one place for each
+distance the feature might be at. For an ideal pinhole camera that curve is a
+straight line — the epipolar line every textbook draws — but for a fisheye or a
+strongly distorted lens it bends, and drawing it straight puts the true match
+off the line. This is how sfmtool traces the real curve for any camera model,
+so match verification, epipolar search and the viewer's overlays stay correct
+on the lenses that need them most.
+
 ## The Problem
 
 The epipolar constraint `p2ᵀ F p1 = 0` only holds when `p1`, `p2` are pixel

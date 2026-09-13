@@ -1,11 +1,19 @@
 # Source Clusters: What a Member's Admission Left Behind
 
-A reconstruction member is drawn from a cluster selection and holds a subset of
-its clusters. The rest are not worse evidence; a smaller feature localizes
-better, and the reason it was left behind is that the selection the member was
-built from wanted a small number of large ones. This kernel names those
-clusters, reads each one's feature radius, and bands them by radius so a caller
-can bring them back a band at a time.
+A reconstruction is usually solved from a deliberately small, coarse slice of
+the feature correspondences its images actually share — the wide features that
+a whole capture can be matched on — and everything finer is left on the table.
+The leftovers are not worse evidence; a smaller feature localizes better, and
+they were simply not what that first pass asked for. This finds them: given a
+finished reconstruction and the correspondence set it was drawn from, it names
+the groups the reconstruction never used, measures how wide each group's
+features are, and hands them back a width band at a time, so finer evidence can
+be brought into a solve in controlled steps instead of all at once.
+
+In this spec's vocabulary the finished reconstruction is a **member**, the
+correspondence set it was drawn from is a **cluster selection**, and a group of
+matched features is a **cluster**. A member holds a subset of the selection's
+clusters; the rest are what this kernel is about.
 
 ## The join is exact and carries no geometry
 

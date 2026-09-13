@@ -1,5 +1,14 @@
 # Per-spherical-tile source patch stack
 
+Panorama work divides the sphere of directions around a viewpoint into small
+tiles and then asks, tile by tile, what each source photograph saw looking that
+way. This gathers exactly that: for every tile, the photographs that can see
+it, each one's view of that direction re-projected into the tile's own frame,
+and each of those re-projections kept at a ladder of resolutions from full size
+down to a single pixel. Doing the re-projection once and sharing it means a
+coarse-to-fine algorithm — consensus, depth, occlusion labelling, compositing —
+pays for the warp once instead of once per scale.
+
 ## Motivation
 
 Many algorithms operating on a `SphericalTileRig` need the same input:

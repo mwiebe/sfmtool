@@ -2,20 +2,24 @@
 
 ## Purpose
 
-The staged robust bundle adjustment used by the cluster pinhole bootstrap
-(`specs/core/geometry/cluster-pinhole-bootstrap.md`,
-`scripts/exp_fast_pinhole.py` / `scripts/exp_pinhole_bootstrap.py`): given
-images sharing one camera model, camera poses, world points, and pixel
-observations tying them together, jointly refine the poses and points (and
-optionally the shared focal length and the shared distortion release — a
-radial coefficient or a spline) by minimizing
-robust pixel reprojection error over a trim schedule with inter-round retriangulation.
+Bundle adjustment is the step that makes a reconstruction agree with itself.
+Every estimate in it — where each photograph was taken from, where each scene
+point sits, and how the lens behaves — was arrived at separately and none of
+them quite fits the others; bundle adjustment nudges all of them at once until
+the scene points land as close as possible to the pixels they were actually
+seen at.
 
-This is the optimizer that the trimmed pose-only refinement
-(`crates/sfmtool-core/src/geometry/pose_refine.rs`) is the single-pose
-special case of. It replaces the experiment scripts'
-`scipy.optimize.least_squares` BA, whose Python-side residual and sparsity
-handling dominated the bootstrap's wall-clock.
+This is the staged, outlier-resistant version of that used where the
+photographs share one camera. Given those images' poses, the world points, and
+the pixel observations tying them together, it jointly refines the poses and
+the points — and, optionally, the shared focal length and a shared distortion
+release, either a radial coefficient or a spline — by minimizing robust pixel
+reprojection error over a schedule that discards the worst-fitting
+observations between rounds and re-triangulates the points as it goes.
+
+It is the optimizer that the trimmed pose-only refinement
+(`crates/sfmtool-core/src/geometry/pose_refine.rs`) is the single-pose special
+case of.
 
 ## Definitions
 

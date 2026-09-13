@@ -1,11 +1,19 @@
 # Patch (Surfel) Rendering in the 3D Viewport
 
+A reconstruction is normally displayed as a cloud of coloured dots, which tells
+you where the surfaces are but not which way they face or what they look like.
+Some reconstructions carry more than that: each point can hold a small square
+of surface — a position, a facing direction, and the piece of photograph that
+belongs on it. This is how the viewer draws those, as little oriented textured
+tiles standing in the scene at the angle the surface actually sits at, so what
+appears in the 3D viewport is a recognizable surface rather than a speckle of
+colour.
+
 The SfM Explorer renders **embedded patches** as small textured, oriented quads
 ("surfels") in the 3D viewport, one per reconstruction 3D point that carries a
-patch frame.
-
-The point-splat renderer draws each 3D point as a camera-facing round billboard
-(see [point-cloud-rendering.md](point-cloud-rendering.md)). A patch adds
+patch frame. The point-splat renderer draws each 3D point as a camera-facing
+round billboard (see
+[point-cloud-rendering.md](point-cloud-rendering.md)). A patch adds
 the missing surface information: instead of a view-facing dot, each point is
 drawn as a **world-oriented rectangle** textured with the point's rendered patch
 bitmap, so the viewport shows the reconstructed *surface* — orientation, texture,

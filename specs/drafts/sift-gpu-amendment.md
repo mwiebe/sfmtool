@@ -2,7 +2,15 @@
 
 **Status:** Draft
 
-Amends [`../core/features/sift.md`](../core/features/sift.md), which specifies
+Extracting features is the largest single cost of preparing a capture — around
+141 s for 1196 4K frames on a 24-core laptop — and all of it currently runs on
+the CPU while the machine's GPU sits idle. This draft proposes a GPU backend
+for sfmtool's SIFT: the same algorithm, with its four data-parallel stages
+moved into compute shaders on the `wgpu` infrastructure the viewer and the
+optical-flow kernels already use, leaving open how the backend is selected and
+what "the same answer as the CPU" has to mean when it cannot mean bit-identical.
+
+It amends [`../core/features/sift.md`](../core/features/sift.md), which specifies
 the shipped CPU SIFT implementation and points back here.
 
 `sfmtool`'s own SIFT runs on the CPU: a scalar/SSE2/AVX2 kernel set parallelized

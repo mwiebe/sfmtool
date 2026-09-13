@@ -1,6 +1,13 @@
 # Blender Viewport Trackpad Navigation Implementation (Windows)
 
-This document details how Blender implements precision trackpad/touchpad navigation in the viewport on Windows.
+Two-finger scrolling, pinch-to-zoom and the rest of a trackpad's gestures are
+not something an application receives ready-made on Windows; each one has to be
+recognized from a stream of raw touch events, and the difference between a
+navigation control that feels precise and one that feels sticky lies almost
+entirely in how that recognition is done. This is a study of how Blender solves
+it — which Windows APIs it uses, what it does with the events they deliver, and
+which of its choices are worth copying — recorded as background for the SfM
+Explorer viewport's own navigation. It describes Blender's code, not sfmtool's.
 
 ## Overview
 

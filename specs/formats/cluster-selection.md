@@ -1,9 +1,19 @@
 # Cluster Selection
 
-Derives a smaller, self-contained working set from a cluster-backbone
-`.matches` file: a predicate over members and clusters that produces a new
-cluster-backbone file holding only the surviving subset. The operation is
-`MatchesData::select_clusters` in the `matches-format` crate, surfaced in
+Matching a whole capture produces far more correspondences than any one
+experiment wants to work with, and the useful next step is almost always to
+carve out a smaller piece of it — these images and no others, only the groups
+seen from enough viewpoints, only the observations a later stage vouched for.
+Cluster selection is that carving operation. It reads a matches file, keeps the
+parts that satisfy a stated set of conditions, and writes an ordinary matches
+file containing just those, so the subset is a real artifact on disk that later
+stages read exactly as they read the original.
+
+In the format's terms it derives a smaller, self-contained working set from a
+cluster-backbone `.matches` file: a predicate over members and clusters that
+produces a new cluster-backbone file holding only the surviving subset. The
+operation is `MatchesData::select_clusters` in the `matches-format` crate,
+surfaced in
 Python as `MatchesFile.select_clusters`. It is a predicate, not a strategy —
 nothing is reordered or ranked; consumers that need an admission order
 compute it from the selected file's arrays.

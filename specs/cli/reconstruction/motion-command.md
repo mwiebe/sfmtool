@@ -1,5 +1,15 @@
 # Camera Motion Analysis
 
+`sfm motion` looks for the places where a camera's path jumps. Given a sequence
+of photographs it measures how much the picture changes from one to the next
+and reports where that stops being smooth; given a finished reconstruction it
+does the same against the solved camera positions, reporting the frames where
+the recovered path disagrees with what the images themselves say. Either way
+the output is a list of suspect frames, which is what tells the two things
+apart that matter before trusting a sequential capture: a genuine break in the
+footage — an edit, an occlusion, a jump cut — and a place where the
+reconstruction went wrong.
+
 ## Motivation
 
 Datasets used for Structure from Motion can come from many sources: frames extracted

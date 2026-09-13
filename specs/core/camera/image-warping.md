@@ -1,13 +1,20 @@
 # Image Warping for Distortion and Undistortion
 
+Every real lens bends the picture it forms — straight edges bow, and the bend
+grows toward the corners. Image warping applies that bend, or its inverse, to a
+whole photograph rather than to one pixel at a time: it is how sfmtool
+straightens an image, puts the distortion back, or re-photographs one camera's
+image as though a different camera had taken it, with the output camera and the
+sampling quality under the caller's control.
+
 ## Motivation
 
-The Rust codebase has complete implementations of `distort()` and `undistort()` for all 11
-COLMAP camera models, operating on individual pixel coordinates. However, there is no
-facility to apply these transforms to entire images — to produce an undistorted image from
-a distorted one, or vice versa. The existing Python `sfm undistort` command delegates to
-`pycolmap.undistort_image()`, which is a black box that always outputs PINHOLE cameras and
-offers no control over interpolation quality or output camera parameters.
+sfmtool implements `distort()` and `undistort()` for all 11 COLMAP camera
+models, operating on individual pixel coordinates, but a per-pixel transform is
+not by itself a way to transform an image. The Python `sfm undistort` command
+delegates to `pycolmap.undistort_image()`, which is a black box that always
+outputs PINHOLE cameras and offers no control over interpolation quality or
+output camera parameters.
 
 This spec provides two building blocks in the Rust `sfmtool-core` crate:
 

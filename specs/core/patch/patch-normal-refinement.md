@@ -1,5 +1,13 @@
 # Photometric Patch-Normal Refinement
 
+A reconstructed point is not just a position: it sits on a small piece of
+surface, and that piece of surface faces some direction. Reconstruction hands
+it a placeholder direction — usually just "toward the cameras" — which is
+almost never the way the real surface faces. This refinement replaces the
+placeholder with the direction that makes the point's neighbourhood look most
+alike across every image that sees it, which is what lets the surface be
+rendered, compared and re-photographed as a surface rather than as a dot.
+
 ## Problem
 
 A reconstructed 3D point `X` is seen by cameras `{(Kᵢ, Tᵢ)}`. Its surface around

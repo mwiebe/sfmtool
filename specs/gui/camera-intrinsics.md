@@ -1,5 +1,13 @@
 # Camera Intrinsics: Scene-Graph Node, Image Overlay, Detail Panel
 
+A camera's intrinsics are the description of the lens and sensor that formed
+the picture — how wide the view is, where the optical centre falls on the
+frame, and how the lens bends what it sees. They are as much a result of a
+reconstruction as the camera positions are, and just as capable of being wrong,
+so this makes them visible in the viewer: listed in the scene graph as things
+in their own right, drawn over the photograph they describe, and laid out in
+full in a panel of their own.
+
 The viewer can show you where a camera *is* and what it *saw*, but nothing in it
 tells you what the camera *is*: which intrinsic model, what focal length, how far
 the principal point sits from the image centre, how much the lens bends, how many

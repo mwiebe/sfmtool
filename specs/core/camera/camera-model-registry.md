@@ -2,10 +2,14 @@
 
 ## Purpose
 
-Two types describe a camera in this workspace, and there is exactly one place
-where they meet. This spec says what each is for, why they are not merged, and
-the invariant that lets the boundary between them be generated rather than
-written twice.
+A camera — a lens model plus its numbers — is written down two different ways
+in sfmtool: loosely, as whatever a reconstruction file happens to hold on disk,
+and strictly, as a closed set of known models the geometry code can compute
+with. Neither can replace the other: the file format has to be able to read a
+model it has never heard of, and the algorithms have to be sure they have
+handled every model that exists. This spec says what each type is for, why they
+stay separate, and how the one place they meet is generated from a single list
+so that adding a model cannot leave half the codebase behind.
 
 ## The two types
 
