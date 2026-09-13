@@ -630,7 +630,7 @@ pub struct AppState {
     /// where every method that would need it already is: an edit, a cursor
     /// move, a save and a close all ask [`AppState::busy_refusal`] first. One
     /// at a time, viewer-wide. See [`crate::background`].
-    pub(crate) background: Option<crate::background::BackgroundProcess>,
+    pub(crate) background_task: Option<crate::background::BackgroundTask>,
 
     /// What became of the operation that ran most recently, and which one it
     /// was.
@@ -639,16 +639,7 @@ pub struct AppState {
     /// done, and what did it say" outlives the operation: a tool call that was
     /// handed a handle comes back for it. One operation, not a history, since
     /// only one can run at a time and the Action Log holds the rest.
-    pub(crate) last_background: Option<crate::background::LastOperation>,
-
-    /// Whether the Background panel's idle form has its phases showing.
-    ///
-    /// Here rather than in the panel because the panel is drawn only while its
-    /// tab is open, and a toggle that forgot itself whenever the tab was
-    /// hidden, or whenever an operation ran, would be a toggle nobody could
-    /// leave open. It survives an operation for the same reason the Action
-    /// Log's expansion set does: it is what the reader asked to see.
-    pub(crate) background_detail_expanded: bool,
+    pub(crate) last_background_task: Option<crate::background::FinishedTask>,
 
     /// The same "what is running" the field above answers, in a form a thread
     /// that is not this one can read.
@@ -764,9 +755,8 @@ impl AppState {
             window: None,
             window_normal_rect: None,
             dock: Layout::default().to_dock(),
-            background: None,
-            last_background: None,
-            background_detail_expanded: false,
+            background_task: None,
+            last_background_task: None,
             busy_notice: Default::default(),
             next_operation_id: 1,
             wake: None,
@@ -848,7 +838,7 @@ impl AppState {
     /// Refused as a whole while a background operation is running, since the
     /// node it is running on is one of the ones this would close.
     pub fn close_all(&mut self) -> Result<(), String> {
-        if let Some(process) = self.background.as_ref() {
+        if let Some(process) = self.background_task.as_ref() {
             if let Some(why) = self.busy_refusal(process.node) {
                 return Err(why);
             }

@@ -4,10 +4,10 @@
 //! The Background panel: what is running, on which node, and what it has spent
 //! its time on so far.
 //!
-//! See `specs/gui/background-operations.md`, "What the user sees". The
-//! panel decides nothing: it reads [`AppState::background`] and the collector
-//! that process shares with its worker, and the one button it has calls
-//! [`AppState::cancel_background`].
+//! See `specs/gui/background-tasks.md`, "What the user sees". The
+//! panel decides nothing: it reads [`AppState::background_task`] and the collector
+//! that task shares with its worker, and the one button it has calls
+//! [`AppState::cancel_background_task`].
 //!
 //! ## Two forms, and neither of them is blank
 //!
@@ -50,12 +50,12 @@ const COST_WIDTH: f32 = 56.0;
 /// for the frame to ride on, so an idle event loop would leave the number
 /// frozen: a viewer that looks stopped is the thing this whole panel exists to
 /// prevent. Ten frames a second is enough for a reader watching seconds, and it
-/// is asked for only where there is a live process.
+/// is asked for only where there is a live task.
 const TICK: Duration = Duration::from_millis(100);
 
 /// The panel body.
 pub(crate) fn show(ui: &mut egui::Ui, state: &mut AppState) {
-    if state.background().is_some() {
+    if state.background_task().is_some() {
         show_running(ui, state);
     } else {
         show_idle(ui, state);
@@ -128,16 +128,16 @@ fn phase_name(live: &Live, row: usize) -> Option<&'static str> {
 /// The running form: the operation, the node, the progress, the elapsed, the
 /// Cancel button and the live phase table.
 fn show_running(ui: &mut egui::Ui, state: &mut AppState) {
-    // Everything is read off the process first: the Cancel below needs
+    // Everything is read off the task first: the Cancel below needs
     // `&mut AppState`, and these reads borrow it.
     let refusal = state.cancel_refusal();
-    let process = state.background().expect("just checked");
-    let name = process.operation.name;
-    let label = process.label.clone();
-    let elapsed = process.started.elapsed();
-    let live = process.collector.live();
-    let status = process.collector.status();
-    let bar = bar(&process.collector, &live);
+    let task = state.background_task().expect("just checked");
+    let name = task.operation.name;
+    let label = task.label.clone();
+    let elapsed = task.started.elapsed();
+    let live = task.collector.live();
+    let status = task.collector.status();
+    let bar = bar(&task.collector, &live);
 
     ui.label(egui::RichText::new(name).strong());
     ui.label(egui::RichText::new(label).weak());
@@ -169,11 +169,11 @@ fn show_running(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
     ui.separator();
-    show_phases(ui, &live.rows, &live.open);
+    show_phases(ui, &live.rows, &live.open, true);
     ui.ctx().request_repaint_after(TICK);
 
     if cancel {
-        state.cancel_background();
+        state.cancel_background_task();
     }
 }
 
@@ -198,63 +198,85 @@ fn show_bar(ui: &mut egui::Ui, bar: &Bar) {
     }
 }
 
+/// `text` cut to the width left in `ui`, out of the middle.
+///
+/// Both ends of a node's name carry meaning and the middle does not: the front
+/// is the date every run of that day shares, and the back is the range and the
+/// `-embedded` suffix. See [`crate::elide`].
+fn elide_to_fit(ui: &egui::Ui, text: &str) -> String {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().weak_text_color();
+    let room = ui.available_width();
+    crate::elide::middle(text, room, |candidate| {
+        ui.ctx().fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(candidate.to_owned(), font.clone(), color)
+                .rect
+                .width()
+        })
+    })
+}
+
 // -- Idle ------------------------------------------------------------------
 
 /// The idle form: the last operation of the session, greyed, with its phases
-/// under a toggle.
-fn show_idle(ui: &mut egui::Ui, state: &mut AppState) {
-    let Some(last) = state.last_background.as_ref() else {
+/// below it.
+///
+/// The phases are always showing. The Action Log hides a breakdown behind a
+/// toggle because it has a row for every action of the session and expanding
+/// them all would bury the list; this panel has one operation in it, and the
+/// breakdown is the only thing it has to say. A toggle there would be a click
+/// between a reader and the thing they opened the panel for.
+fn show_idle(ui: &mut egui::Ui, state: &AppState) {
+    let Some(last) = state.last_background_task.as_ref() else {
         ui.label(egui::RichText::new("Nothing running").weak());
         return;
     };
-    let expandable = !last.detail.is_empty();
-    let expanded = state.background_detail_expanded && expandable;
     let name = last.operation.name;
     let label = last.label.clone();
     let took = ActionLog::format_took(last.took);
 
-    let mut toggled = false;
     ui.horizontal(|ui| {
-        // The Action Log's glyphs and the Action Log's meaning: `+` opens, `-`
-        // closes, and nothing at all where there is nothing to open.
-        if expandable {
-            let toggle = if expanded { "-" } else { "+" };
-            let response =
-                ui.add(egui::Button::new(egui::RichText::new(toggle).monospace()).frame(false));
-            if response.clicked() {
-                toggled = true;
-            }
-        }
-        // The cost is reserved before the names are drawn, for the reason a
-        // phase row reserves it: a node with a long label would otherwise push
-        // the number off the panel, and the number is what a reader came back
-        // to this panel to find.
+        // The cost is reserved before the name is drawn: a long one would
+        // otherwise push the number off the panel, and the number is what a
+        // reader came back to this panel to find.
         let width = (ui.available_width() - COST_WIDTH).max(0.0);
         ui.allocate_ui_with_layout(
             egui::vec2(width, ui.text_style_height(&egui::TextStyle::Body)),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.label(egui::RichText::new(name).weak());
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&label).weak())
-                        .truncate()
-                        .selectable(false),
-                )
-                .on_hover_text(label);
             },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(egui::RichText::new(took).weak());
         });
     });
-    if expanded {
+    // The node goes on a line of its own, as it does while the operation runs.
+    // Sharing the row with the operation and the cost left it a third of a
+    // narrow panel, which is not enough of a name to tell one run from
+    // another: `20260628-01-solve-seattle_backyard_1-26-embedded` came out as
+    // `202\u{2026}ed`. A line of its own is the width of the panel, and the
+    // same two lines a reader was watching a minute ago.
+    ui.horizontal(|ui| {
+        // The cut here is ours, out of the middle, so `Label` is handed a
+        // string that already fits and would tooltip nothing: its own elision
+        // tooltip is turned off and the full name given directly. That is the
+        // one tooltip, rather than the two a `Label` that elided for itself
+        // would stack.
+        ui.add(
+            egui::Label::new(egui::RichText::new(elide_to_fit(ui, &label)).weak())
+                .show_tooltip_when_elided(false)
+                .truncate()
+                .selectable(false),
+        )
+        .on_hover_text(label);
+    });
+    if !last.detail.is_empty() {
         ui.separator();
         // Nothing is open: the operation is over, so every row is a run that
         // closed.
-        show_phases(ui, &last.detail, &[]);
-    }
-    if toggled {
-        state.background_detail_expanded = !state.background_detail_expanded;
+        show_phases(ui, &last.detail, &[], false);
     }
 }
 
@@ -263,25 +285,34 @@ fn show_idle(ui: &mut egui::Ui, state: &mut AppState) {
 /// The transcript, one row per run of a stage and one per message, with `open`
 /// naming the runs that have not closed.
 ///
+/// `follow` is whether the table belongs to a task that is still reporting.
+/// A live one is read at its tail, because the stage that is running is the
+/// newest row and this panel is narrow enough that the stages which finished
+/// early fill it: without that, a reader watching a long solve sees the
+/// prologue for the whole of it. A finished one has no tail to follow and is
+/// read from the top, where the task started. The Action Log follows its own
+/// tail for the live reason and this holds still the moment the reader scrolls
+/// up, so an early stage can be read while the task keeps going.
+///
 /// Virtualized on a uniform row height, as the Action Log's list is, because
 /// nothing folds here: a three-round, sixty-iteration adjustment with detailed
 /// timing on opens `linearise` and its two siblings five hundred and forty
 /// times, and every one of those is a row. Drawing only the range in view is
 /// what keeps that affordable at ten frames a second.
-fn show_phases(ui: &mut egui::Ui, rows: &[Detail], open: &[usize]) {
+fn show_phases(ui: &mut egui::Ui, rows: &[Detail], open: &[usize], follow: bool) {
     let breakdown = Breakdown::running(rows);
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
     egui::ScrollArea::vertical()
-        .id_salt("background_phases")
+        // A scroll position of its own for each form. They share this function
+        // and nothing else: one offset between them would open a finished task
+        // wherever the live one had got to, which is its last row.
+        .id_salt(if follow {
+            "background_task_running"
+        } else {
+            "background_task_finished"
+        })
         .auto_shrink([false, false])
-        // The stage that is running is the newest row, and this panel is narrow
-        // enough that the stages which finished early fill it: without this, a
-        // reader watching a long solve sees the prologue for the whole of it and
-        // has to scroll to find out what it is doing now. The Action Log follows
-        // its own tail for the same reason, and this holds still the moment the
-        // reader scrolls up, so an early stage can be read while the operation
-        // keeps going.
-        .stick_to_bottom(true)
+        .stick_to_bottom(follow)
         .show_rows(ui, row_height, rows.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for index in range {
@@ -311,18 +342,18 @@ fn show_phase_row(ui: &mut egui::Ui, breakdown: &Breakdown<'_>, index: usize, op
             egui::vec2(width, height),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
+                // The whole of a cut row is read on hover, and `Label` is what
+                // does it: it puts an elided text in a tooltip of its own, in
+                // this label's font, and only when the text was actually cut. A
+                // second `on_hover_text` of the same string stacks a
+                // proportional-font copy over that one.
                 ui.add(
-                    egui::Label::new(egui::RichText::new(&text).monospace().color(color))
+                    egui::Label::new(egui::RichText::new(text).monospace().color(color))
                         .truncate()
                         .selectable(false),
                 );
             },
-        )
-        // A note or a message runs past this column far more often than it does
-        // in the Action Log, which has the width of the window to spend, so the
-        // truncated half is read the way the Action Log's is read.
-        .response
-        .on_hover_text(text);
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(egui::RichText::new(&row.cost).monospace().color(weak));
             if open {
