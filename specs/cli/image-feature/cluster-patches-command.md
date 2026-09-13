@@ -2,15 +2,16 @@
 
 ## Overview
 
-Takes a set of feature matches and checks each one against the pictures. For
-every group of features the matcher believes are the same point, this nominates
-one of them as the reference, cuts the small square of image around it, and
-searches for the stretch-and-skew of that square which best reproduces what
-each of the other images actually shows there — keeping the members that fit,
-marking the ones that do not. The result is a matching file that carries not
-just "these detections go together" but a measured account of how well they do
-and how the surface appears in each view, all established before any camera
-pose exists.
+Takes a matches file whose correspondences are grouped into clusters — one
+group per surface point, spanning every image that saw it, rather than a pile
+of image-pair matches — and checks each group against the pictures. For every
+group, this nominates one member as the reference, cuts the small square of
+image around it, and searches for the stretch-and-skew of that square which
+best reproduces what each of the other images actually shows there — keeping
+the members that fit, marking the ones that do not. The result is a matching
+file that carries not just "these detections go together" but a measured
+account of how well they do and how the surface appears in each view, all
+established before any camera pose exists.
 
 In the format's terms, it refines a cluster-bearing `.matches` file into
 **patch clusters**: per cluster, a reference member plus, for every other

@@ -1,14 +1,16 @@
 # Cluster Patches: SIFT Clusters → Patch Clusters
 
-A **patch cluster** is a group of matched features that has been fitted to the
-actual image content behind it. One member is nominated the reference and
-contributes a small square of its own photograph; every other member carries
-the stretch-and-skew that lays that square over what its photograph shows, and
-a score saying how well it lands. This spec is about producing those from the
-raw groups a feature matcher emits — a strictly two-dimensional operation,
-done before any camera pose or 3D point exists, that turns "these detections
-are probably the same thing" into a measured account of how that thing appears
-in each view.
+The matches this spec starts from are not image pairs. Track-cluster matching
+reports a **cluster** per surface point — every image that saw it, gathered
+into one group — and it is a cluster in that form, rather than a set of
+pairwise correspondences, that becomes a **patch cluster** here: one member
+elected as the reference and contributing a small square of its own
+photograph, every other member carrying the stretch-and-skew that lays that
+square over what its own photograph shows, a score saying how well it lands,
+and a verdict on whether it belongs at all. The operation is strictly
+two-dimensional and runs before any camera pose or 3D point exists, turning
+"these detections are probably the same thing" into a measured account of how
+that thing appears in each view.
 
 ## The Idea
 
