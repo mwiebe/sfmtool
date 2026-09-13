@@ -2,15 +2,16 @@
 
 ## Overview
 
-Makes a reconstruction stand on its own, re-measuring its observations on the
-way. A freshly solved reconstruction does not store its own 2D measurements: every
-observation is a pointer into an external feature file sitting beside it, and
-losing those files loses the reconstruction's link to the images. This command
-re-derives each of those measurements by lining a point's views up against one
-another photographically, and writes them into the reconstruction itself,
-alongside the small oriented piece of surface each point sits on. The result is
-a single `.sfmr` that needs nothing else, whose keypoints are sub-pixel
-registrations rather than independent detections.
+Switches a reconstruction from externally stored SIFT features to patch
+features embedded in the file itself. As solved, a reconstruction holds no
+image measurements of its own: every observation is a pointer into a `.sift`
+file sitting beside it, naming a keypoint that was detected in that one image
+in isolation. This command replaces that representation — each point gains a
+small oriented piece of surface, and each of its observations an inline
+keypoint re-measured by registering the point's views against one another
+photographically. What comes out is a single `.sfmr` that needs no feature
+files beside it, whose keypoints are sub-pixel cross-view registrations rather
+than independent per-image detections.
 
 In the file format's terms, this converts a `sift_files` reconstruction into an
 `embedded_patches` `.sfmr` — a wholesale switch of `feature_source`. Each
