@@ -6,6 +6,7 @@
 
 use pyo3::prelude::*;
 
+pub mod constellation;
 pub mod kdf;
 pub mod kdforest;
 pub mod kdtree;
@@ -14,5 +15,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     kdtree::register(m)?;
     kdforest::register(m)?;
     kdf::register(m)?;
+    constellation::register(m)?;
     Ok(())
 }
