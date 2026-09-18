@@ -279,10 +279,26 @@ is for the CLI/inspect/analyze/notebook paths.
 
 ## Consumers
 
-**Points at infinity.** `analysis/infinity/discover.rs::classify_track` and
-`analysis/infinity/convert.rs::classify_points_at_infinity` share
+**Points at infinity.** `analysis/infinity/discover.rs::classify_track`,
+`analysis/infinity/convert.rs::classify_points_at_infinity` and the track
+bench's `bench/classify.rs::classify_track_rays` share
 `classify_rays_at_infinity`, which decides finite-versus-infinity on
-`inverse_depth_z` with `condition_number` as a cheap geometric pre-filter. The
+`inverse_depth_z` with `condition_number` as a cheap geometric pre-filter. It is
+`pub` for that third caller: every bench step that triangulates -- the
+track-stage fit and the cluster-to-track upgrade
+([`../bench/editable-track.md`](../bench/editable-track.md) § "Finite points and
+bearings") -- ends at it with these same defaults, so a hand-edited track and a
+whole-reconstruction pass cannot come to disagree about which representation one
+set of rays has earned. The bench differs in two places, both about what to do
+with an answer rather than about how to reach one: a relabel-only pass leaves an
+`Indeterminate` track as the solve produced it, while a fit has to write
+something and writes the bearing the numbers describe; and the bench then
+reprojects both candidates into the sightings and keeps the criterion's answer
+only where the pixels agree, because this criterion says whether a depth is
+*observable* and an ill-conditioned midpoint can clear its own bar on a depth
+that is not there. `RayClassification` carries the triangulated `point` beside
+its `class` for that second caller: a caller that refuses the depth may still
+want to know what it refused. The
 thresholds — `DEFAULT_INVERSE_DEPTH_Z_CUTOFF = 4.0` and
 `CONDITION_NUMBER_PREFILTER = 1e4` — live in
 [`analysis/infinity/convert.rs`](../../../crates/sfmtool-core/src/analysis/infinity/convert.rs)

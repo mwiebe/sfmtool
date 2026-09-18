@@ -204,6 +204,14 @@ pub enum Classification {
 #[derive(Debug, Clone, Copy)]
 pub struct RayClassification {
     pub class: Classification,
+    /// The least-squares point the rays triangulated to, whatever [`Self::class`]
+    /// made of it.
+    ///
+    /// Beside the class rather than only inside `Classification::Finite`, because
+    /// a caller that refused the depth may still want to know what was refused:
+    /// the bench scores this point and [`Self::bearing`] against the sightings and
+    /// keeps whichever explains them, which needs both candidates in hand.
+    pub point: Point3<f64>,
     pub condition_number: f64,
     pub resolvable_distance: f64,
     pub inverse_depth_z: f64,
@@ -213,7 +221,7 @@ pub struct RayClassification {
 
 /// Spatial extent (bounding-box diagonal) of a set of camera centers — the
 /// scale of the region a capture explored, and the default `finite_horizon`.
-pub(crate) fn camera_extents(centers: &[Point3<f64>]) -> f64 {
+pub fn camera_extents(centers: &[Point3<f64>]) -> f64 {
     let Some(first) = centers.first() else {
         return 0.0;
     };
@@ -242,7 +250,7 @@ pub(crate) fn camera_extents(centers: &[Point3<f64>]) -> f64 {
 ///   z-score below `z_cutoff` is **at infinity** (a `w = 0` bearing direction —
 ///   the mean of the rays, or the first ray if they cancel exactly); else
 ///   **finite**.
-pub(crate) fn classify_rays_at_infinity(
+pub fn classify_rays_at_infinity(
     dirs: &[Vector3<f64>],
     centers: &[Point3<f64>],
     sigma_rad: &[f64],
@@ -283,6 +291,7 @@ pub(crate) fn classify_rays_at_infinity(
     if geometrically_finite && tri.condition_number < CONDITION_NUMBER_PREFILTER {
         return RayClassification {
             class: Classification::Finite(tri.point),
+            point: tri.point,
             condition_number: tri.condition_number,
             resolvable_distance: f64::NAN,
             inverse_depth_z: f64::NAN,
@@ -307,6 +316,7 @@ pub(crate) fn classify_rays_at_infinity(
     };
     RayClassification {
         class,
+        point: tri.point,
         condition_number: tri.condition_number,
         resolvable_distance: du.resolvable_distance,
         inverse_depth_z: du.inverse_depth_z,
