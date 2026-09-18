@@ -329,6 +329,10 @@ impl TabContext<'_> {
             let outcome = self.state.split_bench_track(id, &label, rows).map(|_| ());
             refuse(self.state, outcome);
         }
+        if response.duplicate {
+            let outcome = self.state.duplicate_bench_item(id, &label).map(|_| ());
+            refuse(self.state, outcome);
+        }
         if let Some(search_px) = response.evaluate {
             let outcome = self.state.start_bench_evaluate(id, &label, Some(search_px));
             // A refusal to begin is logged by the starter, in the words its
@@ -749,6 +753,19 @@ impl TabContext<'_> {
                         radius_px: None,
                     };
                     if let Err(why) = self.state.add_bench_observation(label, image, &seed) {
+                        self.state
+                            .action_log
+                            .fail(crate::action_log::Kind::Bench, why);
+                    }
+                }
+            }
+            // A drag of one of the bench layer's handles: the sighting placed,
+            // the patch resized or turned. One version per gesture, through the
+            // call the wire's patch tools make, so a drag and a tool call are
+            // the same step with the same sentence.
+            if let Some(edit) = detail_response.bench_edit {
+                if let Some(label) = &bench_label {
+                    if let Err(why) = self.state.edit_bench_patch(id, label, &edit) {
                         self.state
                             .action_log
                             .fail(crate::action_log::Kind::Bench, why);

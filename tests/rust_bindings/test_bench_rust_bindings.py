@@ -20,11 +20,18 @@ from sfmtool._sfmtool.bench import (
     commit,
     create_cluster,
     create_track,
+    duplicate,
     evaluate,
     fit,
+    resize_frame,
+    resize_from_edge,
+    rotate_frame,
+    set_observation_keypoint,
+    set_observation_shape,
     set_stage,
     set_verdict,
     split,
+    translate_frame,
 )
 from sfmtool._sfmtool.reconstruction import EditedReconstruction, SfmrReconstruction
 
@@ -827,6 +834,220 @@ class TestTheDescriptorSearch:
             "kind": "search",
             "inliers": 11,
         }
+
+
+class TestPlacingSizingAndTurningByHand:
+    """The six steps a person's own hand reaches the geometry through.
+
+    They are what the Image Detail panel's bench handles do. What the exactness
+    of the resize claims -- the dragged edge reprojecting onto the pixel it was
+    given and the opposite edge holding still through a real lens -- is proved
+    in Rust, over a fixture whose camera is swapped for a distorting one; what
+    is checked here is that the bindings carry each step's numbers and each
+    step's refusals.
+    """
+
+    def test_sliding_the_patch_carries_every_sighting_with_it(
+        self, edited, long_track_point
+    ):
+        _, track = create_track(Bench(), edited, long_track_point)
+        was = track.observation(0)["track"]["keypoint"]
+        before = track.frame
+
+        moved, report = translate_frame(track, edited, 0, (was[0] + 6.0, was[1] - 4.0))
+        assert report["changed"]
+        assert report["observation"] == 0
+        assert report["placed"] == moved.observation_count
+        assert report["moved"] > 0.0
+        # In-plane only: the axes, the size and the normal are untouched.
+        after = moved.frame
+        for axis in ("u_halfvec", "v_halfvec"):
+            np.testing.assert_allclose(after[axis], before[axis])
+        offset = np.asarray(after["center"]) - np.asarray(before["center"])
+        normal = np.cross(before["u_halfvec"], before["v_halfvec"])
+        assert abs(float(offset @ normal)) < 1e-12, "the patch left its own plane"
+        np.testing.assert_allclose(moved.position, after["center"])
+        # Every sighting moved with it, and none was pinned by a translation.
+        for index in range(moved.observation_count):
+            observation = moved.observation(index)
+            assert not observation["pinned"]
+            assert "zncc" not in observation["track"]
+            before_at = track.observation(index)["track"]["keypoint"]
+            assert not np.array_equal(observation["track"]["keypoint"], before_at)
+
+    def test_a_placed_sighting_is_written_pinned_and_stripped_of_the_old_reading(
+        self, edited, long_track_point
+    ):
+        _, track = create_track(Bench(), edited, long_track_point)
+        was = track.observation(0)["track"]["keypoint"]
+        moved, report = set_observation_keypoint(track, 0, (was[0] + 3.0, was[1] - 4.0))
+
+        assert report["changed"]
+        assert report["observation"] == 0
+        assert report["moved_px"] == pytest.approx(5.0, abs=1e-3)
+        placed = moved.observation(0)
+        assert placed["track"]["keypoint"] == pytest.approx(
+            (was[0] + 3.0, was[1] - 4.0), abs=1e-3
+        )
+        assert placed["pinned"], "a sighting a person placed is one they ruled on"
+        assert "zncc" not in placed["track"], "the old reading does not hold here"
+        # The track it was called on is untouched, as every step's is.
+        np.testing.assert_array_equal(track.observation(0)["track"]["keypoint"], was)
+
+    def test_a_centred_resize_moves_nothing_and_keeps_the_frame_square(
+        self, edited, long_track_point
+    ):
+        _, track = create_track(Bench(), edited, long_track_point)
+        sized, report = resize_frame(track, 0.4)
+
+        assert report["changed"] and report["half"] == 0.4
+        frame = sized.frame
+        assert np.linalg.norm(frame["u_halfvec"]) == pytest.approx(0.4, rel=1e-12)
+        assert np.linalg.norm(frame["v_halfvec"]) == pytest.approx(0.4, rel=1e-12)
+        np.testing.assert_allclose(frame["center"], track.frame["center"])
+        # Every number read over the old square goes; where each sighting sits
+        # does not.
+        for before, after in zip(track.observations, sized.observations):
+            np.testing.assert_array_equal(
+                after["track"]["keypoint"], before["track"]["keypoint"]
+            )
+            assert "zncc" not in after["track"]
+
+        with pytest.raises(ValueError, match="not a size"):
+            resize_frame(track, 0.0)
+
+    def test_a_turn_keeps_the_axes_the_plane_and_every_sighting(
+        self, edited, long_track_point
+    ):
+        _, track = create_track(Bench(), edited, long_track_point)
+        turned, report = rotate_frame(track, np.pi / 3.0)
+        assert report["degrees"] == pytest.approx(60.0)
+
+        before, after = track.frame, turned.frame
+        for axis in ("u_halfvec", "v_halfvec"):
+            assert np.linalg.norm(after[axis]) == pytest.approx(
+                np.linalg.norm(before[axis]), rel=1e-12
+            )
+        np.testing.assert_allclose(after["center"], before["center"])
+
+        def normal(frame):
+            cross = np.cross(frame["u_halfvec"], frame["v_halfvec"])
+            return cross / np.linalg.norm(cross)
+
+        np.testing.assert_allclose(normal(after), normal(before), atol=1e-12)
+        np.testing.assert_array_equal(
+            turned.observation(0)["track"]["keypoint"],
+            track.observation(0)["track"]["keypoint"],
+        )
+
+    def test_a_resize_from_an_edge_resizes_and_re_places_the_sighting_it_was_named_at(
+        self, edited, long_track_point
+    ):
+        _, track = create_track(Bench(), edited, long_track_point)
+        was = track.observation(0)["track"]["keypoint"]
+        # A pixel out along the outline, which is what dragging the +u edge
+        # hands the step.
+        resized, report = resize_from_edge(
+            track, edited, 0, "+u", (was[0] + 40.0, was[1])
+        )
+
+        assert report["changed"]
+        assert report["observation"] == 0
+        assert report["image"] == track.observation(0)["image"]
+        assert report["half"] > report["was"], "the edge was pulled outward"
+        frame = resized.frame
+        assert np.linalg.norm(frame["u_halfvec"]) == pytest.approx(
+            np.linalg.norm(frame["v_halfvec"]), rel=1e-12
+        )
+        # The patch grew toward the edge that was dragged, so its centre moved
+        # with it and every dot follows.
+        # A resize moves the centre, so every sighting follows it, exactly as a
+        # slide's does; nothing is pinned.
+        assert not resized.observation(0)["pinned"]
+        assert not np.array_equal(resized.observation(0)["track"]["keypoint"], was)
+        assert not np.array_equal(
+            resized.observation(1)["track"]["keypoint"],
+            track.observation(1)["track"]["keypoint"],
+        )
+
+        with pytest.raises(ValueError, match="not an edge"):
+            resize_from_edge(track, edited, 0, "sideways", (was[0], was[1]))
+
+    def test_a_cluster_sighting_takes_the_shape_it_is_given(
+        self, edited, long_track_point
+    ):
+        bench, track = create_cluster(
+            Bench(), 4, "IMG_0042", (142.0, 197.5), radius_px=6.0
+        )
+        # A quarter turn of the seed's own shape, handed over as the matrix.
+        was = np.asarray(track.observation(0)["cluster"]["seed_shape"])
+        turn = np.array([[0.0, -1.0], [1.0, 0.0]]) @ was
+        turned, shaped = set_observation_shape(track, 0, turn)
+
+        assert shaped["changed"]
+        np.testing.assert_allclose(shaped["shape"], turn)
+        assert shaped["half_px"] == pytest.approx(
+            track.radius * np.linalg.norm(turn[:, 0]), rel=1e-12
+        ), "radius * the first column's norm"
+        assert not turned.observation(0)["pinned"], "a turn is not a verdict"
+        with pytest.raises(ValueError, match="spans no area"):
+            set_observation_shape(track, 0, [[1.0, 2.0], [2.0, 4.0]])
+
+        # And the two stages own different steps: a surfel is not a cluster's.
+        _, at_track = create_track(Bench(), edited, long_track_point)
+        with pytest.raises(ValueError, match="cluster-stage step"):
+            set_observation_shape(at_track, 0, turn)
+        with pytest.raises(ValueError, match="track-stage step"):
+            rotate_frame(track, 0.5)
+
+
+class TestDuplicating:
+    """A copy of an item beside it: everything but the origin."""
+
+    def test_a_copy_carries_the_patch_and_commits_as_a_creation(
+        self, edited, long_track_point
+    ):
+        bench, track = create_track(Bench(), edited, long_track_point)
+        label = bench.labels[0]
+
+        bench, report = duplicate(bench, label)
+        assert report["from"] == label
+        assert report["label"] == f"{label} copy"
+        assert report["observation_count"] == track.observation_count
+        assert bench.labels == [label, report["label"]]
+        assert bench.active_label() == report["label"], "the copy is what you work on"
+
+        copy = bench.track(report["label"])
+        assert copy.stage == track.stage
+        assert copy.observation_count == track.observation_count
+        assert copy.origin is None, "a copy has to create rather than replace"
+        assert bench.track(label).origin is not None, "the original kept its origin"
+        np.testing.assert_allclose(copy.position, track.position)
+        np.testing.assert_allclose(copy.frame["u_halfvec"], track.frame["u_halfvec"])
+        for index in range(copy.observation_count):
+            was, now = track.observation(index), copy.observation(index)
+            assert now["verdict"] == was["verdict"]
+            assert now["pinned"] == was["pinned"]
+            assert now["image"] == was["image"]
+            assert now["provenance"] == was["provenance"]
+            np.testing.assert_array_equal(
+                now["track"]["keypoint"], was["track"]["keypoint"]
+            )
+            assert now["track"].keys() == was["track"].keys()
+
+        # A second duplicate takes the bench's own collision suffix.
+        bench, again = duplicate(bench, label)
+        assert again["label"] == f"{label} copy (2)"
+
+        # And the copy's commit creates: the point it was copied from is
+        # untouched.
+        after, committed = commit(edited, copy, node="run")
+        assert "replaced" not in committed
+        assert committed["point"] == edited.point_count
+        assert after.point(long_track_point) is not None
+
+        with pytest.raises(ValueError, match="nothing on the bench"):
+            duplicate(bench, "nothing at all")
 
 
 def test_the_module_reports_its_public_location():

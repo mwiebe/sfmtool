@@ -107,6 +107,33 @@ pub struct ImageDetail {
     /// frame has drawn, and again after a view reset. See
     /// [`ImageDetail::rescale_view`].
     last_display_size: Option<egui::Vec2>,
+    /// The bench layer's handle the pointer has hold of, while it has one.
+    ///
+    /// Held on the panel rather than derived each frame because a drag is a
+    /// gesture and not a state of the pointer: what is being dragged was
+    /// decided when the button went down, and the pointer wanders off the
+    /// handle the moment it starts moving.
+    bench_drag: Option<bench_track::Drag>,
+}
+
+/// Whether a mouse button other than the primary one is down.
+///
+/// Windows routes every button through `WM_POINTER*` and reports them all as
+/// egui's Primary (`EnableMouseInPointer`), so egui alone cannot say which
+/// button a press was. The bench layer has to know, because a secondary press
+/// is this panel's right-drag zoom and its context menu, and neither of those
+/// is a handle being grabbed. Elsewhere there is nothing to disambiguate.
+fn other_mouse_button_down() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let state = crate::platform::windows::mouse_button_state();
+        state & (crate::platform::windows::BUTTON_MIDDLE | crate::platform::windows::BUTTON_RIGHT)
+            != 0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 /// A feature to draw on the image detail panel.
@@ -177,6 +204,11 @@ pub struct ImageDetailResponse {
     /// active track in the Track Edit panel. The layer is on top, so a click it
     /// catches leaves `select_point` alone.
     pub select_bench_row: Option<usize>,
+    /// The edit a drag of one of the bench layer's handles just finished, in
+    /// the form the core steps take. The dock applies it through
+    /// `AppState::edit_bench_patch`, which is the call the wire's three patch
+    /// tools make: one version, one Action Log row, one undo.
+    pub bench_edit: Option<crate::bench::PatchEdit>,
     /// What the panel ended this frame looking at, or `None` on a frame that
     /// drew no image.
     ///
@@ -197,6 +229,7 @@ impl ImageDetail {
             pan: egui::Vec2::ZERO,
             zoom: 1.0,
             last_display_size: None,
+            bench_drag: None,
         }
     }
 
@@ -308,6 +341,107 @@ impl ImageDetail {
         self.zoom = next.zoom;
     }
 
+    /// Run the bench layer's handles for this frame: pick a drag up at the
+    /// press, follow it, cancel it or finish it, and say which handle the
+    /// pointer is on.
+    ///
+    /// Called before the view's own input so that the pan can be suppressed
+    /// from the press onward. The hit test is against the geometry this frame
+    /// starts from, which is the geometry the person pressed on: the view has
+    /// not moved yet, and it will not move while the button is down over a
+    /// handle.
+    ///
+    /// Both ends of a drag are recorded in **source-image** pixels, so panning
+    /// or zooming mid-drag moves the handle with the photograph rather than
+    /// under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn update_bench_drag(
+        &mut self,
+        ui: &egui::Ui,
+        interact_response: &egui::Response,
+        track: Option<&sfmtool_core::bench::EditableTrack>,
+        image_table: &sfmtool_core::ImageTable,
+        img_idx: usize,
+        image_rect: egui::Rect,
+        effective_scale: f32,
+        response: &mut ImageDetailResponse,
+    ) -> Option<bench_track::Handle> {
+        // A drag that outlives the image it started in, or the track it was
+        // editing, is dropped: its handle names something that is not up.
+        if track.is_none() || self.bench_drag.is_some_and(|drag| drag.image != img_idx) {
+            self.bench_drag = None;
+        }
+        let track = track?;
+        let layer =
+            bench_track::Layer::build(image_table, img_idx, track, image_rect, effective_scale)?;
+        let to_image = |pos: egui::Pos2| -> [f64; 2] {
+            [
+                f64::from((pos.x - image_rect.min.x) / effective_scale),
+                f64::from((pos.y - image_rect.min.y) / effective_scale),
+            ]
+        };
+        let (pressed, down, pointer) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos().or(i.pointer.hover_pos()),
+            )
+        });
+
+        // **The press decides the handle, not the drag.** egui calls a gesture
+        // a drag only once the pointer has left the press by a few pixels, but
+        // the view pans on whatever motion it is given, with no threshold of
+        // its own. Waiting for `drag_started` therefore lost the gesture twice
+        // over: the photograph had already moved, so the handle was no longer
+        // under the press position the hit test was given, and the pan had
+        // already begun. So the handle is taken at the press, against the
+        // geometry this frame starts from -- which is the geometry the person
+        // pressed on, since nothing has panned yet -- and from that moment the
+        // pan is suppressed.
+        if self.bench_drag.is_none() && pressed && !other_mouse_button_down() {
+            if let Some((press, handle)) = pointer
+                .filter(|_| interact_response.contains_pointer())
+                .and_then(|press| layer.hit(press).map(|handle| (press, handle)))
+            {
+                self.bench_drag = Some(bench_track::Drag {
+                    image: img_idx,
+                    handle,
+                    from: to_image(press),
+                    to: to_image(press),
+                    moved: false,
+                    cancelled: false,
+                });
+            }
+        }
+        if let Some(drag) = &mut self.bench_drag {
+            if let Some(pos) = interact_response.interact_pointer_pos().or(pointer) {
+                let to = to_image(pos);
+                drag.moved |= to != drag.from;
+                drag.to = to;
+            }
+            // Escape abandons the gesture. The drag is kept until the button
+            // comes up so the view does not start panning halfway through it.
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                drag.cancelled = true;
+            }
+        }
+        // The button coming up ends it, whether or not egui ever called it a
+        // drag: a press that never moved is a **click**, which selects the row
+        // under it and leaves the track alone.
+        if !down {
+            if let Some(drag) = self.bench_drag.take() {
+                if drag.moved {
+                    response.bench_edit = bench_track::Layer::edit(image_table, track, &drag);
+                }
+            }
+        }
+        self.bench_drag.map(|drag| drag.handle).or_else(|| {
+            ui.input(|i| i.pointer.hover_pos())
+                .filter(|_| interact_response.contains_pointer())
+                .and_then(|pos| layer.hit(pos))
+        })
+    }
+
     /// The view and the frame it is held in, as [`mod@view`] states them.
     fn geometry(
         &self,
@@ -368,6 +502,7 @@ impl ImageDetail {
             start_bench_cluster: None,
             add_bench_observation: None,
             select_bench_row: None,
+            bench_edit: None,
             view: None,
         };
 
@@ -486,6 +621,22 @@ impl ImageDetail {
             egui::Color32::WHITE,
         );
 
+        // --- The bench layer's handles, before the view's own input ---
+        //
+        // A drag that began on a handle is an edit of the track and must not
+        // also pan the photograph: the pointer can only mean one of the two,
+        // and what it means was decided where the button went down.
+        let hovered_handle = self.update_bench_drag(
+            ui,
+            &interact_response,
+            bench.active_track,
+            &edited.base.image_table,
+            img_idx,
+            image_rect,
+            effective_scale,
+            &mut response,
+        );
+
         // --- Input handling --- (returns true on double-click view reset)
         if self.handle_input(
             ui,
@@ -496,6 +647,7 @@ impl ImageDetail {
             display_size,
             scroll_input,
             gesture_events,
+            self.bench_drag.is_some(),
         ) {
             return response;
         }
@@ -585,12 +737,15 @@ impl ImageDetail {
         if let Some(track) = bench.active_track {
             bench_track::draw(
                 &painter,
+                ui,
                 &interact_response,
-                image_table,
+                edited,
                 img_idx,
                 track,
                 image_rect,
                 effective_scale,
+                self.bench_drag.as_ref(),
+                hovered_handle,
                 &mut response,
             );
         }

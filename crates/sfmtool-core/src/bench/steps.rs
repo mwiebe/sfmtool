@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use nalgebra::Vector3;
+use nalgebra::{Point3, Vector3};
 
 use crate::patch::cloud::OrientedPatch;
 use crate::progress::Progress;
@@ -23,8 +23,8 @@ use crate::reconstruction::edited::EditedReconstruction;
 use super::fit::FitOptions;
 use super::stage::{set_stage, StageError};
 use super::track::{
-    ClusterPayload, EditableTrack, Observation, Origin, Provenance, Stage, StageKind, Thresholds,
-    TrackMeasurement, TrackPayload, Verdict,
+    ClusterMeasurement, ClusterPayload, EditableTrack, Observation, Origin, Provenance, Stage,
+    StageKind, Thresholds, TrackMeasurement, TrackPayload, Verdict,
 };
 use super::{Bench, BenchItem, ItemKind};
 
@@ -422,6 +422,43 @@ pub enum TrackEditError {
     },
     /// The seed is not a finite pair of coordinates.
     BadPixel([f64; 2]),
+    /// The step belongs to the other stage: the surfel's own size and turn are
+    /// the track stage's, and one sighting's affine shape is the cluster
+    /// stage's.
+    WrongStage {
+        /// The stage the step acts at.
+        wanted: StageKind,
+        /// The stage the track is in.
+        is: StageKind,
+    },
+    /// The track is at the track stage and carries no surfel to resize or turn.
+    NoFrame,
+    /// The half-length asked for is not a positive finite length.
+    BadSize(f64),
+    /// The turn asked for is not a finite angle.
+    BadAngle(f64),
+    /// The affine shape has no area, so there is no frame to warp a template
+    /// through.
+    BadShape([[f64; 2]; 2]),
+    /// Nothing says where the observation sits, so there is no place to re-seat
+    /// it at.
+    NoPlace {
+        /// The observation named.
+        observation: usize,
+    },
+    /// The observation is in an image the reconstruction does not have, or one
+    /// whose camera it does not have.
+    NoSuchImage {
+        /// The image named.
+        image: u32,
+    },
+    /// The patch and the pixel do not meet in that observation's view: the
+    /// centre falls outside the lens model's domain, or the pointer's ray runs
+    /// parallel to the patch's plane.
+    NoProjection {
+        /// The observation whose view was used.
+        observation: usize,
+    },
 }
 
 impl std::fmt::Display for TrackEditError {
@@ -440,6 +477,29 @@ impl std::fmt::Display for TrackEditError {
                 "image {image} already has observation {observation} in; turn it out first"
             ),
             TrackEditError::BadPixel(p) => write!(f, "({}, {}) is not a pixel", p[0], p[1]),
+            TrackEditError::WrongStage { wanted, is } => {
+                write!(f, "that is a {wanted}-stage step and this track is a {is}")
+            }
+            TrackEditError::NoFrame => {
+                write!(f, "this track has no surfel yet; fit it first")
+            }
+            TrackEditError::BadSize(size) => write!(f, "{size} is not a size"),
+            TrackEditError::BadAngle(angle) => write!(f, "{angle} is not an angle"),
+            TrackEditError::BadShape(shape) => write!(
+                f,
+                "the shape [[{}, {}], [{}, {}]] spans no area",
+                shape[0][0], shape[0][1], shape[1][0], shape[1][1]
+            ),
+            TrackEditError::NoPlace { observation } => {
+                write!(f, "nothing says where observation {observation} sits")
+            }
+            TrackEditError::NoSuchImage { image } => {
+                write!(f, "image {image} is not in this reconstruction")
+            }
+            TrackEditError::NoProjection { observation } => write!(
+                f,
+                "the patch and that pixel do not meet in observation {observation}'s view"
+            ),
         }
     }
 }
@@ -601,6 +661,845 @@ pub fn set_verdict(
     ))
 }
 
+// ---- Placing a sighting, and sizing and turning the patch ------------------
+
+/// One of a patch's two in-plane axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// The `u` axis, which the patch's first half-vector lies along.
+    U,
+    /// The `v` axis.
+    V,
+}
+
+/// One of the four edges of a patch's square, named by the axis it lies across
+/// and the side it is on.
+///
+/// What a person grabs when they resize a patch by its outline, and what the
+/// wire's resize tool names as `"+u"`, `"-u"`, `"+v"` or `"-v"`. The edge
+/// matters and not just the axis, because a resize holds the **opposite** edge
+/// still: which of the two moves is the whole of the difference between the
+/// patch growing up and growing down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    /// The edge at `s = +1`.
+    PlusU,
+    /// The edge at `s = -1`.
+    MinusU,
+    /// The edge at `t = +1`.
+    PlusV,
+    /// The edge at `t = -1`.
+    MinusV,
+}
+
+impl Edge {
+    /// Which axis the edge is read on.
+    pub fn axis(self) -> Axis {
+        match self {
+            Edge::PlusU | Edge::MinusU => Axis::U,
+            Edge::PlusV | Edge::MinusV => Axis::V,
+        }
+    }
+
+    /// Which side of the centre it sits on, as `-1.0` or `+1.0`.
+    pub fn sign(self) -> f64 {
+        match self {
+            Edge::PlusU | Edge::PlusV => 1.0,
+            Edge::MinusU | Edge::MinusV => -1.0,
+        }
+    }
+
+    /// The four edges, in the order `"+u"`, `"-u"`, `"+v"`, `"-v"`.
+    pub const ALL: [Edge; 4] = [Edge::PlusU, Edge::MinusU, Edge::PlusV, Edge::MinusV];
+
+    /// The edge's name on the wire and in a report.
+    pub fn name(self) -> &'static str {
+        match self {
+            Edge::PlusU => "+u",
+            Edge::MinusU => "-u",
+            Edge::PlusV => "+v",
+            Edge::MinusV => "-v",
+        }
+    }
+}
+
+impl std::fmt::Display for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for Edge {
+    type Err = String;
+
+    fn from_str(word: &str) -> Result<Self, Self::Err> {
+        Edge::ALL
+            .into_iter()
+            .find(|edge| edge.name() == word)
+            .ok_or_else(|| format!("{word:?} is not an edge; use +u, -u, +v or -v"))
+    }
+}
+
+/// What one hand-placed sighting did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveObservationReport {
+    /// The observation that was moved.
+    pub observation: usize,
+    /// The image it is in.
+    pub image: u32,
+    /// Where it sat, or `None` for an observation nothing said the place of.
+    pub was: Option<[f64; 2]>,
+    /// Where it sits now.
+    pub pixel: [f64; 2],
+    /// How far it moved, in that image's px, or `None` when it came from
+    /// nowhere.
+    pub moved_px: Option<f64>,
+    /// Whether anything changed. A sighting put back exactly where it was
+    /// pins it and changes nothing else.
+    pub changed: bool,
+}
+
+/// Put one observation's sighting at `pixel`, by hand.
+///
+/// What a person dragging the observation's mark in the Image Detail panel
+/// means, and the one step behind it at either stage:
+///
+/// - At the **track stage** it writes the observation's keypoint, which is the
+///   pixel a commit writes and the place every reading is anchored at, and
+///   drops the rest of that measurement. Everything else in a
+///   [`TrackMeasurement`] -- the leave-one-out ZNCC, both distances, the
+///   reprojection residual, the localizability, the reason -- was computed
+///   *for the old keypoint* and says nothing about the new one, and an
+///   evaluation recomputes all of it from the track as it stands, so clearing
+///   is both honest and cheap to undo.
+/// - At the **cluster stage** it re-seeds the observation at `pixel` with the
+///   shape it is being read at, and drops the refinement. The shape is kept
+///   because a person moving a mark is saying where the patch is and not how
+///   large it is; what the refinement found around the old pixel is not an
+///   answer about the new one.
+///
+/// Nothing else on the track moves: the surfel keeps its place, its size and
+/// its turn, and every other sighting keeps its own.
+///
+/// **The observation is pinned either way**, at both stages: a sighting a
+/// person placed is a sighting they have ruled on, and
+/// [`apply_thresholds`] leaves a pinned observation's verdict where it is
+/// rather than painting over a placement by hand.
+pub fn set_observation_keypoint(
+    track: &EditableTrack,
+    observation: usize,
+    pixel: [f64; 2],
+) -> Result<(EditableTrack, MoveObservationReport), TrackEditError> {
+    if !pixel.iter().all(|c| c.is_finite()) {
+        return Err(TrackEditError::BadPixel(pixel));
+    }
+    let current = observation_at(track, observation)?;
+    let was = current.site();
+    let image = current.image;
+    let shape = current.shape();
+
+    let mut next = track.clone();
+    let target = &mut next.observations[observation];
+    match track.stage {
+        Stage::Track(_) => {
+            target.track = Some(TrackMeasurement {
+                keypoint: Some([pixel[0] as f32, pixel[1] as f32]),
+                ..TrackMeasurement::default()
+            });
+        }
+        Stage::Cluster(_) => {
+            let shape = shape
+                .or_else(|| reference_shape(track))
+                .unwrap_or([[1.0, 0.0], [0.0, 1.0]]);
+            target.cluster = Some(ClusterMeasurement::from_seed(pixel, shape));
+        }
+    }
+    target.pinned = true;
+    let moved_px = was.map(|was| (pixel[0] - was[0]).hypot(pixel[1] - was[1]));
+    Ok((
+        next,
+        MoveObservationReport {
+            observation,
+            image,
+            was,
+            pixel,
+            moved_px,
+            changed: was != Some(pixel),
+        },
+    ))
+}
+
+/// What one resize did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResizeReport {
+    /// The observation whose outline was dragged, for
+    /// [`resize_from_edge`]; the resize is of the one patch either way, and
+    /// this says which sighting's view of it the size was named in.
+    pub observation: Option<usize>,
+    /// The image that observation is in.
+    pub image: Option<u32>,
+    /// The patch's new half-length: world units at the track stage, and the
+    /// half-width along `u` in that image's own pixels at the cluster stage.
+    pub half: f64,
+    /// What it was, in the same unit.
+    pub was: f64,
+    /// Whether anything changed.
+    pub changed: bool,
+}
+
+/// Resize the track's surfel to `half_length` along **both** of its axes, about
+/// its own centre.
+///
+/// One scalar rather than two, because a patch frame is square: the half-vector
+/// pair a `.sfmr` stores and every kernel that renders a tile reads has
+/// `|u| == |v|`, and the grid the tile is sampled on is square with it
+/// (`specs/core/patch/patch-cloud.md`). A resize that moved one axis alone
+/// would make the patch a rectangle sampled as a square, which is a stretched
+/// template rather than a larger one.
+///
+/// The centre, the axes' directions and the normal are untouched, so the patch
+/// still sits on the same plane facing the same way and every edge moves: this
+/// is the form a caller that knows the size it wants asks for. The gesture --
+/// one edge dragged, the opposite one left where it is -- is
+/// [`resize_from_edge`].
+///
+/// **What the resize invalidates is cleared.** The consensus bitmap is the
+/// observations fused over the old square, so a frame of another size no longer
+/// has a picture; and every track measurement but its keypoint was read over
+/// that square, so what is kept is where each sighting sits and what is dropped
+/// is every number about it. An [`evaluate`](super::evaluate::evaluate)
+/// restores them, and the next [`fit`](super::fit::fit) fuses a new bitmap at
+/// the size the frame now has.
+pub fn resize_frame(
+    track: &EditableTrack,
+    half_length: f64,
+) -> Result<(EditableTrack, ResizeReport), TrackEditError> {
+    if !half_length.is_finite() || half_length <= 0.0 {
+        return Err(TrackEditError::BadSize(half_length));
+    }
+    let frame = frame_of(track)?;
+    let was = frame.half_extent[0];
+    let mut next = track.clone();
+    let changed = frame.half_extent != [half_length, half_length];
+    if changed {
+        let (position, frame, bitmap) = track_payload_mut(&mut next);
+        frame.half_extent = [half_length, half_length];
+        let _ = position;
+        *bitmap = None;
+        keep_keypoints_only(&mut next);
+    }
+    Ok((
+        next,
+        ResizeReport {
+            observation: None,
+            image: None,
+            half: half_length,
+            was,
+            changed,
+        },
+    ))
+}
+
+/// Resize the patch by putting one edge of the outline drawn at `observation`
+/// under `pixel`, with the **opposite edge left where it is**.
+///
+/// This is the gesture: a person grabs an edge of the square they can see and
+/// pulls it, and what they expect is the edge under the pointer and the other
+/// three where the geometry puts them -- not the patch breathing about its
+/// centre with the far edge running away. So the arithmetic is the one that
+/// holds the far edge still. With the dragged edge at `+h` from the centre and
+/// the far one at `-h`, and the pointer naming the offset `p` along the dragged
+/// direction, the new half-length is `(p + h) / 2` and the centre moves by
+/// `h' - h` along that direction: the far edge stays at `-h` and the dragged
+/// one lands on `p`.
+///
+/// **What the outline shows is what is resized.** At the track stage the
+/// outline is the surfel re-anchored on `observation`'s own sighting
+/// (`OrientedPatch::anchored_at_keypoint`), which is where a person sees the
+/// patch in that photograph, so that is the frame the pointer is read against
+/// and the frame the resize writes back. The surfel therefore takes the centre
+/// the outline had, plus the edge's shift, and the track's position follows it;
+/// `observation`'s keypoint is carried along the plane by the centre's own
+/// displacement, keeping its in-plane offset, so the dot and the outline move
+/// together and the far edge really does hold still on screen. Every other
+/// sighting is carried by the same displacement and keeps its own offset too,
+/// and all of them lose the measurements the move and the resize invalidate, as
+/// they do for [`resize_frame`]. Nothing is pinned.
+///
+/// At the **cluster stage** there is no geometry, so the same arithmetic runs
+/// in that image's pixels: the sighting's affine shape is scaled by one scalar,
+/// which preserves whatever anisotropy the detector read at the keypoint, and
+/// the sighting moves by half the change along the dragged edge's own
+/// direction, which is what holds the far edge of the parallelogram still. Only
+/// that observation is touched.
+pub fn resize_from_edge(
+    track: &EditableTrack,
+    edited: &EditedReconstruction,
+    observation: usize,
+    edge: Edge,
+    pixel: [f64; 2],
+) -> Result<(EditableTrack, ResizeReport), TrackEditError> {
+    if !pixel.iter().all(|c| c.is_finite()) {
+        return Err(TrackEditError::BadPixel(pixel));
+    }
+    let current = observation_at(track, observation)?;
+    let image = current.image;
+    let site = current
+        .site()
+        .ok_or(TrackEditError::NoPlace { observation })?;
+    match &track.stage {
+        Stage::Track(_) => {
+            let frame = frame_of(track)?;
+            let (camera, cam_from_world) = view_of(edited, image)?;
+            let anchored = frame
+                .anchored_at_keypoint(&camera, &cam_from_world, site)
+                .ok_or(TrackEditError::NoProjection { observation })?;
+            let direction = match edge.axis() {
+                Axis::U => anchored.u_axis,
+                Axis::V => anchored.v_axis,
+            } * edge.sign();
+            let offset = anchored
+                .keypoint_plane_offset(&camera, &cam_from_world, pixel)
+                .ok_or(TrackEditError::NoProjection { observation })?;
+            let was = anchored.half_extent[0];
+            let half = (offset.dot(&direction) + was) / 2.0;
+            if !half.is_finite() || half <= 0.0 {
+                return Err(TrackEditError::BadSize(half));
+            }
+            let displacement = direction * (half - was);
+            let mut center = frame.center + displacement;
+            // A direction patch's centre is a unit bearing and its half-extents
+            // are stated against one, so the moved centre is renormalized and
+            // the half-length divided by the same factor. Scaling a bearing and
+            // its tangent frame together leaves every corner the same
+            // direction, which is what keeps the far edge exactly where it was.
+            let scale = if frame.w == 0.0 {
+                let norm = center.coords.norm();
+                if norm <= 1e-12 {
+                    return Err(TrackEditError::BadSize(half));
+                }
+                center = nalgebra::Point3::from(center.coords / norm);
+                norm
+            } else {
+                1.0
+            };
+            let half = half / scale;
+
+            let mut next = track.clone();
+            {
+                let (position, frame, bitmap) = track_payload_mut(&mut next);
+                frame.center = center;
+                frame.half_extent = [half, half];
+                if frame.w != 0.0 {
+                    *position = Some(center);
+                }
+                *bitmap = None;
+            }
+            carry_keypoints(&mut next, edited, displacement);
+            Ok((
+                next,
+                ResizeReport {
+                    observation: Some(observation),
+                    image: Some(image),
+                    half,
+                    was,
+                    changed: half != was,
+                },
+            ))
+        }
+        Stage::Cluster(payload) => {
+            let radius = payload.radius;
+            let shape = current
+                .shape()
+                .ok_or(TrackEditError::NoPlace { observation })?;
+            let det = shape[0][0] * shape[1][1] - shape[0][1] * shape[1][0];
+            if det.abs() < MIN_ABS_DET {
+                return Err(TrackEditError::BadShape(shape));
+            }
+            // The pointer's offset from the sighting, written in the shape's own
+            // two columns: one coefficient per axis, in keypoint-frame units.
+            let (dx, dy) = (pixel[0] - site[0], pixel[1] - site[1]);
+            let along = match edge.axis() {
+                Axis::U => (shape[1][1] * dx - shape[0][1] * dy) / det,
+                Axis::V => (-shape[1][0] * dx + shape[0][0] * dy) / det,
+            } / (radius * edge.sign());
+            let scale = (along + 1.0) / 2.0;
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(TrackEditError::BadSize(scale));
+            }
+            // From the centre to the dragged edge's midpoint, in pixels.
+            let column = match edge.axis() {
+                Axis::U => [shape[0][0], shape[1][0]],
+                Axis::V => [shape[0][1], shape[1][1]],
+            };
+            let reach = [
+                column[0] * radius * edge.sign(),
+                column[1] * radius * edge.sign(),
+            ];
+            let position = [
+                site[0] + reach[0] * (scale - 1.0),
+                site[1] + reach[1] * (scale - 1.0),
+            ];
+            let scaled = [
+                [shape[0][0] * scale, shape[0][1] * scale],
+                [shape[1][0] * scale, shape[1][1] * scale],
+            ];
+            let was = half_width_px(shape, radius);
+            let mut next = track.clone();
+            next.observations[observation].cluster =
+                Some(ClusterMeasurement::from_seed(position, scaled));
+            Ok((
+                next,
+                ResizeReport {
+                    observation: Some(observation),
+                    image: Some(image),
+                    half: half_width_px(scaled, radius),
+                    was,
+                    changed: scale != 1.0,
+                },
+            ))
+        }
+    }
+}
+
+/// What one translation of the surfel did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TranslateFrameReport {
+    /// The observation whose image the pointer named.
+    pub observation: usize,
+    /// That image.
+    pub image: u32,
+    /// Where the centre now projects in it.
+    pub pixel: [f64; 2],
+    /// Where the centre now stands. A unit bearing for a direction patch.
+    pub center: Point3<f64>,
+    /// How far it moved, in world units.
+    pub moved: f64,
+    /// How many sightings the moved centre projects into, and so how many
+    /// keypoints were written.
+    pub placed: usize,
+    /// Whether anything changed.
+    pub changed: bool,
+}
+
+/// Slide the surfel across its own plane until its centre sits under `pixel` in
+/// `observation`'s photograph.
+///
+/// **This moves the patch, not one sighting.** A track-stage track has one
+/// surfel and every observation is a view of it, so dragging the mark in one
+/// photograph is a statement about where that surfel is: the centre moves, the
+/// half-vectors and the normal are kept, and **every** observation's keypoint
+/// moves by the same displacement along the plane, so the outline moves in
+/// every image at once. That is what makes the gesture worth having -- a patch
+/// can be slid, turned and sized until it covers the piece of surface a person
+/// means, and each photograph shows where it lands.
+///
+/// The pointer is read against the outline as drawn: the frame re-anchored on
+/// `observation`'s own sighting, so the offset is measured from the square the
+/// person can see. The move is in-plane by construction -- a ray-plane meeting
+/// minus a point on the plane -- so the normal and the plane are untouched. **Every**
+/// observation's keypoint is carried along the plane by that same displacement,
+/// keeping its own in-plane offset from the centre: a keypoint is where that
+/// photograph sees the patch's content, and the offset is what the tile is cut
+/// on, so resetting keypoints to the centre's projection would scramble the
+/// correlation the next reading scores. The sighting the drag came through
+/// therefore lands under the pointer, and the others move with the patch.
+///
+/// **Nothing is pinned.** A translation says where the patch is and not whether
+/// any sighting belongs to it, which is what a pin protects from the threshold
+/// painting. The measurements go, as they do for a resize: every number beside
+/// a keypoint was read at a place the patch has left. The bitmap goes with
+/// them.
+///
+/// A sighting the moved centre no longer projects into is left with no keypoint
+/// and [`Unmeasured::NoProjection`](super::track::Unmeasured::NoProjection) as
+/// its reason, which is the truth about it: the patch is no longer in that
+/// photograph.
+pub fn translate_frame(
+    track: &EditableTrack,
+    edited: &EditedReconstruction,
+    observation: usize,
+    pixel: [f64; 2],
+) -> Result<(EditableTrack, TranslateFrameReport), TrackEditError> {
+    if !pixel.iter().all(|c| c.is_finite()) {
+        return Err(TrackEditError::BadPixel(pixel));
+    }
+    let current = observation_at(track, observation)?;
+    let image = current.image;
+    let site = current
+        .site()
+        .ok_or(TrackEditError::NoPlace { observation })?;
+    let frame = frame_of(track)?;
+    let was = frame.center;
+    let (camera, cam_from_world) = view_of(edited, image)?;
+    let anchored = frame
+        .anchored_at_keypoint(&camera, &cam_from_world, site)
+        .ok_or(TrackEditError::NoProjection { observation })?;
+    let offset = anchored
+        .keypoint_plane_offset(&camera, &cam_from_world, pixel)
+        .ok_or(TrackEditError::NoProjection { observation })?;
+    // The whole patch moves by this, which is what makes the gesture a
+    // translation: the centre is carried by the drag and so is every sighting,
+    // rather than the surfel being re-seated onto the one observation the
+    // pointer came through.
+    let displacement = offset;
+    let mut center = frame.center + displacement;
+    // A direction patch's centre is a unit bearing, which is what rendering and
+    // the half-extents are stated against; the corner directions are unchanged
+    // by the renormalization, so the patch keeps its size.
+    if frame.w == 0.0 {
+        let norm = center.coords.norm();
+        if norm <= 1e-12 {
+            return Err(TrackEditError::BadPixel(pixel));
+        }
+        center = Point3::from(center.coords / norm);
+    }
+
+    let mut next = track.clone();
+    {
+        let (position, frame, bitmap) = track_payload_mut(&mut next);
+        frame.center = center;
+        if frame.w != 0.0 {
+            *position = Some(center);
+        }
+        *bitmap = None;
+    }
+    let placed = carry_keypoints(&mut next, edited, displacement);
+    // Where the dragged sighting now sits, which is the pointer: its own plane
+    // point plus the displacement is, by construction, the plane point under
+    // the pixel.
+    let landed = next.observations[observation].site().unwrap_or(pixel);
+    Ok((
+        next,
+        TranslateFrameReport {
+            observation,
+            image,
+            pixel: landed,
+            center,
+            moved: (center - was).norm(),
+            placed,
+            changed: center != was,
+        },
+    ))
+}
+
+/// What one turn of the surfel did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RotateFrameReport {
+    /// How far it turned, in degrees, positive about the outward normal.
+    pub degrees: f64,
+    /// Whether anything changed.
+    pub changed: bool,
+}
+
+/// Turn the track's surfel by `angle_rad` about its own outward normal.
+///
+/// The axes are rotated as a pair, by a rotation whose axis **is** the frame's
+/// normal, so both keep their lengths, the frame keeps its handedness and the
+/// patch keeps the plane and the face it had: what changes is which way up the
+/// square sits on that plane, which is what a person turning the outline in the
+/// Image Detail panel is saying.
+///
+/// The centre is untouched, so a turn moves no sighting: a corner drag spins
+/// the square in place while every keypoint stays where it is. The consensus
+/// bitmap and the track measurements are dropped for the reason a resize drops
+/// them -- both were read over the square as it stood, and the square has
+/// turned under them.
+pub fn rotate_frame(
+    track: &EditableTrack,
+    angle_rad: f64,
+) -> Result<(EditableTrack, RotateFrameReport), TrackEditError> {
+    if !angle_rad.is_finite() {
+        return Err(TrackEditError::BadAngle(angle_rad));
+    }
+    frame_of(track)?;
+    let mut next = track.clone();
+    let changed = angle_rad != 0.0;
+    if changed {
+        keep_keypoints_only(&mut next);
+        let (_, frame, bitmap) = track_payload_mut(&mut next);
+        let axis = nalgebra::Unit::new_normalize(frame.normal());
+        let rotation = nalgebra::Rotation3::from_axis_angle(&axis, angle_rad);
+        frame.u_axis = rotation * frame.u_axis;
+        frame.v_axis = rotation * frame.v_axis;
+        *bitmap = None;
+    }
+    Ok((
+        next,
+        RotateFrameReport {
+            degrees: angle_rad.to_degrees(),
+            changed,
+        },
+    ))
+}
+
+/// What one hand-set affine shape did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeReport {
+    /// The observation whose shape was set.
+    pub observation: usize,
+    /// The image it is in.
+    pub image: u32,
+    /// The shape it now carries.
+    pub shape: [[f64; 2]; 2],
+    /// The patch's half-width along its `u` axis in that image's own pixels at
+    /// the cluster's radius, which is `radius * ||column 0||`: the size a
+    /// person reads off the outline.
+    pub half_px: f64,
+    /// What that half-width was.
+    pub was_half_px: f64,
+    /// Whether anything changed.
+    pub changed: bool,
+}
+
+/// Give one cluster-stage observation the affine shape `shape`, by hand.
+///
+/// The shape is the cluster stage's own convention -- the detector's canonical
+/// keypoint frame mapped onto this image's pixels, read over the square
+/// `[-r, r]^2` at the cluster's [`ClusterPayload::radius`]. What sets one by
+/// hand is a corner drag, which turns the parallelogram about the sighting;
+/// the edge drag, which scales it and moves it, is [`resize_from_edge`],
+/// because holding the far edge still is arithmetic the caller should not have
+/// to repeat.
+///
+/// The observation is re-seeded at the place it is already drawn and its
+/// refinement is dropped: the ZNCC, the drift and the status were the
+/// refinement's answer about the shape it was run at, and this is another
+/// shape. The verdict is **not** pinned: a size or a turn is not a ruling on
+/// whether the sighting belongs, which is what a pin protects from the
+/// painting.
+pub fn set_observation_shape(
+    track: &EditableTrack,
+    observation: usize,
+    shape: [[f64; 2]; 2],
+) -> Result<(EditableTrack, ShapeReport), TrackEditError> {
+    let det = shape[0][0] * shape[1][1] - shape[0][1] * shape[1][0];
+    if !shape.iter().flatten().all(|c| c.is_finite()) || det.abs() < MIN_ABS_DET {
+        return Err(TrackEditError::BadShape(shape));
+    }
+    let radius = match &track.stage {
+        Stage::Cluster(payload) => payload.radius,
+        Stage::Track(_) => {
+            return Err(TrackEditError::WrongStage {
+                wanted: StageKind::Cluster,
+                is: StageKind::Track,
+            })
+        }
+    };
+    let current = observation_at(track, observation)?;
+    let image = current.image;
+    let was = current.shape();
+    let position = current
+        .site()
+        .ok_or(TrackEditError::NoPlace { observation })?;
+
+    let mut next = track.clone();
+    next.observations[observation].cluster = Some(ClusterMeasurement::from_seed(position, shape));
+    Ok((
+        next,
+        ShapeReport {
+            observation,
+            image,
+            shape,
+            half_px: half_width_px(shape, radius),
+            was_half_px: was.map_or(0.0, |was| half_width_px(was, radius)),
+            changed: was != Some(shape),
+        },
+    ))
+}
+
+/// The patch's half-width along its `u` axis, in the image's own pixels: the
+/// first column of `shape` is one keypoint-frame unit in pixels and the patch
+/// is `radius` of them.
+pub fn half_width_px(shape: [[f64; 2]; 2], radius: f64) -> f64 {
+    radius * shape[0][0].hypot(shape[1][0])
+}
+
+/// The observation at `observation`, or the refusal a step owes an index past
+/// the end of the list.
+fn observation_at(
+    track: &EditableTrack,
+    observation: usize,
+) -> Result<&Observation, TrackEditError> {
+    track
+        .observations
+        .get(observation)
+        .ok_or(TrackEditError::NoSuchObservation {
+            observation,
+            observation_count: track.observations.len(),
+        })
+}
+
+/// The track-stage surfel, or the refusal a track-stage step owes a cluster or
+/// a track nothing has triangulated.
+fn frame_of(track: &EditableTrack) -> Result<&OrientedPatch, TrackEditError> {
+    match &track.stage {
+        Stage::Track(payload) => payload.frame.as_ref().ok_or(TrackEditError::NoFrame),
+        Stage::Cluster(_) => Err(TrackEditError::WrongStage {
+            wanted: StageKind::Track,
+            is: StageKind::Cluster,
+        }),
+    }
+}
+
+/// The position, the surfel and the bitmap of a track whose payload has already
+/// been read as a track stage carrying a frame.
+fn track_payload_mut(
+    track: &mut EditableTrack,
+) -> (
+    &mut Option<nalgebra::Point3<f64>>,
+    &mut OrientedPatch,
+    &mut Option<ndarray::Array3<u8>>,
+) {
+    let Stage::Track(payload) = &mut track.stage else {
+        unreachable!("the stage was read as a track stage before the clone");
+    };
+    let TrackPayload {
+        position,
+        frame,
+        bitmap,
+        ..
+    } = payload;
+    (
+        position,
+        frame.as_mut().expect("the frame was read before the clone"),
+        bitmap,
+    )
+}
+
+/// Carry every sighting along the plane by `displacement`, and drop every
+/// measurement read before the patch moved.
+///
+/// The rule the two steps that move the centre share, and **not** a
+/// reprojection of the centre: a keypoint is where that photograph sees the
+/// patch's *content*, and the gap between it and the centre's projection is
+/// that observation's own in-plane offset -- the thing the tile is cut on and
+/// the correlation is scored at. Resetting every keypoint to the centre's
+/// projection would throw all of those away and scramble the correlation, so
+/// what moves is the **place**: each sighting's own plane point is found by
+/// re-anchoring the patch on it (`OrientedPatch::anchored_at_keypoint`, its own
+/// camera and pose), the displacement is added to that point, and the result is
+/// projected back. Every offset therefore survives the move exactly, and the
+/// sighting the drag came through lands under the pointer, because its plane
+/// point plus the displacement *is* the plane point under the pixel.
+///
+/// A sighting that has never been localized has no keypoint to carry, so it
+/// takes the projection of the new centre -- the only place the patch says it
+/// could be. One that no longer projects at all is left with no keypoint and
+/// the reason that says so, rather than with a stale one.
+///
+/// Returns how many keypoints were written, which is how many photographs still
+/// hold the patch.
+fn carry_keypoints(
+    track: &mut EditableTrack,
+    edited: &EditedReconstruction,
+    displacement: Vector3<f64>,
+) -> usize {
+    let Some(frame) = track.track().and_then(|payload| payload.frame.clone()) else {
+        return 0;
+    };
+    let mut placed = 0;
+    for observation in &mut track.observations {
+        let was = observation.track.as_ref().and_then(|m| m.keypoint);
+        let landed = view_of(edited, observation.image).ok().and_then(
+            |(camera, cam_from_world)| match was {
+                // Its own plane point, carried by the drag: the offset between
+                // the feature and the centre's projection is preserved.
+                Some(keypoint) => {
+                    let at = [f64::from(keypoint[0]), f64::from(keypoint[1])];
+                    let anchored = frame.anchored_at_keypoint(&camera, &cam_from_world, at)?;
+                    project_center(
+                        &camera,
+                        &cam_from_world,
+                        anchored.center + displacement,
+                        frame.w,
+                    )
+                }
+                // Never localized, so there is no offset to keep.
+                None => project_center(&camera, &cam_from_world, frame.center, frame.w),
+            },
+        );
+        observation.track = Some(match landed {
+            Some(pixel) => {
+                placed += 1;
+                TrackMeasurement {
+                    keypoint: Some([pixel[0] as f32, pixel[1] as f32]),
+                    ..TrackMeasurement::default()
+                }
+            }
+            None => TrackMeasurement {
+                reason: Some(super::track::Unmeasured::NoProjection),
+                ..TrackMeasurement::default()
+            },
+        });
+    }
+    placed
+}
+
+/// Drop every track measurement but the keypoint it was read at.
+///
+/// What a change to the surfel invalidates, stated once: the ZNCC, both
+/// distances, the reprojection residual, the localizability and the reason were
+/// all read over the square as it stood and against the position it stood at,
+/// and neither holds after the patch has been resized, moved or turned. Where
+/// each sighting sits is not one of those things, so it stays.
+fn keep_keypoints_only(track: &mut EditableTrack) {
+    for observation in &mut track.observations {
+        if let Some(measurement) = &observation.track {
+            observation.track = Some(TrackMeasurement {
+                keypoint: measurement.keypoint,
+                ..TrackMeasurement::default()
+            });
+        }
+    }
+}
+
+/// The camera and the pose of one image of the reconstruction.
+fn view_of(
+    edited: &EditedReconstruction,
+    image: u32,
+) -> Result<
+    (
+        crate::camera::CameraIntrinsics,
+        crate::geometry::RigidTransform,
+    ),
+    TrackEditError,
+> {
+    let table = &edited.base.image_table;
+    let row = table
+        .images
+        .get(image as usize)
+        .ok_or(TrackEditError::NoSuchImage { image })?;
+    let camera = table
+        .cameras
+        .get(row.camera_index as usize)
+        .ok_or(TrackEditError::NoSuchImage { image })?;
+    let q = row.quaternion_wxyz.quaternion();
+    let pose = crate::geometry::RigidTransform::from_wxyz_translation(
+        [q.w, q.i, q.j, q.k],
+        [
+            row.translation_xyz.x,
+            row.translation_xyz.y,
+            row.translation_xyz.z,
+        ],
+    );
+    Ok((camera.clone(), pose))
+}
+
+/// Where a patch's centre lands in a view, as a pixel.
+fn project_center(
+    camera: &crate::camera::CameraIntrinsics,
+    cam_from_world: &crate::geometry::RigidTransform,
+    center: nalgebra::Point3<f64>,
+    w: f64,
+) -> Option<[f64; 2]> {
+    let pc = cam_from_world.transform_point_homogeneous(center.coords, w);
+    if !camera.model.needs_ray_path() && pc.z >= 0.0 {
+        return None;
+    }
+    camera.ray_to_pixel([pc.x, pc.y, pc.z]).map(|(u, v)| [u, v])
+}
+
 /// What one painting did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThresholdReport {
@@ -734,6 +1633,76 @@ fn proposed_verdict(
 }
 
 // ---- Splitting one track into two ------------------------------------------
+
+/// Why a duplicate was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DuplicateError {
+    /// Nothing on the bench carries that label.
+    NoSuchTrack(String),
+}
+
+impl std::fmt::Display for DuplicateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DuplicateError::NoSuchTrack(label) => {
+                write!(f, "nothing on the bench is called `{label}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DuplicateError {}
+
+/// What one duplicate did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateReport {
+    /// The label the copy took.
+    pub label: String,
+    /// The label it was copied from.
+    pub from: String,
+    /// How many observations it carries, which is the original's count.
+    pub observation_count: usize,
+}
+
+/// Put a copy of the track called `label` on the bench beside it.
+///
+/// **What a second patch over the same ground is started from.** A patch that
+/// has been slid, turned and sized until it covers one piece of surface is most
+/// of the work of covering the piece next to it, so the copy carries everything
+/// that describes the geometry and the judgements made about it: the stage and
+/// all of its data (the surfel, the consensus bitmap, the cluster's template and
+/// radius), every observation with its keypoint, its seed, its shape, its
+/// verdict and its pin, and the thresholds. The measurements come too -- they
+/// were read against this geometry and still describe it, and the moment the
+/// copy is moved the steps that move it drop the ones that no longer hold.
+///
+/// **The copy has no origin.** An origin is what makes a commit *replace* a
+/// point, and a copy is a new patch over new ground: it has to create one, or
+/// the second commit would delete what the first wrote. That is the one field
+/// the copy does not carry, and it is the whole of the difference between the
+/// two items.
+///
+/// The label is minted from `<label> copy` through the bench's own collision
+/// rule ([`Bench::mint_label`]), so a second duplicate of the same track is
+/// `<label> copy (2)`, and the copy becomes the active track, because it is the
+/// thing the person is about to work on.
+pub fn duplicate(bench: &Bench, label: &str) -> Result<(Bench, DuplicateReport), DuplicateError> {
+    let track = bench
+        .track(label)
+        .ok_or_else(|| DuplicateError::NoSuchTrack(label.to_string()))?;
+    let mut copy = (**track).clone();
+    copy.origin = None;
+    let observation_count = copy.observations.len();
+    let (bench, new_label) = bench.put(&format!("{label} copy"), BenchItem::Track(Arc::new(copy)));
+    Ok((
+        bench,
+        DuplicateReport {
+            label: new_label,
+            from: label.to_string(),
+            observation_count,
+        },
+    ))
+}
 
 /// Why a split was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]

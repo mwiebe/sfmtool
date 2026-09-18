@@ -291,11 +291,59 @@ pub(crate) enum Command {
         reconstruction_label: String,
         item: String,
     },
+    /// Put a copy of one item on the bench beside it. A copy has no origin, so
+    /// a commit of it creates a point rather than replacing one.
+    DuplicateBenchItem {
+        reconstruction_label: String,
+        /// Omitted means the active track.
+        item: Option<String>,
+    },
     AddBenchTrackObservation {
         reconstruction_label: String,
         track: Option<String>,
         camera_image: CameraImageSel,
         seed: crate::bench::Seed,
+    },
+    /// Slide the track-stage surfel across its own plane until its centre sits
+    /// under a pixel. Every sighting follows.
+    MoveBenchTrack {
+        reconstruction_label: String,
+        track: Option<String>,
+        /// The observation whose image the pixel is in.
+        observation: usize,
+        /// Where, in that image's own px.
+        pixel: [f64; 2],
+    },
+    /// Put one observation's own sighting at a pixel, by hand.
+    MoveBenchTrackObservation {
+        reconstruction_label: String,
+        track: Option<String>,
+        /// The observation's position in the track's list.
+        observation: usize,
+        /// Where, in that observation's own image's px.
+        pixel: [f64; 2],
+    },
+    /// Put one edge of the patch under a pixel, with the opposite edge left
+    /// where it is.
+    ResizeBenchTrack {
+        reconstruction_label: String,
+        track: Option<String>,
+        /// The observation whose outline is being dragged.
+        observation: usize,
+        /// Which edge of the patch's square.
+        edge: sfmtool_core::bench::Edge,
+        /// Where its midpoint should land, in that image's own px.
+        pixel: [f64; 2],
+    },
+    /// Turn the patch in its own plane.
+    RotateBenchTrack {
+        reconstruction_label: String,
+        track: Option<String>,
+        /// How far, positive about the patch's outward normal.
+        degrees: f64,
+        /// Which sighting's shape turns, at the cluster stage, where there is
+        /// no surfel to turn.
+        observation: Option<usize>,
     },
     SetBenchTrackVerdict {
         reconstruction_label: String,
@@ -1036,6 +1084,14 @@ pub(crate) fn apply_with_window(
             &reconstruction_label,
             &item,
         )),
+        Command::DuplicateBenchItem {
+            reconstruction_label,
+            item,
+        } => done(bench::duplicate_bench_item(
+            state,
+            &reconstruction_label,
+            item.as_deref(),
+        )),
         Command::AddBenchTrackObservation {
             reconstruction_label,
             track,
@@ -1047,6 +1103,56 @@ pub(crate) fn apply_with_window(
             track.as_deref(),
             &camera_image,
             &seed,
+        )),
+        Command::MoveBenchTrack {
+            reconstruction_label,
+            track,
+            observation,
+            pixel,
+        } => done(bench::move_bench_track(
+            state,
+            &reconstruction_label,
+            track.as_deref(),
+            observation,
+            pixel,
+        )),
+        Command::MoveBenchTrackObservation {
+            reconstruction_label,
+            track,
+            observation,
+            pixel,
+        } => done(bench::move_bench_track_observation(
+            state,
+            &reconstruction_label,
+            track.as_deref(),
+            observation,
+            pixel,
+        )),
+        Command::ResizeBenchTrack {
+            reconstruction_label,
+            track,
+            observation,
+            edge,
+            pixel,
+        } => done(bench::resize_bench_track(
+            state,
+            &reconstruction_label,
+            track.as_deref(),
+            observation,
+            edge,
+            pixel,
+        )),
+        Command::RotateBenchTrack {
+            reconstruction_label,
+            track,
+            degrees,
+            observation,
+        } => done(bench::rotate_bench_track(
+            state,
+            &reconstruction_label,
+            track.as_deref(),
+            degrees,
+            observation,
         )),
         Command::SetBenchTrackVerdict {
             reconstruction_label,
@@ -1634,7 +1740,12 @@ impl Command {
             Command::ActivateBenchItem { .. } => "activate_bench_item",
             Command::RenameBenchItem { .. } => "rename_bench_item",
             Command::DiscardBenchItem { .. } => "discard_bench_item",
+            Command::DuplicateBenchItem { .. } => "duplicate_bench_item",
             Command::AddBenchTrackObservation { .. } => "add_bench_track_observation",
+            Command::MoveBenchTrack { .. } => "move_bench_track",
+            Command::MoveBenchTrackObservation { .. } => "move_bench_track_observation",
+            Command::ResizeBenchTrack { .. } => "resize_bench_track",
+            Command::RotateBenchTrack { .. } => "rotate_bench_track",
             Command::SetBenchTrackVerdict { .. } => "set_bench_track_verdict",
             Command::ApplyBenchTrackThresholds { .. } => "apply_bench_track_thresholds",
             Command::SplitBenchTrack { .. } => "split_bench_track",
@@ -1823,7 +1934,12 @@ impl Command {
             | Command::ActivateBenchItem { .. }
             | Command::RenameBenchItem { .. }
             | Command::DiscardBenchItem { .. }
+            | Command::DuplicateBenchItem { .. }
             | Command::AddBenchTrackObservation { .. }
+            | Command::MoveBenchTrack { .. }
+            | Command::MoveBenchTrackObservation { .. }
+            | Command::ResizeBenchTrack { .. }
+            | Command::RotateBenchTrack { .. }
             | Command::SetBenchTrackVerdict { .. }
             | Command::ApplyBenchTrackThresholds { .. }
             | Command::SplitBenchTrack { .. }

@@ -23,14 +23,14 @@
 
 use serde_json::{json, Value};
 use sfmtool_core::bench::{
-    Bench, EditableTrack, Observation, Provenance, Stage, StageKind, Thresholds, Verdict,
+    Bench, Edge, EditableTrack, Observation, Provenance, Stage, StageKind, Thresholds, Verdict,
 };
 
 use super::{
     edit, resolve_camera_image, resolve_point_in, resolve_reconstruction, BackgroundReply,
     CameraImageSel, Deferred, JsonReply, Outcome, ThresholdChange, ToolError,
 };
-use crate::bench::Seed;
+use crate::bench::{PatchEdit, Seed};
 use crate::scene::ReconId;
 use crate::state::AppState;
 
@@ -218,6 +218,30 @@ pub(super) fn rename_bench_item(
     Ok(with_item(reply, to))
 }
 
+/// `duplicate_bench_item`: a copy of the item beside it on the bench, which the
+/// reply names.
+///
+/// Answers as `split_bench_track` does, with the label the copy took, because
+/// that is the handle every later call has to use -- and the copy is the active
+/// track, so the calls that name none already act on it. `item` omitted means
+/// the active track, as it does for the track tools.
+pub(super) fn duplicate_bench_item(
+    state: &mut AppState,
+    label: &str,
+    named: Option<&str>,
+) -> JsonReply {
+    let (id, item) = target(state, label, named)?;
+    let mut made = String::new();
+    let reply = edit::edited(state, id, |state| {
+        state.duplicate_bench_item(id, &item).map(|label| {
+            made = label;
+        })
+    })?;
+    let mut reply = with_item(reply, &made);
+    insert(&mut reply, "copy_of", json!(item));
+    Ok(reply)
+}
+
 pub(super) fn discard_bench_item(state: &mut AppState, label: &str, item: &str) -> JsonReply {
     let id = resolve_reconstruction(state, Some(label))?;
     let reply = edit::edited(state, id, |state| state.discard_bench_item(id, item))?;
@@ -246,6 +270,131 @@ pub(super) fn add_bench_track_observation(
         .map(|track| track.observations.len().saturating_sub(1));
     let mut reply = with_item(reply, &item);
     insert(&mut reply, "observation", json!(observation));
+    Ok(reply)
+}
+
+/// `move_bench_track`: the patch slid across its own plane until its centre
+/// sits under a pixel.
+///
+/// The wire's half of the dot drag at the **track** stage, where the dot means
+/// the patch and not the sighting: a track-stage track has one surfel and every
+/// observation is a view of it, so the centre moves and every keypoint becomes
+/// the projection of the new centre through its own camera. `observation` names
+/// the image the pixel is in, which is also the outline the pointer is read
+/// against.
+pub(super) fn move_bench_track(
+    state: &mut AppState,
+    label: &str,
+    named: Option<&str>,
+    observation: usize,
+    pixel: [f64; 2],
+) -> JsonReply {
+    let (id, item) = target(state, label, named)?;
+    let edit = PatchEdit::Translate { observation, pixel };
+    let reply = edit::edited(state, id, |state| state.edit_bench_patch(id, &item, &edit))?;
+    let mut reply = with_item(reply, &item);
+    insert(&mut reply, "observation", json!(observation));
+    insert(&mut reply, "pixel", json!(pixel));
+    Ok(reply)
+}
+
+/// `move_bench_track_observation`: one sighting put where the caller says.
+///
+/// **One** sighting, which at the track stage is the step the panel's dot no
+/// longer makes: dragging the dot there moves the patch (`move_bench_track`),
+/// because a surfel every observation is a view of is the thing that gesture is
+/// about. This is what remains for a caller that really means one keypoint --
+/// the cluster stage's dot, where there is no shared geometry, and a script
+/// placing one sighting of a track-stage track by hand. Either way it writes
+/// that observation alone and pins it, because a sighting a person placed is one
+/// they have ruled on, and drops the measurements read at the old pixel.
+pub(super) fn move_bench_track_observation(
+    state: &mut AppState,
+    label: &str,
+    named: Option<&str>,
+    observation: usize,
+    pixel: [f64; 2],
+) -> JsonReply {
+    let (id, item) = target(state, label, named)?;
+    let edit = PatchEdit::Move { observation, pixel };
+    let reply = edit::edited(state, id, |state| state.edit_bench_patch(id, &item, &edit))?;
+    let mut reply = with_item(reply, &item);
+    insert(&mut reply, "observation", json!(observation));
+    insert(&mut reply, "pixel", json!(pixel));
+    Ok(reply)
+}
+
+/// `resize_bench_track`: one edge of the patch put under a pixel, with the
+/// opposite edge left where it is.
+///
+/// An edge and a pixel rather than a size, because that is what the gesture is
+/// and what makes the answer exact: the pixel is unprojected onto the patch's
+/// own plane, so the edge really lands there through whatever distortion the
+/// lens has. The observation says which sighting's outline is meant -- the
+/// surfel re-anchored on it at the track stage, its own parallelogram at the
+/// cluster stage -- and the pixel is in that observation's image.
+///
+/// At the track stage a resize moves the centre, so **every** keypoint becomes
+/// the projection of the new centre, exactly as a translation's does; nothing is
+/// pinned.
+pub(super) fn resize_bench_track(
+    state: &mut AppState,
+    label: &str,
+    named: Option<&str>,
+    observation: usize,
+    edge: Edge,
+    pixel: [f64; 2],
+) -> JsonReply {
+    let (id, item) = target(state, label, named)?;
+    let edit = PatchEdit::ResizeFromEdge {
+        observation,
+        edge,
+        pixel,
+    };
+    let reply = edit::edited(state, id, |state| state.edit_bench_patch(id, &item, &edit))?;
+    let mut reply = with_item(reply, &item);
+    insert(&mut reply, "observation", json!(observation));
+    insert(&mut reply, "edge", json!(edge.name()));
+    Ok(reply)
+}
+
+/// `rotate_bench_track`: the patch turned in its own plane.
+///
+/// What turns depends on the stage, which is why `observation` is optional: a
+/// track-stage track has **one** surfel and turning it is about its normal, so
+/// no sighting need be named; a cluster stage has no geometry at all, only one
+/// affine shape per sighting, so a turn there has to say which one.
+pub(super) fn rotate_bench_track(
+    state: &mut AppState,
+    label: &str,
+    named: Option<&str>,
+    degrees: f64,
+    observation: Option<usize>,
+) -> JsonReply {
+    let (id, item) = target(state, label, named)?;
+    let stage = state
+        .bench_track(id, &item)
+        .map(|track| track.stage_kind())
+        .ok_or_else(|| ToolError::new(format!("Nothing on the bench is called {item}.")))?;
+    let angle_rad = degrees.to_radians();
+    let edit = match stage {
+        StageKind::Track => PatchEdit::Rotate { angle_rad },
+        StageKind::Cluster => PatchEdit::RotateShape {
+            observation: observation.ok_or_else(|| {
+                ToolError::new(
+                    "A cluster-stage track has one affine shape per sighting rather than a \
+                     surfel, so a turn of one needs an observation.",
+                )
+            })?,
+            angle_rad,
+        },
+    };
+    let reply = edit::edited(state, id, |state| state.edit_bench_patch(id, &item, &edit))?;
+    let mut reply = with_item(reply, &item);
+    insert(&mut reply, "degrees", json!(degrees));
+    if let Some(observation) = observation {
+        insert(&mut reply, "observation", json!(observation));
+    }
     Ok(reply)
 }
 

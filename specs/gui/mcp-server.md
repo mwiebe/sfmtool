@@ -100,8 +100,8 @@ place.
 
 ## The tool surface
 
-Sixty tools. Fifteen read -- fourteen that answer with JSON, and
-`screenshot`, which closes the loop by handing back a picture -- forty-four
+Sixty-five tools. Fifteen read -- fourteen that answer with JSON, and
+`screenshot`, which closes the loop by handing back a picture -- forty-nine
 write, and one writes a file.
 
 | Tool | Kind | What it does |
@@ -152,7 +152,12 @@ write, and one writes a file.
 | `activate_bench_item` | write | Make one item the active one of its kind |
 | `rename_bench_item` | write | Give one item a label of your own |
 | `discard_bench_item` | write | Take one item off the bench |
+| `duplicate_bench_item` | write | Put a copy of one item on the bench beside it |
 | `add_bench_track_observation` | write | Add a candidate observation of a bench track, in one camera image |
+| `move_bench_track` | write | Slide the patch across its own plane; every sighting follows |
+| `move_bench_track_observation` | write | Put one observation's own sighting at a pixel, by hand |
+| `resize_bench_track` | write | Put one edge of the patch under a pixel, the opposite edge held still |
+| `rotate_bench_track` | write | Turn the patch in its own plane |
 | `set_bench_track_verdict` | write | Rule on one observation by hand: in, out, or candidate |
 | `apply_bench_track_thresholds` | write | Set a track's bars and paint the verdicts they propose |
 | `split_bench_track` | write | Move some observations onto a second track beside this one |
@@ -2033,7 +2038,7 @@ version may well have been pushed.
 
 ### The bench family
 
-Eighteen tools that read and work the **bench** beside a node
+Twenty-three tools that read and work the **bench** beside a node
 ([bench.md](bench.md)): the place where a track is held and judged before it is
 written into the reconstruction. Every one of them is one `AppState` call from
 `crate::bench` -- the same call the Track Edit panel's button or the Image
@@ -2081,7 +2086,50 @@ take `search_px`, how far from each observation's own pixel the correlation peak
 is looked for. A fit of a track-stage track with fewer than two `in`
 observations is refused where a reading of the same track is not.
 
-**Three of the eighteen are about the descriptor index**, which is the node's
+**Four of the twenty-two are the patch a track is**, and they are the wire's
+half of the handles the Image Detail panel's bench layer offers
+([multi-panel-image-browser.md](multi-panel-image-browser.md) § "The bench
+layer"). `move_bench_track` slides the patch across its own plane until its
+centre sits under a `pixel`; `resize_bench_track` puts one `edge` of its square
+(`"+u"`, `"-u"`, `"+v"`, `"-v"`) under a `pixel` with the **opposite edge left
+where it is**; `rotate_bench_track` turns it by `degrees` in its own plane. The
+pixel is unprojected onto the patch's own plane, so an edge lands there exactly
+through whatever distortion the lens has, and because a patch frame is square
+the whole square follows one scale. Each names the `observation` whose outline
+is meant -- the surfel re-anchored on that sighting at the track stage, its own
+parallelogram at the cluster stage -- and the pixel is in that observation's
+image; a turn at the **track** stage names no observation, because there is one
+surfel and it turns about its own normal.
+
+**At the track stage the patch is the thing every sighting is a view of**, so
+the two tools that move its centre -- the translation and the resize -- carry
+**every** observation's keypoint along the plane by that same displacement, and
+the outline moves in every image at once. Carried, not reprojected: each
+sighting keeps its own offset from where the centre projects, which is where
+that photograph sees the patch's content against where the geometry puts its
+middle, and is what the tiles are cut on. The sighting the call came through
+lands under the pixel it named, because its plane point plus the displacement
+*is* the plane point under that pixel. That is what makes the gesture worth
+having: a patch can be slid, turned and sized until it covers the piece of
+surface a person means. Neither pins anything, because where the patch is says
+nothing about whether a sighting belongs to it. The **fourth** tool,
+`move_bench_track_observation`, is the one that moves a single sighting: the
+cluster stage's dot, where there is no shared geometry, and a script placing one
+keypoint of a track-stage track by hand. It writes that observation alone, pins
+it, and drops the measurements read at the old pixel.
+
+**`duplicate_bench_item` is how a second patch over neighbouring ground is
+started.** A patch slid, turned and sized until it covers one piece of surface
+is most of the work of covering the piece beside it, so the copy carries
+everything that describes the geometry and the judgements about it -- the stage
+and its data, every observation with its keypoint, seed, shape, verdict and pin,
+the measurements, the thresholds -- and drops exactly one field: the **origin**.
+That is what makes a commit *replace* a point, so without it the copy's commit
+creates one, which is what it must do; otherwise the second commit would delete
+what the first wrote. The copy is the active track and the reply names it, as a
+split's does.
+
+**Three of the twenty-two are about the descriptor index**, which is the node's
 rather than any track's: `open_descriptor_index` adopts a `.kdf`,
 `build_descriptor_index` makes one out of the node's `.sift` files -- at a
 `path` of the caller's where it names one, refused when that path resolves
@@ -2981,7 +3029,7 @@ where a test hands no host over.
   and the panel list in the prose above are asserted against `catalog()` and
   `Tab::ALL`, because a number written out in words is the first thing to go
   stale.
-- **The catalog is sixty tools**, fifteen of them reads and one of them
+- **The catalog is sixty-five tools**, fifteen of them reads and one of them
   the `Save` kind that carries `destructiveHint: true`;
   `set_window_layout`'s schema advertises `sfm_explorer_layout`, `window` and
   `layout`, with the `window` section's five keys under it, and `screenshot`'s
