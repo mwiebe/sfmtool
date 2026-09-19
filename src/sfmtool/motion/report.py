@@ -23,14 +23,12 @@ from .constants import (
     POSE_TRANS_FACTOR,
     STEP_RATIO_THRESHOLD,
 )
-from .recon_discontinuity import _flag_frame, _rotation_angle_deg
+from .._pose_math import rotation_angle_deg
+from .ratio_band import RATIO_LOWER, RATIO_UPPER, classify_ratio
+from .recon_discontinuity import _flag_frame
 
 
 SCHEMA_VERSION = 1
-
-# Image-sequence-mode ratio band (matches the adaptive-stride shrink band).
-_RATIO_LOWER = 0.75
-_RATIO_UPPER = 1.0 / _RATIO_LOWER
 
 
 def _f(x: Any) -> float | None:
@@ -120,7 +118,7 @@ def reconstruction_results_to_json(all_sequence_results: list[dict]) -> dict:
             for i in range(frame_count - 1)
         ]
         successive_rots = [
-            _rotation_angle_deg(seq_quats[i], seq_quats[i + 1])
+            rotation_angle_deg(seq_quats[i], seq_quats[i + 1])
             for i in range(frame_count - 1)
         ]
 
@@ -184,7 +182,7 @@ def reconstruction_results_to_json(all_sequence_results: list[dict]) -> dict:
             img_a = seq_image_indexes[a]
             img_b = seq_image_indexes[b]
             dist = float(np.linalg.norm(seq_centers[b] - seq_centers[a]))
-            rot = _rotation_angle_deg(seq_quats[a], seq_quats[b])
+            rot = rotation_angle_deg(seq_quats[a], seq_quats[b])
             obs_a = obs_z_scores[a] if a < len(obs_z_scores) else None
             obs_b = obs_z_scores[b] if b < len(obs_z_scores) else None
             sr = step_ratios[a] if a < len(step_ratios) else None
@@ -242,21 +240,6 @@ def reconstruction_results_to_json(all_sequence_results: list[dict]) -> dict:
     }
 
 
-def _classify_ratio(normalized: float | None) -> str | None:
-    """Image-sequence-mode classification of the normalized magnitude ratio."""
-    if normalized is None:
-        return None
-    if normalized < 0.5:
-        return "strong deceleration"
-    if normalized < _RATIO_LOWER:
-        return "deceleration"
-    if normalized > 2.0:
-        return "strong acceleration"
-    if normalized > _RATIO_UPPER:
-        return "acceleration"
-    return None
-
-
 def image_sequence_results_to_json(
     per_sequence_results: list[dict],
 ) -> dict:
@@ -290,7 +273,7 @@ def image_sequence_results_to_json(
                     "expected_magnitude_ratio": _f(r.get("expected_magnitude_ratio")),
                     "actual_magnitude_ratio": _f(actual),
                     "in_bounds_pct": _f(r.get("in_bounds_pct")),
-                    "classification": _classify_ratio(normalized),
+                    "classification": classify_ratio(normalized),
                 }
             )
         sequences.append(
@@ -306,8 +289,8 @@ def image_sequence_results_to_json(
         "schema_version": SCHEMA_VERSION,
         "mode": "image_sequence",
         "thresholds": {
-            "ratio_lower": _RATIO_LOWER,
-            "ratio_upper": _RATIO_UPPER,
+            "ratio_lower": RATIO_LOWER,
+            "ratio_upper": RATIO_UPPER,
         },
         "sequences": sequences,
     }

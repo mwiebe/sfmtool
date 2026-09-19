@@ -12,8 +12,9 @@ from .flow_stats import (
     _compare_flow_representations,
     _compute_in_bounds_mask,
     _flow_magnitude,
-    _load_gray,
 )
+from .ratio_band import BAND_TEXT, out_of_band
+from .._image_load import load_gray
 from .._sfmtool.flow import (
     compute_optical_flow,
     compute_optical_flow_with_init,
@@ -77,7 +78,7 @@ def analyze_image_sequence(
 
     def get_gray(idx: int) -> np.ndarray:
         if idx not in gray_cache:
-            gray_cache[idx] = _load_gray(image_paths[idx])
+            gray_cache[idx] = load_gray(image_paths[idx])
         return gray_cache[idx]
 
     while i < n_images - 1:
@@ -190,9 +191,9 @@ def analyze_image_sequence(
             # Adaptive stride based on ratio/stride and in-bounds coverage.
             #
             # Ratio bands (log-symmetric):
-            #   Grow:   0.85 < ratio/stride < 1/0.85  — consistent
-            #   Keep:   0.75 < ratio/stride < 1/0.75  — mild deviation
-            #   Shrink: outside the keep band          — something changed
+            #   Grow:   0.85 < ratio/stride < 1/0.85           — consistent
+            #   Keep:   RATIO_LOWER < ratio/stride < RATIO_UPPER — mild deviation
+            #   Shrink: outside the keep band                    — something changed
             #
             # In-bounds coverage modifies the decision:
             #   < 25%:  force shrink (data too sparse to trust)
@@ -204,9 +205,9 @@ def analyze_image_sequence(
                 normalized = ratio / effective_stride
 
                 # Determine action from ratio
-                if normalized < 0.75 or normalized > 1.0 / 0.75:
+                if out_of_band(normalized):
                     action = "shrink"
-                    reason = f"ratio/stride={normalized:.2f}, outside [0.75, 1.33]"
+                    reason = f"ratio/stride={normalized:.2f}, outside {BAND_TEXT}"
                 elif 0.85 < normalized < 1.0 / 0.85:
                     action = "grow"
                     reason = f"ratio/stride={normalized:.2f}, inside [0.85, 1.18]"
