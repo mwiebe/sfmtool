@@ -1347,7 +1347,6 @@ sibling already shows the fix**
     `rig/panorama.py:56–65`, `_embed_patches.py:240–256`. All compute `C = −Rᵀt`. Note
     the `analyze/` copy is a private name imported across a subpackage boundary at
     `xform/_select_by_distribution.py:30`.
-    > _Status (2026-09-18): Partially done — back to 2 copies. The `analyze/images.py` copy and the cross-package private import from `xform/_select_by_distribution.py` are gone; `rig/panorama.py:56` and `_embed_patches.py:240` remain._
   - **`_rotation_angle_deg`** — confirmed a **name collision, not a duplicate**
     (`_compare_fragments.py:332` takes an `Se3Transform`;
     `motion/recon_discontinuity.py:23` takes two quaternions). But the scan found the
