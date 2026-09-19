@@ -265,8 +265,9 @@ backlog and keep them honest as findings get addressed:
   under `specs/cli/reconstruction/xform/` rather than as top-level commands.
 - Python 3.14 and Rust 1.98 are pinned in `pixi.toml`. That is the *development*
   toolchain, and it is deliberately not the same thing as the MSRV: the workspace
-  declares `rust-version = "1.95"` in `[workspace.package]` (inherited by all nine
-  crates), because the PyPI sdist compiles this workspace on the user's own rustc
+  declares `rust-version = "1.95"` in `[workspace.package]` (inherited by every
+  crate in the workspace), because the PyPI sdist compiles this workspace on the
+  user's own rustc
   and we publish wheels for Linux and Windows only. The `msrv` job in `ci.yml`
   builds against that floor; it reads the version out of `Cargo.toml`, so raise
   the MSRV there and nowhere else. Bumping a dependency can raise the floor

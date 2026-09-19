@@ -10,7 +10,7 @@
 //! there is nothing to attribute afterwards: the collector *is* that entry's
 //! detail.
 //!
-//! See `specs/drafts/operation-progress.md`.
+//! See `specs/gui/operation-progress.md`.
 //!
 //! ## Shared by `&`, never by `&mut`
 //!

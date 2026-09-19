@@ -297,6 +297,10 @@ datasets (4 cores), multiplicative where independent.
    Small-medium change; measure Φ-bias and kerry agreement before adopting as
    default. (Related micro-lever, unmeasured: `MAX_ANISOTROPY` 16 → 8 caps
    the tap tail.)
+
+   > _Status (2026-09-18): Done — `Sampler::BilinearMip` exists and is the default
+   > (`patch/normal_refine/params.rs`), which also supersedes the 2026-06-13 note on
+   > the §4 `sampler` row._
 5. **Freeze the warp SVD per grid level** — `compute_svd` runs per candidate
    per view (7–11% of CPU) but the Jacobian varies little
    across a level's candidates; the mask is already frozen per level, so
