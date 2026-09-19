@@ -1347,6 +1347,7 @@ sibling already shows the fix**
     `rig/panorama.py:56–65`, `_embed_patches.py:240–256`. All compute `C = −Rᵀt`. Note
     the `analyze/` copy is a private name imported across a subpackage boundary at
     `xform/_select_by_distribution.py:30`.
+    > _Status (2026-09-18): Partially done — back to 2 copies. The `analyze/images.py` copy and the cross-package private import from `xform/_select_by_distribution.py` are gone; `rig/panorama.py:56` and `_embed_patches.py:240` remain._
   - **`_rotation_angle_deg`** — confirmed a **name collision, not a duplicate**
     (`_compare_fragments.py:332` takes an `Se3Transform`;
     `motion/recon_discontinuity.py:23` takes two quaternions). But the scan found the
@@ -1543,6 +1544,7 @@ boundary rather than by subject**
 - Risk: low — developer tooling, not package code, and not covered by CI.
 
 **`AGENTS.md` says the workspace has "nine crates" 195 lines after saying it has ten**
+> _Status (2026-09-18): Done — the count is dropped, as proposed: "inherited by every crate in the workspace"._
 - Location: `AGENTS.md:73` ("`crates/` — Cargo workspace, 10 crates") vs `AGENTS.md:268`
   ("inherited by all **nine** crates")
 - Problem: There are **10**, all ten inherit `rust-version.workspace = true` (verified),
@@ -1555,6 +1557,7 @@ boundary rather than by subject**
 - Risk: low
 
 **Three `specs/` paths cited from code and specs do not resolve**
+> _Status (2026-09-18): Partially done — `progress.rs` now cites `specs/gui/operation-progress.md`, where the spec was filed; `bundle-adjustment.md` no longer cites the bootstrap spec or the two deleted scripts. `sift-gpu-amendment.md:52` is left: it names the spec the draft *would become*, in a code span and not as a link, which is what a draft is for. The enforcement test is not written._
 - Location: `crates/sfm-explorer/src/progress.rs:13` → `specs/drafts/operation-progress.md`;
   `specs/drafts/sift-gpu-amendment.md:52` → `specs/core/features/gpu-sift.md`;
   `specs/core/geometry/bundle-adjustment.md:6` → `specs/core/geometry/cluster-pinhole-bootstrap.md`

@@ -112,8 +112,9 @@ medians of three:
 | Materialisation with 8 modified, 4 deleted, 2 new points (numpy, full re-sort of the tracks) | 1 800 ms, of which the re-sort 745 ms |
 | XXH128 over every column | 131 ms |
 
-The read-path census is
-[`reports/2026-09-07-editing-read-path-census.md`](../../reports/2026-09-07-editing-read-path-census.md):
+The read-path census (`reports/2026-09-07-editing-read-path-census.md`, retired
+once [`gui/document-model.md`](../gui/document-model.md) superseded it; in git
+history from `e997d64b`) found
 116 read sites, of which 53 run every frame, and **no per-frame read walks
 the point set**. The eight per-frame "whole" reads are counts and the
 content hash, answerable over an overlay in O(1). The ten real whole walks
@@ -316,9 +317,9 @@ has been moved. That rule is stated with the family in
 Each step is one PR, has its own spec change, and is verifiable without the
 steps after it.
 
-1. **Census and measurement.** Done: the census is
-   [`reports/2026-09-07-editing-read-path-census.md`](../../reports/2026-09-07-editing-read-path-census.md),
-   the script is
+1. **Census and measurement.** Done: the census was
+   `reports/2026-09-07-editing-read-path-census.md` (retired; summarised in
+   Part 1), the script is
    [`scripts/measure_edit_costs.py`](../../scripts/measure_edit_costs.py),
    and the numbers and what they decided are in Part 1.
 7. **Edit families**, one PR each in Part 5's order, `gui/edits/`. The

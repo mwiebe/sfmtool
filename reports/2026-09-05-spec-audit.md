@@ -248,6 +248,10 @@ Full surface table under **Code without specs**.
 > shader-header comments this run noticed on the way past — `blur_downsample.wgsl:4`
 > still claims workgroup shared memory and `:9` a `params.pass` field that `Params`
 > does not have._
+>
+> _Status (2026-09-18, later): the `blur_downsample.wgsl` header is fixed — it now says each
+> invocation reads its taps from the storage buffer and that the pass is selected by
+> entry point (`horiz` / `vert`)._
 
 **Summary:** The wgpu compute-shader implementation of the same DIS pipeline: measured speedups, the CPU/GPU hybrid and its per-level `gpu_min_pixels` routing, transfer-minimizing decisions, buffer pools, the five shaders, buffer layout, GPU-vs-CPU agreement, a WGSL Jacobi listing, and timing profiles.
 **Implementing code:** `crates/sfmtool-core/src/features/optical_flow/gpu/` (`mod.rs`: `GpuFlowContext::{new, run_dis_and_variational, build_gpu_pyramid, run_gpu_levels_prebuilt}`; `context.rs`, `dis_pipeline.rs`, `variational.rs`, `pyramid_pipeline.rs`, `shaders/*.wgsl`); routing at `../dis.rs:69`, `../mod.rs:177-185`.

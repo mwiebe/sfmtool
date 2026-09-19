@@ -1,12 +1,12 @@
 // Separable Gaussian blur + 2x downsample compute shader.
 //
 // Two-pass approach: horizontal blur+downsample, then vertical blur+downsample.
-// Uses workgroup shared memory to load tiles with halos for efficient access.
+// Each invocation reads its six taps straight from the storage buffer.
 //
 // 6-tap kernel [0.017560, 0.129748, 0.352692, 0.352692, 0.129748, 0.017560]
 // centered between pixels (taps at offsets -2, -1, 0, +1, +2, +3 from base = 2*oc).
 //
-// This shader handles ONE pass (horizontal or vertical), selected by `params.pass`.
+// Each dispatch runs ONE pass, selected by entry point: `horiz` or `vert`.
 // Pass 0 (horizontal): reads input image (in_w × in_h), writes intermediate (out_w × in_h)
 //   where out_w = in_w / 2. Each output pixel applies the kernel horizontally.
 // Pass 1 (vertical): reads intermediate (out_w × in_h), writes output (out_w × out_h)
