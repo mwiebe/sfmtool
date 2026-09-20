@@ -495,6 +495,17 @@ event loop never reads, a HUD checkbox that never reaches the tree, a
 desktop platforms via `pixi run ui-test`, one window at a time (a process-wide
 mutex, so a plain `cargo test` behaves like `--test-threads=1`).
 
+Because they need a window, they are **off by default**. `ui_basic` is declared
+in [`crates/sfm-explorer/Cargo.toml`](../../crates/sfm-explorer/Cargo.toml) as an
+explicit `[[test]]` target with `required-features = ["ui-tests"]`, so
+`cargo test --workspace` builds and runs the lib tests and nothing windowed,
+while `pixi run ui-test` expands to
+`cargo test -p sfm-explorer --features ui-tests --test ui_basic --
+--test-threads=1 --nocapture`. Cargo *silently skips* a target whose required
+features are off rather than reporting anything, so every invocation that is
+supposed to see this file — including the clippy gate that type-checks it on
+Linux — names the feature explicitly.
+
 **One locator resolution is one full snapshot of the app's accessibility
 subtree**, and that is what the suite is written around. `wait_attached`,
 `press`, `toggle`, `elements` and `count` each walk the whole tree — on Windows
@@ -521,8 +532,8 @@ drops — so a panicking test reports too — it prints a line, and after it the
 running total; the last `UIPROBE TOTAL` is the run's:
 
 ```text
-UIPROBE test=file_menu_items launch_ms=886 ops=5 op_ms=3732 total_ms=4733
-UIPROBE TOTAL tests=19 launch_ms=19559 ops=45 op_ms=29234 total_ms=53012 mean_launch_ms=1029 mean_op_ms=649
+UIPROBE test=file_menu_items launch_ms=680 ops=4 op_ms=2959 total_ms=3724
+UIPROBE TOTAL tests=19 launch_ms=16917 ops=38 op_ms=21909 total_ms=42384 mean_launch_ms=890 mean_op_ms=576
 ```
 
 `launch_ms` is the process spawn, GPU init and window registration up to the
@@ -543,6 +554,40 @@ guard, which is sound only because `UI_TEST_LOCK` keeps exactly one guard
 alive at a time. All three invocations of the suite pass `--nocapture`, since
 libtest discards a passing test's stdout and these lines are wanted on green
 runs above all.
+
+**A cross-process call can fail because the tree moved, not because the suite
+was wrong, and the two are guarded differently.** The read-only probes —
+`wait_attached`, `wait_until`, `count` — retry a bounded number of times when
+the platform returns a specifically *transient* HRESULT (`UIA_E_TIMEOUT`,
+`UIA_E_ELEMENTNOTAVAILABLE`), which is free because resolving a locator twice
+changes nothing. Only those codes: a selector that names something the app does
+not have must still fail on its first attempt rather than spend three budgets
+rediscovering the same absence.
+
+A **press is never retried that way**, and the asymmetry is load-bearing. A
+transient error says the call did not complete, not that the press did not
+land, and every press the suite makes is a toggle — a menu button that did open
+its menu closes it again on a second press, so a blind retry converts a
+recovered timeout into a shut menu and a later, more confusing failure. Presses
+are made reliable by being *idempotent by observation* instead: `press_revealing`
+presses, looks for the item the press was supposed to reveal, and presses again
+only if it is absent, so a press that worked while reporting `UIA_E_TIMEOUT`
+succeeds. Every menu this suite opens goes through it. A checkbox has no
+equivalent because it reveals nothing; its callers confirm `states.checked` with
+a `wait_until`, which already fails loudly if the toggle did not land.
+
+**That confirmation is returned, not discarded, and this is what makes the guard
+free.** Confirming costs a full subtree snapshot — ~25s on the Windows runner —
+so `press_revealing` hands the element back and every call site that wants the
+revealed item takes it from there instead of resolving the same selector again.
+A menu opening is therefore one snapshot rather than two, and the sites that
+used to open a menu and then look up the item they had just proven present now
+do strictly less work than before the guard existed.
+
+Retries do not disturb the accounting. One wrapper call is one `op` however many
+platform attempts happen inside it, so `ops` stays a deterministic fingerprint
+of suite *shape* and the retry time lands in `op_ms` where it was spent. A run
+that needed a retry says so with a `UIPROBE RETRY` line instead.
 
 **Whatever a test puts outside its own process is the lock's business too.** The
 `Guard` that holds the mutex owns the viewer process *and* anything the test
@@ -608,5 +653,12 @@ goes the same way: a click that lands somewhere else is not a failure anyone
 can read.
 
 In CI the three suites are three jobs — `ui-test-windows`, `ui-test-macos`,
-`ui-test-linux` — separate from the coverage job, which excludes `sfm-explorer`
-entirely so that uninstrumented artifacts never land in its target directory.
+`ui-test-linux` — each passing `--features ui-tests`, and separate from the
+coverage job, which excludes `sfm-explorer` entirely so that uninstrumented
+artifacts never land in its target directory. The lib tests run instead in
+`test-os-rust`, whose single `cargo test --workspace` reaches them precisely
+because `ui_basic` is gated out of it. `ui-test-macos` is the one job that
+cannot just run the pixi task: macOS gates the accessibility API behind a TCC
+grant that targets an exact on-disk path, so it builds the test binary with
+`--no-run`, resolves its content-hashed path, grants TCC to that, and executes
+it directly — and that `--no-run` build needs the feature like any other.
