@@ -169,10 +169,19 @@ states what differs:
 - **Reach**: nine panel pixels for the dot, a corner, the arrowhead and a
   circle; eight from an edge or from the normal's segment. Where reaches
   overlap the order is arrowhead, corner, dot, circle, edge, normal segment.
+  The arrowhead is first because it is a point at the far end of the segment
+  that is last, and anything between them would take the presses meant for it.
+  One consequence is worth knowing: seen exactly down the normal the whole
+  arrow collapses onto the centre, so the head covers the dot and takes its
+  presses. That view is the aim's own best one, and a few degrees of lean pulls
+  the head clear and gives the dot back.
 - **Cursors**: `Move` on the dot and `Grabbing` while it is held, and a circle
   selects rather than moves, so it takes `PointingHand`. The normal's segment
   takes the resize cursor along its own on-screen direction. The arrowhead takes
-  `Grab`, and `Grabbing` while held.
+  the cursor of the gesture it is about to make (§ "The arrowhead's two
+  gestures"): `AllScroll` where the aim is free in two directions, and where it
+  is a swing about one axis, the resize cursor along the arc the arrowhead
+  travels, which is the corner's own reading of a tangent.
 
   An edge and a corner both take the resize cursor their on-screen orientation
   names, and the difference between them is the direction: an edge is dragged
@@ -201,7 +210,8 @@ degenerate-view tests read the same on either side of it.
 | Edge | the frame's plane | the offset along that edge's axis is `p`; new half-length `(p + h) / 2`, centre moved `h' - h` along it, far edge held |
 | Corner | the frame's plane | the angle swept about `n` from the press point to the pointer, both read about `c` |
 | Normal segment | the line `c + t n` | the point of that line nearest the ray; the centre moves by that point's `t` less the press's own, along `n` |
-| Arrowhead | the sphere of radius `L` about `c` | the new normal is the unit vector from `c` to the hit |
+| Arrowhead, aiming | the plane through `c` square to `n` | the new normal is `4h n` carried by the pointer's travel across that plane since the press, normalized |
+| Arrowhead, swinging | the plane through `c` square to the swing axis `a` | the angle swept about `a` from the press's point to the pointer's turns the normal about `a` |
 
 **The degenerate views are refused at the press.** Three handles read the
 frame's plane, and a plane seen edge-on turns a pixel of pointer motion into an
@@ -219,14 +229,74 @@ reading is multiplied by. Between them some handle is
 always live, and the view in which one set dies is the view in which the other
 is at its best.
 
-**The arrowhead's sphere.** The ray meets the sphere twice, or not at all. The
-hit taken is the one on the hemisphere the arrowhead was on at the press, near
-or far from the viewer, so a drag does not flip the normal through the frame.
-When the ray misses the sphere the hit is the point of the sphere's silhouette
-nearest the ray, so the arrowhead follows the pointer around the rim. The frame
-is turned by the **least rotation** that takes the old normal to the new one,
-the rotation about `n_old x n_new`, so a tilt adds no spin about the normal:
-spin is the corners' job.
+The arrowhead needs no refusal of its own, because its two gestures are each
+other's cure: the aim reads a plane that is square to the view exactly when the
+normal points along it, and the swing reads an axis that is well determined
+exactly when it does not. Both planes run through `c`, so neither can fall
+behind an eye that is looking at the figure at all, and the arrowhead answers
+from every view it is drawn in.
+
+**The arrowhead's two gestures.** Which one a press makes is decided by where
+the normal points. With `e` the unit vector from `c` to the eye, the arrowhead
+**aims** when `|n . e|` is above `cos 45 degrees` and **swings** when it is
+below. The magnitude and not the signed value, because a patch showing its back
+is as square to the view as one showing its face. The press decides it, as the
+press decides the handle, so a gesture does not change character halfway
+through.
+
+**Aiming**, when the normal lies near the line of sight. The pointer's ray is met
+with the plane through `c` square to `n`, and the new normal is `4h n` -- the old
+normal on a lever twice the arrow's own length -- displaced by however far the
+pointer has travelled across that plane since the press, normalized. The plane
+and the lever are the ones fixed at the press, `n` being the normal the arrowhead
+had then, so the gesture is a single map from the window onto the sphere of
+normals rather than a thing that moves as it is used. The press's own place is
+kept for the reason the centre dot's is: a press that took the arrowhead is not
+standing where `c` projects, the head being drawn out along the normal, and
+reading the meeting outright would turn the normal over before the pointer had
+moved at all -- which a drag that ends where it started is not allowed to do.
+
+Two properties follow from the lever. `4h` of travel is 45 degrees of tilt while
+the arrowhead is drawn `2h` out, and the travel is read on the very plane the
+arrow stands out of, so `4h` is **twice the arrow's own drawn length whatever the
+zoom**: the aim is half as sensitive as the figure looks, at every distance, and
+a small correction is a small motion, which is what the handle is for -- a normal
+is read off a surface a few degrees at a time. And the travel being square to
+`n`, the answer keeps the whole `4h` along it; the sum of a fixed vector and one
+square to it can never turn through a right angle, so one gesture turns the
+normal by less than 90 degrees and cannot push it through the frame at all.
+
+**The lever is not a distance the plane stands at**, and that distinction is the
+whole of why the plane runs through `c`. Standing the plane `4h` out along `n`
+gives the same arithmetic wherever the eye is far off, and fails where it is not:
+the standoff is measured *toward* an eye the aim was chosen for, so an eye within
+`4h` of a patch facing it has the plane behind it, the ray meets nothing, and the
+press falls through to the viewport's navigation with the arrowhead's cursor
+still showing. That view -- close in on a patch that faces you -- is not a corner
+case but the one a person zooms to when they mean to work on a normal. Reading
+`c`'s own plane also takes the eye's distance out of the gesture entirely: what a
+pixel of pointer is worth on a plane depends on how far off that plane is, so a
+plane standing at a fixed offset makes the handle's sensitivity a function of the
+zoom, while `c`'s own plane and the patch project alike and the ratio between
+them is the same at every zoom.
+
+**Swinging**, when the normal lies across the line of sight. The normal turns
+about one axis `a`, which is **in the frame's own plane**: the unit vector there
+nearest the eye, which is the part of `e` square to `n`, normalized. The normal
+therefore stays in the one plane through it square to `a` and never rolls toward
+or away from the viewer, which is the motion that is hardest to aim and easiest
+to overshoot when the arrowhead is nearly side-on. The pointer's ray is met with
+the plane through `c` square to `a`, which is the plane the arrowhead travels in
+and, `a` pointing at the eye as nearly as the frame allows, the plane most nearly
+facing the window; the angle swept about `c` from the press's meeting to the
+pointer's is the angle the normal turns by. That is the corner's reading with `a`
+in place of `n`, which is why the two take the same cursor.
+
+Both state their answer as a normal, so `tilt_frame` takes a normal and knows
+nothing of which gesture named it. Both turn the frame by the **least rotation** that takes
+the old normal to the new one, the rotation about `n_old x n_new`, so a tilt adds
+no spin about the normal: spin is the corners' job. A swing already is that
+rotation, `a` being square to both normals by construction.
 
 **At infinity** the pointer is its ray's **direction** alone, met with the
 tangent plane as an observation's is: `r / (r . d)`. The dot, the edges and the
@@ -261,7 +331,11 @@ what the tiles are cut on.
   second time. The sightings therefore move by *different* amounts in their
   photographs, and that spread is the parallax the old depth was wrong by.
 - **Tilt.** `u`, `v` and so `n` are rotated about `c`. Each keypoint becomes
-  the projection of `c + a_i u' + b_i v'`.
+  the projection of `c + a_i u' + b_i v'`. `(a_i, b_i)` is read on the frame as
+  it stood **before** the turn, for the reason the offset's is: this edit takes
+  the plane with it too. Unlike the other three this is not a rigid carry of
+  each plane point -- the pair is kept and the place is built again on the new
+  axes -- but what it preserves is the same thing.
 
 **A tilt stops 80 degrees from any observation.** With `e_i` the unit vector
 from `c` to observation `i`'s camera centre, a normal is **allowed** when the
@@ -375,8 +449,8 @@ The slide and the resize get no second wire form: `move_bench_track` and
 
 The figure's world geometry and the handles are a new
 `viewer_3d/bench_track.rs`; the pass is `scene_renderer/bench_track.rs` with
-`shaders/bench_track.wgsl`; the ray geometry (ray against
-plane, line and sphere, and the degenerate-view tests) goes in
+`shaders/bench_track.wgsl`; the ray geometry (ray against a
+plane and against a line, and the degenerate-view tests) goes in
 `bench/geometry.rs` beside what a pixel means against a patch, with no egui in
 it, so it is tested without a frame.
 
@@ -414,12 +488,28 @@ Each is one PR, and each leaves the viewer whole.
    keypoint is the new projection; an observation that loses its projection
    carries `NoProjection`.
 4. **The arrowhead.** `tilt_frame`, `PatchEdit::Tilt`, `tilt_bench_track`, the
-   hemisphere and silhouette rules. Tests: the tilt is the least rotation (the
-   axis is perpendicular to both normals and `u` keeps its component along it);
-   the centre and the half-length are unchanged; a tilt asked past an observation
-   stops 80 degrees from it and says which, while a track already past that for
-   one observation can still be tilted; a pointer off the sphere tracks
-   the rim; a drag across the silhouette does not flip the normal.
+   aim, the swing and the rule that chooses between them. Tests: the tilt is the
+   least rotation (the axis is perpendicular to both normals and `u` keeps its
+   component along it); the centre and the half-length are unchanged; a tilt
+   asked past an observation stops 80 degrees from it and says which, while a
+   track already past that for one observation can still be tilted; a pointer
+   travelling `4h` across the aim's plane is 45 degrees and no aim reaches 90;
+   an aim answers from an eye closer in than its own lever, where a plane stood
+   off by that lever would sit behind the camera; a swing leaves the normal
+   square to its axis and the axis in the frame's plane; the gesture is chosen
+   at the press and does not change while the button is down.
+5. **The names.** The steps and the wire tools are named for the shape of the
+   arithmetic rather than for what a person does with them, and they collide:
+   `translate_frame`, `translate_frame_to`, `offset_frame` and
+   `resize_from_edge_to` all move a centre, and `move_bench_track`,
+   `move_bench_track_observation` and `offset_bench_track` all read as the same
+   verb. One pass settles a vocabulary and renames the core steps, their reports,
+   the `PatchEdit` variants and the wire tools to it, rewriting the standing
+   specs in the same change. No behaviour moves, so the tests are the ones
+   already written, renamed with what they call. The old wire names are not kept
+   as aliases: an agent binds its tools when a session starts, so there is one
+   generation of callers to move, and a shim would make the ambiguous name
+   permanent.
 
 On step 4 landing this draft is converted: the panel half into
 `../gui/viewer-3d-bench-layer.md` or a section of the 3D viewer's spec, the four
@@ -440,3 +530,20 @@ the tools into [`../gui/bench.md`](../gui/bench.md) § "The wire" and
   as the point cloud does.
 - A tilt stops 80 degrees from any observation (§ "What each edit does to the
   sightings").
+- The arrowhead has two gestures chosen by where the normal points, rather than
+  one reading of a sphere about `c` (§ "The arrowhead's two gestures"). A sphere
+  makes every drag a full-sensitivity aim, including the side-on view where the
+  useful motion is a swing about a single axis and the rest is roll the person
+  did not ask for; and a sphere of the arrow's own radius turns 90 degrees in the
+  length of the arrow, which is far too fast for a handle whose job is a few
+  degrees at a time.
+- The aim's `4h` is a **lever** and not a distance its plane stands at: the
+  plane runs through `c`, and the old normal is carried on `4h` of lever, so the
+  gesture is half as sensitive as the figure looks. It is a number to look at on
+  screen and adjust, as the arrow's own `2h` is. Standing the plane off by the
+  lever instead reads the same wherever the eye is far away and fails where it
+  is not, the standoff being measured toward an eye the aim was chosen for: from
+  inside `4h` the plane lies behind the camera and the press falls through to
+  navigation while the cursor still says otherwise. Reading `c`'s own plane also
+  takes the eye's distance out of the sensitivity, which a standoff puts into
+  it.

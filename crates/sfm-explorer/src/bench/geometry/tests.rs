@@ -181,6 +181,202 @@ fn a_turn_on_the_plane_is_the_angle_swept_about_the_centre() {
     assert!(turn_on_plane(&frame, frame.center, Point3::new(1.0, 0.0, 0.0)).is_none());
 }
 
+// ---- The arrowhead's two gestures ------------------------------------------
+
+/// A ray from `origin` that lands exactly on `at`.
+fn ray_to(origin: Point3<f64>, at: Point3<f64>) -> (Point3<f64>, Vector3<f64>) {
+    (origin, at - origin)
+}
+
+/// An eye `degrees` off the frame's normal, on the `sign` side of it, at a
+/// distance of four half-lengths.
+fn eye_off_normal(frame: &OrientedPatch, degrees: f64, sign: f64) -> Point3<f64> {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    frame.center + (frame.normal() * (cos * sign) + frame.u_axis * sin) * 4.0
+}
+
+/// Which gesture the arrowhead makes is decided by where the normal points, on
+/// the **magnitude** of its cosine against the view: a patch showing its back is
+/// as square to the view as one showing its face.
+#[test]
+fn the_arrowhead_aims_within_forty_five_degrees_of_the_view_and_swings_outside_it() {
+    let frame = flat();
+    for sign in [1.0, -1.0] {
+        assert_eq!(
+            tilt_gesture(&frame, eye_off_normal(&frame, 0.0, sign)),
+            Some(Tilt::Aim),
+            "straight down the normal is the aim's own view",
+        );
+        assert_eq!(
+            tilt_gesture(&frame, eye_off_normal(&frame, AIM_ANGLE_DEG - 0.5, sign)),
+            Some(Tilt::Aim),
+        );
+        assert!(
+            matches!(
+                tilt_gesture(&frame, eye_off_normal(&frame, AIM_ANGLE_DEG + 0.5, sign)),
+                Some(Tilt::Swing(_)),
+            ),
+            "past the bar the arrowhead swings",
+        );
+        assert!(
+            matches!(
+                tilt_gesture(&frame, eye_off_normal(&frame, 90.0, sign)),
+                Some(Tilt::Swing(_)),
+            ),
+            "a view along the plane is the swing's own",
+        );
+    }
+    // A direction patch draws no arrowhead, so there is no gesture to make.
+    assert_eq!(tilt_gesture(&bearing(), Point3::new(0.0, 0.0, 4.0)), None);
+    // And an eye at the centre names no view of the frame at all.
+    assert_eq!(tilt_gesture(&frame, frame.center), None);
+}
+
+/// The aim is a map of the window onto the sphere of normals, read off the
+/// plane through the **centre** square to the normal and levered by
+/// [`AIM_LEVER`] half-lengths. Two things follow from that lever, and they are
+/// the whole of why it is the length it is.
+#[test]
+fn an_aim_turns_forty_five_degrees_in_four_half_lengths_and_never_reaches_ninety() {
+    let frame = flat();
+    let half = frame.half_extent[0];
+    let lever = AIM_LEVER * half;
+    let eye = frame.center + frame.normal() * 20.0;
+    let on_plane = |across: f64| frame.center + frame.u_axis * across;
+
+    // The meeting is the plane's own point, and that plane runs through the
+    // centre rather than standing off it.
+    let (origin, direction) = ray_to(eye, on_plane(1.5));
+    let at = tilt_point(&frame, Tilt::Aim, origin, direction).expect("the ray meets the plane");
+    assert!((at - on_plane(1.5)).norm() < 1e-9);
+
+    // The press's own place on that plane, which every answer is measured from:
+    // a press on the arrowhead is not standing where the centre is, the head
+    // being drawn out along the normal.
+    let (origin, direction) = ray_to(eye, on_plane(0.7));
+    let press = tilt_point(&frame, Tilt::Aim, origin, direction).expect("the plane");
+    let aimed = |across: f64| {
+        let (origin, direction) = ray_to(eye, on_plane(across));
+        let at = tilt_point(&frame, Tilt::Aim, origin, direction).expect("the plane");
+        tilt_normal(&frame, Tilt::Aim, press, at).expect("a direction")
+    };
+    let degrees = |n: Vector3<f64>| n.dot(&frame.normal()).clamp(-1.0, 1.0).acos().to_degrees();
+
+    // A drag that ends where it started names the normal the patch already has.
+    assert!((aimed(0.7) - frame.normal()).norm() < 1e-9);
+
+    // `AIM_LEVER` half-lengths of travel is 45 degrees, which is the arrow's own
+    // drawn length twice over: the handle is half as sensitive as the figure
+    // looks.
+    let tilted = aimed(0.7 + lever);
+    assert!((degrees(tilted) - 45.0).abs() < 1e-9, "{}", degrees(tilted));
+
+    // And no aim reaches 90 however far the pointer goes: the travel is square
+    // to the lever, so the sum can never turn through a right angle, and one
+    // gesture cannot push the normal through the frame.
+    for across in [10.0, 1e3, 1e9] {
+        let far = aimed(0.7 + across * half);
+        assert!(
+            degrees(far) < 90.0 && far.dot(&frame.normal()) > 0.0,
+            "an aim {across} half-lengths out reached {} degrees",
+            degrees(far),
+        );
+    }
+}
+
+/// The aim answers from **inside** the lever's own length, which a plane
+/// standing `AIM_LEVER` half-lengths out could not.
+///
+/// The patch facing the eye is the aim's own view, and it is also the view a
+/// person zooms into to work on a normal, so an eye a half-length or two off
+/// the surface is the ordinary case rather than a corner of one. A plane stood
+/// off by the lever would sit *behind* such an eye -- the standoff being
+/// measured toward it -- and the press would read nothing and fall through to
+/// the viewport's navigation, with the arrowhead's own cursor still showing.
+/// Reading the centre's own plane, there is no such distance.
+#[test]
+fn an_aim_answers_from_closer_in_than_its_own_lever() {
+    let frame = flat();
+    let half = frame.half_extent[0];
+    let degrees = |n: Vector3<f64>| n.dot(&frame.normal()).clamp(-1.0, 1.0).acos().to_degrees();
+
+    // Nearer than the lever, at it, and comfortably past it: the same gesture
+    // and the same answer, the reading having no distance in it at all.
+    for standoff in [0.5, 1.0, AIM_LEVER - 0.5, AIM_LEVER, AIM_LEVER + 0.5, 50.0] {
+        let eye = frame.center + frame.normal() * (standoff * half);
+        assert_eq!(
+            tilt_gesture(&frame, eye),
+            Some(Tilt::Aim),
+            "a patch facing the eye at {standoff} half-lengths is the aim's view",
+        );
+        let at = |across: f64| {
+            let (origin, direction) = ray_to(eye, frame.center + frame.u_axis * across);
+            tilt_point(&frame, Tilt::Aim, origin, direction)
+                .unwrap_or_else(|| panic!("an eye {standoff} half-lengths out read no point"))
+        };
+        // The press is off the centre, as a press on the drawn arrowhead is.
+        let turned = tilt_normal(&frame, Tilt::Aim, at(0.3), at(0.3 + AIM_LEVER * half))
+            .expect("a direction");
+        assert!(
+            (degrees(turned) - 45.0).abs() < 1e-9,
+            "at {standoff} half-lengths the same travel turned {} degrees",
+            degrees(turned),
+        );
+    }
+}
+
+/// The swing turns the normal about one axis lying in the frame's own plane --
+/// the one nearest the eye -- so the normal keeps to the single plane through
+/// it square to that axis and never rolls toward or away from the viewer.
+#[test]
+fn a_swing_turns_about_the_axis_of_the_frames_plane_nearest_the_eye() {
+    let frame = flat();
+    // Well past the bar, and leaning toward `+u` and a little toward `+v`, so
+    // the axis is not one of the frame's own axes by accident.
+    let eye = frame.center + frame.u_axis * 6.0 + frame.v_axis * 2.0 + frame.normal() * 1.0;
+    let Some(Tilt::Swing(axis)) = tilt_gesture(&frame, eye) else {
+        panic!("this view is the swing's")
+    };
+
+    // In the frame's plane, and the nearest direction there to the eye: no
+    // other in-plane unit vector has a larger cosine against the view.
+    assert!(axis.dot(&frame.normal()).abs() < 1e-12, "{axis:?}");
+    assert!((axis.norm() - 1.0).abs() < 1e-12);
+    let to_eye = (eye - frame.center).normalize();
+    for k in 0..72 {
+        let angle = std::f64::consts::TAU * f64::from(k) / 72.0;
+        let other = frame.u_axis * angle.cos() + frame.v_axis * angle.sin();
+        assert!(
+            other.dot(&to_eye) <= axis.dot(&to_eye) + 1e-12,
+            "{other:?} lies nearer the eye than the axis does",
+        );
+    }
+
+    // The pointer is read against the plane through the centre square to that
+    // axis, which is the plane the arrowhead travels in.
+    let tip = frame.center + frame.normal() * 2.0;
+    let from = tilt_point(&frame, Tilt::Swing(axis), eye, tip - eye).expect("the ray meets it");
+    assert!((from - frame.center).dot(&axis).abs() < 1e-9);
+
+    // And the normal it names stays square to the axis: the turn is about that
+    // axis and nothing else.
+    let swung = frame.center + (tip - frame.center) * 0.6 + axis.cross(&frame.normal()) * 1.4;
+    let to = tilt_point(&frame, Tilt::Swing(axis), eye, swung - eye).expect("the ray meets it");
+    let normal = tilt_normal(&frame, Tilt::Swing(axis), from, to).expect("a direction");
+    assert!((normal.norm() - 1.0).abs() < 1e-12);
+    assert!(
+        normal.dot(&axis).abs() < 1e-9,
+        "the swing rolled the normal"
+    );
+    assert!(
+        (normal - frame.normal()).norm() > 1e-3,
+        "the swing turned the normal by nothing",
+    );
+
+    // A swing read about the centre itself names no answer.
+    assert!(tilt_normal(&frame, Tilt::Swing(axis), frame.center, to).is_none());
+}
+
 #[test]
 fn the_boundarys_edges_are_named_in_the_order_the_square_is_walked() {
     assert_eq!(
