@@ -513,7 +513,8 @@ track. **A cluster and a track are the same body at two stages**: the header's
 headline, the table's cells and the row menu follow the stage, and there is no
 separate cluster layout. What differs is outside the panel: a cluster has no
 geometry, so the 3D viewer's bench layer draws nothing for it and Image Detail
-draws its parallelograms rather than an outline. A cluster has no view mode
+draws its parallelograms rather than an outline, and no ghost outline in the
+images it has no sighting in. A cluster has no view mode
 either, since there is no committed point behind it, so the way back to a
 cluster after Edit has been cleared is its row under *Bench Clusters*.
 
@@ -590,14 +591,19 @@ after a fit are the numbers *Evaluate* would report. *Fit* greys with
 observations, while *Evaluate* stays available for it, because one sighting is
 something to report.
 
-***Lock* says what Image Detail's dot does at the track stage.** Ticked, which
+***Lock* says what Image Detail's handles do at the track stage.** Ticked, which
 is how the panel starts, dragging a sighting's dot there slides the patch and
-every sighting follows it. Cleared, the dot moves that one sighting's keypoint
-and the patch and every other sighting stay where they are, which is how a
-keypoint that settled on the wrong detail is fixed; the outline's edges and
-corners take no drag while it is cleared, a track-stage sighting having no size
-or turn of its own ([`multi-panel-image-browser.md`](multi-panel-image-browser.md)
-§ "The handles"). At the cluster stage the box is drawn and greyed, its hover
+every sighting follows it, and the patch-wide handles are all live: the
+outline's edges and corners, the normal's segment and arrowhead, and the ghost
+outline in an image the track has no sighting in, which then takes the same
+edits read against the patch as it stands. Cleared, the dot moves that one
+sighting's keypoint and the patch and every other sighting stay where they are,
+which is how a keypoint that settled on the wrong detail is fixed; the edges,
+the corners, the normal's two handles and the whole ghost take no drag while it
+is cleared, a track-stage sighting having no size, turn, depth or facing of its
+own and the ghost no keypoint to move
+([`multi-panel-image-browser.md`](multi-panel-image-browser.md) § "The
+handles"). At the cluster stage the box is drawn and greyed, its hover
 text saying that every sighting there already moves on its own. It keeps its
 state across the greyed stretch, so a track taken to the cluster stage and back
 is edited with the lock it had.
