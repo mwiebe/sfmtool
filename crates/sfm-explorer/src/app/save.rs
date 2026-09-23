@@ -39,7 +39,9 @@ pub(super) fn save_as_with_dialog(
     else {
         return Ok(());
     };
-    state.save_node_as(id, &path)
+    // The dialog has no field for a workspace path, and measuring it from where
+    // the file lands is what an interactive save wants.
+    state.save_node_as(id, &path, None)
 }
 
 /// Write everything the close prompt was standing in front of, and say whether
@@ -92,4 +94,45 @@ pub(super) fn save_outcome(
             .action_log
             .fail(crate::action_log::Kind::File, message);
     }
+}
+
+/// Ask for a path for a minimal copy of `id`, through the same native dialog
+/// Save As uses, and then ask what workspace path it should record.
+///
+/// The suggested name is the node's label with `-minimal`, so the dialog does
+/// not open on the node's own file, which a minimal copy never replaces.
+/// `Ok(())` with nothing written when the dialog was dismissed.
+///
+/// **This writes nothing itself.** The chosen file goes into
+/// [`crate::save_minimal_prompt::SaveMinimalPrompt`], and the copy is written on
+/// the frame that prompt is answered (`super::modals::show`). The refusals are
+/// asked here, between the two dialogs, so nobody is made to confirm a workspace
+/// path for a save that cannot happen.
+pub(super) fn save_minimal_with_dialog(
+    state: &mut crate::state::AppState,
+    id: crate::scene::ReconId,
+) -> Result<(), String> {
+    let suggested = state
+        .node(id)
+        .map(|node| format!("{}-minimal.sfmr", node.label))
+        .unwrap_or_else(|| "reconstruction-minimal.sfmr".to_string());
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("SfM Reconstruction", &["sfmr"])
+        .set_file_name(suggested)
+        .save_file()
+    else {
+        return Ok(());
+    };
+    if let Some(why) = state.minimal_copy_refusal(id, &path) {
+        return Err(why);
+    }
+    let label = state
+        .node(id)
+        .map(|node| node.label.clone())
+        .unwrap_or_else(|| "the reconstruction".to_string());
+    let workspace_path = state.minimal_copy_workspace_path(id, &path);
+    state
+        .save_minimal_prompt
+        .ask(id, label, path, workspace_path);
+    Ok(())
 }

@@ -14,6 +14,7 @@ use sfmtool_core::analysis::infinity::Classification;
 use sfmtool_core::geometry::viewing_angle::viewing_rays;
 use sfmtool_core::patch::cloud::{PatchExtent, PatchNormal, ViewReduce};
 use sfmtool_core::progress::Progress;
+use sfmtool_core::reconstruction::minimal::SaveStamp;
 use sfmtool_core::reconstruction::triangulation::{depth_uncertainty_batch, triangulate_batch};
 use sfmtool_core::SfmrReconstruction;
 
@@ -101,6 +102,19 @@ impl PySfmrReconstruction {
     ///     tool_name: Tool that performed the operation (default ``"sfmtool"``).
     ///     tool_options: Optional dict of operation-specific metadata to merge
     ///         into ``metadata.tool_options``.
+    ///     minimal: Write the metadata a file meant to travel between machines
+    ///         carries: an empty ``workspace.absolute_path`` (none recorded), no
+    ///         ``lineage``, and ``tool_options`` replaced by the ``tool_options``
+    ///         given here rather than merged into the inherited ones. What
+    ///         ``sfm xform --minimal`` saves with. The in-memory value keeps
+    ///         whatever the save wrote, like the other metadata a save stamps.
+    ///     workspace_path: Record this as ``workspace.relative_path`` instead of
+    ///         measuring it from the output's directory to the workspace. Given
+    ///         verbatim (``\`` turned into ``/``, since the field is POSIX), so
+    ///         ``"."`` is a file written beside its workspace marker and ``""``
+    ///         is no path recorded. Needs ``operation``, which is what makes the
+    ///         save a stamped one. What ``sfm xform --minimal wspath=<path>``
+    ///         passes.
     ///
     /// The write preserves the in-memory ``normals`` of every point that has one
     /// (recomputing only the missing/zero rows from geometry), so normals set via
@@ -109,7 +123,11 @@ impl PySfmrReconstruction {
     /// ``has_normals`` ``False`` writes no normals at all. Any attached patch
     /// cloud is written as the per-point patch frame in ``points3d/`` (format
     /// version 3+).
-    #[pyo3(signature = (path, operation=None, tool_name=None, tool_options=None))]
+    // Every argument is one Python keyword of the save's surface, so they are a
+    // list rather than a struct: a `SaveOptions` here would be a type the caller
+    // cannot name.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, operation=None, tool_name=None, tool_options=None, minimal=false, workspace_path=None))]
     fn save(
         &mut self,
         py: Python<'_>,
@@ -117,25 +135,46 @@ impl PySfmrReconstruction {
         operation: Option<&str>,
         tool_name: Option<&str>,
         tool_options: Option<&Bound<'_, PyDict>>,
+        minimal: bool,
+        workspace_path: Option<&str>,
     ) -> PyResult<()> {
-        // Update metadata if operation is provided
-        if let Some(op) = operation {
-            let meta = &mut self.inner.metadata;
-            meta.operation = op.to_string();
-            meta.tool = tool_name.unwrap_or("sfmtool").to_string();
-            meta.image_count = self.inner.image_table.images.len() as u32;
-            meta.point_count = self.inner.point_set.points.len() as u32;
-            meta.observation_count = self.inner.point_set.tracks.len() as u32;
-            meta.camera_count = self.inner.image_table.cameras.len() as u32;
+        // The workspace path is one of the fields the stamp writes, so a save
+        // that states it and names no operation would drop it silently.
+        if workspace_path.is_some() && operation.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "The workspace path is recorded by a stamped save; pass operation \
+                 alongside workspace_path.",
+            ));
+        }
 
-            // Update workspace paths relative to output file
-            let output_path = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
-            if let Some(parent) = output_path.parent() {
-                if let Some(rel) = pathdiff::diff_paths(&self.inner.workspace_dir, parent) {
-                    meta.workspace.relative_path = rel.to_string_lossy().replace('\\', "/");
-                }
-            }
-            meta.workspace.absolute_path = self.inner.workspace_dir.to_string_lossy().to_string();
+        // Update metadata if operation is provided. The stamp and the minimal
+        // clearing are sfmtool-core's, the one definition the viewer's
+        // Save As Minimal writes through too.
+        if let Some(op) = operation {
+            let tool = tool_name.unwrap_or("sfmtool");
+            // The version of the sfmtool that wrote this file, not of whatever
+            // wrote the one it was read from; another tool's version is kept.
+            let tool_version = if tool == "sfmtool" {
+                env!("CARGO_PKG_VERSION").to_string()
+            } else {
+                self.inner.metadata.tool_version.clone()
+            };
+            self.inner.stamp_save(
+                &path,
+                &SaveStamp {
+                    operation: op,
+                    tool,
+                    tool_version: &tool_version,
+                    workspace_path,
+                },
+            );
+        }
+
+        // A minimal file records nothing about the machine or the history it was
+        // written on: no absolute path, no ancestry, and only the options of the
+        // operation that wrote it.
+        if minimal {
+            self.inner.clear_minimal_metadata();
         }
 
         // Merge tool_options if provided
@@ -541,26 +580,7 @@ impl PySfmrReconstruction {
     /// bitmaps, if stored, are not loaded into the cloud).
     #[getter]
     fn patches(&self) -> Option<crate::PyPatchCloud> {
-        let u = self.inner.point_set.patch_u_halfvec_xyz.as_ref()?;
-        let v = self.inner.point_set.patch_v_halfvec_xyz.as_ref()?;
-        // The patch center for each point is the point's own position (a
-        // direction for a point at infinity).
-        let centers: Vec<Point3<f64>> = self
-            .inner
-            .point_set
-            .points
-            .iter()
-            .map(|p| p.position)
-            .collect();
-        let mut cloud = sfmtool_core::patch::PatchCloud::from_halfvec_arrays(u, v, &centers);
-        // from_halfvec_arrays builds every patch finite; mark the rows whose
-        // source point is at infinity so rendering treats their corners as
-        // directions.
-        for (patch, &pid) in cloud.patches.iter_mut().zip(cloud.point_indexes.iter()) {
-            if self.inner.point_set.points[pid as usize].is_at_infinity() {
-                patch.w = 0.0;
-            }
-        }
+        let cloud = sfmtool_core::patch::PatchCloud::from_stored_frames(&self.inner)?;
         Some(crate::PyPatchCloud { inner: cloud })
     }
 
@@ -572,6 +592,18 @@ impl PySfmrReconstruction {
     fn patch_bitmaps<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray4<u8>>> {
         let b = self.inner.point_set.patch_bitmaps_y_x_rgba.as_deref()?;
         Some(b.clone().into_pyarray(py))
+    }
+
+    /// The edge ``R`` of the stored ``(P, R, R, 4)`` patch bitmaps, or ``None``
+    /// when the reconstruction carries none. Reads no pixels, unlike
+    /// :attr:`patch_bitmaps`, which copies the column.
+    #[getter]
+    fn patch_bitmap_resolution(&self) -> Option<usize> {
+        self.inner
+            .point_set
+            .patch_bitmaps_y_x_rgba
+            .as_deref()
+            .map(|b| b.shape()[1])
     }
 
     // ── Track data array getters ─────────────────────────────────────
@@ -619,11 +651,12 @@ impl PySfmrReconstruction {
     }
 
     /// RGB thumbnails for each image, shape
-    /// `(N, THUMBNAIL_SIZE, THUMBNAIL_SIZE, 3)`.
+    /// `(N, THUMBNAIL_SIZE, THUMBNAIL_SIZE, 3)`, or ``None`` for a
+    /// reconstruction without them (a load never fills them in).
     ///
     /// Returns a read-only numpy view into the Rust-owned data (zero-copy).
     #[getter]
-    fn thumbnails_y_x_rgb<'py>(self_: &Bound<'py, Self>) -> Bound<'py, PyArray4<u8>> {
+    fn thumbnails_y_x_rgb<'py>(self_: &Bound<'py, Self>) -> Option<Bound<'py, PyArray4<u8>>> {
         // Get a raw pointer to the thumbnail array. This is safe because:
         // 1. #[pyclass] objects are heap-allocated and pinned — the data won't move.
         //    The array is behind an `Arc`, so its buffer sits in an allocation of
@@ -635,7 +668,7 @@ impl PySfmrReconstruction {
             let borrow = self_.borrow();
             // Through the `Arc`: the view must point at the array itself, not
             // at the pointer that owns it.
-            &*borrow.inner.image_table.thumbnails_y_x_rgb as *const ndarray::Array4<u8>
+            borrow.inner.image_table.thumbnails_y_x_rgb.as_deref()? as *const ndarray::Array4<u8>
         };
         let view = unsafe { PyArray4::borrow_from_array(&*ptr, self_.clone().into_any()) };
         // The buffer is shared: every clone of this reconstruction that did not
@@ -652,7 +685,7 @@ impl PySfmrReconstruction {
         view.call_method("setflags", (), Some(&kwargs)).expect(
             "numpy refuses write=False only on a view of a writeable base, which this is not",
         );
-        view
+        Some(view)
     }
 
     // ── Depth data getters ───────────────────────────────────────────

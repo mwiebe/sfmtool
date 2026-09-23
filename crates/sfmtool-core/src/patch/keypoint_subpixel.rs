@@ -93,6 +93,7 @@ use crate::patch::normal_refine::{
     build_support, irls_view_weights, weighted_unit_template_into, ConsensusScratch,
     PatchViewStack, ProjectedImage, Support, AGREEMENT_SIGMA,
 };
+use crate::progress::{Cancelled, Progress};
 use rayon::prelude::*;
 
 pub mod prof;
@@ -855,6 +856,145 @@ pub fn refine_patch_cloud_keypoints(
         .collect();
     prof::report(cloud.len(), wall_start.elapsed().as_secs_f64());
     out
+}
+
+/// Fuse `patch`'s RGBA representative from `views` at `keypoints`, moving
+/// nothing. `None` when fewer than two views render in frame.
+///
+/// This is the one place a representative is rendered for a patch whose
+/// placement and keypoints are settled: the sub-pixel kernel's own fuse
+/// ([`KeypointSubpixelParams::render_bitmaps`]) run with no Gauss-Newton step
+/// and a single sweep, so the keypoints come out where they went in and the
+/// pass only renders and blends. `keypoints` is parallel to `view_set`, in
+/// source-image pixels. Of `params`, `resolution`, `window`, `sampler` and
+/// `robust_iters` shape the render; the solve knobs are overridden.
+///
+/// # Panics
+///
+/// Panics if `keypoints.len() != view_set.len()` or a view index is out of
+/// range for `views`.
+pub fn fuse_patch_bitmap(
+    patch: &OrientedPatch,
+    views: &[ProjectedImage<'_>],
+    view_set: &[u32],
+    keypoints: &[[f64; 2]],
+    params: &KeypointSubpixelParams,
+) -> Option<Vec<u8>> {
+    assert_eq!(
+        keypoints.len(),
+        view_set.len(),
+        "keypoints must be parallel to view_set"
+    );
+    let seeds: Vec<Option<[f64; 2]>> = keypoints.iter().map(|&k| Some(k)).collect();
+    let params = KeypointSubpixelParams {
+        // Nothing moves: the keypoints are settled, and this pass is the fuse.
+        max_gn_steps: 0,
+        max_outer_sweeps: 1,
+        render_bitmaps: true,
+        ..params.clone()
+    };
+    refine_patch_keypoints(patch, views, view_set, Some(&seeds), &params).representative
+}
+
+/// [`fuse_patch_bitmap`] over every patch of `cloud`, parallel across patches
+/// (rayon), each fused from its point's track in `recon` at the stored
+/// per-observation keypoints.
+///
+/// `views` holds one entry per image of `recon`. A `None` entry is an image
+/// whose photograph is not to hand, and it is left out of every patch's view
+/// set rather than failing the call, so a capture with a few photographs
+/// missing still gets a bitmap for every point that two readable views see.
+///
+/// Returns the `(P, R, R, 4)` bitmap column for `recon`'s `P` points, `R` being
+/// `params.resolution` (at least 2). A point with no patch in the cloud, or
+/// whose fuse returns `None` (fewer than two views render in frame), gets a
+/// zero row, as the sub-pixel refiner gives it. `done`, when given, is bumped
+/// once per patch fused, for a caller polling progress from another thread.
+/// `progress` receives a `patches` count about every hundredth of the way
+/// through, and is polled for cancellation before each patch.
+///
+/// # Errors
+///
+/// [`Cancelled`] when `progress` was cancelled before every patch was fused.
+///
+/// # Panics
+///
+/// Panics if `recon` carries no inline keypoints (`keypoints_xy`), if a patch's
+/// point index is out of range for `recon`, or a track's image index is out of
+/// range for `views`.
+pub fn fuse_patch_cloud_bitmaps(
+    cloud: &PatchCloud,
+    recon: &crate::SfmrReconstruction,
+    views: &[Option<ProjectedImage<'_>>],
+    params: &KeypointSubpixelParams,
+    done: Option<&std::sync::atomic::AtomicUsize>,
+    progress: &Progress<'_>,
+) -> Result<ndarray::Array4<u8>, Cancelled> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let keypoints_xy = recon
+        .keypoints_xy()
+        .expect("fuse_patch_cloud_bitmaps needs a reconstruction with inline keypoints");
+    let resolution = params.resolution.max(2) as usize;
+    let point_count = recon.point_count();
+    let offsets = &recon.point_set.observation_offsets;
+    let tracks = &recon.point_set.tracks;
+    // The views that are to hand, packed, and where each image's view went.
+    let mut present: Vec<ProjectedImage<'_>> = Vec::with_capacity(views.len());
+    let mut slot: Vec<Option<u32>> = Vec::with_capacity(views.len());
+    for view in views {
+        slot.push(view.as_ref().map(|view| {
+            present.push(*view);
+            (present.len() - 1) as u32
+        }));
+    }
+    let total = cloud.patches.len();
+    let step = (total / 100).max(1);
+    let fused_so_far = AtomicUsize::new(0);
+    let fused: Vec<(usize, Option<Vec<u8>>)> = cloud
+        .patches
+        .par_iter()
+        .zip(cloud.point_indexes.par_iter())
+        .map(|(patch, &pid)| {
+            let p = pid as usize;
+            if progress.is_cancelled() {
+                return (p, None);
+            }
+            let mut view_set: Vec<u32> = Vec::new();
+            let mut keypoints: Vec<[f64; 2]> = Vec::new();
+            for j in offsets[p]..offsets[p + 1] {
+                let Some(view) = slot[tracks[j].image_index as usize] else {
+                    continue;
+                };
+                view_set.push(view);
+                keypoints.push([
+                    f64::from(keypoints_xy[[j, 0]]),
+                    f64::from(keypoints_xy[[j, 1]]),
+                ]);
+            }
+            let bitmap = fuse_patch_bitmap(patch, &present, &view_set, &keypoints, params);
+            if let Some(counter) = done {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            let n = fused_so_far.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_multiple_of(step) || n == total {
+                progress.count(n as u64, Some(total as u64), "patches");
+            }
+            (p, bitmap)
+        })
+        .collect();
+    progress.check_cancel()?;
+    let mut column = ndarray::Array4::<u8>::zeros((point_count, resolution, resolution, 4));
+    let row_len = resolution * resolution * 4;
+    let flat = column
+        .as_slice_mut()
+        .expect("a freshly allocated array is contiguous");
+    for (p, bitmap) in fused {
+        if let Some(bitmap) = bitmap {
+            flat[p * row_len..(p + 1) * row_len].copy_from_slice(&bitmap);
+        }
+    }
+    Ok(column)
 }
 
 #[cfg(test)]

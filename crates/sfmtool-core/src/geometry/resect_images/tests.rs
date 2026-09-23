@@ -15,11 +15,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use approx::assert_relative_eq;
 use nalgebra::{Matrix3, Point3, Rotation3, UnitQuaternion, Vector3};
-use ndarray::{Array2, Array4};
+use ndarray::Array2;
 
 use sfmtool_sfmr_format::{
     ContentHash, DepthStatistics, SfmrMetadata, FEATURE_SOURCE_EMBEDDED_PATCHES,
@@ -269,7 +268,7 @@ fn build(
         image_table: ImageTable {
             cameras: vec![camera],
             images,
-            thumbnails_y_x_rgb: Arc::new(Array4::zeros((n_images, 1, 1, 3))),
+            thumbnails_y_x_rgb: None,
             depth_statistics: DepthStatistics {
                 num_histogram_buckets: 0,
                 images: Vec::new(),
@@ -284,6 +283,7 @@ fn build(
             patch_u_halfvec_xyz: None,
             patch_v_halfvec_xyz: None,
             patch_bitmaps_y_x_rgba: None,
+            patch_bitmaps_for_display: false,
             has_normals: false,
             normal_confidence: None,
             point_constraints: None,

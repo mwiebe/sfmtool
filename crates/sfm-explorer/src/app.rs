@@ -430,9 +430,14 @@ impl App {
                 }
                 {
                     let mut phase = uploads.phase("thumbnails");
-                    let did = self
-                        .scene_renderer
-                        .upload_thumbnails(device, queue, id, recon, &phase);
+                    let did = self.scene_renderer.upload_thumbnails(
+                        device,
+                        queue,
+                        id,
+                        recon,
+                        node.display_thumbnails.as_ref(),
+                        &phase,
+                    );
                     note_upload(&mut phase, did, "image", "images");
                 }
                 {

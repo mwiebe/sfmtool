@@ -10,9 +10,11 @@ mod edit;
 pub mod edited;
 mod embed;
 pub mod filter;
+pub mod minimal;
 pub mod move_camera;
 pub mod point_correspondence;
 pub mod prune_covered;
+pub mod thumbnail;
 pub mod triangulation;
 
 pub use bundle_adjust::{

@@ -248,7 +248,7 @@ The frame's upload phase, in
 ```rust
 if renderer.base_changed(id, &base) {
     renderer.upload_points(device, id, recon);
-    renderer.upload_thumbnails(device, queue, id, recon);
+    renderer.upload_thumbnails(device, queue, id, recon, node.display_thumbnails.as_ref());
     renderer.upload_patches(device, queue, id, recon);
     renderer.set_uploaded_base(id, base);
 }
@@ -263,8 +263,9 @@ all leave the base the same allocation, so none of them does.
 
 **The two atlases are keyed on their own pixels, not on the base.** A new base
 is a coarse signal: it says the value changed, not which part of it. The
-thumbnail atlas is a function of the image table's thumbnail column, and the
-patch atlas of the patch bitmap column and the packing over it, and a bulk edit
+thumbnail atlas is a function of the node's display thumbnails, the image
+table's own thumbnail column and the image list (see
+[camera-views.md](camera-views.md) § "Thumbnail loading"), and the patch atlas of the patch bitmap column and the packing over it, and a bulk edit
 rewrites poses, positions and patch frames while touching neither column.
 Rebuilding an atlas means a texture allocation and one `write_texture` per tile,
 which on a node with tens of thousands of patches is the whole cost of the
@@ -367,6 +368,17 @@ share, each charged its observations and its consensus bitmap
 ([bench.md](bench.md)). On the largest reconstruction measured -- 1 354 MB in
 memory, of which 1 189 MB are those two columns -- that is some 165 MB for a
 bulk edit, so the budget holds twenty-odd of them, or any number of point edits.
+
+**Columns the open filled in for display** are counted by where they live. A
+node's display thumbnails, which the open builds for a file carrying none, are
+held once on the node beside the history and belong to no version, so no version
+is charged for them. Patch bitmaps the open renders for such a file are in the
+value, marked `PointSet::patch_bitmaps_for_display`, so every reader of the
+column sees them as it would a file's own; they are charged like any bitmap
+column, and like one are shared by pointer between versions that keep them. The
+mark leaves them out of every save and every content hash, so the value keeps
+the identity of the file it was read from
+([background-tasks.md](background-tasks.md) § "Opening a file").
 
 It is a constant, not a setting: it is a ceiling that keeps a session from
 exhausting memory, not a quantity anyone has a reason to tune from the window.

@@ -1105,7 +1105,7 @@ impl EditedReconstruction {
             // No overlay edit touches an image, so the whole table is the
             // base's, thumbnails shared rather than copied.
             image_table: ImageTable {
-                thumbnails_y_x_rgb: Arc::clone(&self.base.image_table.thumbnails_y_x_rgb),
+                thumbnails_y_x_rgb: self.base.image_table.thumbnails_y_x_rgb.clone(),
                 ..self.base.image_table.clone()
             },
             point_set,
@@ -1191,6 +1191,7 @@ impl EditedReconstruction {
             patch_u_halfvec_xyz: self.merge_halfvec(&base.patch_u_halfvec_xyz, &point_rows, true),
             patch_v_halfvec_xyz: self.merge_halfvec(&base.patch_v_halfvec_xyz, &point_rows, false),
             patch_bitmaps_y_x_rgba: self.merge_bitmaps(&point_rows),
+            patch_bitmaps_for_display: base.patch_bitmaps_for_display,
             has_normals: base.has_normals,
             normal_confidence: base.normal_confidence.as_ref().map(|c| {
                 point_rows
@@ -1861,6 +1862,7 @@ fn empty_like(base: &PointSet, image_count: usize) -> PointSet {
             let s = b.shape();
             Arc::new(Array4::<u8>::zeros((0, s[1], s[2], s[3])))
         }),
+        patch_bitmaps_for_display: base.patch_bitmaps_for_display,
         has_normals: base.has_normals,
         normal_confidence: base.normal_confidence.as_ref().map(|_| Vec::new()),
         point_constraints: base

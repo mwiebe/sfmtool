@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) mod edits;
+pub(crate) mod open;
 mod ops;
 mod save;
 
@@ -635,6 +636,10 @@ pub struct AppState {
     /// [`crate::bundle_adjust_prompt`].
     pub bundle_adjust_prompt: crate::bundle_adjust_prompt::BundleAdjustPrompt,
 
+    /// The workspace path `Save As Minimal...` asks about once its file dialog
+    /// has named a file. See [`crate::save_minimal_prompt`].
+    pub save_minimal_prompt: crate::save_minimal_prompt::SaveMinimalPrompt,
+
     /// The `.matches` file each node's matches-backed resection reads, chosen
     /// once per source node and remembered for the session. See
     /// [`crate::resect`].
@@ -813,6 +818,7 @@ impl AppState {
             goto_point: GotoPointDialog::default(),
             close_prompt: crate::close_prompt::ClosePrompt::default(),
             bundle_adjust_prompt: crate::bundle_adjust_prompt::BundleAdjustPrompt::default(),
+            save_minimal_prompt: crate::save_minimal_prompt::SaveMinimalPrompt::default(),
             resect_matches: HashMap::new(),
             resect_matches_cache: None,
             #[cfg(feature = "mcp")]
@@ -900,11 +906,12 @@ impl AppState {
     /// One entry, not one per node: `Close All` is a single action, and a
     /// twelve-node scene should not push twelve lines through the log for it.
     ///
-    /// Refused as a whole while a background operation is running, since the
-    /// node it is running on is one of the ones this would close.
+    /// Refused as a whole while a background operation is running on a node,
+    /// since that node is one of the ones this would close. An open locks no
+    /// node, and the files it lands are appended to the empty scene.
     pub fn close_all(&mut self) -> Result<(), String> {
-        if let Some(process) = self.background_task.as_ref() {
-            if let Some(why) = self.busy_refusal(process.node) {
+        if let Some(node) = self.background_task.as_ref().and_then(|task| task.node) {
+            if let Some(why) = self.busy_refusal(node) {
                 return Err(why);
             }
         }
