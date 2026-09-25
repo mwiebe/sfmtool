@@ -21,6 +21,7 @@ mod bundle_adjust_prompt;
 mod camera_lock;
 mod cli;
 mod close_prompt;
+mod cluster_patches;
 mod colormap;
 mod context_menu;
 mod display_thumbnails;
@@ -32,6 +33,7 @@ mod elide;
 mod goto_point;
 mod image_browser;
 mod image_detail;
+mod index_files;
 mod intrinsics_detail;
 mod layout;
 #[cfg(feature = "mcp")]

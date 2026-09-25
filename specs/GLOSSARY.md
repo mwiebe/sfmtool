@@ -69,6 +69,16 @@ it is `PatchEdit::Tilt`. Only the wire, whose namespace is flat, spells all
 three, as `tilt_bench_patch`. A name like `bench_track_frame` is three words
 where the context has already supplied two.
 
+## Files beside a reconstruction
+
+The files the viewer builds and opens beside a node's `.sfmr`, in
+`crates/sfm-explorer/`, the viewer specs and the wire.
+
+| Word | Means | Not | Why |
+|------|-------|-----|-----|
+| **index files** | the two files the viewer builds beside a reconstruction's `.sfmr` to index its capture for bench search: its SIFT index, `<stem>-sift-index.kdf`, and its cluster patches, `<stem>-cluster-patches.matches`. Built together by one operation, *Build Index Files* / *Rebuild Index Files* (`Build index files` in the Background panel), shown under one Scene tree group row *Index Files* with *Close Index Files* in its menus, and on the wire `build_index_files`, `open_index_files`, `close_index_files` and the `index_files` block. The two files keep their own names, *SIFT Index* and *Cluster Patches* | `search files`, *SIFT index* for the pair, `match files`, `sidecar files` | the name the user settled on for the pair: both files exist to index the capture so a bench search can find what it looks for, and the name says that. *SIFT index* names the `.kdf` alone (entry below), so keeping it for the operation would describe half of what it writes. `.matches` files are what `sfm match` writes into `matches/`, so *match files* would point at those. *Sidecar* says where a file sits and not what it is for |
+| **cluster patches** (the file) | a node's `<stem>-cluster-patches.matches`: the SIFT index's features clustered as `sfm match --cluster` clusters them and refined as `sfm cluster-patches` refines them, with both the clusters and the cluster-patches sections. Scene tree row *Cluster Patches*, wire key `cluster_patches` | `clusters file`, `patch file` | a `.matches` with a clusters section and no refinement is a clusters file, and such a file reads stale here. *Patch file* would suggest the `.sfmr`'s own patches |
+
 ## The scene's frame
 
 The vocabulary of a node's similarity transform in `crates/sfm-explorer/`, the
