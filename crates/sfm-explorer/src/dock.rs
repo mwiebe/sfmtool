@@ -15,6 +15,7 @@ use sfmtool_core::progress::Progress;
 use crate::action_log::Kind;
 use crate::image_browser::ImageBrowser;
 use crate::image_detail::ImageDetail;
+use crate::image_menu::ImageMenuAction;
 use crate::intrinsics_detail::IntrinsicsDetail;
 use crate::platform;
 use crate::scene::{selected_node, CameraRef, ImageRef, PointRef, ReconId, SceneNode};
@@ -424,6 +425,15 @@ impl TabContext<'_> {
     /// The Image Browser tab: the selected reconstruction's image strip, and
     /// the selection and hover it reports back.
     fn show_image_browser(&mut self, ui: &mut egui::Ui) {
+        // The image menu the thumbnails open, read before the node is borrowed
+        // out of the scene. The strip shows the selected node, so that is the
+        // node the menu's image belongs to.
+        let image_menu = selected_node(&self.state.scene, self.state.selected_recon)
+            .map(|node| node.id)
+            .and_then(|id| {
+                self.state.refresh_index_files(id);
+                self.state.image_menu(id)
+            });
         let node = selected_node(&self.state.scene, self.state.selected_recon);
         if let Some(node) = node {
             let recon = node.recon();
@@ -464,6 +474,7 @@ impl TabContext<'_> {
                 camera_view_image,
                 self.gesture_events,
                 self.scroll_input,
+                image_menu.as_ref(),
                 &mut self.state.action_log,
             );
             // Held back rather than applied here: `select_image`
@@ -498,6 +509,9 @@ impl TabContext<'_> {
             // needs the state mutably.
             if let Some(img_idx) = requested_view {
                 self.look_through(ui, ImageRef::new(id, img_idx));
+            }
+            if let Some((img_idx, action)) = response.menu_action {
+                self.apply_image_menu_action(ImageRef::new(id, img_idx), action);
             }
         } else {
             ui.centered_and_justified(|ui| {
@@ -1001,25 +1015,6 @@ impl TabContext<'_> {
         if let Some(image) = response.request_camera_view {
             self.look_through(ui, image);
         }
-        // `Move Camera` on an image row: look through it, then take it in hand.
-        // Two steps rather than one because the lock is only ever entered from
-        // camera view, which is the whole of what it is.
-        if let Some(image) = response.move_camera {
-            if let Some(moved) = crate::camera_lock::exit_implicitly(self.viewer_3d, self.state) {
-                self.forget_recon(moved);
-            }
-            // The immediate entry rather than the animated one: the lock is
-            // entered from camera view, and the animated entry does not arrive
-            // there until its ease has finished.
-            if let Some(node) = crate::scene::node_by_id(&self.state.scene, image.recon) {
-                self.viewer_3d.jump_to_camera_view(image, node);
-            }
-            if let Err(message) = crate::camera_lock::enter(self.viewer_3d, self.state) {
-                self.state
-                    .action_log
-                    .fail(crate::action_log::Kind::View, message);
-            }
-        }
         if response.has_pointer {
             // The Scene panel owns both hover fields while it has the pointer.
             self.state.hovered_image = response.hovered_image;
@@ -1054,16 +1049,8 @@ impl TabContext<'_> {
         if let Some((source, target, options)) = response.align_node {
             self.state.align_node(source, target, options);
         }
-        if let Some((image, from)) = response.resect_image {
-            self.resect_image(image, from);
-        }
-        if let Some(image) = response.delete_image {
-            if let Err(message) = self.state.delete_image(image) {
-                self.state.action_log.fail(Kind::Edit, message);
-            }
-            // A bulk edit renumbers the image table, so the panels' textures
-            // are keyed by indexes that now name other images.
-            self.forget_recon(image.recon);
+        if let Some((image, action)) = response.image_menu {
+            self.apply_image_menu_action(image, action);
         }
         // Both record their own outcome, refusals included, so the `Err` has
         // nobody left to tell.
@@ -1176,41 +1163,47 @@ impl TabContext<'_> {
             .map(|entry| entry.label.clone())
     }
 
-    /// Resect one image, asking for a `.matches` file first when the matches
-    /// variant was chosen and this node has not been given one yet.
-    ///
-    /// The dialog lives here rather than in the panel so the panel stays a pure
-    /// egui function that a headless frame can run: it reports the *choice*, and
-    /// the file that choice needs is found out here. The path is remembered per
-    /// source node for the session, so working through several images of one
-    /// capture asks once.
-    fn resect_image(&mut self, image: ImageRef, from: crate::resect::ResectFrom) {
-        if from == crate::resect::ResectFrom::Matches
-            && !self.state.resect_matches.contains_key(&image.recon)
-        {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("Feature Matches", &["matches"])
-                .pick_file()
-            else {
-                // Dismissing the chooser cancels the action rather than falling
-                // back to the other correspondence source: the user asked for
-                // the matches one.
-                return;
-            };
-            self.state.resect_matches.insert(image.recon, path);
-        }
-        // A version's poses and points are new, so what the panels cached
-        // *about* them -- the rendered patches, the prepared track rows, the
-        // per-camera derived quantities -- describes a geometry the node no
-        // longer holds. The image table did not move, so the decoded pixels
-        // keyed by an image index did not become statements about a different
-        // image, and they stay.
-        if self
-            .state
-            .resect_image(image.recon, image.index(), from)
-            .is_ok()
-        {
-            self.forget_recon(image.recon);
+    /// Carry out an entry of the image menu chosen on `image`, from a Scene
+    /// tree image row or an Image Browser thumbnail: the one path both take.
+    fn apply_image_menu_action(&mut self, image: ImageRef, action: ImageMenuAction) {
+        match action {
+            ImageMenuAction::Resect => {
+                // A version's poses and points are new, so what the panels
+                // cached *about* them -- the rendered patches, the prepared
+                // track rows, the per-camera derived quantities -- describes a
+                // geometry the node no longer holds. The image table did not
+                // move, so the decoded pixels keyed by an image index did not
+                // become statements about a different image, and they stay.
+                if self.state.resect_image(image.recon, image.index()).is_ok() {
+                    self.forget_recon(image.recon);
+                }
+            }
+            // Look through the image, then take it in hand. Two steps rather
+            // than one because the lock is only ever entered from camera view,
+            // which is the whole of what it is.
+            ImageMenuAction::MoveCamera => {
+                if let Some(moved) = crate::camera_lock::exit_implicitly(self.viewer_3d, self.state)
+                {
+                    self.forget_recon(moved);
+                }
+                // The immediate entry rather than the animated one: the lock
+                // is entered from camera view, and the animated entry does not
+                // arrive there until its ease has finished.
+                if let Some(node) = crate::scene::node_by_id(&self.state.scene, image.recon) {
+                    self.viewer_3d.jump_to_camera_view(image, node);
+                }
+                if let Err(message) = crate::camera_lock::enter(self.viewer_3d, self.state) {
+                    self.state.action_log.fail(Kind::View, message);
+                }
+            }
+            ImageMenuAction::Delete => {
+                if let Err(message) = self.state.delete_image(image) {
+                    self.state.action_log.fail(Kind::Edit, message);
+                }
+                // A bulk edit renumbers the image table, so the panels'
+                // textures are keyed by indexes that now name other images.
+                self.forget_recon(image.recon);
+            }
         }
     }
 
