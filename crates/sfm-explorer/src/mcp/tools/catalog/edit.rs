@@ -328,15 +328,58 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           report names each released camera's focal before and after.",
             kind: Write,
             schema: object(
-                &[(
-                    "release_focal",
-                    flag(
-                        "Solve each camera's focal length as well as the poses and points. \
-                         Refused when a camera the posed images use has a model whose focal the \
-                         adjustment cannot solve. Defaults to false, which holds them where \
-                         they are.",
+                &[
+                    (
+                        "release_focal",
+                        flag(
+                            "Solve each camera's focal length as well as the poses and \
+                             points. Refused when a camera the posed images use has a model \
+                             whose focal the adjustment cannot solve. Defaults to false, which \
+                             holds them where they are.",
+                        ),
                     ),
-                )],
+                    (
+                        "release_distortion",
+                        flag(
+                            "Solve each camera's lens distortion together with its focal, \
+                             where its model has distortion the adjustment can free: k1 on \
+                             SIMPLE_RADIAL_FISHEYE, the radial spline on SFMTOOL_FISHEYE and \
+                             SFMTOOL_PINHOLE. Cameras of other models keep theirs. Refused \
+                             without release_focal, since neither k1 nor the spline can \
+                             change the scale at the centre of the image, and refused when no \
+                             camera the posed images use has such a model. Defaults to false.",
+                        ),
+                    ),
+                    (
+                        "spline_coeff_count",
+                        json!({
+                            "type": "integer",
+                            "minimum": 2,
+                            "maximum": 32,
+                            "description":
+                                "Refit every SFMTOOL_FISHEYE or SFMTOOL_PINHOLE camera the posed                                  images use to this many spline coefficients before the solve,                                  over its whole spline domain, and start the solve from the                                  refitted cameras; a camera already at the count is left alone.                                  Refused without release_distortion, since the new coefficients                                  only approximate the old curve until the solve fits them, and                                  when no camera is a spline model. The report names each refit                                  and its largest pixel distance from the old curve. Omit to keep                                  each count.",
+                        }),
+                    ),
+                    (
+                        "spline_domain_deg",
+                        json!({
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "maximum": 180,
+                            "description":
+                                "Move the domain end of every SFMTOOL_FISHEYE or SFMTOOL_PINHOLE \
+                                 camera the posed images use to this incidence angle, in \
+                                 degrees, before the solve, in the same refit as \
+                                 spline_coeff_count and over the whole new domain; a camera \
+                                 already there is left alone. Past its domain the model is a \
+                                 straight line the solve cannot bend. get_camera_intrinsics \
+                                 reports the outermost keypoint's angle to set it from. Refused \
+                                 as spline_coeff_count is, and for an angle the model cannot \
+                                 end at (90 or more for SFMTOOL_PINHOLE). Omit to keep each \
+                                 domain.",
+                        }),
+                    ),
+                ],
                 &[("reconstruction_label", edited_label_schema())],
             ),
         },

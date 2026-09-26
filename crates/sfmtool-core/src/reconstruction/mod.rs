@@ -13,8 +13,10 @@ mod embed;
 pub mod filter;
 pub mod minimal;
 pub mod move_camera;
+pub mod outermost_keypoint;
 pub mod point_correspondence;
 pub mod prune_covered;
+pub mod switch_camera_model;
 pub mod thumbnail;
 pub mod triangulation;
 

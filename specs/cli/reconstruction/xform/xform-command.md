@@ -281,40 +281,119 @@ sfm xform in.sfmr out.sfmr --find-points-at-infinity 0.1,200,2 --max-features 20
 
 ### Camera Model
 
-#### `--camera-model <NAME>`
+#### `--camera-model <MODEL>[,coeffs=<N>,fit_to=<DEG>,spline_domain=<DEG>,cameras=<I>+<J>...]`
 
-Converts every camera in the reconstruction to a different COLMAP camera model. The
-target name is case-insensitive and must be one of the models registered in
-`_CAMERA_PARAM_NAMES` (e.g. `SIMPLE_PINHOLE`, `PINHOLE`, `SIMPLE_RADIAL`, `RADIAL`,
-`OPENCV`, `OPENCV_FISHEYE`, ...). Each camera is converted independently, so a
-reconstruction with mixed source models is fine; image width and height are preserved.
-Parameter handling:
+Replaces cameras with cameras of another model, each fitted to the one it
+replaces over the angles where that one is trusted. Poses, points, keypoints,
+patches and tracks are not changed; the stored errors of the points the switched
+cameras' images observe are recomputed. The fit and the switch are specified in
+[`../../../core/camera/refit-camera-intrinsics.md`](../../../core/camera/refit-camera-intrinsics.md) and
+[`../../../core/reconstruction/switch-camera-model.md`](../../../core/reconstruction/switch-camera-model.md);
+the transform calls `SfmrReconstruction.switch_camera_model`
+([`xform/_switch_camera_model.py`](../../../../src/sfmtool/xform/_switch_camera_model.py)).
 
-- Parameters whose names are identical in source and target are carried over as-is.
-- Parameters that exist only in the target model are initialized to zero.
-- Parameters that exist only in the source model are dropped.
-- When the focal-length representation differs: a single `focal_length` becomes split
-  `focal_length_x = focal_length_y` and vice versa; collapsing split → single averages
-  `fx` and `fy` and prints a warning if they differ by more than a small relative tolerance.
-- If every camera already uses the target model, all parameter names match and values
-  are carried over unchanged (the operation is effectively a no-op, but is still logged).
+The first comma-separated field is the model, case-insensitive: any COLMAP lens
+model in `_CAMERA_PARAM_NAMES` (`SIMPLE_PINHOLE`, `PINHOLE`, `SIMPLE_RADIAL`,
+`RADIAL`, `OPENCV`, `OPENCV_FISHEYE`, ...), `EQUIDISTANT_FISHEYE`,
+`SFMTOOL_FISHEYE` or `SFMTOOL_PINHOLE`. The two spline models are targets here
+and nowhere else: they are still never a `solve` or `match` camera model, which
+is why `_CAMERA_PARAM_NAMES` leaves them out. `EQUIRECTANGULAR` is not a target.
+The other fields are `key=value`:
 
-The typical use is to widen the parameter set right before bundle adjustment — e.g.
-upgrading `SIMPLE_RADIAL` to `RADIAL` so bundle adjustment has a `k2` term to refine.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `coeffs` | `8` | Spline coefficients, for `SFMTOOL_FISHEYE` and `SFMTOOL_PINHOLE` only. |
+| `fit_to` | the camera's trusted bound, else its observations' largest incidence angle | The largest incidence angle, in degrees, the fit samples. A value past the trusted bound is refused. |
+| `spline_domain` | the far image corner | Where a spline target's domain ends, as an incidence angle in degrees. |
+| `cameras` | every camera | Camera-table indexes to switch, separated by `+`. |
+
+A target that contains the source's model fits to the copied parameters: the
+same focal and coefficients, the new terms at zero, so `SIMPLE_RADIAL` to
+`RADIAL` gives `k2 = 0`. A switch across radial coordinates (a polynomial fisheye
+to a spline, a fisheye to a perspective model below 90°) gives the target's best
+fit to the same lens. A perspective target is refused for a camera with
+observations at 90° or more, and a fitted polynomial fisheye whose trusted bound
+falls short of the fit is refused too. A spline fit is not refused for turning
+over: it is constrained to stay monotone, the closest invertible curve to the
+source.
+A refusal stops the command, names the camera, the rule and the value, and
+writes nothing. The observations' pixels come from the inline keypoints, or
+from the `.sift` files for a `sift_files` reconstruction without them.
+
+For each switched camera the transform prints the source and target models, the
+fitted parameters, the fit (its largest angle and where it came from, rms,
+radial rms and max pixel error, the spline domain), where a spline fit's
+monotonicity constraint bound (for example `monotone constraint bound at 1
+angle, 113.2°, where the fit departs from the source`), each term the target cannot
+represent (for example `fx/fy aspect 0.9978 dropped (single focal)`), the extent
+(the new model's edge and corner angles, the source's trusted bound and fold),
+and the observation comparison over one fixed set: median, 90th percentile and
+maximum error before and after, how many changed by more than a pixel, and the
+same for the observations past the source's trusted bound. Last comes the
+camera's outermost keypoint under the new model
+([`../../../core/reconstruction/outermost-keypoint.md`](../../../core/reconstruction/outermost-keypoint.md)):
+observed, and detected where the images' `.sift` files can be read, for
+example `outermost keypoint: 230.3 px, 95.8° observed; 259.2 px, 108.8° detected
+(24 .sift files)`. On a circular fisheye the detected angle is the image
+circle's, and `spline_domain=` or `--bundle-adjust domain=` can be set from it;
+the default domain stays the far corner.
 
 ```bash
+--camera-model SFMTOOL_FISHEYE,coeffs=8
+--camera-model SFMTOOL_FISHEYE,coeffs=8,fit_to=80,cameras=0
 --camera-model RADIAL
 ```
 
 ### Optimization
 
-#### `--bundle-adjust`
+#### `--bundle-adjust [coeffs=N,domain=DEG]`
 
 Applies bundle adjustment via pycolmap to refine camera poses and 3D point positions.
+The value is optional, as for `--refine-normals`: bare `--bundle-adjust` takes no
+parameters, and `coeffs=N` and `domain=DEG` (also `--bundle-adjust=coeffs=N`)
+apply only to the sfmtool path below.
 
 ```bash
 --remove-short-tracks 2 --bundle-adjust
 ```
+
+pycolmap knows neither sfmtool spline model, so a reconstruction with any camera
+of `SFMTOOL_FISHEYE` or `SFMTOOL_PINHOLE` (as `--camera-model` produces) is
+adjusted by sfmtool's own reconstruction-level bundle adjustment instead
+([`../../../core/reconstruction/bundle-adjust.md`](../../../core/reconstruction/bundle-adjust.md)),
+with every camera's focal and lens distortion released (`opt_f` and
+`opt_distortion`: the spline, and `k1` on a `SIMPLE_RADIAL_FISHEYE` camera beside
+it). That path needs inline keypoints (an `embedded_patches` reconstruction) and
+a camera model whose focal it can release for every posed image, and stops with
+the adjustment's own refusal otherwise; a rig with one spline camera and one
+`OPENCV_FISHEYE` camera is refused rather than half-adjusted. It honours points at
+infinity as they are, deletes the points the solve leaves unsupported, and
+rescales patch frames with their depth, as the viewer's Bundle Adjust does. It
+prints the median residual before and after and each camera's focal change and
+what was released. A reconstruction whose cameras are all COLMAP models goes
+through pycolmap as described below, unchanged.
+
+```bash
+--camera-model SFMTOOL_FISHEYE,coeffs=8 --bundle-adjust
+--bundle-adjust coeffs=12
+--bundle-adjust coeffs=12,domain=108.8
+```
+
+`coeffs=N` refits every spline camera whose coefficient count differs to `N`
+coefficients before that solve, over its whole spline domain with the domain
+end held, and the solve starts from the refitted cameras (`spline_coeff_count`,
+2 to 32). `domain=DEG` moves each spline camera's domain end to `DEG` degrees
+of incidence angle in the same refit, over the whole new domain
+(`spline_domain_deg`). Each refit prints its old and new count, the domain
+before and after when it moved, and its rms and largest pixel distance from the
+old curve. The refit is constrained to keep the spline monotone, and where that
+constraint bound the refit prints where, for example `monotone constraint bound
+at 1 angle, 113.2°, where the fit departs from the source`. After the solve each camera's outermost keypoint is printed under the
+adjusted camera, observed and, where the images' `.sift` files can be read,
+detected: `outermost keypoint: 230.3 px, 95.8° observed; 259.2 px, 108.8°
+detected (24 .sift files)`, the angle to give `domain=`. On a reconstruction
+with no spline camera, `coeffs=` and `domain=` are a usage error rather than
+being ignored.
 
 Works on both `sift_files` and `embedded_patches` reconstructions. The transform
 round-trips through COLMAP binary files, which need a 2D keypoint per

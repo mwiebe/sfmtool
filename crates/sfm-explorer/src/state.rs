@@ -1230,15 +1230,17 @@ impl AppState {
     }
 
     /// Open the Bundle Adjust dialog on `id`, with the focal checkbox greyed
-    /// where that camera's focal cannot be released.
+    /// where a camera's focal cannot be released and the distortion checkbox
+    /// greyed where no camera has distortion the adjustment can release, and
+    /// the spline coefficient counts the node holds shown beside the count.
     ///
     /// The one entry point, so whatever opens the dialog asks the same question
     /// about the same node.
     pub fn open_bundle_adjust(&mut self, id: ReconId) {
         let Some(node) = self.node(id) else { return };
         let label = node.label.clone();
-        let focal = crate::bundle_adjust_prompt::focal_refusal(node.edited());
-        self.bundle_adjust_prompt.ask(id, label, focal);
+        let gates = crate::bundle_adjust_prompt::BundleAdjustGates::of(node.edited());
+        self.bundle_adjust_prompt.ask(id, label, gates);
     }
 
     /// Select a 3D point, and with it the reconstruction that owns it.

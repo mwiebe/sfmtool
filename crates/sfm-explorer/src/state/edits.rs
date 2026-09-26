@@ -165,6 +165,68 @@ fn focal_changes(cameras: &[sfmtool_core::CameraAdjustment]) -> String {
     }
 }
 
+/// Whether a refit moved the spline's domain end, rather than keeping it.
+fn domain_moved(refit: &sfmtool_core::reconstruction::bundle_adjust::SplineRefit) -> bool {
+    (refit.domain_after_deg - refit.domain_before_deg).abs() > 1e-9
+}
+
+/// The version label's spline clause: the new count and, when it moved, the
+/// new domain end, which every refitted camera shares, e.g. `, spline refitted
+/// to 12 coefficients on a 108.0° domain`.
+fn spline_refit_label(refit: &sfmtool_core::reconstruction::bundle_adjust::SplineRefit) -> String {
+    let mut label = format!(", spline refitted to {} coefficients", refit.coeffs_after);
+    if domain_moved(refit) {
+        label.push_str(&format!(" on a {:.1}° domain", refit.domain_after_deg));
+    }
+    label
+}
+
+/// The spline refit clause of a bundle adjustment's Action Log entry: each
+/// camera whose spline was refitted to a new coefficient count or domain
+/// before the solve, with how closely the refit reproduced the old curve and,
+/// where its monotonicity constraint bound, the angles where it departed.
+/// Named by table index when the solve holds more than one camera, as the
+/// focal clause is.
+fn spline_refit_changes(cameras: &[sfmtool_core::CameraAdjustment]) -> String {
+    cameras
+        .iter()
+        .filter_map(|c| c.spline_refit.as_ref().map(|r| (c, r)))
+        .map(|(c, r)| {
+            let who = if cameras.len() == 1 {
+                String::new()
+            } else {
+                format!("camera {} ", c.camera)
+            };
+            let domain = if domain_moved(r) {
+                format!(
+                    ", domain {:.1}° → {:.1}°",
+                    r.domain_before_deg, r.domain_after_deg
+                )
+            } else {
+                String::new()
+            };
+            let held = match r.monotone_constraint.range_deg {
+                Some([from, to]) if r.monotone_constraint.active => {
+                    let count = r.monotone_constraint.active_angles;
+                    let plural = if count == 1 { "" } else { "s" };
+                    let (from, to) = (format!("{from:.1}"), format!("{to:.1}"));
+                    let range = if from == to {
+                        format!("{from}°")
+                    } else {
+                        format!("{from}°–{to}°")
+                    };
+                    format!(", monotone constraint bound at {count} angle{plural}, {range}")
+                }
+                _ => String::new(),
+            };
+            format!(
+                ", {who}spline {} → {} coefficients{domain} (refit max {:.3} px{held})",
+                r.coeffs_before, r.coeffs_after, r.max_px
+            )
+        })
+        .collect()
+}
+
 /// Why `node`'s covered observations cannot be pruned, or `None` when they can.
 ///
 /// The three reasons a caller can see without reading a single footprint, and
@@ -1272,8 +1334,8 @@ impl AppState {
     /// Start a bundle adjustment of `id`'s current value on a worker thread.
     ///
     /// A bulk edit: every posed image's pose, every point's position and, when
-    /// the options release them, the cameras' focals move together, so the next
-    /// version is a whole new base under the row map `RowMap::by_scan` reads off
+    /// the options release them, the cameras' focals and lens distortion move
+    /// together, so the next version is a whole new base under the row map `RowMap::by_scan` reads off
     /// the call's input and output. The map is not decoration here -- a point
     /// the solve leaves unsupported is deleted, and the map is what carries a
     /// selection over that.
@@ -1382,17 +1444,23 @@ impl AppState {
             let map = PointMap::Chain(steps);
 
             let mut version_label = format!("Bundle adjusted {label}");
-            if report.cameras.iter().any(|c| c.focal_released) {
+            if report.cameras.iter().any(|c| c.distortion_released) {
+                version_label.push_str(", focal and lens distortion released");
+            } else if report.cameras.iter().any(|c| c.focal_released) {
                 version_label.push_str(", focal released");
             }
+            if let Some(refit) = report.cameras.iter().find_map(|c| c.spline_refit.as_ref()) {
+                version_label.push_str(&spline_refit_label(refit));
+            }
             let focal = focal_changes(&report.cameras);
+            let spline = spline_refit_changes(&report.cameras);
             let deleted = if report.points_deleted > 0 {
                 format!(", {} points deleted", report.points_deleted)
             } else {
                 String::new()
             };
             let text = format!(
-                "{version_label}: {} images, {} points, {} observations, median residual {:.3} → {:.3} px{focal}{deleted}",
+                "{version_label}: {} images, {} points, {} observations, median residual {:.3} → {:.3} px{focal}{spline}{deleted}",
                 report.images,
                 report.points,
                 report.observations,

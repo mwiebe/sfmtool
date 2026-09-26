@@ -527,6 +527,9 @@ fn two_cameras_are_adjusted_each_through_its_own_lens() {
                 focal_before: FOCAL,
                 focal_after: FOCAL,
                 focal_released: false,
+                distortion_released: false,
+                spline_refit: None,
+                outermost_observed: report.cameras[0].outermost_observed,
             },
             CameraAdjustment {
                 camera: 1,
@@ -534,9 +537,20 @@ fn two_cameras_are_adjusted_each_through_its_own_lens() {
                 focal_before: 620.0,
                 focal_after: 620.0,
                 focal_released: false,
+                distortion_released: false,
+                spline_refit: None,
+                outermost_observed: report.cameras[1].outermost_observed,
             },
         ]
     );
+    // Each camera's outermost observation is one of its own images', measured
+    // under its own lens.
+    for (c, camera) in report.cameras.iter().enumerate() {
+        let reach = camera.outermost_observed.expect("observed");
+        assert_eq!(out.image_table.images[reach.image].camera_index as usize, c);
+        let (cx, cy) = out.image_table.cameras[c].principal_point();
+        assert!((reach.radius_px - (reach.xy[0] - cx).hypot(reach.xy[1] - cy)).abs() < 1e-9);
+    }
     assert_eq!(out.image_table.cameras, truth.image_table.cameras);
 }
 
@@ -1156,4 +1170,392 @@ fn a_silent_run_reaches_no_sink_it_was_not_handed() {
     bundle_adjust(&source, &BundleAdjustOptions::default(), &Progress::none()).expect("well posed");
 
     assert!(collector.events().is_empty(), "{:?}", collector.events());
+}
+
+/// A fisheye lens with a live spline over the fixture's narrow field: at the
+/// cloud's edge, about 14° off the axis, the spline moves a ray by a few
+/// pixels.
+fn spline_fisheye(bspline: Vec<f64>) -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SfmtoolFisheye {
+            focal_length: FOCAL,
+            principal_point_x: IMG_W as f64 / 2.0,
+            principal_point_y: IMG_H as f64 / 2.0,
+            bspline_theta_max: 0.3,
+            bspline,
+        },
+        width: IMG_W,
+        height: IMG_H,
+    }
+}
+
+/// A `SIMPLE_RADIAL_FISHEYE` lens: at the cloud's edge `k1 = 0.2` moves a ray
+/// by about two pixels.
+fn radial_fisheye(k1: f64) -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimpleRadialFisheye {
+            focal_length: FOCAL,
+            principal_point_x: IMG_W as f64 / 2.0,
+            principal_point_y: IMG_H as f64 / 2.0,
+            radial_distortion_k1: k1,
+        },
+        width: IMG_W,
+        height: IMG_H,
+    }
+}
+
+fn k1_of(camera: &CameraIntrinsics) -> f64 {
+    match camera.model {
+        CameraModel::SimpleRadialFisheye {
+            radial_distortion_k1,
+            ..
+        } => radial_distortion_k1,
+        _ => panic!("not a SIMPLE_RADIAL_FISHEYE: {camera:?}"),
+    }
+}
+
+/// The focal and the distortion released together.
+fn distortion_released() -> BundleAdjustOptions {
+    BundleAdjustOptions {
+        opt_f: true,
+        opt_distortion: true,
+        ..BundleAdjustOptions::default()
+    }
+}
+
+#[test]
+fn a_released_spline_moves_toward_the_lens() {
+    let planted = vec![-0.002, -0.006, -0.012, -0.02];
+    let truth = truth_through(vec![spline_fisheye(planted.clone())], |_| 0);
+    let mut source = perturb(truth.clone());
+    // The same lens with its spline flattened: the focal and the spline have to
+    // move together for the residuals to come down.
+    source.image_table.cameras[0] = spline_fisheye(vec![0.0; planted.len()]);
+
+    let (out, report) =
+        bundle_adjust(&source, &distortion_released(), &Progress::none()).expect("well posed");
+
+    let camera = &report.cameras[0];
+    assert!(camera.focal_released && camera.distortion_released);
+    assert!(
+        report.median_residual_after < 0.1 * report.median_residual_before,
+        "{report:?}"
+    );
+    let Some((solved, _, _)) = out.image_table.cameras[0].model.radial_spline() else {
+        panic!("the camera is still a spline model");
+    };
+    // The coefficient the observations reach most moved most of the way to the
+    // planted one.
+    assert!(solved[1] < -0.003, "{solved:?}");
+}
+
+#[test]
+fn a_released_k1_moves_toward_the_lens() {
+    let truth = truth_through(vec![radial_fisheye(0.2)], |_| 0);
+    let mut source = perturb(truth);
+    source.image_table.cameras[0] = radial_fisheye(0.0);
+
+    let (out, report) =
+        bundle_adjust(&source, &distortion_released(), &Progress::none()).expect("well posed");
+
+    let camera = &report.cameras[0];
+    assert!(camera.focal_released && camera.distortion_released);
+    assert!(
+        report.median_residual_after < 0.1 * report.median_residual_before,
+        "{report:?}"
+    );
+    let k1 = k1_of(&out.image_table.cameras[0]);
+    assert!(k1 > 0.1, "k1 {k1}");
+}
+
+#[test]
+fn a_mixed_solve_releases_each_camera_its_own_distortion() {
+    // A spline camera, a k1 camera and a pinhole in one solve: the kernel
+    // frees the spline on the first and k1 on the second, and holds the third.
+    let planted = vec![-0.002, -0.006, -0.012, -0.02];
+    let truth = truth_through(
+        vec![
+            spline_fisheye(planted.clone()),
+            radial_fisheye(0.2),
+            pinhole(),
+        ],
+        |i| (i % 3) as u32,
+    );
+    let mut source = perturb(truth);
+    source.image_table.cameras[0] = spline_fisheye(vec![0.0; planted.len()]);
+    source.image_table.cameras[1] = radial_fisheye(0.0);
+
+    let (out, report) =
+        bundle_adjust(&source, &distortion_released(), &Progress::none()).expect("well posed");
+
+    let released: Vec<bool> = report
+        .cameras
+        .iter()
+        .map(|c| c.distortion_released)
+        .collect();
+    assert_eq!(released, vec![true, true, false]);
+    assert!(
+        report.median_residual_after < 0.2 * report.median_residual_before,
+        "{report:?}"
+    );
+    let Some((solved, _, _)) = out.image_table.cameras[0].model.radial_spline() else {
+        panic!("camera 0 is still a spline model");
+    };
+    assert!(solved.iter().any(|&c| c != 0.0), "{solved:?}");
+    assert!(k1_of(&out.image_table.cameras[1]) > 0.05);
+    assert!(matches!(
+        out.image_table.cameras[2].model,
+        CameraModel::SimplePinhole { .. }
+    ));
+}
+
+#[test]
+fn a_distortion_release_without_the_focal_is_refused() {
+    for camera in [spline_fisheye(vec![0.0; 4]), radial_fisheye(0.0)] {
+        let truth = truth_through(vec![camera], |_| 0);
+        let options = BundleAdjustOptions {
+            opt_distortion: true,
+            ..BundleAdjustOptions::default()
+        };
+        let error = bundle_adjust(&truth, &options, &Progress::none()).err();
+        assert_eq!(error, Some(BundleAdjustError::DistortionWithoutFocal));
+        let sentence = error.unwrap().to_string();
+        assert!(!sentence.contains('\n'), "{sentence:?}");
+    }
+}
+
+#[test]
+fn a_distortion_release_with_nothing_to_release_is_refused() {
+    let error = bundle_adjust(&truth(), &distortion_released(), &Progress::none()).err();
+    assert_eq!(error, Some(BundleAdjustError::DistortionNotReleasable));
+    let sentence = error.unwrap().to_string();
+    for model in [
+        "SIMPLE_RADIAL_FISHEYE",
+        "SFMTOOL_FISHEYE",
+        "SFMTOOL_PINHOLE",
+    ] {
+        assert!(sentence.contains(model), "{sentence}");
+    }
+    assert!(!sentence.contains('\n'), "{sentence:?}");
+    // An empty spline evaluates as the identity and has nothing to release.
+    assert!(!distortion_is_releasable(&spline_fisheye(Vec::new())));
+    assert!(distortion_is_releasable(&spline_fisheye(vec![0.0; 2])));
+    assert!(distortion_is_releasable(&radial_fisheye(0.0)));
+    assert!(!distortion_is_releasable(&pinhole()));
+}
+
+#[test]
+fn a_camera_without_distortion_keeps_its_lens_beside_one_that_releases() {
+    let truth = truth_through(vec![spline_fisheye(vec![0.0; 4]), pinhole()], |i| {
+        (i % 2) as u32
+    });
+    let source = perturb(truth);
+    let (_, report) =
+        bundle_adjust(&source, &distortion_released(), &Progress::none()).expect("well posed");
+    assert!(report.cameras[0].distortion_released);
+    assert!(!report.cameras[1].distortion_released);
+}
+
+/// [`spline_fisheye`] on its own domain end.
+fn spline_fisheye_on(theta_max: f64, bspline: Vec<f64>) -> CameraIntrinsics {
+    let mut camera = spline_fisheye(bspline);
+    if let CameraModel::SfmtoolFisheye {
+        bspline_theta_max, ..
+    } = &mut camera.model
+    {
+        *bspline_theta_max = theta_max;
+    }
+    camera
+}
+
+/// A smooth eight-coefficient curve over the fixture's field.
+fn eight_coefficients() -> Vec<f64> {
+    (0..8).map(|i| -0.0004 * (i * i) as f64).collect()
+}
+
+fn with_coeff_count(count: usize) -> BundleAdjustOptions {
+    BundleAdjustOptions {
+        spline_coeff_count: Some(count),
+        ..distortion_released()
+    }
+}
+
+#[test]
+fn a_new_coefficient_count_refits_the_spline_before_the_solve() {
+    let truth = truth_through(vec![spline_fisheye(eight_coefficients())], |_| 0);
+    let source = perturb(truth);
+    for (count, refit_tolerance_px) in [(12, 0.01), (5, 0.25)] {
+        let (out, report) = bundle_adjust(&source, &with_coeff_count(count), &Progress::none())
+            .expect("well posed");
+        let camera = &report.cameras[0];
+        let refit = camera.spline_refit.as_ref().expect("the count changed");
+        assert_eq!((refit.coeffs_before, refit.coeffs_after), (8, count));
+        assert!(
+            refit.max_px < refit_tolerance_px && refit.rms_px <= refit.max_px,
+            "{count}: {refit:?}"
+        );
+        assert!(camera.distortion_released);
+        let Some((solved, d_max, _)) = out.image_table.cameras[0].model.radial_spline() else {
+            panic!("the camera is still a spline model");
+        };
+        assert_eq!(solved.len(), count);
+        assert_eq!(d_max, 0.3);
+        assert!(
+            report.median_residual_after < 0.1 * report.median_residual_before,
+            "{report:?}"
+        );
+    }
+}
+
+#[test]
+fn a_spline_already_at_the_count_is_not_refitted() {
+    let truth = truth_through(
+        vec![
+            spline_fisheye(eight_coefficients()),
+            spline_fisheye(vec![0.0; 4]),
+        ],
+        |i| (i % 2) as u32,
+    );
+    let (_, report) =
+        bundle_adjust(&perturb(truth), &with_coeff_count(8), &Progress::none()).expect("posed");
+    assert_eq!(report.cameras[0].spline_refit, None);
+    let refit = report.cameras[1].spline_refit.as_ref().expect("4 -> 8");
+    assert_eq!((refit.coeffs_before, refit.coeffs_after), (4, 8));
+}
+
+#[test]
+fn a_new_coefficient_count_is_refused_where_it_cannot_be_made() {
+    let spline = truth_through(vec![spline_fisheye(eight_coefficients())], |_| 0);
+    let held = BundleAdjustOptions {
+        opt_f: true,
+        spline_coeff_count: Some(12),
+        ..BundleAdjustOptions::default()
+    };
+    assert_eq!(
+        bundle_adjust(&spline, &held, &Progress::none()).err(),
+        Some(BundleAdjustError::SplineRefitWithoutDistortion)
+    );
+    for count in [0, 1, 33] {
+        let error = bundle_adjust(&spline, &with_coeff_count(count), &Progress::none()).err();
+        assert_eq!(error, Some(BundleAdjustError::SplineCoeffCount { count }));
+        assert!(error.unwrap().to_string().contains("2 to 32"));
+    }
+
+    let k1 = truth_through(vec![radial_fisheye(0.0)], |_| 0);
+    assert_eq!(
+        bundle_adjust(&k1, &with_coeff_count(12), &Progress::none()).err(),
+        Some(BundleAdjustError::SplineRefitWithoutSpline)
+    );
+
+    // A spline on a domain with no extent evaluates as the identity, and has
+    // no curve to refit.
+    let flat = truth_through(vec![spline_fisheye_on(0.0, vec![0.0; 4])], |_| 0);
+    let error = bundle_adjust(&flat, &with_coeff_count(6), &Progress::none()).err();
+    assert!(
+        matches!(
+            error,
+            Some(BundleAdjustError::SplineRefit {
+                camera: 0,
+                error: RefitError::Degenerate { .. }
+            })
+        ),
+        "{error:?}"
+    );
+    let sentence = error.unwrap().to_string();
+    assert!(sentence.starts_with("the spline of camera 0"), "{sentence}");
+}
+
+#[test]
+fn a_new_domain_refits_the_spline_before_the_solve() {
+    let truth = truth_through(vec![spline_fisheye(eight_coefficients())], |_| 0);
+    let source = perturb(truth);
+    let before_deg = 0.3f64.to_degrees();
+    // A domain shorter than the observations' reach leaves the outermost ones
+    // on the linear tail, which the solve cannot bend, so it fits them less
+    // well than a domain that covers them.
+    for (domain_deg, ratio) in [(before_deg - 3.0, 0.2), (before_deg + 5.0, 0.1)] {
+        let options = BundleAdjustOptions {
+            spline_domain_deg: Some(domain_deg),
+            ..distortion_released()
+        };
+        let (out, report) =
+            bundle_adjust(&source, &options, &Progress::none()).expect("well posed");
+        let refit = report.cameras[0]
+            .spline_refit
+            .as_ref()
+            .expect("the domain moved");
+        assert_eq!((refit.coeffs_before, refit.coeffs_after), (8, 8));
+        assert!(
+            (refit.domain_before_deg - before_deg).abs() < 1e-9,
+            "{refit:?}"
+        );
+        assert!(
+            (refit.domain_after_deg - domain_deg).abs() < 1e-9,
+            "{refit:?}"
+        );
+        assert!(refit.max_px < 0.25, "{refit:?}");
+        assert_eq!(
+            spline_domain_deg(&out.image_table.cameras[0]).map(|d| (d - domain_deg).abs() < 1e-9),
+            Some(true)
+        );
+        assert!(
+            report.median_residual_after < ratio * report.median_residual_before,
+            "{report:?}"
+        );
+    }
+
+    // Both at once is one refit.
+    let options = BundleAdjustOptions {
+        spline_coeff_count: Some(10),
+        spline_domain_deg: Some(before_deg + 2.0),
+        ..distortion_released()
+    };
+    let (_, report) = bundle_adjust(&source, &options, &Progress::none()).expect("well posed");
+    let refit = report.cameras[0].spline_refit.as_ref().expect("both moved");
+    assert_eq!(refit.coeffs_after, 10);
+    assert!((refit.domain_after_deg - (before_deg + 2.0)).abs() < 1e-9);
+
+    // The domain the camera already has is no change.
+    let options = BundleAdjustOptions {
+        spline_domain_deg: Some(before_deg),
+        ..distortion_released()
+    };
+    let (_, report) = bundle_adjust(&source, &options, &Progress::none()).expect("well posed");
+    assert_eq!(report.cameras[0].spline_refit, None);
+}
+
+#[test]
+fn a_new_domain_is_refused_where_it_cannot_be_made() {
+    let spline = truth_through(vec![spline_fisheye(eight_coefficients())], |_| 0);
+    let held = BundleAdjustOptions {
+        opt_f: true,
+        spline_domain_deg: Some(20.0),
+        ..BundleAdjustOptions::default()
+    };
+    assert_eq!(
+        bundle_adjust(&spline, &held, &Progress::none()).err(),
+        Some(BundleAdjustError::SplineRefitWithoutDistortion)
+    );
+    let k1 = truth_through(vec![radial_fisheye(0.0)], |_| 0);
+    let options = BundleAdjustOptions {
+        spline_domain_deg: Some(20.0),
+        ..distortion_released()
+    };
+    assert_eq!(
+        bundle_adjust(&k1, &options, &Progress::none()).err(),
+        Some(BundleAdjustError::SplineRefitWithoutSpline)
+    );
+    let options = BundleAdjustOptions {
+        spline_domain_deg: Some(200.0),
+        ..distortion_released()
+    };
+    assert_eq!(
+        bundle_adjust(&spline, &options, &Progress::none()).err(),
+        Some(BundleAdjustError::SplineRefit {
+            camera: 0,
+            error: RefitError::SplineDomainInvalid {
+                spline_domain_deg: 200.0
+            }
+        })
+    );
 }

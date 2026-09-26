@@ -40,9 +40,18 @@ from ..xform._arg_parser import auto_output_path, parse_transform_args
 )
 @click.option(
     "--bundle-adjust",
-    is_flag=True,
+    is_flag=False,
+    flag_value="",
     multiple=True,
-    help="Apply bundle adjustment to refine camera poses and 3D points",
+    help=(
+        "Apply bundle adjustment to refine camera poses and 3D points. A "
+        "reconstruction with a SFMTOOL_FISHEYE or SFMTOOL_PINHOLE camera is "
+        "adjusted by sfmtool with the focal and the lens distortion released; "
+        "the optional 'coeffs=N' refits every spline camera to N spline "
+        "coefficients, and 'domain=DEG' on a domain ending at DEG degrees, over "
+        "the whole domain before that solve (e.g. "
+        "'--bundle-adjust coeffs=12,domain=108')."
+    ),
 )
 @click.option(
     "--refine-normals",
@@ -252,9 +261,9 @@ from ..xform._arg_parser import auto_output_path, parse_transform_args
     "--camera-model",
     multiple=True,
     help=(
-        "Switch every camera to a different COLMAP model "
-        "(e.g., 'RADIAL' to add a k2 term for bundle adjustment to refine). "
-        "Shared parameters carry over; new ones initialize to zero."
+        "Fit a camera of another model to each camera over the angles where it "
+        "is trusted: MODEL[,coeffs=N,fit_to=DEG,spline_domain=DEG,cameras=0+1] "
+        "(e.g., 'SFMTOOL_FISHEYE,coeffs=8' or 'RADIAL'). Prints a per-camera report."
     ),
 )
 @click.option(
@@ -319,11 +328,11 @@ def xform(ctx, input_path, output_path, **kwargs):
 
     \b
     Camera model:
-      --camera-model NAME                 Switch every camera's model (e.g. RADIAL)
+      --camera-model MODEL[,KEY=VAL...]   Fit another model to each camera (e.g. SFMTOOL_FISHEYE,coeffs=8)
 
     \b
     Optimization:
-      --bundle-adjust                     Apply bundle adjustment
+      --bundle-adjust [coeffs=N,domain=DEG]  Apply bundle adjustment (refits spline cameras first)
       --refine-normals [PARAMS]           Refine per-point normals by photometric consensus (reads source images)
       --refine-keypoints [PARAMS]         Refine per-observation keypoints to sub-pixel (reads source images)
       --localize-keypoints [PARAMS]       Cross-view keypoint search; drops non-registering views (reads source images)
@@ -374,6 +383,10 @@ def xform(ctx, input_path, output_path, **kwargs):
     \b
         # Upgrade SIMPLE_RADIAL → RADIAL to refine k2 during bundle adjustment
         sfm xform in.sfmr out.sfmr --camera-model RADIAL --bundle-adjust
+
+    \b
+        # Move a fisheye to the spline model, then refine its focal and spline
+        sfm xform in.sfmr out.sfmr --camera-model SFMTOOL_FISHEYE,coeffs=8 --bundle-adjust
 
     \b
         # Discover points at infinity, capping features per image
@@ -514,5 +527,10 @@ def xform(ctx, input_path, output_path, **kwargs):
         click.echo("\nTransformed reconstruction saved to:")
         click.echo(f"  {output_path}")
 
+    except click.UsageError:
+        # A step that finds the chain misapplied to this reconstruction (e.g.
+        # ``--bundle-adjust coeffs=`` with no spline camera) says so as a usage
+        # error rather than as a failure of the step.
+        raise
     except Exception as e:
         raise click.ClickException(str(e))

@@ -568,7 +568,12 @@ one at the cursor, and this block reports it.
               "principal_point_x": 135.0, "principal_point_y": 240.0,
               "radial_distortion_k1": -0.031, "radial_distortion_k2": 0.004,
               "tangential_distortion_p1": 0.0, "tangential_distortion_p2": 0.0 },
-  "camera_image_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] }
+  "camera_image_indices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+  "outermost_keypoint": {
+    "observed": { "radius_px": 262.4, "theta_deg": 34.1,
+                  "camera_image_index": 7, "xy": [12.8, 470.1] },
+    "detected": null,                    // no readable .sift file
+    "detected_camera_images": 0 } }
 
 // get_point { "point": "pt3d_a1b2c3d4_1207" }
 { "id": "pt3d_a1b2c3d4_1207", "reconstruction_label": "seoul_bull",
@@ -580,6 +585,16 @@ one at the cursor, and this block reports it.
 
 // get_point { "point": 1207 }   // bare index, in the selected reconstruction
 ```
+
+`get_camera_intrinsics`'s `outermost_keypoint` is how far out the camera's
+photographs reach
+([../core/reconstruction/outermost-keypoint.md](../core/reconstruction/outermost-keypoint.md)):
+the keypoint furthest from the principal point among the reconstruction's
+observations, and among every feature of the images' `.sift` files, each as a
+radius and an incidence angle under this camera's model. `detected` is `null`
+where no `.sift` file can be read. The files' positions are read on every call,
+a few milliseconds per camera, and the angle is the one to give
+`bundle_adjust`'s `spline_domain_deg`.
 
 `list_camera_images` defaults to 50 rows and caps at 500 (`read::MAX_LIMIT`).
 An `offset` past the end is an empty page and not a refusal: a caller walking a
@@ -600,8 +615,10 @@ Both can be absent, and say so rather than inventing a number.
 computed — the source reads the image's `.sift` file, which an
 `embedded_patches` reconstruction does not have, and which a `sift_files` one
 whose workspace has moved cannot find. A track observation's `reproj_error` is
-`null` where the point falls behind that camera, which the metric reports as
-`NaN` and JSON cannot carry.
+`null` where that camera's model has no pixel for the point's ray, which the
+metric reports as `NaN` and JSON cannot carry. For a perspective model that is
+a point behind the camera; a fisheye observation more than 90° off the axis has
+an error like any other.
 
 `params` is a name→value map rather than the model's positional parameter
 vector, because a positional vector is unreadable without also shipping the
@@ -2089,6 +2106,12 @@ The two bulk edits.
 // resect_camera_image { "reconstruction_label": "seoul_bull",
 //                                "camera_image": "images/IMG_0042.jpg" }
 // bundle_adjust { "reconstruction_label": "seoul_bull", "release_focal": true }
+// bundle_adjust { "reconstruction_label": "kerry_park", "release_focal": true,
+//                 "release_distortion": true }
+// bundle_adjust { "reconstruction_label": "kerry_park", "release_focal": true,
+//                 "release_distortion": true, "spline_coeff_count": 12 }
+// bundle_adjust { "reconstruction_label": "kerry_park", "release_focal": true,
+//                 "release_distortion": true, "spline_domain_deg": 108.8 }
 ```
 
 `resect_camera_image` is the resection landed as the node's next
@@ -2133,13 +2156,30 @@ frame_23.jpg to 12 tracks (361 candidates refused: 306 not in frame, 32 peak at
 edge, 21 below bar, ...)"*.
 
 `bundle_adjust` is the node's own solver run over the value on screen
-([edits/bundle-adjust.md](edits/bundle-adjust.md)), with the one decision the
-dialog collects, whether the focal of each camera the posed images use is
-released, as `release_focal`. Everything else is the core function's defaults.
+([edits/bundle-adjust.md](edits/bundle-adjust.md)), with the two decisions the
+dialog collects: whether the focal of each camera the posed images use is
+released, as `release_focal`, and whether the lens distortion of each of those
+cameras whose model the adjustment can free it on (`k1` on
+`SIMPLE_RADIAL_FISHEYE`, the spline on `SFMTOOL_FISHEYE` and `SFMTOOL_PINHOLE`)
+is released with it, as `release_distortion`, and the coefficient count every
+spline camera is refitted to before the solve, as `spline_coeff_count` (2 to
+32; omitted keeps each count), and the incidence angle its domain is moved to in
+the same refit, as `spline_domain_deg` (omitted keeps each domain).
+`get_camera_intrinsics` reports the outermost keypoint an agent sets the domain
+from. Everything else is the core function's defaults.
 It needs inline keypoints and a posed image, and says which is missing when it
 refuses; `release_focal` is refused, naming the camera, when a camera the posed
-images use has a model whose focal the adjustment cannot solve. The report's
-focal clause names each released camera's focal before and after.
+images use has a model whose focal the adjustment cannot solve, and
+`release_distortion` is refused without `release_focal` and when no camera the
+posed images use has one of those three models. The report's focal clause names
+each released camera's focal before and after and each spline refit's counts,
+largest distance from the old curve and, where its monotonicity constraint
+bound, the angles where it did, and the version's label says `focal
+and lens distortion released` when a distortion was released and `spline
+refitted to N coefficients` (and `on a D° domain`) when a count or domain
+changed. `spline_coeff_count` and `spline_domain_deg` are refused without
+`release_distortion` and when no camera is a spline model, and a domain the
+model cannot end at is refused naming the camera.
 
 **`bundle_adjust` runs on a worker thread**, so the window stays usable while it
 solves and this call answers one of two ways
@@ -2880,7 +2920,8 @@ pub(crate) enum Command {
     MoveCameraImage { reconstruction_label: String, camera_image: CameraImageSel,
                       quaternion_wxyz: [f64; 4], translation: [f64; 3] },
     ResectCameraImage { reconstruction_label: String, camera_image: CameraImageSel },
-    BundleAdjust { reconstruction_label: String, release_focal: bool },
+    BundleAdjust { reconstruction_label: String, release_focal: bool, release_distortion: bool,
+                   spline_coeff_count: Option<usize>, spline_domain_deg: Option<f64> },
     /// `hud: false` is only reachable with `panel: Some(Tab::Viewer3D)`; the
     /// parse refuses it elsewhere.
     Screenshot { panel: Option<Tab>, hud: bool, max_dimension: Option<u32> },
@@ -3583,7 +3624,9 @@ would be an edit like the others under this model, but it has real work behind
 it (a partial-parameter merge against `CameraModel`, and the re-upload of every
 frustum, distorted mesh and image quad built from the lens that changed), and it
 should land as its own change, with an edit spec beside the rest in
-[edits/](edits/README.md).
+[edits/](edits/README.md). Two tools that switch a camera to another model, as a
+proposal an agent can inspect before applying it, are proposed in
+[../drafts/switch-camera-model.md](../drafts/switch-camera-model.md).
 
 ### Loose images, and the names held for them
 
@@ -3670,7 +3713,8 @@ Other candidates, in rough order of value:
 | `set_image_detail_display` `intrinsics.grid_cols` | `8, 12, 16, 24, 32` (`IntrinsicsDisplaySettings::GRID_LADDER`) | The only densities accepted, for the same reason. |
 | `set_image_detail_display` `max_features` | `≥ 1`, or `null` for all | `0` is refused: "no features" is `overlay_mode: "none"`. |
 
-| `bundle_adjust` `release_focal` | `false`, every camera's focal is held | The one decision the Bundle Adjust dialog collects. |
+| `bundle_adjust` `release_focal` | `false`, every camera's focal is held | One of the two decisions the Bundle Adjust dialog collects. |
+| `bundle_adjust` `release_distortion` | `false`, every camera's distortion is held | The other; `true` needs `release_focal`. |
 
 ## Open questions
 

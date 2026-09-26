@@ -1,31 +1,139 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bundle adjustment transformation."""
+"""Bundle adjustment transformation.
+
+A reconstruction whose cameras are all COLMAP models goes through pycolmap. One
+with a camera of an sfmtool spline model (`SFMTOOL_FISHEYE`, `SFMTOOL_PINHOLE`),
+which pycolmap does not know, goes through sfmtool's own reconstruction-level
+bundle adjustment with the focal and the lens distortion released (the spline,
+and k1 on any SIMPLE_RADIAL_FISHEYE camera beside it).
+"""
 
 import tempfile
 from pathlib import Path
 
+import click
 import numpy as np
 import pycolmap
 
-from .._sfmtool.reconstruction import SfmrReconstruction
+from .._sfmtool.reconstruction import EditedReconstruction, SfmrReconstruction
+from ._switch_camera_model import format_monotone_constraint, format_outermost_keypoint
+
+# The camera models only sfmtool's own bundle adjustment can refine.
+SPLINE_MODELS = ("SFMTOOL_FISHEYE", "SFMTOOL_PINHOLE")
 
 
 class BundleAdjustTransform:
-    """Apply bundle adjustment to refine camera poses and 3D points."""
+    """Apply bundle adjustment to refine camera poses and 3D points.
+
+    Args:
+        coeff_count: Refit every spline camera to this many spline coefficients
+            before the solve (``--bundle-adjust coeffs=N``).
+        spline_domain_deg: Refit every spline camera on a domain ending at this
+            incidence angle, in degrees, before the solve, in the same refit as
+            ``coeff_count`` (``--bundle-adjust domain=DEG``).
+
+    Only a reconstruction with a spline camera takes either, which the sfmtool
+    path adjusts; given for one without, ``apply`` raises ``click.UsageError``.
+    """
 
     def __init__(
         self,
         refine_focal_length: bool = True,
         refine_principal_point: bool = False,
         refine_extra_params: bool = True,
+        coeff_count: int | None = None,
+        spline_domain_deg: float | None = None,
     ):
         self.refine_focal_length = refine_focal_length
         self.refine_principal_point = refine_principal_point
         self.refine_extra_params = refine_extra_params
+        self.coeff_count = coeff_count
+        self.spline_domain_deg = spline_domain_deg
 
     def apply(self, recon: SfmrReconstruction) -> SfmrReconstruction:
+        if any(c.model in SPLINE_MODELS for c in recon.cameras):
+            return self._apply_sfmtool(recon)
+        if self.coeff_count is not None or self.spline_domain_deg is not None:
+            raise click.UsageError(
+                "--bundle-adjust coeffs= and domain= apply only to a reconstruction with a "
+                f"{' or '.join(SPLINE_MODELS)} camera, and this one has none "
+                "(switch a camera with --camera-model first)"
+            )
+        return self._apply_pycolmap(recon)
+
+    def _apply_sfmtool(self, recon: SfmrReconstruction) -> SfmrReconstruction:
+        """Adjust through sfmtool's own solve, releasing each camera's focal and,
+        where its model has one the solve can free, its lens distortion.
+
+        The solve needs a pixel per observation (inline keypoints) and a camera
+        model whose focal it can release for every posed image; it raises
+        ``ValueError`` naming what does not hold. The principal point stays
+        where it is, as it does in every sfmtool solve.
+        """
+        print(
+            "  Running bundle adjustment (sfmtool; a camera has a spline model, "
+            "which pycolmap cannot refine)..."
+        )
+        adjusted, report = EditedReconstruction(recon).bundle_adjust(
+            opt_f=self.refine_focal_length,
+            opt_distortion=self.refine_focal_length and self.refine_extra_params,
+            spline_coeff_count=self.coeff_count,
+            spline_domain_deg=self.spline_domain_deg,
+        )
+        print(
+            f"    {report['images']} images, {report['points']} points, "
+            f"{report['observations']} observations; median residual "
+            f"{report['median_residual_before']:.3f} -> "
+            f"{report['median_residual_after']:.3f} px"
+        )
+        if report["points_deleted"]:
+            print(f"    Deleted {report['points_deleted']} unsupported point(s)")
+        for camera in report["cameras"]:
+            released = [
+                name
+                for name, flag in (
+                    ("focal", camera["focal_released"]),
+                    ("distortion", camera["distortion_released"]),
+                )
+                if flag
+            ]
+            print(
+                f"    Camera {camera['camera']} ({camera['images']} images): focal "
+                f"{camera['focal_before']:.3f} -> {camera['focal_after']:.3f}; "
+                f"released: {', '.join(released) or 'none'}"
+            )
+            refit = camera["spline_refit"]
+            if refit is not None:
+                domain = ""
+                if abs(refit["domain_after_deg"] - refit["domain_before_deg"]) > 1e-9:
+                    domain = (
+                        f", domain {refit['domain_before_deg']:.1f}° -> "
+                        f"{refit['domain_after_deg']:.1f}°"
+                    )
+                print(
+                    f"      spline refitted {refit['coeffs_before']} -> "
+                    f"{refit['coeffs_after']} coefficients{domain} before the solve: "
+                    f"rms {refit['rms_px']:.4f} px, max {refit['max_px']:.4f} px "
+                    "from the old curve over its domain"
+                )
+                held = format_monotone_constraint(refit["monotone_constraint"])
+                if held:
+                    print(f"        {held}")
+        result = adjusted.materialize()[0]
+        # How far out the photographs reach, under the adjusted cameras: the
+        # outermost observation, and the outermost feature detected in the
+        # images' .sift files where they can be read.
+        for outermost in result.outermost_keypoints(
+            cameras=[c["camera"] for c in report["cameras"]]
+        ):
+            line = format_outermost_keypoint(outermost)
+            if line:
+                print(f"    Camera {outermost['camera']} {line}")
+        return result
+
+    def _apply_pycolmap(self, recon: SfmrReconstruction) -> SfmrReconstruction:
         from ..colmap.io import save_colmap_binary
 
         print("  Running bundle adjustment...")
@@ -223,4 +331,9 @@ class BundleAdjustTransform:
         if self.refine_extra_params:
             opts.append("extra")
         opt_str = ",".join(opts) if opts else "none"
-        return f"Bundle adjustment (refine: {opt_str})"
+        params = ""
+        if self.coeff_count is not None:
+            params += f", coeffs={self.coeff_count}"
+        if self.spline_domain_deg is not None:
+            params += f", domain={self.spline_domain_deg:g}"
+        return f"Bundle adjustment (refine: {opt_str}{params})"
