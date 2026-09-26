@@ -304,8 +304,7 @@ def test_missing_image_is_hard_error(seoul_bull_workspace):
 
 
 def test_cli_refine_keypoints(seoul_bull_workspace):
-    """End-to-end CLI run rewrites keypoints without touching the structure;
-    the sys.argv reparse needs patching.
+    """End-to-end CLI run rewrites keypoints without touching the structure.
 
     ``--refine-keypoints`` requires embedded_patches, so the run converts first
     in the same pipeline (``--to-embedded-patches --refine-keypoints``)."""
@@ -322,8 +321,7 @@ def test_cli_refine_keypoints(seoul_bull_workspace):
         # on keypoints, not textures).
         "resolution=12,max_gn_steps=3,bitmaps=false",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
     assert output_sfmr.exists()
@@ -371,10 +369,7 @@ def test_cli_refine_keypoints_bare_before_other_option(seoul_bull_workspace):
         captured.append(self)
         return recon
 
-    with (
-        patch("sys.argv", ["sfm"] + args),
-        patch.object(RefineKeypointsTransform, "apply", _stub_apply),
-    ):
+    with patch.object(RefineKeypointsTransform, "apply", _stub_apply):
         result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
@@ -409,8 +404,7 @@ def test_refine_keypoints_rejects_sift_files(seoul_bull_workspace):
         str(output_sfmr),
         "--refine-keypoints",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code != 0
     assert "embedded_patches" in result.output

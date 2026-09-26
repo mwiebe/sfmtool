@@ -6,14 +6,21 @@
 ``xform`` is an ordered pipeline of repeatable, interleaved heterogeneous
 options (``--rotate … --scale … --rotate …``). Click's ``kwargs`` collapses
 each option into a per-option tuple that loses the cross-option ordering the
-pipeline depends on, so the command walks ``sys.argv`` by hand here to build
-the ordered list of transforms. The Click ``@option`` decorators on the
+pipeline depends on, so the command walks its own argument list by hand here to
+build the ordered list of transforms. The Click ``@option`` decorators on the
 command itself still provide ``--help``, completion, and unknown-option
 rejection; this module is the complementary ordered parser.
+
+The two readings must agree. The walk follows Click's token rules (``--opt
+value`` and ``--opt=value`` for a value option, the next token as a required
+value even when it begins with ``-``, ``--`` ending the options), refuses any
+option it does not know, and ``check_against_click`` compares what it read with
+what Click collected, so an option Click accepted is never dropped silently.
 """
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import click
@@ -524,8 +531,9 @@ def _parse_find_points_at_infinity(param: str, max_features: int | None):
         )
 
 
-# The rule says whether a value is absent, required in the next token, or
-# optional (either joined with "=" or supplied by the next non-option token).
+# The rule says whether a value is absent ("none"), required ("required": joined
+# with "=" or the next token, whatever it starts with), or optional ("optional":
+# joined with "=" or the next token when that token is not an option).
 # Builders keep each option's validation and error text near its registration.
 _TRANSFORM_OPTIONS: dict[str, tuple[str, Callable[[str, int | None], object]]] = {
     "--rotate": ("required", _parse_rotate),
@@ -648,42 +656,159 @@ _TRANSFORM_OPTIONS: dict[str, tuple[str, Callable[[str, int | None], object]]] =
 }
 
 
-def parse_transform_args(args: list[str], max_features: int | None = None) -> list:
-    """Parse command-line arguments to extract transforms in order.
+# Options of the command that are not ordered transforms, with their value rule.
+# Click supplies their values through ``kwargs``; the walk only steps over them.
+# ``--help``/``-h`` are eager and end the command before the walk runs, but are
+# listed so the table covers every option the command declares.
+_GLOBAL_OPTIONS: dict[str, str] = {
+    "--max-features": "required",
+    "--help": "none",
+    "-h": "none",
+}
+
+# The key under which ``OrderedArgsCommand`` keeps the command's argument list.
+_ARGS_META_KEY = "sfmtool.xform.args"
+
+
+class OrderedArgsCommand(click.Command):
+    """A Click command that keeps its own argument list for the ordered walk.
+
+    Reading the list Click was handed, rather than ``sys.argv``, means the walk
+    sees exactly the tokens Click parsed, wherever the positional arguments sit
+    among the options and however the command was invoked.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        ctx.meta[_ARGS_META_KEY] = list(args)
+        return super().parse_args(ctx, args)
+
+
+def command_args(ctx: click.Context) -> list[str]:
+    """Return the argument list an ``OrderedArgsCommand`` was handed."""
+    return ctx.meta[_ARGS_META_KEY]
+
+
+@dataclass
+class ParsedXformArgs:
+    """The result of one ordered walk over the ``xform`` arguments."""
+
+    transforms: list = field(default_factory=list)
+    # Tokens that are neither an option nor an option's value, in order.
+    positionals: list[str] = field(default_factory=list)
+    # Each transform option's raw values in command-line order ("" for an
+    # optional-value option given bare, and for a value-free option).
+    values: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _is_option_token(token: str) -> bool:
+    """Whether Click reads ``token`` as an option rather than as a value."""
+    return token.startswith("-") and len(token) > 1
+
+
+def parse_xform_args(
+    args: list[str], max_features: int | None = None
+) -> ParsedXformArgs:
+    """Walk the ``xform`` argument list, building the transforms in order.
+
+    A required value is written ``--opt value`` or ``--opt=value``; the
+    separated form takes the next token whatever it starts with, so
+    ``--translate -1,2,3`` reads as Click reads it. An optional value is joined,
+    or is the next token when that token is not an option. A value-free option
+    given ``=value``, and any option this command does not declare, raise
+    ``click.UsageError``. After ``--`` every token is positional.
 
     ``max_features`` is a global value option (not an ordered transform); it is
-    obtained reliably from the Click ``kwargs`` and shared by every
+    obtained from the Click ``kwargs`` and shared by every
     ``--find-points-at-infinity`` operation in the chain.
     """
-    transforms = []
+    parsed = ParsedXformArgs()
+    options_ended = False
     i = 0
     while i < len(args):
         arg = args[i]
+        if not options_ended and arg == "--":
+            options_ended = True
+            i += 1
+            continue
+        if options_ended or not _is_option_token(arg):
+            parsed.positionals.append(arg)
+            i += 1
+            continue
+
         option, separator, joined_value = arg.partition("=")
         spec = _TRANSFORM_OPTIONS.get(option)
         if spec is not None:
             value_rule, build = spec
-            # Required and value-free options did not accept joined values.
-            if not separator or value_rule == "optional":
-                if value_rule == "required":
-                    param, i = _take_arg(args, i, option)
-                elif value_rule == "optional":
-                    if separator:
-                        param = joined_value
-                    elif i + 1 < len(args) and not args[i + 1].startswith("-"):
-                        i += 1
-                        param = args[i]
-                    else:
-                        param = ""
-                else:
-                    param = ""
-                transforms.append(build(param, max_features))
-        elif arg == "--max-features":
-            # Click supplies this global value; it is not an ordered transform.
-            if i + 1 < len(args):
-                i += 1
+        elif option in _GLOBAL_OPTIONS:
+            value_rule, build = _GLOBAL_OPTIONS[option], None
+        else:
+            raise click.UsageError(f"No such option: {option}")
+
+        if value_rule == "none":
+            if separator:
+                raise click.UsageError(f"{option} does not take a value")
+            param = ""
+        elif separator:
+            param = joined_value
+        elif value_rule == "required":
+            param, i = _take_arg(args, i, option)
+        elif i + 1 < len(args) and not _is_option_token(args[i + 1]):
+            i += 1
+            param = args[i]
+        else:
+            param = ""
+
+        if build is not None:
+            parsed.values.setdefault(option, []).append(param)
+            parsed.transforms.append(build(param, max_features))
         i += 1
 
+    _mark_minimal_restores(parsed.transforms)
+    return parsed
+
+
+def parse_transform_args(args: list[str], max_features: int | None = None) -> list:
+    """Parse a list of transform options into the ordered transforms.
+
+    The list holds options only; a positional token raises ``click.UsageError``
+    rather than being skipped.
+    """
+    parsed = parse_xform_args(args, max_features=max_features)
+    if parsed.positionals:
+        raise click.UsageError(f"Unexpected argument: {parsed.positionals[0]}")
+    return parsed.transforms
+
+
+def check_against_click(
+    parsed: ParsedXformArgs, kwargs: dict, paths: list[str | None]
+) -> None:
+    """Raise ``click.UsageError`` where the ordered walk and Click disagree.
+
+    ``kwargs`` is the command's Click keyword arguments and ``paths`` its
+    positional arguments as Click bound them (``None`` for an omitted one).
+    Each transform option's values must match Click's tuple one for one, and
+    the positional tokens must be the paths, so every option Click accepted is
+    in the ordered chain.
+    """
+    given_paths = [p for p in paths if p is not None]
+    if parsed.positionals != given_paths:
+        raise click.UsageError(
+            f"The ordered option reading found the arguments {parsed.positionals}, "
+            f"but the command received {given_paths}"
+        )
+    for option, (value_rule, _build) in _TRANSFORM_OPTIONS.items():
+        read = parsed.values.get(option, [])
+        expected = [True] * len(read) if value_rule == "none" else read
+        received = list(kwargs.get(option[2:].replace("-", "_"), ()))
+        if received != expected:
+            raise click.UsageError(
+                f"The ordered option reading found {option} values {read}, "
+                f"but the command received {received}"
+            )
+
+
+def _mark_minimal_restores(transforms: list) -> None:
+    """Flag each ``--add-*`` step that follows a ``--minimal``."""
     # An --add-* step after --minimal restores part of what the shorthand
     # dropped; it says so when it runs, so the combination reads as intended.
     seen_minimal = False
@@ -694,5 +819,3 @@ def parse_transform_args(args: list[str], max_features: int | None = None) -> li
             transform, (AddThumbnailsTransform, AddPatchBitmapsTransform)
         ):
             transform.restores_minimal = True
-
-    return transforms

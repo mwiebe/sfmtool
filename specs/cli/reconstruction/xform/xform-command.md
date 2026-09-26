@@ -32,6 +32,28 @@ sfm xform in.sfmr out.sfmr --rotate 0,1,0,+25deg --translate 3,5,-2
 sfm xform in.sfmr out.sfmr --translate 3,5,-2 --rotate 0,1,0,+25deg
 ```
 
+### Option Values
+
+An option that takes a value accepts it either as the next argument or joined
+with `=`, and the two spellings give the same step:
+
+```bash
+--translate 3,5,-2
+--translate=3,5,-2
+```
+
+An option with a required value takes the next argument as its value even when
+that argument begins with `-`, so `--translate -17.17,-0.42,-0.27` and
+`--translate=-17.17,-0.42,-0.27` both translate by the same vector. An option
+with an optional value (`--bundle-adjust`, `--refine-normals`, `--minimal`, ...)
+takes the next argument only when it does not begin with `-`, so its value is
+written joined when there is any doubt, as in `--minimal=wspath=.`. A value-free
+option (`--drop-thumbnails`, `--align-to-input`, ...) given `=value` is an error.
+
+The input and output paths may sit anywhere among the options, and `--` ends the
+options so that a later argument beginning with `-` is read as a path. An option
+the command does not declare is an error; there are no abbreviations.
+
 ## Available Operations
 
 ### Geometric Transformations
@@ -835,6 +857,18 @@ class Transform(Protocol):
 Each operation is a class implementing this interface. The CLI parses arguments into an
 ordered list of `Transform` objects and applies them sequentially. The reconstruction is
 loaded once, transformed through the pipeline, and written once.
+
+Click collects each repeatable option into its own tuple, which loses the order across
+options, so the command reads its arguments a second time in
+[`_arg_parser.py`](../../../../src/sfmtool/xform/_arg_parser.py). The command class,
+`OrderedArgsCommand`, keeps the argument list Click was handed, and
+`parse_xform_args` walks it with Click's token rules (see
+[Option Values](#option-values)), building one `Transform` per transform option and
+refusing an option it does not know. `check_against_click` then compares that walk with
+Click's result: each transform option's values, in order, must equal Click's tuple for
+that option, and the arguments that are not options must be the input and output paths.
+A disagreement is a usage error, so an option Click accepted is never left out of the
+chain.
 
 The write is `SfmrReconstruction.save(path, operation="xform",
 tool_options={"transforms": [...]})`, which stamps `operation`, `tool`,

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
-from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -16,8 +15,7 @@ def test_xform_no_transforms(tmp_path: Path):
     input_path.touch()
     output_path = tmp_path / "output.sfmr"
     args = ["xform", str(input_path), str(output_path)]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "At least one transformation must be specified" in result.output
 
@@ -36,8 +34,7 @@ def test_xform_max_features_without_find_infinity_rejected(tmp_path: Path):
         "--max-features",
         "500",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "--max-features only applies to --find-points-at-infinity" in result.output
 
@@ -48,8 +45,7 @@ def test_xform_non_sfmr_input(tmp_path: Path):
     input_path.touch()
     output_path = tmp_path / "output.sfmr"
     args = ["xform", str(input_path), str(output_path), "--scale", "2.0"]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "Input path must be a .sfmr file" in result.output
 
@@ -60,8 +56,7 @@ def test_xform_non_sfmr_output(tmp_path: Path):
     input_path.touch()
     output_path = tmp_path / "output.txt"
     args = ["xform", str(input_path), str(output_path), "--scale", "2.0"]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "Output path must be a .sfmr file" in result.output
 
@@ -74,8 +69,7 @@ def test_xform_on_reconstruction(seoul_bull_workspace: Path):
     # Now test xform with scale
     scaled_sfmr = workspace_dir / "scaled.sfmr"
     args = ["xform", str(output_sfmr), str(scaled_sfmr), "--scale", "2.0"]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert scaled_sfmr.exists()
     assert "Scale by 2.000" in result.output
@@ -98,8 +92,7 @@ def test_xform_remove_short_tracks(seoul_bull_workspace: Path):
     # Remove short tracks
     filtered_sfmr = workspace_dir / "filtered.sfmr"
     args = ["xform", str(output_sfmr), str(filtered_sfmr), "--remove-short-tracks", "3"]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert filtered_sfmr.exists()
     assert "Remove tracks with length <= 3" in result.output
@@ -129,8 +122,7 @@ def test_xform_camera_model_with_bundle_adjust(
         "RADIAL",
         "--bundle-adjust",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert switched_sfmr.exists()
     assert "Switch camera model to RADIAL" in result.output
@@ -155,8 +147,7 @@ def test_xform_camera_model_unknown(seoul_bull_workspace: Path):
         "--camera-model",
         "NOT_A_MODEL",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "Unknown camera model" in result.output
 
@@ -173,19 +164,16 @@ def test_xform_default_output_path(seoul_bull_workspace: Path):
     expected_third = workspace_dir / f"{stem}-transformed-3.sfmr"
 
     args = ["xform", str(input_sfmr), "--scale", "2.0"]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert expected_first.exists()
     assert str(expected_first) in result.output
 
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert expected_second.exists()
 
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert expected_third.exists()
 
@@ -208,8 +196,109 @@ def test_xform_chained_transforms(seoul_bull_workspace: Path):
         "--translate",
         "1,2,3",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     assert chained_sfmr.exists()
     assert "Applying 3 transformation(s)" in result.output
+
+
+def test_xform_joined_negative_translation_translates(
+    seoul_bull_ground_truth_sfmr: Path, tmp_path: Path
+):
+    """`--translate=-1,2,3` moves every point and is recorded with the other steps."""
+    import numpy as np
+
+    from sfmtool._sfmtool.io import read_sfmr
+
+    output_sfmr = tmp_path / "translated.sfmr"
+    args = [
+        "xform",
+        str(seoul_bull_ground_truth_sfmr),
+        str(output_sfmr),
+        "--scale",
+        "1",
+        "--translate=-1,2,3",
+    ]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+
+    before = read_sfmr(seoul_bull_ground_truth_sfmr)
+    after = read_sfmr(output_sfmr)
+    finite = before["positions_xyzw"][:, 3] != 0
+    assert finite.any()
+
+    def euclidean(data):
+        xyzw = data["positions_xyzw"][finite]
+        return xyzw[:, :3] / xyzw[:, 3:]
+
+    moved = euclidean(after) - euclidean(before)
+    assert np.allclose(moved, [-1.0, 2.0, 3.0], atol=1e-6)
+    assert len(after["metadata"]["tool_options"]["transforms"]) == 2
+
+
+def test_xform_separated_negative_value_matches_joined(
+    seoul_bull_ground_truth_sfmr: Path, tmp_path: Path
+):
+    """`--translate -1,2,3` and `--translate=-1,2,3` write the same points."""
+    from sfmtool._sfmtool.io import read_sfmr
+
+    outputs = []
+    for spelling in (["--translate", "-1,2,3"], ["--translate=-1,2,3"]):
+        output_sfmr = tmp_path / f"out{len(outputs)}.sfmr"
+        args = ["xform", str(seoul_bull_ground_truth_sfmr), str(output_sfmr)]
+        result = CliRunner().invoke(main, args + spelling)
+        assert result.exit_code == 0, result.output
+        outputs.append(read_sfmr(output_sfmr))
+    assert (outputs[0]["positions_xyzw"] == outputs[1]["positions_xyzw"]).all()
+
+
+def test_xform_paths_among_the_options(
+    seoul_bull_ground_truth_sfmr: Path, tmp_path: Path
+):
+    """An output path written after an option is still the output, and the
+    option before it is still applied."""
+    output_sfmr = tmp_path / "out.sfmr"
+    args = [
+        "xform",
+        str(seoul_bull_ground_truth_sfmr),
+        "--scale",
+        "2",
+        str(output_sfmr),
+        "--translate=1,0,0",
+    ]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 0, result.output
+    assert "Applying 2 transformation(s)" in result.output
+    assert output_sfmr.exists()
+
+
+def test_xform_value_free_option_refuses_joined_value(
+    seoul_bull_ground_truth_sfmr: Path, tmp_path: Path
+):
+    args = [
+        "xform",
+        str(seoul_bull_ground_truth_sfmr),
+        str(tmp_path / "out.sfmr"),
+        "--drop-thumbnails=x",
+    ]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code != 0
+    assert "--drop-thumbnails" in result.output
+    assert "does not take a value" in result.output
+
+
+def test_xform_unknown_option_refused(
+    seoul_bull_ground_truth_sfmr: Path, tmp_path: Path
+):
+    args = [
+        "xform",
+        str(seoul_bull_ground_truth_sfmr),
+        str(tmp_path / "out.sfmr"),
+        "--scale",
+        "2",
+        "--tranlsate=1,2,3",
+    ]
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code != 0
+    assert "--tranlsate" in result.output
+    assert not (tmp_path / "out.sfmr").exists()
