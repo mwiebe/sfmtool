@@ -14,15 +14,11 @@
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use super::data::SfmrReconstruction;
-use std::ops::RangeInclusive;
 
 use super::outermost_keypoint::{outermost_keypoints, KeypointReach};
 use crate::camera::distortion::bspline::MIN_BSPLINE_COEFFS;
-use crate::camera::intrinsics::SplineRadial;
-use crate::camera::refit_intrinsics::{
-    refit_spline, MonotoneConstraint, RefitError, MAX_COEFF_COUNT,
-};
 use crate::camera::{CameraIntrinsics, CameraModel};
+pub use crate::geometry::bundle_adjust::CameraRelease;
 use crate::geometry::bundle_adjust::{
     BaCameras, BaSchedule, DistanceReference, FreePointPolicy, PointConstraints,
     PointConstraintsError, DEFAULT_PROTECTED_LOSS_SCALE, DEFAULT_SCHEDULE,
@@ -40,72 +36,45 @@ const DEFAULT_MIN_TRACK: usize = 2;
 /// default.
 const DEFAULT_MIN_OBS: usize = 12;
 
-/// The spline coefficient counts [`BundleAdjustOptions::spline_coeff_count`]
-/// accepts. The floor is the fewest coefficients a spline is defined with
-/// (fewer evaluate as the identity, which has nothing to release); the ceiling
-/// is the refit's own, [`MAX_COEFF_COUNT`], past which the knot spans are
-/// narrower than a lens calibration can support.
-pub const SPLINE_COEFF_COUNT_RANGE: RangeInclusive<usize> = MIN_BSPLINE_COEFFS..=MAX_COEFF_COUNT;
-
 /// What the adjustment is allowed to move, and how hard it tries.
 ///
-/// The defaults are the kernel's own, so an adjustment asked for with nothing
-/// stated is the one every other caller in this crate runs.
+/// The defaults are the kernel's own, and hold every camera, so an adjustment
+/// asked for with nothing stated is the one every other caller in this crate
+/// runs.
 #[derive(Debug, Clone)]
 pub struct BundleAdjustOptions {
-    /// Release the focal length of every camera the posed images use, each
-    /// camera its own. Off by default, because a focal that moves is a
-    /// different claim about the capture than a pose that does, and the caller
-    /// should be the one making it.
+    /// What each camera may release, one entry per camera in the
+    /// reconstruction's camera table, in table order. A camera no posed image
+    /// uses is not in the solve, and its entry is ignored. An empty list, the
+    /// default, holds every camera; any other length than the table's is
+    /// refused ([`BundleAdjustError::ReleaseCount`]). Nothing is released by
+    /// default, because a lens that moves is a different claim about the
+    /// capture than a pose that does, and the caller should be the one making
+    /// it.
     ///
-    /// Only the models the kernel's analytic focal column is exact for accept
-    /// it -- `SIMPLE_PINHOLE`, `EQUIDISTANT_FISHEYE`, `SIMPLE_RADIAL_FISHEYE`,
-    /// `SFMTOOL_FISHEYE` and `SFMTOOL_PINHOLE`. When any camera in the solve has
-    /// another model this is refused rather than silently ignored: a caller that
-    /// asked for a focal solve and got a fixed-focal one back would have no way
-    /// to tell.
-    pub opt_f: bool,
-    /// Release each camera's lens distortion where its model admits one: `k1`
-    /// on `SIMPLE_RADIAL_FISHEYE`, the radial spline on `SFMTOOL_FISHEYE` and
-    /// `SFMTOOL_PINHOLE`, each camera its own. Off by default.
+    /// Each camera's entry is checked against its own model, and a release the
+    /// model cannot take is refused naming the camera rather than silently
+    /// dropped: a caller that asked for a focal solve and got a fixed-focal one
+    /// back would have no way to tell.
     ///
-    /// The distortion is released only together with the focal: neither `k1`
-    /// nor the spline can change the scale at the centre of the image (both
-    /// leave the slope of the radial map on the axis at one), and a distortion
-    /// released against a held focal could only bend the periphery around a
-    /// scale it cannot fix. So this is refused without [`Self::opt_f`], and
-    /// refused when no camera in the solve has distortion to release. A camera
-    /// of any other model keeps its distortion where it is, and the report says
-    /// which cameras released theirs.
-    pub opt_distortion: bool,
-    /// Change the coefficient count of every spline camera in the solve to
-    /// this, before the solve starts. `None`, the default, keeps each count.
+    /// - [`CameraRelease::focal`] is accepted on the models the kernel's
+    ///   analytic focal column is exact for -- `SIMPLE_PINHOLE`,
+    ///   `EQUIDISTANT_FISHEYE`, `SIMPLE_RADIAL_FISHEYE`, `SFMTOOL_FISHEYE` and
+    ///   `SFMTOOL_PINHOLE` ([`focal_is_releasable`]).
+    /// - [`CameraRelease::distortion`] is accepted where
+    ///   [`distortion_is_releasable`] says the model has some: `k1` on
+    ///   `SIMPLE_RADIAL_FISHEYE`, the radial spline on `SFMTOOL_FISHEYE` and
+    ///   `SFMTOOL_PINHOLE`. It is released only together with that camera's
+    ///   focal: neither `k1` nor the spline can change the scale at the centre
+    ///   of the image (both leave the slope of the radial map on the axis at
+    ///   one), and a distortion released against a held focal could only bend
+    ///   the periphery around a scale it cannot fix.
     ///
-    /// Each spline camera whose count differs is refitted by
-    /// [`refit_spline`] as the same spline model with this many coefficients,
-    /// its domain end held, fitted over the whole domain: the best
-    /// least-squares description of the old spline's curve on the new
-    /// coefficient scheme. The solve then starts from the refitted cameras.
-    /// Refused unless [`Self::opt_distortion`] is on, because a new
-    /// coefficient scheme can only approximate the old curve and it is the
-    /// solve that brings it back to the observations; refused when no camera
-    /// in the solve is a spline model; refused outside
-    /// [`SPLINE_COEFF_COUNT_RANGE`]; and refused, naming the camera, when a
-    /// refit is.
-    pub spline_coeff_count: Option<usize>,
-    /// Move the domain end of every spline camera in the solve to this
-    /// incidence angle, in degrees, before the solve starts. `None`, the
-    /// default, keeps each domain.
-    ///
-    /// Each spline camera whose domain end differs is refitted by
-    /// [`refit_spline`] on the new domain, over the whole of it, together with
-    /// any new [`Self::spline_coeff_count`] in the same refit. The old model is
-    /// defined everywhere, on its domain and along its linear tail past it, so
-    /// the new domain may be shorter or longer than the old one. The refusals
-    /// are the coefficient count's: it needs [`Self::opt_distortion`] and a
-    /// spline camera in the solve, and a refit refused, here for a domain end
-    /// the model cannot have, refuses the adjustment naming the camera.
-    pub spline_domain_deg: Option<f64>,
+    /// A camera with neither is held, so a rig can release some cameras and
+    /// hold the rest, and one whose model can release nothing is simply held.
+    /// With every camera held the solve still runs, and refines the poses and
+    /// the points alone.
+    pub releases: Vec<CameraRelease>,
     /// The staged trim schedule, `(trim_px, loss_scale)` per round.
     pub schedule: Vec<BaSchedule>,
     /// LM iteration budget per round.
@@ -121,14 +90,23 @@ pub struct BundleAdjustOptions {
 impl Default for BundleAdjustOptions {
     fn default() -> Self {
         Self {
-            opt_f: false,
-            opt_distortion: false,
-            spline_coeff_count: None,
-            spline_domain_deg: None,
+            releases: Vec::new(),
             schedule: DEFAULT_SCHEDULE.to_vec(),
             max_iters: DEFAULT_MAX_ITERS,
             min_track: DEFAULT_MIN_TRACK,
             min_obs: DEFAULT_MIN_OBS,
+        }
+    }
+}
+
+impl BundleAdjustOptions {
+    /// The defaults with `release` for each of `camera_count` cameras: the
+    /// uniform case, where every camera of a table is released alike. Pass the
+    /// table's length, `recon.image_table.cameras.len()`.
+    pub fn uniform(camera_count: usize, release: CameraRelease) -> Self {
+        Self {
+            releases: vec![release; camera_count],
+            ..Self::default()
         }
     }
 }
@@ -140,37 +118,34 @@ pub enum BundleAdjustError {
     /// The observations carry no pixel: a `sift_files` value without the
     /// format's optional inline keypoint column.
     NoKeypoints,
-    /// The focal release was asked for, and a camera in the solve has a model
-    /// the kernel's focal column is not exact for.
+    /// The release list's length is neither zero nor the camera table's.
+    ReleaseCount {
+        /// The entries given.
+        releases: usize,
+        /// The cameras the table holds.
+        cameras: usize,
+    },
+    /// A camera in the solve was asked to release its focal, and its model is
+    /// one the kernel's focal column is not exact for.
     FocalNotReleasable {
         /// The camera's index in the reconstruction's camera table.
         camera: usize,
         /// Its model's name.
-        model: &'static str,
+        camera_model: &'static str,
     },
-    /// The distortion release was asked for without the focal release.
-    DistortionWithoutFocal,
-    /// The distortion release was asked for, and no camera in the solve has a
-    /// model whose distortion the adjustment can release.
-    DistortionNotReleasable,
-    /// A spline coefficient count or domain was asked for without the
-    /// distortion release.
-    SplineRefitWithoutDistortion,
-    /// A spline coefficient count or domain was asked for, and no camera in
-    /// the solve is a spline model.
-    SplineRefitWithoutSpline,
-    /// A spline coefficient count outside [`SPLINE_COEFF_COUNT_RANGE`].
-    SplineCoeffCount {
-        /// The count asked for.
-        count: usize,
-    },
-    /// The refit of one spline camera to the new count or domain was
-    /// refused.
-    SplineRefit {
+    /// A camera in the solve was asked to release its distortion without its
+    /// focal.
+    DistortionWithoutFocal {
         /// The camera's index in the reconstruction's camera table.
         camera: usize,
-        /// The refit's refusal.
-        error: RefitError,
+    },
+    /// A camera in the solve was asked to release its distortion, and its
+    /// model has none the adjustment can release.
+    DistortionNotReleasable {
+        /// The camera's index in the reconstruction's camera table.
+        camera: usize,
+        /// Its model's name.
+        camera_model: &'static str,
     },
     /// No image of the reconstruction carries a usable pose.
     NoPosedImages,
@@ -202,45 +177,35 @@ impl std::fmt::Display for BundleAdjustError {
                 "the adjustment needs a pixel per observation, and this reconstruction's \
                  observations are .sift feature indexes with no inline keypoints"
             ),
-            BundleAdjustError::FocalNotReleasable { camera, model } => write!(
+            BundleAdjustError::ReleaseCount { releases, cameras } => write!(
                 f,
-                "the focal cannot be released on camera {camera}, a {model}; the \
+                "the release list has {releases} entries and the reconstruction has \
+                 {cameras} camera(s); give one entry per camera, or none to hold them all"
+            ),
+            BundleAdjustError::FocalNotReleasable {
+                camera,
+                camera_model,
+            } => write!(
+                f,
+                "the focal cannot be released on camera {camera}, a {camera_model}; the \
                  adjustment's focal column is exact for SIMPLE_PINHOLE, \
                  EQUIDISTANT_FISHEYE, SIMPLE_RADIAL_FISHEYE, SFMTOOL_FISHEYE and \
                  SFMTOOL_PINHOLE"
             ),
-            BundleAdjustError::DistortionWithoutFocal => write!(
+            BundleAdjustError::DistortionWithoutFocal { camera } => write!(
                 f,
-                "the lens distortion is released only together with the focal length, \
-                 because neither k1 nor the spline can change the scale at the centre of \
-                 the image"
+                "the lens distortion of camera {camera} is released only together with its \
+                 focal length, because neither k1 nor the spline can change the scale at the \
+                 centre of the image"
             ),
-            BundleAdjustError::DistortionNotReleasable => write!(
+            BundleAdjustError::DistortionNotReleasable {
+                camera,
+                camera_model,
+            } => write!(
                 f,
-                "no camera of this reconstruction has lens distortion the adjustment can \
+                "camera {camera}, a {camera_model}, has no lens distortion the adjustment can \
                  release; it releases k1 on SIMPLE_RADIAL_FISHEYE and the spline on \
                  SFMTOOL_FISHEYE and SFMTOOL_PINHOLE"
-            ),
-            BundleAdjustError::SplineRefitWithoutDistortion => write!(
-                f,
-                "a spline's coefficient count or domain is changed only while the lens \
-                 distortion is released, because the refitted spline can only approximate \
-                 the old curve until the solve fits it to the observations"
-            ),
-            BundleAdjustError::SplineRefitWithoutSpline => write!(
-                f,
-                "no camera of this reconstruction has a spline whose coefficient count or \
-                 domain could change; only SFMTOOL_FISHEYE and SFMTOOL_PINHOLE carry one"
-            ),
-            BundleAdjustError::SplineCoeffCount { count } => write!(
-                f,
-                "a spline takes {} to {} coefficients, not {count}",
-                SPLINE_COEFF_COUNT_RANGE.start(),
-                SPLINE_COEFF_COUNT_RANGE.end()
-            ),
-            BundleAdjustError::SplineRefit { camera, error } => write!(
-                f,
-                "the spline of camera {camera} could not be refitted: {error}"
             ),
             BundleAdjustError::NoPosedImages => {
                 write!(f, "no image of this reconstruction carries a pose")
@@ -316,9 +281,6 @@ pub struct CameraAdjustment {
     /// Whether its lens distortion was released: `k1` on a
     /// `SIMPLE_RADIAL_FISHEYE`, the spline on a spline model.
     pub distortion_released: bool,
-    /// The refit that gave its spline a new coefficient count or domain before
-    /// the solve, or `None` where both were kept.
-    pub spline_refit: Option<SplineRefit>,
     /// The outermost of the observations of its images, measured under the
     /// camera the solve returned. Only the observations: the adjustment reads
     /// nothing off disk, so the features detected in the images' `.sift` files
@@ -326,34 +288,11 @@ pub struct CameraAdjustment {
     pub outermost_observed: Option<KeypointReach>,
 }
 
-/// How one camera's spline was refitted to a new coefficient count or domain
-/// before the solve.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SplineRefit {
-    /// The coefficient count it had.
-    pub coeffs_before: usize,
-    /// The coefficient count it was refitted to.
-    pub coeffs_after: usize,
-    /// Where its domain ended, as an incidence angle in degrees.
-    pub domain_before_deg: f64,
-    /// Where the refitted domain ends, in degrees.
-    pub domain_after_deg: f64,
-    /// RMS pixel distance between the old and the refitted camera over the
-    /// refit's samples, which cover the whole spline domain.
-    pub rms_px: f64,
-    /// The largest such distance.
-    pub max_px: f64,
-    /// What the refit's monotonicity constraint did: where it held the new
-    /// spline's slope at the floor, and so departed from the old curve.
-    pub monotone_constraint: MonotoneConstraint,
-}
-
 /// Bundle-adjust `recon`, returning the adjusted value and a report.
 ///
-/// Every posed image's pose, every live point's position and, under
-/// [`BundleAdjustOptions::opt_f`], each camera's focal (and under
-/// [`BundleAdjustOptions::opt_distortion`] each camera's `k1` or radial spline)
-/// are refined together
+/// Every posed image's pose, every live point's position and, as
+/// [`BundleAdjustOptions::releases`] states camera by camera, each camera's
+/// focal and its `k1` or radial spline are refined together
 /// against every observation that carries a pixel, by the staged robust solve in
 /// [`crate::geometry::bundle_adjust()`]. The posed images may be taken through
 /// any number of the table's cameras; each keeps its own lens in the solve, and a
@@ -454,87 +393,54 @@ pub fn bundle_adjust(
                 .expect("every posed image's camera is in the list") as u32
         })
         .collect();
-    // The release refuses rather than degrades, over every camera in the
-    // solve: the kernel would hold a camera it cannot release and move the rest,
-    // and a report saying the focal was released would then be false of it.
-    if options.opt_f {
-        if let Some((&c, camera)) = used
-            .iter()
-            .zip(&source_cameras)
-            .find(|(_, camera)| !focal_is_releasable(camera))
-        {
+    // Each camera of the solve's release, from the caller's list in table
+    // order. The release refuses rather than degrades: the kernel would hold a
+    // parameter its model cannot release and move the rest, and a report
+    // saying it was released would then be false of that camera.
+    let camera_count = table.cameras.len();
+    if !options.releases.is_empty() && options.releases.len() != camera_count {
+        return Err(BundleAdjustError::ReleaseCount {
+            releases: options.releases.len(),
+            cameras: camera_count,
+        });
+    }
+    let releases: Vec<CameraRelease> = used
+        .iter()
+        .map(|&c| {
+            options
+                .releases
+                .get(c as usize)
+                .copied()
+                .unwrap_or(CameraRelease::HELD)
+        })
+        .collect();
+    for ((&c, camera), release) in used.iter().zip(&source_cameras).zip(&releases) {
+        let camera_index = c as usize;
+        if release.distortion && !release.focal {
+            return Err(BundleAdjustError::DistortionWithoutFocal {
+                camera: camera_index,
+            });
+        }
+        if release.focal && !focal_is_releasable(camera) {
             return Err(BundleAdjustError::FocalNotReleasable {
-                camera: c as usize,
-                model: camera.model_name(),
+                camera: camera_index,
+                camera_model: camera.model_name(),
+            });
+        }
+        if release.distortion && !distortion_is_releasable(camera) {
+            return Err(BundleAdjustError::DistortionNotReleasable {
+                camera: camera_index,
+                camera_model: camera.model_name(),
             });
         }
     }
-    if options.opt_distortion && !options.opt_f {
-        return Err(BundleAdjustError::DistortionWithoutFocal);
-    }
-    // A new coefficient count or domain is a refit of each spline camera whose
-    // count or domain differs, before the solve, and the solve starts from the
-    // refitted cameras. The "before" residuals are still measured through the cameras
-    // the value holds, so the report's two medians describe the input and the
-    // output.
-    let mut spline_refits: Vec<Option<SplineRefit>> = vec![None; used.len()];
-    let mut cameras = source_cameras.clone();
-    if options.spline_coeff_count.is_some() || options.spline_domain_deg.is_some() {
-        if !options.opt_distortion {
-            return Err(BundleAdjustError::SplineRefitWithoutDistortion);
-        }
-        if let Some(count) = options.spline_coeff_count {
-            if !SPLINE_COEFF_COUNT_RANGE.contains(&count) {
-                return Err(BundleAdjustError::SplineCoeffCount { count });
-            }
-        }
-        if !cameras.iter().any(|c| c.model.radial_spline().is_some()) {
-            return Err(BundleAdjustError::SplineRefitWithoutSpline);
-        }
-        for (j, &c) in used.iter().enumerate() {
-            let Some((bspline, _, _)) = source_cameras[j].model.radial_spline() else {
-                continue;
-            };
-            let coeffs_before = bspline.len();
-            let domain_before_deg = spline_domain_deg(&source_cameras[j]).unwrap_or(f64::NAN);
-            let count = options.spline_coeff_count.unwrap_or(coeffs_before);
-            // A domain within a nanodegree of the one the camera has is the
-            // same domain, which is then copied exactly rather than taken
-            // through degrees and back. A value that is not a number is passed
-            // on, for the refit to refuse.
-            let same = |deg: f64| (deg - domain_before_deg).abs() <= 1e-9;
-            let domain = options.spline_domain_deg.filter(|&deg| !same(deg));
-            if count == coeffs_before && domain.is_none() {
-                continue;
-            }
-            let refit = refit_spline(&source_cameras[j], count, domain).map_err(|error| {
-                BundleAdjustError::SplineRefit {
-                    camera: c as usize,
-                    error,
-                }
-            })?;
-            spline_refits[j] = Some(SplineRefit {
-                coeffs_before,
-                coeffs_after: count,
-                domain_before_deg,
-                domain_after_deg: refit.spline_domain_deg.unwrap_or(f64::NAN),
-                rms_px: refit.rms_px,
-                max_px: refit.max_px,
-                monotone_constraint: refit.monotone_constraint,
-            });
-            cameras[j] = refit.camera;
-        }
-    }
-    if options.opt_distortion && !cameras.iter().any(distortion_is_releasable) {
-        return Err(BundleAdjustError::DistortionNotReleasable);
-    }
-    let source_ba_cameras = BaCameras {
+    // Every kernel flag on, and each camera's own release narrowing them: the
+    // checks above leave only releases its model admits, so the kernel frees
+    // exactly what the report below says it did.
+    let ba_cameras = BaCameras {
         cameras: &source_cameras,
         image_camera: image_camera.as_slice().into(),
-    };
-    let ba_cameras = BaCameras {
-        cameras: &cameras,
-        image_camera: image_camera.as_slice().into(),
+        releases: Some(&releases),
     };
 
     // The solve is all of the time; the other three walk arrays the size of the
@@ -644,7 +550,7 @@ pub fn bundle_adjust(
     // a second spelling of it here.
     let residuals = p_before.phase("residuals before");
     let before = crate::geometry::bundle_adjust::bundle_adjust(
-        &source_ba_cameras,
+        &ba_cameras,
         &mut quats.clone(),
         &mut trans.clone(),
         &mut points.clone(),
@@ -686,11 +592,11 @@ pub fn bundle_adjust(
         FreePointPolicy::default(),
         None,
         DEFAULT_PROTECTED_LOSS_SCALE,
-        options.opt_f,
+        true,
         // One request, both kernel rungs: `k1` and the spline live on different
         // models, and the kernel decides each per camera.
-        options.opt_distortion,
-        options.opt_distortion,
+        true,
+        true,
         &options.schedule,
         options.max_iters,
         options.min_track,
@@ -728,9 +634,8 @@ pub fn bundle_adjust(
         out.image_table.images[i].translation_xyz = trans[slot];
     }
     // Each camera in the solve takes the one the kernel returned, which is
-    // itself at its solved focal under `opt_f`, with its solved `k1` or spline
-    // under `opt_distortion` where its model has one, and itself unchanged
-    // otherwise:
+    // itself at its solved focal where its focal was released, with its solved
+    // `k1` or spline where its distortion was, and itself unchanged otherwise:
     // nothing else about any lens moves.
     for (&c, solved_camera) in used.iter().zip(&solved.cameras) {
         out.image_table.cameras[c as usize] = solved_camera.clone();
@@ -747,9 +652,8 @@ pub fn bundle_adjust(
             images: image_camera.iter().filter(|&&k| k as usize == j).count(),
             focal_before: source_cameras[j].focal_lengths().0,
             focal_after: solved.cameras[j].focal_lengths().0,
-            focal_released: options.opt_f,
-            distortion_released: options.opt_distortion && distortion_is_releasable(&cameras[j]),
-            spline_refit: spline_refits[j].clone(),
+            focal_released: releases[j].focal,
+            distortion_released: releases[j].distortion,
             outermost_observed: outermost[j].observed,
         })
         .collect();
@@ -857,21 +761,6 @@ pub fn distortion_is_releasable(camera: &CameraIntrinsics) -> bool {
         .radial_spline()
         .is_some_and(|(bspline, d_max, _)| {
             bspline.len() >= MIN_BSPLINE_COEFFS && d_max.is_finite() && d_max > 0.0
-        })
-}
-
-/// Where a spline camera's domain ends, as an incidence angle in degrees:
-/// `bspline_theta_max` itself for `SFMTOOL_FISHEYE`, and the angle whose
-/// tangent is `bspline_rho_max` for `SFMTOOL_PINHOLE`. `None` for a camera with
-/// no spline. A caller showing the domain as an editable value reads it here,
-/// in the unit [`BundleAdjustOptions::spline_domain_deg`] takes.
-pub fn spline_domain_deg(camera: &CameraIntrinsics) -> Option<f64> {
-    camera
-        .model
-        .radial_spline()
-        .map(|(_, d_max, radial)| match radial {
-            SplineRadial::IncidenceAngle => d_max.to_degrees(),
-            SplineRadial::ImagePlaneRadius => d_max.atan().to_degrees(),
         })
 }
 

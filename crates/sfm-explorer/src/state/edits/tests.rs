@@ -1063,10 +1063,10 @@ fn a_released_focal_is_named_in_the_label_and_the_entry() {
             principal_point_y: cy,
         };
     }
-    let options = sfmtool_core::BundleAdjustOptions {
-        opt_f: true,
-        ..sfmtool_core::BundleAdjustOptions::default()
-    };
+    let options = sfmtool_core::BundleAdjustOptions::uniform(
+        1,
+        sfmtool_core::reconstruction::bundle_adjust::CameraRelease::FOCAL,
+    );
 
     state.start_bundle_adjust(id, &options).expect("well posed");
     state.finish_background_task();
@@ -1169,21 +1169,29 @@ fn a_node_whose_images_are_taken_through_two_cameras_is_adjusted() {
 #[test]
 fn each_released_camera_is_named_in_the_entry() {
     let (mut state, id) = two_camera_state();
+    let gates = crate::bundle_adjust_prompt::camera_gates(state.scene[0].edited());
     assert_eq!(
-        crate::bundle_adjust_prompt::focal_refusal(state.scene[0].edited()),
-        None
+        gates.iter().map(|g| g.camera).collect::<Vec<_>>(),
+        vec![0, 1]
     );
-    let options = sfmtool_core::BundleAdjustOptions {
-        opt_f: true,
-        ..sfmtool_core::BundleAdjustOptions::default()
-    };
+    assert!(gates.iter().all(|g| g.focal_refusal.is_none()));
+    // Image 2 is camera 1's, and every other image camera 0's.
+    let images = state.scene[0].recon().image_table.images.len();
+    assert_eq!(
+        gates.iter().map(|g| g.images).collect::<Vec<_>>(),
+        vec![images - 1, 1]
+    );
+    let options = sfmtool_core::BundleAdjustOptions::uniform(
+        2,
+        sfmtool_core::reconstruction::bundle_adjust::CameraRelease::FOCAL,
+    );
 
     state.start_bundle_adjust(id, &options).expect("well posed");
     state.finish_background_task();
 
     assert_eq!(
         state.scene[0].history.current_version().label,
-        "Bundle adjusted run_a, focal released"
+        "Bundle adjusted run_a, focal released on every camera"
     );
     let last = texts(&state).last().expect("one entry").clone();
     assert!(last.contains(", camera 0 focal "), "{last}");
@@ -1193,10 +1201,12 @@ fn each_released_camera_is_named_in_the_entry() {
 #[test]
 fn the_distortion_gate_opens_on_a_camera_with_a_spline() {
     let (mut state, id) = two_camera_state();
-    // Two SIMPLE_PINHOLE cameras: nothing to release, and the checkbox says so.
-    let why = crate::bundle_adjust_prompt::distortion_refusal(state.scene[0].edited())
-        .expect("no camera carries a spline");
-    assert!(why.contains("SFMTOOL_FISHEYE"), "{why}");
+    // Two SIMPLE_PINHOLE cameras: nothing to release, and each row says so.
+    for gate in crate::bundle_adjust_prompt::camera_gates(state.scene[0].edited()) {
+        let why = gate.distortion_refusal.expect("no camera carries a spline");
+        assert!(why.contains("SFMTOOL_FISHEYE"), "{why}");
+        assert!(why.contains(&format!("Camera {}", gate.camera)), "{why}");
+    }
     {
         let recon = state.scene[0].recon_mut();
         let (f, _) = recon.image_table.cameras[1].focal_lengths();
@@ -1209,24 +1219,22 @@ fn the_distortion_gate_opens_on_a_camera_with_a_spline() {
             bspline: vec![0.0; 4],
         };
     }
-    assert_eq!(
-        crate::bundle_adjust_prompt::distortion_refusal(state.scene[0].edited()),
-        None
-    );
-    assert_eq!(
-        crate::bundle_adjust_prompt::spline_coeff_counts(state.scene[0].edited()),
-        vec![4]
-    );
+    let gates = crate::bundle_adjust_prompt::camera_gates(state.scene[0].edited());
+    assert!(gates[0].distortion_refusal.is_some());
+    assert_eq!(gates[1].distortion_refusal, None);
     let options = sfmtool_core::BundleAdjustOptions {
-        opt_f: true,
-        opt_distortion: true,
+        releases: vec![
+            sfmtool_core::reconstruction::bundle_adjust::CameraRelease::FOCAL,
+            sfmtool_core::reconstruction::bundle_adjust::CameraRelease::FOCAL_AND_DISTORTION,
+        ],
         ..sfmtool_core::BundleAdjustOptions::default()
     };
     state.start_bundle_adjust(id, &options).expect("well posed");
     state.finish_background_task();
     assert_eq!(
         state.scene[0].history.current_version().label,
-        "Bundle adjusted run_a, focal and lens distortion released"
+        "Bundle adjusted run_a, camera 0 focal released, camera 1 focal and lens distortion \
+         released"
     );
 }
 
@@ -1244,25 +1252,26 @@ fn the_distortion_gate_opens_on_a_simple_radial_fisheye() {
             radial_distortion_k1: 0.0,
         };
     }
-    assert_eq!(
-        crate::bundle_adjust_prompt::distortion_refusal(state.scene[0].edited()),
-        None
-    );
+    let gates = crate::bundle_adjust_prompt::camera_gates(state.scene[0].edited());
+    assert_eq!(gates[0].distortion_refusal, None);
+    // Camera 1 held while camera 0 releases both.
     let options = sfmtool_core::BundleAdjustOptions {
-        opt_f: true,
-        opt_distortion: true,
+        releases: vec![
+            sfmtool_core::reconstruction::bundle_adjust::CameraRelease::FOCAL_AND_DISTORTION,
+            sfmtool_core::reconstruction::bundle_adjust::CameraRelease::HELD,
+        ],
         ..sfmtool_core::BundleAdjustOptions::default()
     };
     state.start_bundle_adjust(id, &options).expect("well posed");
     state.finish_background_task();
     assert_eq!(
         state.scene[0].history.current_version().label,
-        "Bundle adjusted run_a, focal and lens distortion released"
+        "Bundle adjusted run_a, camera 0 focal and lens distortion released, camera 1 held"
     );
 }
 
 #[test]
-fn the_focal_gate_names_the_first_camera_that_cannot_release_its_focal() {
+fn the_focal_gate_names_the_camera_that_cannot_release_its_focal() {
     let (mut state, _) = two_camera_state();
     {
         let recon = state.scene[0].recon_mut();
@@ -1277,7 +1286,12 @@ fn the_focal_gate_names_the_first_camera_that_cannot_release_its_focal() {
     }
     let edited = state.scene[0].edited();
     assert_eq!(crate::bundle_adjust_prompt::refusal(edited), None);
-    let why = crate::bundle_adjust_prompt::focal_refusal(edited).expect("camera 1 is a PINHOLE");
+    let gates = crate::bundle_adjust_prompt::camera_gates(edited);
+    assert_eq!(gates[0].focal_refusal, None);
+    let why = gates[1]
+        .focal_refusal
+        .as_deref()
+        .expect("camera 1 is a PINHOLE");
     assert!(why.contains("camera 1, a PINHOLE camera"), "{why}");
 }
 
@@ -1288,7 +1302,9 @@ fn the_gate_and_the_focal_gate_pass_on_a_node_that_can_be_adjusted() {
     assert_eq!(crate::bundle_adjust_prompt::refusal(edited), None);
     // The demo camera is a two-focal PINHOLE, whose focal the adjustment cannot
     // release: the checkbox is greyed and says so.
-    assert!(crate::bundle_adjust_prompt::focal_refusal(edited).is_some());
+    assert!(crate::bundle_adjust_prompt::camera_gates(edited)[0]
+        .focal_refusal
+        .is_some());
 }
 
 // ── Move camera: the bulk edit that moves one pose ──────────────────────
@@ -2253,4 +2269,114 @@ fn a_gesture_applied_while_the_dock_is_swapped_out_loses_the_raise() {
         !state.is_panel_open(crate::dock::Tab::TrackView),
         "the raise reached the real dock from inside the swap",
     );
+}
+
+/// [`two_camera_state`] with camera 1 a four-coefficient `SFMTOOL_PINHOLE` on
+/// a 45° domain whose spline is flat, so it is still the pinhole the
+/// observations were made through.
+fn spline_camera_state() -> (AppState, ReconId) {
+    let (mut state, id) = two_camera_state();
+    let recon = state.scene[0].recon_mut();
+    let (f, _) = recon.image_table.cameras[1].focal_lengths();
+    let (cx, cy) = recon.image_table.cameras[1].principal_point();
+    recon.image_table.cameras[1].model = sfmtool_core::CameraModel::SfmtoolPinhole {
+        focal_length: f,
+        principal_point_x: cx,
+        principal_point_y: cy,
+        bspline_rho_max: 1.0,
+        bspline: vec![0.0; 4],
+    };
+    (state, id)
+}
+
+#[test]
+fn the_refit_dialog_reads_its_fields_off_a_spline_camera_and_refuses_the_rest() {
+    let (state, _) = spline_camera_state();
+    let edited = state.scene[0].edited();
+    let gates = crate::refit_spline_prompt::RefitSplineGates::of(edited, 1).expect("a spline");
+    assert_eq!(
+        (gates.camera, gates.camera_model, gates.coeff_count),
+        (1, "SFMTOOL_PINHOLE", 4)
+    );
+    assert!(
+        (gates.domain_deg - 45.0).abs() < 1e-9,
+        "{}",
+        gates.domain_deg
+    );
+    // The node has inline keypoints, so the outermost observation is known.
+    assert!(gates.keypoint_extent.observed.is_some());
+
+    let why = crate::refit_spline_prompt::RefitSplineGates::of(edited, 0).expect_err("a pinhole");
+    assert!(why.contains("SIMPLE_PINHOLE camera has no spline"), "{why}");
+    let why = crate::refit_spline_prompt::RefitSplineGates::of(edited, 7).expect_err("no camera");
+    assert!(why.contains("Camera 7 does not exist"), "{why}");
+}
+
+#[test]
+fn a_refit_of_a_spline_pushes_one_version_labelled_with_the_change() {
+    let (mut state, id) = spline_camera_state();
+    let request = crate::state::edits::SwitchCameraModelRequest {
+        camera: 1,
+        coeff_count: Some(6),
+        spline_domain_deg: Some(50.0),
+        ..Default::default()
+    };
+    let entry = state.switch_camera_model(id, &request).expect("a refit");
+    assert_eq!(
+        entry.refit.theta_fit_source,
+        sfmtool_core::camera::refit_intrinsics::ThetaFitSource::SplineDomain
+    );
+
+    let node = &state.scene[0];
+    assert_eq!(node.history.versions().len(), 2);
+    assert_eq!(
+        node.history.current_version().label,
+        "Refit spline of camera 1 of run_a: 4 → 6 coefficients, domain 45.0° → 50.0°"
+    );
+    let camera = &node.recon().image_table.cameras[1];
+    assert_eq!(camera.model.radial_spline().expect("a spline").0.len(), 6);
+    // Only the named camera changed.
+    assert_eq!(
+        node.recon().image_table.cameras[0].model_name(),
+        "SIMPLE_PINHOLE"
+    );
+    let row = newest(&state);
+    assert!(!row.failed);
+    assert!(
+        row.text.contains("fit rms ") && row.text.contains("median error"),
+        "{}",
+        row.text
+    );
+
+    // Undo is the old camera back.
+    state.undo(id).expect("one edit to undo");
+    let camera = &state.scene[0].recon().image_table.cameras[1];
+    assert_eq!(camera.model.radial_spline().expect("a spline").0.len(), 4);
+}
+
+#[test]
+fn a_refused_switch_names_the_camera_and_pushes_nothing() {
+    let (mut state, id) = spline_camera_state();
+    let request = crate::state::edits::SwitchCameraModelRequest {
+        camera: 1,
+        spline_domain_deg: Some(95.0),
+        ..Default::default()
+    };
+    let why = state
+        .switch_camera_model(id, &request)
+        .expect_err("past 90°");
+    assert!(why.contains("camera 1"), "{why}");
+    assert_eq!(state.scene[0].history.versions().len(), 1);
+    assert!(newest(&state).failed);
+
+    // A coefficient count on a model without a spline is refused too.
+    let request = crate::state::edits::SwitchCameraModelRequest {
+        camera: 0,
+        coeff_count: Some(6),
+        ..Default::default()
+    };
+    let why = state
+        .switch_camera_model(id, &request)
+        .expect_err("no spline");
+    assert!(why.contains("camera 0"), "{why}");
 }

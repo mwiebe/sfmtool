@@ -24,16 +24,17 @@ as `sfmtool_core::camera::refit_intrinsics`, and is bound as `CameraIntrinsics.r
 
 ```rust
 pub enum RefitTarget {
-    SfmtoolFisheye { coeff_count: usize },
-    SfmtoolPinhole { coeff_count: usize },
+    SfmtoolFisheye { coeff_count: Option<usize> }, // None: resolved per source
+    SfmtoolPinhole { coeff_count: Option<usize> },
     EquidistantFisheye,
     Colmap(&'static str),
 }
 
 impl RefitTarget {
-    pub fn from_name(model: &str, coeff_count: Option<usize>) -> Result<Self, RefitError>;
+    pub fn from_name(camera_model: &str, coeff_count: Option<usize>) -> Result<Self, RefitError>;
     pub fn model_name(&self) -> &'static str;
-    pub fn coeff_count(&self) -> Option<usize>;
+    pub fn coeff_count(&self) -> Option<usize>;              // as stated
+    pub fn coeff_count_for(&self, source: &CameraIntrinsics) -> Option<usize>;
     pub fn is_perspective(&self) -> bool;
 }
 
@@ -79,9 +80,9 @@ pub struct CameraIntrinsicsRefit {
 }
 
 pub enum RefitError {
-    UnknownTarget { model: String },
-    CoeffCount { model: &'static str, count: usize },
-    CoeffCountNotApplicable { model: &'static str },
+    UnknownTarget { camera_model: String },
+    CoeffCount { camera_model: &'static str, count: usize },
+    CoeffCountNotApplicable { camera_model: &'static str },
     ThetaFitInvalid { theta_fit_deg: f64 },
     BeyondTrustedBound { theta_fit_deg: f64, trusted_deg: f64 },
     PerspectivePast90 { theta_fit_deg: f64 },
@@ -90,7 +91,7 @@ pub enum RefitError {
     SplineDomainInvalid { spline_domain_deg: f64 },
     NotMonotone,
     TrustedBoundShort { trusted_deg: f64, theta_fit_deg: f64 },
-    NotSplineSource { model: &'static str },
+    NotSplineSource { camera_model: &'static str },
     Degenerate { reason: &'static str },
 }
 
@@ -107,6 +108,14 @@ pub fn refit_spline(
     coeff_count: usize,
     spline_domain_deg: Option<f64>, // None: the source's domain end, copied exactly
 ) -> Result<CameraIntrinsicsRefit, RefitError>;
+
+/// A spline camera's domain end as an incidence angle in degrees, the unit
+/// `spline_domain_deg` takes; `None` for a camera with no spline.
+pub fn spline_domain_deg(camera: &CameraIntrinsics) -> Option<f64>;
+
+/// The counts a spline with a curve takes, 2 to 32: what a count field is
+/// bounded by.
+pub const SPLINE_COEFF_COUNT_RANGE: RangeInclusive<usize>;
 ```
 
 The source's trusted bound is
@@ -139,9 +148,12 @@ coefficient count is not a move between model families, and none of the
 defaults of `refit_camera_intrinsics` fit it: the domain end should stay where it
 is, exactly, and the fit should cover that whole domain rather than a trusted
 bound the source does not have. `refit_spline` states both, and takes only what
-can change. The bundle adjustment's coefficient count
-([`../reconstruction/bundle-adjust.md`](../reconstruction/bundle-adjust.md)) is
-its caller.
+can change. The reconstruction-level switch
+([`../reconstruction/switch-camera-model.md`](../reconstruction/switch-camera-model.md))
+is its caller, for a spline camera switched to its own spline model: that is how
+`sfm xform --camera-model`, the viewer's "Refit spline…" action and the MCP tool
+`switch_camera_model` change a spline's count or domain. Bundle adjustment then
+refines the coefficients the refit gave it.
 
 **A spline fit is constrained to be monotone, not refused when it is not.** A
 lens model must be invertible, since every keypoint's ray comes from the
@@ -398,7 +410,7 @@ no dependency of the workspace carries a quadratic-programming or NNLS routine.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `coeff_count` | `DEFAULT_COEFF_COUNT`, `8` | Spline coefficients for a spline target named without a count; `0` or `2..=MAX_COEFF_COUNT` (`32`). |
+| `coeff_count` | the source's own count when it carries the target's spline, else `DEFAULT_COEFF_COUNT`, `8` | Spline coefficients for a spline target named without a count, resolved per source by `RefitTarget::coeff_count_for`; `0` or `2..=MAX_COEFF_COUNT` (`32`). |
 | `theta_fit_deg` | trusted bound, else far image corner | The largest incidence angle sampled. |
 | `spline_domain_deg` | far image corner, `r_corner / √(fx·fy)` | Where a spline target's domain ends. |
 | `THETA_SAMPLES` | `96` | Incidence angles sampled over `(0, θ_fit]`. |
@@ -412,10 +424,10 @@ All are constants in [refit_intrinsics.rs](../../../crates/sfmtool-core/src/came
 
 ## Python bindings
 
-`CameraIntrinsics.refit(target, *, coeff_count=None, theta_fit_deg=None,
+`CameraIntrinsics.refit(camera_model, *, coeff_count=None, theta_fit_deg=None,
 spline_domain_deg=None)` returns `(CameraIntrinsics, report)`. The report is a
-dict: `model`, `theta_fit_deg`, `theta_fit_source` (`"trusted_bound"`,
-`"observations"`, `"image_corner"` or `"given"`), `spline_domain_deg` (`None` for
+dict: `camera_model`, `theta_fit_deg`, `theta_fit_source` (`"trusted_bound"`,
+`"observations"`, `"image_corner"`, `"given"` or `"spline_domain"`), `spline_domain_deg` (`None` for
 a non-spline target), `rms_px`, `max_px`, `radial_rms_px`, `dropped` (one
 sentence per term) and `extent` (`edge_deg`, `corner_deg`, `source_trusted_deg`,
 `source_fold_deg`) and `monotone_constraint` (`active`, `active_angles`, and
@@ -478,7 +490,8 @@ bindings are tested in
   ([`../reconstruction/outermost-keypoint.md`](../reconstruction/outermost-keypoint.md)),
   the detected one where the images' `.sift` files can be read and otherwise
   the observed one, labelled as such, with a button that sets the domain to its
-  angle. `refit_spline` makes the change on a camera already switched.
+  angle. `refit_spline` makes the change on a camera already switched, reached
+  as a switch of the camera to its own spline model.
 
 ## Open questions
 

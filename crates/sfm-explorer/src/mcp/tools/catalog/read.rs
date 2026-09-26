@@ -65,7 +65,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_camera_intrinsics",
-            description: "One camera intrinsics record — the lens: model, sensor size, every \
+            description: "One camera intrinsics record — the lens: camera_model, sensor size, every \
                           stored parameter by name, and the camera images that use it. The \
                           parameters are a name-to-value map in the model's own declaration \
                           order, which is the order `sfm inspect` prints. outermost_keypoint \
@@ -73,7 +73,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           as a radius in pixels and an incidence angle under this model: \
                           observed among the reconstruction's observations, and detected \
                           among every feature of the images' .sift files (null when none is \
-                          readable). It is the angle to set bundle_adjust's \
+                          readable). It is the angle to set switch_camera_model's \
                           spline_domain_deg from.",
             kind: Read,
             schema: object(

@@ -345,7 +345,7 @@ class TestSwitchCameraModel:
         assert entry["source"].model == "SIMPLE_RADIAL"
         assert entry["target"] == value.cameras[0]
         fit = entry["fit"]
-        assert fit["model"] == "SFMTOOL_PINHOLE"
+        assert fit["camera_model"] == "SFMTOOL_PINHOLE"
         # A perspective source has no trusted bound: the fit reaches the
         # observations' extent.
         assert fit["theta_fit_source"] == "observations"
@@ -359,10 +359,10 @@ class TestSwitchCameraModel:
 
     def test_the_distortion_is_released_by_the_adjustment(self, embedded):
         switched, _ = embedded.switch_camera_model("SFMTOOL_PINHOLE", coeff_count=4)
-        with pytest.raises(ValueError, match="together with the focal"):
+        with pytest.raises(ValueError, match="camera 0 .* together with its focal"):
             switched.bundle_adjust(opt_distortion=True)
         pinhole, _ = embedded.switch_camera_model("SIMPLE_PINHOLE")
-        with pytest.raises(ValueError, match="no camera"):
+        with pytest.raises(ValueError, match="camera 0, a SIMPLE_PINHOLE, has no lens"):
             pinhole.bundle_adjust(opt_f=True, opt_distortion=True)
 
         adjusted, report = switched.bundle_adjust(opt_f=True, opt_distortion=True)
@@ -383,30 +383,32 @@ class TestSwitchCameraModel:
         )
         assert adjusted.materialize()[0].cameras[0].model == "SIMPLE_RADIAL_FISHEYE"
 
-    def test_the_spline_is_refitted_to_a_new_coefficient_count(self, embedded):
+    def test_a_spline_switched_to_its_own_model_is_refitted(self, embedded):
         switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
-        with pytest.raises(ValueError, match="only while the lens distortion"):
-            switched.bundle_adjust(opt_f=True, spline_coeff_count=8)
-        with pytest.raises(ValueError, match="2 to 32 coefficients, not 40"):
-            switched.bundle_adjust(
-                opt_f=True, opt_distortion=True, spline_coeff_count=40
-            )
-        fisheye, _ = embedded.switch_camera_model("SIMPLE_RADIAL_FISHEYE")
-        with pytest.raises(ValueError, match="no camera .* coefficient count"):
-            fisheye.bundle_adjust(opt_f=True, opt_distortion=True, spline_coeff_count=8)
+        before = switched.materialize()[0].cameras[0].to_dict()["parameters"]
+        with pytest.raises(ValueError, match="2 to 32 spline coefficients, not 40"):
+            switched.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=40)
 
-        adjusted, report = switched.bundle_adjust(
-            opt_f=True, opt_distortion=True, spline_coeff_count=8
+        refitted, report = switched.switch_camera_model(
+            "SFMTOOL_FISHEYE", coeff_count=8
         )
-        (camera,) = report["cameras"]
-        refit = camera["spline_refit"]
-        assert (refit["coeffs_before"], refit["coeffs_after"]) == (6, 8)
-        assert 0.0 <= refit["rms_px"] <= refit["max_px"] < 1.0
-        params = adjusted.materialize()[0].cameras[0].to_dict()["parameters"]
+        (entry,) = report["cameras"]
+        fit = entry["fit"]
+        # Over the whole spline domain, not the observations' extent.
+        assert fit["theta_fit_source"] == "spline_domain"
+        assert fit["theta_fit_deg"] == pytest.approx(
+            np.degrees(before["bspline_theta_max"])
+        )
+        assert 0.0 <= fit["rms_px"] <= fit["max_px"] < 1.0
+        params = refitted.materialize()[0].cameras[0].to_dict()["parameters"]
         assert params["bspline_coeff_count"] == 8
-
-        _, kept = switched.bundle_adjust(opt_f=True, opt_distortion=True)
-        assert kept["cameras"][0]["spline_refit"] is None
+        # No domain given: the domain end is kept exactly.
+        assert params["bspline_theta_max"] == before["bspline_theta_max"]
+        # Poses are not touched; the adjustment is a separate step.
+        np.testing.assert_array_equal(
+            refitted.materialize()[0].translations,
+            switched.materialize()[0].translations,
+        )
 
     def test_a_dipped_spline_is_refitted_under_the_monotone_constraint(self, embedded):
         from sfmtool._sfmtool.geometry import CameraIntrinsics
@@ -427,46 +429,111 @@ class TestSwitchCameraModel:
         )
         edited = EditedReconstruction(value.clone_with_changes(cameras=[dipped]))
 
-        _, report = edited.bundle_adjust(
-            opt_f=True, opt_distortion=True, max_iters=1, spline_coeff_count=12
-        )
-        (camera,) = report["cameras"]
-        refit = camera["spline_refit"]
-        assert (refit["coeffs_before"], refit["coeffs_after"]) == (8, 12)
-        constraint = refit["monotone_constraint"]
+        _, report = edited.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=12)
+        fit = report["cameras"][0]["fit"]
+        assert fit["theta_fit_source"] == "spline_domain"
+        constraint = fit["monotone_constraint"]
         assert constraint["active"]
         assert constraint["active_angles"] >= 1
         low, high = constraint["range_deg"]
         assert 100.0 < low <= high < 130.0
-        assert refit["max_px"] < 5.0
+        assert fit["max_px"] < 5.0
 
-        _, unconstrained = switched.bundle_adjust(
-            opt_f=True, opt_distortion=True, max_iters=1, spline_coeff_count=12
+        _, unconstrained = switched.switch_camera_model(
+            "SFMTOOL_FISHEYE", coeff_count=12
         )
-        kept = unconstrained["cameras"][0]["spline_refit"]["monotone_constraint"]
+        kept = unconstrained["cameras"][0]["fit"]["monotone_constraint"]
         assert kept == {"active": False, "active_angles": 0, "range_deg": None}
 
-    def test_the_spline_domain_is_moved_before_the_solve(self, embedded):
+    def test_the_spline_domain_is_moved_by_a_refit(self, embedded):
         switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
-        with pytest.raises(ValueError, match="count or domain"):
-            switched.bundle_adjust(opt_f=True, spline_domain_deg=40.0)
-        with pytest.raises(ValueError, match="camera 0 could not be refitted"):
-            switched.bundle_adjust(
-                opt_f=True, opt_distortion=True, spline_domain_deg=200.0
+        with pytest.raises(ValueError, match="camera 0: the spline domain"):
+            switched.switch_camera_model(
+                "SFMTOOL_FISHEYE", coeff_count=6, spline_domain_deg=200.0
             )
 
-        adjusted, report = switched.bundle_adjust(
-            opt_f=True, opt_distortion=True, spline_domain_deg=40.0
+        refitted, report = switched.switch_camera_model(
+            "SFMTOOL_FISHEYE", coeff_count=6, spline_domain_deg=40.0
         )
-        (camera,) = report["cameras"]
-        refit = camera["spline_refit"]
-        assert (refit["coeffs_before"], refit["coeffs_after"]) == (6, 6)
-        assert refit["domain_after_deg"] == pytest.approx(40.0)
-        assert refit["domain_before_deg"] != pytest.approx(40.0)
-        observed = camera["outermost_observed"]
-        assert observed["radius_px"] > 0 and observed["theta_deg"] > 0
-        params = adjusted.materialize()[0].cameras[0].to_dict()["parameters"]
+        fit = report["cameras"][0]["fit"]
+        assert fit["spline_domain_deg"] == pytest.approx(40.0)
+        assert fit["theta_fit_deg"] == pytest.approx(40.0)
+        params = refitted.materialize()[0].cameras[0].to_dict()["parameters"]
         assert params["bspline_theta_max"] == pytest.approx(np.radians(40.0))
+        assert params["bspline_coeff_count"] == 6
+
+    def test_the_adjustment_reports_the_outermost_observation(self, embedded):
+        switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
+        _, report = switched.bundle_adjust(opt_f=True, opt_distortion=True)
+        observed = report["cameras"][0]["outermost_observed"]
+        assert observed["radius_px"] > 0 and observed["theta_deg"] > 0
+
+    @staticmethod
+    def _two_cameras(edited, second):
+        """``edited``'s value with its odd images taken through ``second``, a
+        second camera appended to the table."""
+        value = edited.materialize()[0]
+        indexes = np.arange(value.image_count, dtype=np.uint32) % 2
+        return EditedReconstruction(
+            value.clone_with_changes(
+                cameras=[value.cameras[0], second], camera_indexes=indexes
+            )
+        )
+
+    def test_releases_are_chosen_per_camera(self, embedded):
+        switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
+        spline = switched.materialize()[0].cameras[0]
+        rig = self._two_cameras(switched, spline)
+
+        adjusted, report = rig.bundle_adjust(
+            opt_f=True,
+            opt_distortion=True,
+            releases=[{"focal": True, "distortion": True}, {}],
+        )
+        released = [
+            (c["camera"], c["focal_released"], c["distortion_released"])
+            for c in report["cameras"]
+        ]
+        assert released == [(0, True, True), (1, False, False)]
+        # The held camera comes back exactly as it went in.
+        assert adjusted.materialize()[0].cameras[1] == spline
+
+        # With no list, the keyword defaults apply to every camera.
+        _, both = rig.bundle_adjust(opt_f=True, opt_distortion=True)
+        assert [c["distortion_released"] for c in both["cameras"]] == [True, True]
+
+        # Every camera held still refines the poses.
+        _, held = rig.bundle_adjust(releases=[{}, {"focal": False}])
+        assert not any(c["focal_released"] for c in held["cameras"])
+
+    def test_a_rig_holds_the_camera_whose_model_cannot_release(self, embedded):
+        switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
+        opencv, _ = embedded.switch_camera_model("OPENCV_FISHEYE")
+        rig = self._two_cameras(switched, opencv.materialize()[0].cameras[0])
+
+        with pytest.raises(ValueError, match="camera 1, a OPENCV_FISHEYE"):
+            rig.bundle_adjust(opt_f=True)
+        _, report = rig.bundle_adjust(
+            releases=[{"focal": True, "distortion": True}, {}]
+        )
+        assert [c["focal_released"] for c in report["cameras"]] == [True, False]
+
+    def test_a_bad_release_list_is_refused(self, embedded):
+        switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
+        with pytest.raises(ValueError, match="2 entries and the reconstruction has 1"):
+            switched.bundle_adjust(releases=[{}, {}])
+        with pytest.raises(ValueError, match="'focus'"):
+            switched.bundle_adjust(releases=[{"focus": True}])
+        with pytest.raises(ValueError, match="camera 0 .* together with its focal"):
+            switched.bundle_adjust(releases=[{"distortion": True}])
+
+    def test_the_release_capabilities_are_read_off_the_camera(self, embedded):
+        switched, _ = embedded.switch_camera_model("SFMTOOL_FISHEYE", coeff_count=6)
+        spline = switched.materialize()[0].cameras[0]
+        assert spline.focal_is_releasable and spline.distortion_is_releasable
+        simple_radial = embedded.materialize()[0].cameras[0]
+        assert not simple_radial.focal_is_releasable
+        assert not simple_radial.distortion_is_releasable
 
     def test_the_outermost_keypoints_are_observed_and_detected(self, embedded):
         recon = embedded.materialize()[0]

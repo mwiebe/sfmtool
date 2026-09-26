@@ -302,25 +302,26 @@ def parse_localize_keypoints_params(param: str) -> LocalizeKeypointsTransform:
     )
 
 
+def _parse_camera_list(value: str) -> list[int]:
+    """Parse ``0+1+3`` into camera indexes."""
+    return [int(v) for v in value.split("+") if v.strip()]
+
+
 # Each --bundle-adjust key maps to a caster; the transform and the adjustment
 # own the range checks.
 _BUNDLE_ADJUST_KEYS: dict[str, Callable[[str], object]] = {
-    "coeffs": int,
-    "domain": float,
+    "cameras": _parse_camera_list,
 }
 
 
 def parse_bundle_adjust_params(param: str) -> BundleAdjustTransform:
     """Parse a ``--bundle-adjust`` comma-separated ``key=value`` string.
 
-    An empty string is the bare option. ``coeffs=N`` refits every spline camera
-    to ``N`` spline coefficients before the solve, and ``domain=DEG`` on a
-    domain ending at ``DEG`` degrees, both in one refit.
+    An empty string is the bare option. ``cameras=0+1`` releases the lens of
+    those cameras only and holds the rest.
     """
     kwargs = _parse_kv_params(param, "--bundle-adjust", _BUNDLE_ADJUST_KEYS)
-    return BundleAdjustTransform(
-        coeff_count=kwargs.get("coeffs"), spline_domain_deg=kwargs.get("domain")
-    )
+    return BundleAdjustTransform(cameras=kwargs.get("cameras"))
 
 
 # Each --to-embedded-patches key maps to a caster; the transform constructor owns
@@ -365,11 +366,6 @@ def auto_output_path(input_path: Path, suffix: str = "transformed") -> Path:
         counter += 1
 
 
-def _parse_camera_list(value: str) -> list[int]:
-    """Parse ``0+1+3`` into camera indexes."""
-    return [int(v) for v in value.split("+") if v.strip()]
-
-
 _CAMERA_MODEL_KEYS: dict[str, Callable[[str], object]] = {
     "coeffs": int,
     "fit_to": float,
@@ -380,13 +376,13 @@ _CAMERA_MODEL_KEYS: dict[str, Callable[[str], object]] = {
 
 def parse_camera_model_params(param: str) -> SwitchCameraModelTransform:
     """Parse ``MODEL[,coeffs=N,fit_to=DEG,spline_domain=DEG,cameras=0+1]``."""
-    model, _, rest = param.partition(",")
-    if not model.strip():
+    camera_model, _, rest = param.partition(",")
+    if not camera_model.strip():
         raise click.UsageError("--camera-model needs a model name first")
     kwargs = _parse_kv_params(rest, "--camera-model", _CAMERA_MODEL_KEYS)
     try:
         return SwitchCameraModelTransform(
-            model,
+            camera_model,
             coeff_count=kwargs.get("coeffs"),
             theta_fit_deg=kwargs.get("fit_to"),
             spline_domain_deg=kwargs.get("spline_domain"),

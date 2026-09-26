@@ -373,94 +373,43 @@ fn with_flat_spline_cameras(state: &mut AppState) {
     }
 }
 
-/// A coefficient count refits the spline before the solve, and the reply and
-/// the version say so.
-#[test]
-fn bundle_adjust_refits_the_spline_to_a_new_coefficient_count() {
-    let (mut state, mut viewer) = editable();
-    with_flat_spline_cameras(&mut state);
-    perturb(&mut state, 0.02);
-    let reply = adjusted(
-        &mut state,
-        &mut viewer,
-        json!({
-            "reconstruction_label": "run_a",
-            "release_focal": true,
-            "release_distortion": true,
-            "spline_coeff_count": 6
-        }),
-    );
-    let report = reply["report"].as_str().expect("a report");
-    assert!(report.contains("spline 4 → 6 coefficients"), "{report}");
-    let label = reply["label"].as_str().expect("a label");
-    assert!(
-        label.ends_with(", spline refitted to 6 coefficients"),
-        "{label}"
-    );
-    let camera = &state.scene[0].recon().image_table.cameras[0];
-    let (bspline, _, _) = camera.model.radial_spline().expect("a spline");
-    assert_eq!(bspline.len(), 6);
+/// `run_a` with its camera made a single-focal `SIMPLE_PINHOLE`, which can
+/// release its focal and has no distortion, and a copy of its original
+/// two-focal `PINHOLE` as camera 1 taking image 2, whose focal cannot be
+/// released. Two cameras through the same lens, so the observations still
+/// describe the geometry.
+fn with_two_cameras(state: &mut AppState) {
+    let recon = state.scene[0].recon_mut();
+    let original = recon.image_table.cameras[0].clone();
+    let camera = &mut recon.image_table.cameras[0];
+    let (f, _) = camera.focal_lengths();
+    let (cx, cy) = camera.principal_point();
+    camera.model = sfmtool_core::CameraModel::SimplePinhole {
+        focal_length: f,
+        principal_point_x: cx,
+        principal_point_y: cy,
+    };
+    recon.image_table.cameras.push(original);
+    recon.image_table.images[2].camera_index = 1;
 }
 
-/// A new spline domain refits the spline before the solve, and the label says
-/// where the domain now ends; `get_camera_intrinsics` reports the outermost
-/// observation it can be set from.
+/// The defaults reach every camera, and a `cameras` entry overrides them for
+/// the camera it names; the label says what each camera released.
 #[test]
-fn bundle_adjust_refits_the_spline_to_a_new_domain() {
+fn bundle_adjust_releases_each_camera_as_its_entry_says() {
     let (mut state, mut viewer) = editable();
-    with_flat_spline_cameras(&mut state);
-    let lens = call(
-        &mut state,
-        &mut viewer,
-        "get_camera_intrinsics",
-        json!({ "reconstruction_label": "run_a", "camera_intrinsics_index": 0 }),
-    );
-    let observed = &lens["outermost_keypoint"]["observed"];
-    assert!(observed["radius_px"].is_number(), "{lens}");
-    assert!(observed["theta_deg"].is_number(), "{lens}");
-
+    with_two_cameras(&mut state);
     perturb(&mut state, 0.02);
-    // rho_max 1.0 is a 45° domain; 50° extends it.
-    let reply = adjusted(
-        &mut state,
-        &mut viewer,
-        json!({
-            "reconstruction_label": "run_a",
-            "release_focal": true,
-            "release_distortion": true,
-            "spline_domain_deg": 50.0
-        }),
-    );
-    let report = reply["report"].as_str().expect("a report");
-    assert!(
-        report.contains("spline 4 → 4 coefficients, domain 45.0° → 50.0°"),
-        "{report}"
-    );
-    let label = reply["label"].as_str().expect("a label");
-    assert!(
-        label.ends_with(", spline refitted to 4 coefficients on a 50.0° domain"),
-        "{label}"
-    );
-}
 
-/// A coefficient count without the distortion release is the core function's
-/// refusal, in its words.
-#[test]
-fn bundle_adjust_refuses_a_coefficient_count_without_the_distortion() {
-    let (mut state, mut viewer) = editable();
-    with_flat_spline_cameras(&mut state);
-    let map = json!({
-        "reconstruction_label": "run_a",
-        "release_focal": true,
-        "spline_coeff_count": 6
-    })
-    .as_object()
-    .cloned()
-    .expect("an object");
+    // The default focal release reaches camera 1 too, whose PINHOLE model
+    // cannot take it: the core function's refusal, naming it.
+    let map = json!({ "reconstruction_label": "run_a", "release_focal": true })
+        .as_object()
+        .cloned()
+        .expect("an object");
     let command = tools::parse("bundle_adjust", Some(&map)).expect("a well-formed call");
     let pending = match agent(&mut state, &mut viewer, command) {
         Outcome::Deferred(super::super::Deferred::Background(pending)) => pending,
-        Outcome::Done(Err(e)) => panic!("expected a deferral, got refusal: {e}"),
         _ => panic!("bundle_adjust must defer"),
     };
     state.finish_background_task();
@@ -469,7 +418,286 @@ fn bundle_adjust_refuses_a_coefficient_count_without_the_distortion() {
     else {
         panic!("expected a refusal");
     };
-    assert!(error.0.contains("coefficient count"), "{error}");
+    assert!(error.0.contains("camera 1, a PINHOLE"), "{error}");
+    assert_eq!(version_count(&state), 1);
+
+    // Held through its entry, the solve runs and releases camera 0 alone.
+    let reply = adjusted(
+        &mut state,
+        &mut viewer,
+        json!({
+            "reconstruction_label": "run_a",
+            "release_focal": true,
+            "cameras": [{ "camera_intrinsics_index": 1, "release_focal": false }]
+        }),
+    );
+    let label = reply["label"].as_str().expect("a label");
+    assert_eq!(
+        label,
+        "Bundle adjusted run_a, camera 0 focal released, camera 1 held"
+    );
+    let report = reply["report"].as_str().expect("a report");
+    assert!(
+        report.contains(", camera 0 focal ") && !report.contains("camera 1 focal"),
+        "{report}"
+    );
+    assert_eq!(version_count(&state), 2);
+}
+
+/// An entry naming a camera the reconstruction does not have, or one camera
+/// twice, is refused before anything starts.
+#[test]
+fn bundle_adjust_refuses_a_camera_entry_it_cannot_apply() {
+    let (mut state, mut viewer) = editable();
+    let error = refused_call(
+        &mut state,
+        &mut viewer,
+        "bundle_adjust",
+        json!({
+            "reconstruction_label": "run_a",
+            "cameras": [{ "camera_intrinsics_index": 5 }]
+        }),
+    );
+    assert!(
+        error.0.contains("camera_intrinsics_index 5") && error.0.contains("1 camera"),
+        "{error}"
+    );
+    let error = refused_call(
+        &mut state,
+        &mut viewer,
+        "bundle_adjust",
+        json!({
+            "reconstruction_label": "run_a",
+            "cameras": [{ "camera_intrinsics_index": 0 }, { "camera_intrinsics_index": 0 }]
+        }),
+    );
+    assert!(error.0.contains("twice"), "{error}");
+    assert_eq!(version_count(&state), 1);
+    assert!(state.background_task().is_none());
+}
+
+/// The `cameras` entries parse to overrides whose left-out fields stay open
+/// for the defaults, and an entry with an argument it does not have is
+/// refused.
+#[test]
+fn bundle_adjust_parses_its_camera_entries() {
+    let map = json!({
+        "reconstruction_label": "a",
+        "release_focal": true,
+        "cameras": [
+            { "camera_intrinsics_index": 1, "release_distortion": true },
+            { "camera_intrinsics_index": 0, "release_focal": false, "release_distortion": false }
+        ]
+    })
+    .as_object()
+    .cloned()
+    .expect("an object");
+    let Command::BundleAdjust { cameras, .. } =
+        tools::parse("bundle_adjust", Some(&map)).expect("a well-formed call")
+    else {
+        panic!("not a bundle_adjust");
+    };
+    assert_eq!(
+        cameras,
+        vec![
+            super::super::CameraReleaseOverride {
+                camera_intrinsics_index: 1,
+                release_focal: None,
+                release_distortion: Some(true),
+            },
+            super::super::CameraReleaseOverride {
+                camera_intrinsics_index: 0,
+                release_focal: Some(false),
+                release_distortion: Some(false),
+            },
+        ]
+    );
+
+    for (cameras, expected) in [
+        (json!([{ "camera": 0 }]), "has no argument"),
+        (
+            json!([{ "release_focal": true }]),
+            "camera_intrinsics_index",
+        ),
+        (json!([3]), "cameras"),
+        (json!({ "camera_intrinsics_index": 0 }), "cameras"),
+    ] {
+        let map = json!({ "reconstruction_label": "a", "cameras": cameras })
+            .as_object()
+            .cloned()
+            .expect("an object");
+        let error = tools::parse("bundle_adjust", Some(&map)).expect_err("refused at the parse");
+        assert!(error.0.contains(expected), "{error}");
+    }
+}
+
+/// `switch_camera_model`'s arguments parse into the request the edit takes,
+/// with every default left open.
+#[test]
+fn switch_camera_model_parses_its_request() {
+    let map = json!({ "reconstruction_label": "a", "camera_intrinsics_index": 1 })
+        .as_object()
+        .cloned()
+        .expect("an object");
+    assert_eq!(
+        tools::parse("switch_camera_model", Some(&map)).expect("a well-formed call"),
+        Command::SwitchCameraModel {
+            reconstruction_label: "a".to_string(),
+            request: crate::state::edits::SwitchCameraModelRequest {
+                camera: 1,
+                ..Default::default()
+            },
+        }
+    );
+    let map = json!({
+        "reconstruction_label": "a",
+        "camera_intrinsics_index": 0,
+        "camera_model": "SFMTOOL_FISHEYE",
+        "coeff_count": 10,
+        "spline_domain_deg": 108.0,
+        "theta_fit_deg": 80.0
+    })
+    .as_object()
+    .cloned()
+    .expect("an object");
+    assert_eq!(
+        tools::parse("switch_camera_model", Some(&map)).expect("a well-formed call"),
+        Command::SwitchCameraModel {
+            reconstruction_label: "a".to_string(),
+            request: crate::state::edits::SwitchCameraModelRequest {
+                camera: 0,
+                camera_model: Some("SFMTOOL_FISHEYE".to_string()),
+                coeff_count: Some(10),
+                spline_domain_deg: Some(108.0),
+                theta_fit_deg: Some(80.0),
+            },
+        }
+    );
+    let map = json!({ "reconstruction_label": "a" })
+        .as_object()
+        .cloned()
+        .expect("an object");
+    let error = tools::parse("switch_camera_model", Some(&map)).expect_err("no camera");
+    assert!(error.0.contains("camera_intrinsics_index"), "{error}");
+}
+
+/// With no model named, a spline camera's switch is a refit of its spline:
+/// its own count and domain unless they are named, one version, and the fit's
+/// numbers in the reply.
+#[test]
+fn switch_camera_model_refits_a_spline_with_its_own_count_and_domain_by_default() {
+    let (mut state, mut viewer) = editable();
+    with_flat_spline_cameras(&mut state);
+
+    let reply = call(
+        &mut state,
+        &mut viewer,
+        "switch_camera_model",
+        json!({
+            "reconstruction_label": "run_a",
+            "camera_intrinsics_index": 0,
+            "coeff_count": 6
+        }),
+    );
+    assert_eq!(
+        reply["label"],
+        "Refit spline of camera 0 of run_a: 4 → 6 coefficients, domain 45.0° kept"
+    );
+    assert_eq!(reply["changed"], true);
+    let fit = &reply["fit"];
+    assert_eq!(fit["theta_fit_source"], "spline_domain");
+    assert_eq!(fit["camera_model_before"], "SFMTOOL_PINHOLE");
+    assert_eq!(fit["camera_model_after"], "SFMTOOL_PINHOLE");
+    assert!(fit["rms_px"].as_f64().is_some_and(|r| r >= 0.0), "{fit}");
+    assert!(fit["monotone_constraint"]["active"].is_boolean(), "{fit}");
+    let report = reply["report"].as_str().expect("a report");
+    assert!(
+        report.contains("fit rms ") && report.contains("median error"),
+        "{report}"
+    );
+    let camera = &state.scene[0].recon().image_table.cameras[0];
+    let (bspline, rho_max, _) = camera.model.radial_spline().expect("a spline");
+    assert_eq!(bspline.len(), 6);
+    assert_eq!(
+        rho_max.to_bits(),
+        1.0f64.to_bits(),
+        "the domain end was not kept"
+    );
+    assert_eq!(version_count(&state), 2);
+
+    // A named domain with the count left out keeps the count.
+    let reply = call(
+        &mut state,
+        &mut viewer,
+        "switch_camera_model",
+        json!({
+            "reconstruction_label": "run_a",
+            "camera_intrinsics_index": 0,
+            "spline_domain_deg": 50.0
+        }),
+    );
+    assert_eq!(
+        reply["label"],
+        "Refit spline of camera 0 of run_a: 6 coefficients kept, domain 45.0° → 50.0°"
+    );
+    assert!((reply["fit"]["spline_domain_deg"].as_f64().unwrap() - 50.0).abs() < 1e-9);
+    assert_eq!(version_count(&state), 3);
+}
+
+/// A named model is a switch between models.
+#[test]
+fn switch_camera_model_switches_to_a_named_model() {
+    let (mut state, mut viewer) = editable();
+    let before = state.scene[0].recon().image_table.cameras[0]
+        .model_name()
+        .to_string();
+    let reply = call(
+        &mut state,
+        &mut viewer,
+        "switch_camera_model",
+        json!({
+            "reconstruction_label": "run_a",
+            "camera_intrinsics_index": 0,
+            "camera_model": "sfmtool_pinhole"
+        }),
+    );
+    assert_eq!(
+        reply["label"],
+        format!("Switched camera 0 of run_a from {before} to SFMTOOL_PINHOLE")
+    );
+    assert_eq!(
+        state.scene[0].recon().image_table.cameras[0].model_name(),
+        "SFMTOOL_PINHOLE"
+    );
+    assert_eq!(version_count(&state), 2);
+}
+
+/// A camera the table does not have, and a refit the model cannot make, are
+/// refused naming the camera, and push nothing.
+#[test]
+fn switch_camera_model_refuses_naming_the_camera() {
+    let (mut state, mut viewer) = editable();
+    with_flat_spline_cameras(&mut state);
+    let error = refused_call(
+        &mut state,
+        &mut viewer,
+        "switch_camera_model",
+        json!({ "reconstruction_label": "run_a", "camera_intrinsics_index": 5 }),
+    );
+    assert!(error.0.contains("camera 5 does not exist"), "{error}");
+    // SFMTOOL_PINHOLE cannot end its domain at 95°.
+    let error = refused_call(
+        &mut state,
+        &mut viewer,
+        "switch_camera_model",
+        json!({
+            "reconstruction_label": "run_a",
+            "camera_intrinsics_index": 0,
+            "spline_domain_deg": 95.0
+        }),
+    );
+    assert!(error.0.contains("camera 0"), "{error}");
+    assert!(error.0.contains("spline domain"), "{error}");
     assert_eq!(version_count(&state), 1);
 }
 
@@ -1574,8 +1802,7 @@ fn the_editing_defaults_are_what_the_schemas_say() {
             reconstruction_label: "a".to_string(),
             release_focal: true,
             release_distortion: false,
-            spline_coeff_count: None,
-            spline_domain_deg: None,
+            cameras: Vec::new(),
         }
     );
     assert_eq!(
@@ -1591,44 +1818,7 @@ fn the_editing_defaults_are_what_the_schemas_say() {
             reconstruction_label: "a".to_string(),
             release_focal: true,
             release_distortion: true,
-            spline_coeff_count: None,
-            spline_domain_deg: None,
-        }
-    );
-    assert_eq!(
-        parse(
-            "bundle_adjust",
-            json!({
-                "reconstruction_label": "a",
-                "release_focal": true,
-                "release_distortion": true,
-                "spline_coeff_count": 12
-            })
-        ),
-        Command::BundleAdjust {
-            reconstruction_label: "a".to_string(),
-            release_focal: true,
-            release_distortion: true,
-            spline_coeff_count: Some(12),
-            spline_domain_deg: None,
-        }
-    );
-    assert_eq!(
-        parse(
-            "bundle_adjust",
-            json!({
-                "reconstruction_label": "a",
-                "release_focal": true,
-                "release_distortion": true,
-                "spline_domain_deg": 108.5
-            })
-        ),
-        Command::BundleAdjust {
-            reconstruction_label: "a".to_string(),
-            release_focal: true,
-            release_distortion: true,
-            spline_coeff_count: None,
-            spline_domain_deg: Some(108.5),
+            cameras: Vec::new(),
         }
     );
     assert_eq!(

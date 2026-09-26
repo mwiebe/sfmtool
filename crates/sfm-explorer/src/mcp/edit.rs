@@ -361,16 +361,48 @@ pub(super) fn add_camera_image_to_tracks(
 /// the GUI thread; a long one answers with a handle instead of timing out on
 /// the transport, which is what the call used to do for any reconstruction
 /// worth adjusting.
+///
+/// `defaults` is the release every camera of the node's table takes, and each
+/// of `overrides` replaces it for one camera, field by field. An override
+/// naming a camera the table does not have, or naming one camera twice, is
+/// refused before anything starts. `options` carries the rest of the request;
+/// its release list is the one built here.
 pub(super) fn bundle_adjust(
     state: &mut AppState,
     label: &str,
-    options: &sfmtool_core::BundleAdjustOptions,
+    defaults: sfmtool_core::reconstruction::bundle_adjust::CameraRelease,
+    overrides: &[super::CameraReleaseOverride],
+    mut options: sfmtool_core::BundleAdjustOptions,
 ) -> super::Outcome {
     let id = match resolve_reconstruction(state, Some(label)) {
         Ok(id) => id,
         Err(error) => return super::Outcome::Done(Err(error)),
     };
-    if let Err(message) = state.start_bundle_adjust(id, options) {
+    let count = state
+        .node(id)
+        .map_or(0, |node| node.edited().base.image_table.cameras.len());
+    let mut releases = vec![defaults; count];
+    let mut named = vec![false; count];
+    for entry in overrides {
+        let c = entry.camera_intrinsics_index;
+        let Some(slot) = releases.get_mut(c) else {
+            return super::Outcome::Done(Err(ToolError::new(format!(
+                "bundle_adjust names camera_intrinsics_index {c} in cameras, and {label} has \
+                 {count} camera(s)."
+            ))));
+        };
+        if std::mem::replace(&mut named[c], true) {
+            return super::Outcome::Done(Err(ToolError::new(format!(
+                "bundle_adjust names camera_intrinsics_index {c} twice in cameras."
+            ))));
+        }
+        *slot = sfmtool_core::reconstruction::bundle_adjust::CameraRelease {
+            focal: entry.release_focal.unwrap_or(defaults.focal),
+            distortion: entry.release_distortion.unwrap_or(defaults.distortion),
+        };
+    }
+    options.releases = releases;
+    if let Err(message) = state.start_bundle_adjust(id, &options) {
         return super::Outcome::Done(Err(ToolError::new(message)));
     }
     let task = state.background_task().expect("the operation just started");
@@ -381,6 +413,66 @@ pub(super) fn bundle_adjust(
         label: task.label.clone(),
         started: task.started,
     }))
+}
+
+/// `switch_camera_model`: one camera switched to a model fitted to it, landed
+/// as the node's next version.
+///
+/// The step the Camera Intrinsics panel's `Refit spline…` takes, with any
+/// target model: an omitted `camera_model` is the camera's own, which for a spline
+/// camera makes the switch a refit of its spline, keeping its count and its
+/// domain end unless they are named. Beside the version the reply carries
+/// `fit`, the numbers the Action Log sentence is written from: the fit's
+/// distance from the old camera, where its monotonicity constraint bound, and
+/// the median reprojection error of the camera's observations before and
+/// after.
+pub(super) fn switch_camera_model(
+    state: &mut AppState,
+    label: &str,
+    request: &crate::state::edits::SwitchCameraModelRequest,
+) -> JsonReply {
+    let id = resolve_reconstruction(state, Some(label))?;
+    let mut entry = None;
+    let mut reply = edited(state, id, |state| {
+        entry = Some(state.switch_camera_model(id, request)?);
+        Ok(())
+    })?;
+    let entry = entry.expect("the edit succeeded");
+    let refit = &entry.refit;
+    let constraint = &refit.monotone_constraint;
+    let o = &entry.observations;
+    let fit = json!({
+        "camera_intrinsics_index": entry.camera,
+        "camera_model_before": entry.source.model_name(),
+        "camera_model_after": refit.camera.model_name(),
+        "theta_fit_deg": refit.theta_fit_deg,
+        "theta_fit_source": refit.theta_fit_source.as_str(),
+        "spline_domain_deg": refit.spline_domain_deg,
+        "rms_px": refit.rms_px,
+        "max_px": refit.max_px,
+        "monotone_constraint": {
+            "active": constraint.active,
+            "active_angles": constraint.active_angles,
+            "range_deg": constraint.range_deg,
+        },
+        "observations": o.observations,
+        "median_error_before_px": finite(o.before.median_px),
+        "median_error_after_px": finite(o.after.median_px),
+    });
+    reply
+        .as_object_mut()
+        .expect("a version reply is an object")
+        .insert("fit".into(), fit);
+    Ok(reply)
+}
+
+/// A number the wire can carry: `null` where it is not finite.
+fn finite(value: f64) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
 }
 
 /// `convert_to_embedded_patches`: start the conversion, and answer with its

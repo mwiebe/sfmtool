@@ -67,6 +67,20 @@ use logged::{query_text, screenshot_size};
 pub(crate) use panel_rect::panel_body_points;
 use panel_rect::panel_crop;
 
+/// One entry of `bundle_adjust`'s `cameras` list: what one camera releases,
+/// where it differs from the call's defaults. A field left out takes the
+/// default the call states for every camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CameraReleaseOverride {
+    /// The camera's index in the reconstruction's camera table.
+    pub(crate) camera_intrinsics_index: usize,
+    /// Release its focal length, or `None` for the call's `release_focal`.
+    pub(crate) release_focal: Option<bool>,
+    /// Release its lens distortion, or `None` for the call's
+    /// `release_distortion`.
+    pub(crate) release_distortion: Option<bool>,
+}
+
 /// Everything the MCP surface can ask the viewer to do. One variant per tool.
 ///
 /// A reconstruction is named by its **label**, so these carry a `String` that
@@ -277,12 +291,21 @@ pub(crate) enum Command {
         reconstruction_label: String,
         camera_image: CameraImageSel,
     },
+    /// Bundle-adjust one node. `release_focal` and `release_distortion` are
+    /// the release every camera takes; `cameras` overrides them camera by
+    /// camera.
     BundleAdjust {
         reconstruction_label: String,
         release_focal: bool,
         release_distortion: bool,
-        spline_coeff_count: Option<usize>,
-        spline_domain_deg: Option<f64>,
+        cameras: Vec<CameraReleaseOverride>,
+    },
+    /// Switch one camera of a node to a model fitted to it, as one version: a
+    /// change of model, or, for a spline camera switched to its own model, a
+    /// refit of its spline to a new coefficient count or domain end.
+    SwitchCameraModel {
+        reconstruction_label: String,
+        request: crate::state::edits::SwitchCameraModelRequest,
     },
     /// Convert one node's observations from `sift_files` to
     /// `embedded_patches`, then render bitmaps from readable photographs
@@ -1218,19 +1241,25 @@ pub(crate) fn apply_with_window(
             reconstruction_label,
             release_focal,
             release_distortion,
-            spline_coeff_count,
-            spline_domain_deg,
+            cameras,
         } => edit::bundle_adjust(
             state,
             &reconstruction_label,
-            &sfmtool_core::BundleAdjustOptions {
-                opt_f: release_focal,
-                opt_distortion: release_distortion,
-                spline_coeff_count,
-                spline_domain_deg,
-                ..sfmtool_core::BundleAdjustOptions::default()
+            sfmtool_core::reconstruction::bundle_adjust::CameraRelease {
+                focal: release_focal,
+                distortion: release_distortion,
             },
+            &cameras,
+            sfmtool_core::BundleAdjustOptions::default(),
         ),
+        Command::SwitchCameraModel {
+            reconstruction_label,
+            request,
+        } => done(edit::switch_camera_model(
+            state,
+            &reconstruction_label,
+            &request,
+        )),
         Command::ConvertToEmbeddedPatches {
             reconstruction_label,
         } => edit::convert_to_embedded_patches(state, &reconstruction_label),

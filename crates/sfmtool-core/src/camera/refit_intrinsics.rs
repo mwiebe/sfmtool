@@ -25,11 +25,14 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::RangeInclusive;
 
 use nalgebra::{DMatrix, DVector};
 use sfmtool_sfmr_format::SfmrCamera;
 
-use super::distortion::bspline::{basis_at, bspline_is_monotone, BSPLINE_SUPPORT};
+use super::distortion::bspline::{
+    basis_at, bspline_is_monotone, BSPLINE_SUPPORT, MIN_BSPLINE_COEFFS,
+};
 use super::intrinsics::{fixed_arity_model_by_name, CameraIntrinsics, CameraModel, SplineRadial};
 use super::report::{forward_fold_deg, off_axis_angle_deg, trustworthy_max_theta_deg};
 use constrained_lsq::least_squares_with_inequalities;
@@ -37,13 +40,21 @@ use constrained_lsq::least_squares_with_inequalities;
 mod constrained_lsq;
 
 /// The spline coefficient count a caller gets when it names a spline model
-/// and no count.
+/// and no count, and the source has no spline of that model to keep the
+/// count of.
 pub const DEFAULT_COEFF_COUNT: usize = 8;
 
 /// The largest spline coefficient count the fit accepts. The basis has one
 /// knot span per coefficient past the first, so past this the spans are
 /// narrower than anything a lens calibration can support.
 pub const MAX_COEFF_COUNT: usize = 32;
+
+/// The coefficient counts a spline with a curve takes, which is what a caller
+/// offering the count as a choice bounds its field by. The floor is the fewest
+/// coefficients a spline is defined with (fewer evaluate as the identity); the
+/// ceiling is [`MAX_COEFF_COUNT`]. A target may also have none, which is the
+/// base model alone.
+pub const SPLINE_COEFF_COUNT_RANGE: RangeInclusive<usize> = MIN_BSPLINE_COEFFS..=MAX_COEFF_COUNT;
 
 /// Incidence angles the fit samples, evenly spaced over `(0, θ_fit]`.
 const THETA_SAMPLES: usize = 96;
@@ -86,12 +97,15 @@ pub enum RefitTarget {
     /// `SFMTOOL_FISHEYE` with this many spline coefficients.
     SfmtoolFisheye {
         /// The spline's coefficient count, `0` or `2..=MAX_COEFF_COUNT`.
-        coeff_count: usize,
+        /// `None` keeps the source's count when the source is an
+        /// `SFMTOOL_FISHEYE` with a spline, and is [`DEFAULT_COEFF_COUNT`]
+        /// otherwise; see [`RefitTarget::coeff_count_for`].
+        coeff_count: Option<usize>,
     },
     /// `SFMTOOL_PINHOLE` with this many spline coefficients.
     SfmtoolPinhole {
-        /// The spline's coefficient count, `0` or `2..=MAX_COEFF_COUNT`.
-        coeff_count: usize,
+        /// The spline's coefficient count, as for `SfmtoolFisheye`.
+        coeff_count: Option<usize>,
     },
     /// `EQUIDISTANT_FISHEYE`: the fisheye spline fit with no coefficients.
     EquidistantFisheye,
@@ -103,28 +117,32 @@ impl RefitTarget {
     /// The target a model name asks for, case-insensitively.
     ///
     /// `coeff_count` applies to the two spline models, where `None` is
-    /// [`DEFAULT_COEFF_COUNT`], and is refused for every other model rather
-    /// than ignored. `EQUIRECTANGULAR` is not a lens model and is refused as a
+    /// resolved against each source by [`RefitTarget::coeff_count_for`], and
+    /// is refused for every other model rather than ignored. `EQUIRECTANGULAR` is not a lens model and is refused as a
     /// target, as is any name the registry does not know.
-    pub fn from_name(model: &str, coeff_count: Option<usize>) -> Result<Self, RefitError> {
-        let upper = model.trim().to_ascii_uppercase();
+    pub fn from_name(camera_model: &str, coeff_count: Option<usize>) -> Result<Self, RefitError> {
+        let upper = camera_model.trim().to_ascii_uppercase();
         let target = match upper.as_str() {
-            "SFMTOOL_FISHEYE" => RefitTarget::SfmtoolFisheye {
-                coeff_count: coeff_count.unwrap_or(DEFAULT_COEFF_COUNT),
-            },
-            "SFMTOOL_PINHOLE" => RefitTarget::SfmtoolPinhole {
-                coeff_count: coeff_count.unwrap_or(DEFAULT_COEFF_COUNT),
-            },
+            "SFMTOOL_FISHEYE" => RefitTarget::SfmtoolFisheye { coeff_count },
+            "SFMTOOL_PINHOLE" => RefitTarget::SfmtoolPinhole { coeff_count },
             "EQUIDISTANT_FISHEYE" => RefitTarget::EquidistantFisheye,
-            "EQUIRECTANGULAR" => return Err(RefitError::UnknownTarget { model: upper }),
+            "EQUIRECTANGULAR" => {
+                return Err(RefitError::UnknownTarget {
+                    camera_model: upper,
+                })
+            }
             other => match fixed_arity_model_by_name(other) {
                 Some((name, _)) => RefitTarget::Colmap(name),
-                None => return Err(RefitError::UnknownTarget { model: upper }),
+                None => {
+                    return Err(RefitError::UnknownTarget {
+                        camera_model: upper,
+                    })
+                }
             },
         };
-        if coeff_count.is_some() && target.coeff_count().is_none() {
+        if coeff_count.is_some() && target.spline_radial().is_none() {
             return Err(RefitError::CoeffCountNotApplicable {
-                model: target.model_name(),
+                camera_model: target.model_name(),
             });
         }
         target.check()?;
@@ -141,13 +159,44 @@ impl RefitTarget {
         }
     }
 
-    /// The spline coefficient count, for the two spline models.
+    /// The spline coefficient count the caller stated, for the two spline
+    /// models.
     pub fn coeff_count(&self) -> Option<usize> {
         match self {
             RefitTarget::SfmtoolFisheye { coeff_count }
-            | RefitTarget::SfmtoolPinhole { coeff_count } => Some(*coeff_count),
+            | RefitTarget::SfmtoolPinhole { coeff_count } => *coeff_count,
             _ => None,
         }
+    }
+
+    /// The radial coordinate of the target's spline, for the two spline
+    /// models.
+    fn spline_radial(&self) -> Option<SplineRadial> {
+        match self {
+            RefitTarget::SfmtoolFisheye { .. } => Some(SplineRadial::IncidenceAngle),
+            RefitTarget::SfmtoolPinhole { .. } => Some(SplineRadial::ImagePlaneRadius),
+            _ => None,
+        }
+    }
+
+    /// The coefficient count the target's spline gets when `source` is fitted
+    /// to it: the stated count, or with none stated, the source's own count
+    /// when the source carries a spline of this model, so a refit that changes
+    /// only the domain keeps the camera's count; [`DEFAULT_COEFF_COUNT`] for any
+    /// other source. `None` for a target with no spline.
+    pub fn coeff_count_for(&self, source: &CameraIntrinsics) -> Option<usize> {
+        let radial = self.spline_radial()?;
+        Some(
+            self.coeff_count()
+                .unwrap_or_else(|| match source.model.radial_spline() {
+                    Some((bspline, _, source_radial))
+                        if source_radial == radial && bspline.len() >= MIN_BSPLINE_COEFFS =>
+                    {
+                        bspline.len()
+                    }
+                    _ => DEFAULT_COEFF_COUNT,
+                }),
+        )
     }
 
     /// Whether the target is a perspective model, which has no pixel for a ray
@@ -174,7 +223,7 @@ impl RefitTarget {
         if let Some(n) = self.coeff_count() {
             if n == 1 || n > MAX_COEFF_COUNT {
                 return Err(RefitError::CoeffCount {
-                    model: self.model_name(),
+                    camera_model: self.model_name(),
                     count: n,
                 });
             }
@@ -184,7 +233,7 @@ impl RefitTarget {
                 || fixed_arity_model_by_name(name).is_none()
             {
                 return Err(RefitError::UnknownTarget {
-                    model: name.to_string(),
+                    camera_model: name.to_string(),
                 });
             }
         }
@@ -339,19 +388,19 @@ pub enum RefitError {
     /// The target model is not one a camera can be refitted to.
     UnknownTarget {
         /// The name as given, upper-cased.
-        model: String,
+        camera_model: String,
     },
     /// A spline target with a coefficient count the model does not allow.
     CoeffCount {
         /// The target model.
-        model: &'static str,
+        camera_model: &'static str,
         /// The count asked for.
         count: usize,
     },
     /// A coefficient count given for a model without a spline.
     CoeffCountNotApplicable {
         /// The target model.
-        model: &'static str,
+        camera_model: &'static str,
     },
     /// The fit's largest angle is not a positive angle of at most 180°.
     ThetaFitInvalid {
@@ -400,7 +449,7 @@ pub enum RefitError {
     /// [`refit_spline`] was handed a camera with no spline.
     NotSplineSource {
         /// The source's model.
-        model: &'static str,
+        camera_model: &'static str,
     },
     /// The samples do not determine the target's parameters.
     Degenerate {
@@ -412,19 +461,22 @@ pub enum RefitError {
 impl fmt::Display for RefitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RefitError::UnknownTarget { model } => write!(
+            RefitError::UnknownTarget { camera_model } => write!(
                 f,
-                "'{model}' is not a model a camera can be refitted to; the targets are \
+                "'{camera_model}' is not a model a camera can be refitted to; the targets are \
                  SFMTOOL_FISHEYE, SFMTOOL_PINHOLE, EQUIDISTANT_FISHEYE and the COLMAP lens models"
             ),
-            RefitError::CoeffCount { model, count } => write!(
+            RefitError::CoeffCount {
+                camera_model,
+                count,
+            } => write!(
                 f,
-                "{model} takes 0 or 2 to {MAX_COEFF_COUNT} spline coefficients, not {count}"
+                "{camera_model} takes 0 or 2 to {MAX_COEFF_COUNT} spline coefficients, not {count}"
             ),
-            RefitError::CoeffCountNotApplicable { model } => write!(
+            RefitError::CoeffCountNotApplicable { camera_model } => write!(
                 f,
                 "a coefficient count applies only to SFMTOOL_FISHEYE and SFMTOOL_PINHOLE, \
-                 not to {model}"
+                 not to {camera_model}"
             ),
             RefitError::ThetaFitInvalid { theta_fit_deg } => write!(
                 f,
@@ -470,9 +522,9 @@ impl fmt::Display for RefitError {
                 "the fitted polynomial is trusted only to {trusted_deg:.2}°, short of the fit's \
                  largest angle {theta_fit_deg:.2}°"
             ),
-            RefitError::NotSplineSource { model } => write!(
+            RefitError::NotSplineSource { camera_model } => write!(
                 f,
-                "a {model} camera has no spline; only SFMTOOL_FISHEYE and SFMTOOL_PINHOLE carry one"
+                "a {camera_model} camera has no spline; only SFMTOOL_FISHEYE and SFMTOOL_PINHOLE carry one"
             ),
             RefitError::Degenerate { reason } => write!(f, "the fit is degenerate: {reason}"),
         }
@@ -562,20 +614,13 @@ pub(crate) fn refit_camera_intrinsics_over(
     let (cx, cy) = source.principal_point();
 
     let (camera, domain, constraint) = match target {
-        RefitTarget::SfmtoolFisheye { coeff_count } => fit_spline_camera(
-            source,
-            &samples,
-            SplineRadial::IncidenceAngle,
-            *coeff_count,
-            spline_domain_deg,
-        )?,
-        RefitTarget::SfmtoolPinhole { coeff_count } => fit_spline_camera(
-            source,
-            &samples,
-            SplineRadial::ImagePlaneRadius,
-            *coeff_count,
-            spline_domain_deg,
-        )?,
+        RefitTarget::SfmtoolFisheye { .. } | RefitTarget::SfmtoolPinhole { .. } => {
+            let radial = target.spline_radial().expect("a spline target");
+            let coeff_count = target
+                .coeff_count_for(source)
+                .expect("a spline target has a count");
+            fit_spline_camera(source, &samples, radial, coeff_count, spline_domain_deg)?
+        }
         RefitTarget::EquidistantFisheye => {
             let f = fit_spline(&samples, cx, cy, SplineRadial::IncidenceAngle, 0, 1.0)?.0;
             let camera = CameraIntrinsics {
@@ -662,12 +707,16 @@ pub fn refit_spline(
 ) -> Result<CameraIntrinsicsRefit, RefitError> {
     let Some((_, source_d_max, radial)) = source.model.radial_spline() else {
         return Err(RefitError::NotSplineSource {
-            model: source.model_name(),
+            camera_model: source.model_name(),
         });
     };
     let target = match radial {
-        SplineRadial::IncidenceAngle => RefitTarget::SfmtoolFisheye { coeff_count },
-        SplineRadial::ImagePlaneRadius => RefitTarget::SfmtoolPinhole { coeff_count },
+        SplineRadial::IncidenceAngle => RefitTarget::SfmtoolFisheye {
+            coeff_count: Some(coeff_count),
+        },
+        SplineRadial::ImagePlaneRadius => RefitTarget::SfmtoolPinhole {
+            coeff_count: Some(coeff_count),
+        },
     };
     target.check()?;
     let d_max = match spline_domain_deg {
@@ -700,6 +749,18 @@ pub fn refit_spline(
         Some(domain_deg),
         constraint,
     )
+}
+
+/// Where a spline camera's domain ends, as an incidence angle in degrees:
+/// `bspline_theta_max` itself for `SFMTOOL_FISHEYE`, and the angle whose
+/// tangent is `bspline_rho_max` for `SFMTOOL_PINHOLE`. `None` for a camera with
+/// no spline. A caller showing the domain as an editable value reads it here,
+/// in the unit [`refit_spline`] and [`RefitOptions::spline_domain_deg`] take.
+pub fn spline_domain_deg(camera: &CameraIntrinsics) -> Option<f64> {
+    camera
+        .model
+        .radial_spline()
+        .map(|(_, d_max, radial)| incidence_angle(radial, d_max).to_degrees())
 }
 
 /// The report of a fitted `camera` against its `source` over `samples`.
@@ -1207,15 +1268,15 @@ fn copied_parameters(source: &CameraIntrinsics, names: &[&str]) -> BTreeMap<Stri
         .collect()
 }
 
-/// A camera of `model` with `parameters`, or `None` where the registry refuses
+/// A camera of `camera_model` with `parameters`, or `None` where the registry refuses
 /// them.
 fn build_camera(
     source: &CameraIntrinsics,
-    model: &str,
+    camera_model: &str,
     parameters: BTreeMap<String, f64>,
 ) -> Option<CameraIntrinsics> {
     CameraIntrinsics::try_from(&SfmrCamera {
-        model: model.to_string(),
+        model: camera_model.to_string(),
         width: source.width,
         height: source.height,
         parameters,
@@ -1250,11 +1311,11 @@ fn residuals(samples: &Samples, camera: &CameraIntrinsics) -> Option<Vec<f64>> {
 /// in step.
 fn fit_colmap(
     source: &CameraIntrinsics,
-    model: &'static str,
+    camera_model: &'static str,
     samples: &Samples,
 ) -> Result<CameraIntrinsics, RefitError> {
-    let (_, names) = fixed_arity_model_by_name(model).ok_or(RefitError::UnknownTarget {
-        model: model.to_string(),
+    let (_, names) = fixed_arity_model_by_name(camera_model).ok_or(RefitError::UnknownTarget {
+        camera_model: camera_model.to_string(),
     })?;
     let mut start = copied_parameters(source, names);
     let free: Vec<&str> = names
@@ -1267,7 +1328,7 @@ fn fit_colmap(
         for (name, v) in free.iter().zip(values) {
             parameters.insert(name.to_string(), *v);
         }
-        build_camera(source, model, parameters)
+        build_camera(source, camera_model, parameters)
     };
 
     let evaluate = |values: &[f64], template: &BTreeMap<String, f64>| {
