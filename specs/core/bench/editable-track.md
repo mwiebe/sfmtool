@@ -599,10 +599,13 @@ one track take the track alone, and the caller installs the result with
 
 **The measurement slots are per stage and optional.** A track put on the bench
 from a point has a keypoint and no cluster seed; one started from a pixel has a
-seed and no keypoint. Two slots, each `Option`, say which of those a given
-sighting is without a third state to keep coherent, and they say it per
+seed and no keypoint; an observation added to a track-stage track has both, the
+keypoint where it sits and a seed carrying the shape it was added with. Two
+slots, each `Option`, say which of those a given sighting is, and they say it per
 observation rather than per track, so a report computed against the track as it
-stood when a task began still applies when it finishes.
+stood when a task began still applies when it finishes. Where both are present
+the keypoint is where the sighting is: every reader that asks where an
+observation sits takes the keypoint first (`Observation::site`).
 
 **The verdict and the pin are separate fields.** `verdict` is what the person
 has decided and `pinned` is whether they decided it by hand. Without the second,
@@ -883,12 +886,54 @@ the fit is the classification's, applied to the frame the fit ran against:
 | Was | Is | The frame |
 |-----|----|-----------|
 | bearing | bearing | the refined direction, the tangent frame re-pinned on it, at the angular half-extents it had |
-| bearing | place | the angular half-extents become world ones at the placement distance from the camera-cloud centroid, which is what keeps the patch the apparent size it had when a second sighting gives a bearing its depth |
-| place | bearing | the world half-extents become angular by the distance the frame stood at, the rescale `classify_points_at_infinity` applies to a demoted point, and the frame is re-expressed as the tangent one |
+| bearing | place | the axes are kept, and the half-extents become the world ones that keep the patch the size it looked as a bearing in the images of the `in` observations |
+| place | bearing | the frame is re-expressed as the tangent one, and the half-extents become the angular ones that keep the patch the size it looked as a point in the images of the `in` observations |
 | place | place | the centre moves and nothing else does |
 
-All four keep the patch the apparent size it had, so the next round registers
-the square the person has been looking at.
+All four keep the patch the size it looked in the photographs the track is
+seen in, so the next round registers the square the person has been looking at.
+
+**The size is matched in the observing images, one scale for both axes.** The
+patch's size in one image is the geometric mean of its two projected
+half-axes, each half the pixel distance between the projections of two opposite
+edge midpoints, measured through that image's own camera model and pose -- so a
+fisheye's compression toward its rim is part of the number, and a bearing's
+edge midpoints project as directions. With `t_i` the old frame's size in the
+image of the `i`-th `in` observation and `c_i` the new frame's at a trial
+extent, a small patch's projected size is linear in its half-extent, so scaling
+the trial by `k` makes it `k c_i`, and the `k` that minimises
+`sum_i (ln(k c_i) - ln t_i)^2` is
+
+```text
+k = exp( mean_i ln(t_i / c_i) )
+```
+
+the geometric mean of the per-view ratios. The fit is in logarithms because the
+error is a ratio -- a patch twice too large in one image and half the size in
+another is equally wrong in both -- and so that an image seeing the patch far
+larger than the others, from a camera much closer to it, does not outweigh them
+by the size of its numbers. The trial extent is the old one multiplied (to a
+place) or divided (to a bearing) by the geometric mean distance from the `in`
+observations' cameras to the point, which is the exact answer for a camera
+looking straight at the patch; the fit then corrects for the obliquity and the
+lens across a factor near one, where the linearity holds best. Both directions
+are the same criterion, so a place taken to a bearing and back is the size it
+started at, up to that linearity and to the tangent frame's axes being the ones
+it is re-expressed on.
+
+Where no `in` image measures both frames -- nothing projects, or a size is not a
+positive finite number -- the trial extent stands, and where the observing
+distance is not defined either, the numbers are carried over unchanged.
+
+The reference is the `in` observations' images and not the camera cloud,
+although `materialize_points_at_infinity` gives a whole reconstruction's bearings
+their world size at the distance from the camera-cloud centroid. That rule has
+no particular photograph to answer to; the bench's does, because what the person
+judges is the patch in the photographs that see it. The two differ by the ratio
+of the two distances, which on a capture that walks away from the point is large:
+a point two metres from the three cameras that see it and eleven from the
+centroid comes out more than five times too large in every one of them, which
+on a fisheye runs it off the image circle and the localization then fails.
 
 **The cluster-to-track upgrade goes through the same criterion**, over the
 refined cluster positions: a capture that only ever stated a direction becomes a
@@ -976,6 +1021,19 @@ gesture on a track that already has a scale needs no radius prompt and lands at
 that track's size. With no reference to copy it is the identity, which is one
 pixel to the keypoint-frame unit: a patch of `[-radius, radius]` pixels, and
 what a track with nothing to say about its own scale is worth.
+
+**At the track stage the named pixel is also the observation's keypoint.** The
+track slot is written with a keypoint at that pixel and nothing measured, which
+is what `sight_observation` writes for a sighting placed by hand. The pixel a
+person clicked, or a search placed, is then where the sighting is: an evaluation
+measures from it, and once the observation is `in` a commit can write it without
+a fit first. An observation with no keypoint is one a commit refuses, so without
+this a person who had pointed at the sighting would have to run a correlation
+they did not ask for before the track could be written. The cluster seed is
+written too, at the same pixel and with the same shape, because the track stage
+keeps no shape of its own per observation and a descriptor search run from that
+row warps the one it carries. At the cluster stage the step writes the seed
+alone: a cluster has no keypoints.
 
 `set_verdict` sets one verdict **by hand** and pins it. `apply_thresholds`
 paints the proposed verdicts from the stored measurements onto the unpinned
@@ -1332,8 +1390,8 @@ to the consensus, weighted towards the centre
 three-point model RANSAC drew. Both are the cluster stage's own convention (§ "The cluster
 stage's units"), which is what the next evaluation reads at either stage: at the
 cluster stage the refinement registers the seed, and at the track stage the
-candidate is a row the reading measures and the thresholds propose a verdict
-for. The step sets no verdict and moves nothing that was already on the track.
+candidate's pixel is also its keypoint (§ "Growing and judging") and it is a row
+the reading measures and the thresholds propose a verdict for. The step sets no verdict and moves nothing that was already on the track.
 
 **Where the search runs from** is one observation, named by index, and its pixel
 is the one everything that draws an observation uses: the track stage's keypoint,
@@ -1390,11 +1448,12 @@ reference mode: the row gesture chooses real source appearance without giving
 up the robust consensus of the observations already accepted.
 
 **An admitted image arrives as a seed and no decision.** Its pixel is the
-patch centre's projection. Its shape is the projected `u`/`v` half-frame,
+patch centre's projection, which is also its keypoint, as for any observation
+added at the track stage. Its shape is the projected `u`/`v` half-frame,
 converted from the negative-determinant patch-frame convention into the
 positive-determinant cluster/SIFT convention and divided by the cluster radius,
 exactly as a track-to-cluster stage change seeds an observation. The row is a
-`candidate` with `Provenance::Sweep`, carries no evaluation, and the next
+`candidate` with `Provenance::Sweep`, carries no measurement, and the next
 Evaluate or Fit judges it. An image the track already names is reported and
 left byte-for-byte alone, including an `out` verdict or a pin; the source image
 and all other reference images are excluded by the selector itself. Repeating
@@ -1936,7 +1995,9 @@ builds, wrapped as an
 `embedded_patches` reconstruction whose stored keypoints are the exact
 projections, so what a commit should have written is known to the pixel. It
 covers: a point put on the bench being at the track stage with every observation
-`in` and the stored numbers carried; two observations in one image not both
+`in` and the stored numbers carried; an observation added at the track stage
+carrying its pixel as its keypoint and committing without a fit, and one added at
+the cluster stage carrying a seed alone; two observations in one image not both
 being `in`; the painting proposing from the measurements, leaving a pinned
 verdict alone and giving one image one `in`; a split taking exactly the named
 observations, handing the half it takes off back as a cluster, and refusing an
@@ -2077,8 +2138,13 @@ rounds then walk sightings onto some other facade detail; a bearing's per-row ra
 angle agrees with the direction to a thousandth of a degree, where measuring it
 against a phantom point one unit from the origin reads tens of degrees; the same
 sightings plus the offset camera's promote to a point on the plane with the frame
-grown by the placement distance; the same eight sightings stored as a *finite*
-point demote to a bearing with the frame shrunk by the distance it stood at; a
+grown by about the observing distance; the same eight sightings stored as a
+*finite* point demote to a bearing with the frame shrunk by about the distance it
+stood at; on a capture whose camera cloud is spread wide while the three cameras
+that see the point stand close to it, a bearing placed at the point looks within
+3% of its old size in each of those three images, a point taken to a bearing and
+back looks within 1% of its old size, and with nothing to measure in the extents
+fall back to the observing distance and then to the numbers they had; a
 sighting moved four pixels off with the bar at two keeps its seed, carries
 `walked_px` and is still scored there while the other seven move; a bearing taken
 down to the cluster stage and back up comes back a bearing at the size it was and
