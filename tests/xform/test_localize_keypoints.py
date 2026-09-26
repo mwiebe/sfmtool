@@ -12,8 +12,6 @@ survivors — so the invariants tested here are shrinking counts and output
 validity, not byte-identity. See specs/cli/reconstruction/xform/localize-keypoints-command.md.
 """
 
-from unittest.mock import patch
-
 import numpy as np
 import pytest
 from click.testing import CliRunner
@@ -323,8 +321,7 @@ def test_missing_image_is_hard_error(seoul_bull_workspace):
 
 def test_cli_localize_keypoints(seoul_bull_workspace):
     """End-to-end CLI run: convert then localize in one chain; the output is a
-    valid embedded_patches recon with shrunk (or equal) counts and no bitmaps.
-    The sys.argv reparse needs patching."""
+    valid embedded_patches recon with shrunk (or equal) counts and no bitmaps."""
     input_sfmr = seoul_bull_workspace
     output_sfmr = input_sfmr.with_name("localized_kpts.sfmr")
 
@@ -336,8 +333,7 @@ def test_cli_localize_keypoints(seoul_bull_workspace):
         "--localize-keypoints",
         "resolution=12,max_iters=2",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
     assert output_sfmr.exists()
@@ -364,8 +360,7 @@ def test_localize_keypoints_rejects_sift_files(seoul_bull_workspace):
         str(output_sfmr),
         "--localize-keypoints",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code != 0
     assert "embedded_patches" in result.output

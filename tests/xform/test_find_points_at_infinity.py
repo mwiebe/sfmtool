@@ -10,8 +10,6 @@ reclassifier. Both read the workspace ``.sift`` files, so they use the
 files on disk). See specs/cli/reconstruction/xform/find-points-at-infinity.md.
 """
 
-from unittest.mock import patch
-
 import numpy as np
 import pytest
 from click.testing import CliRunner
@@ -167,7 +165,7 @@ def test_found_reconstruction_survives_bundle_adjust(
 
 
 def test_cli_find_points_at_infinity(seoul_bull_workspace):
-    """End-to-end CLI run adds points; the sys.argv reparse needs patching."""
+    """End-to-end CLI run adds points."""
     # The fixture is already per-test isolated, and its .sfmr sits beside its
     # workspace, so the relative .sift paths resolve. Write the output there.
     input_sfmr = seoul_bull_workspace
@@ -182,10 +180,7 @@ def test_cli_find_points_at_infinity(seoul_bull_workspace):
         "--max-features",
         "1500",
     ]
-    # The xform command re-parses sys.argv to preserve transform order, so the
-    # CliRunner invocation must have argv contain "xform" + the same args.
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
     assert output_sfmr.exists()

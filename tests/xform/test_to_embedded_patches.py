@@ -12,7 +12,6 @@ the full ``seoul_bull_workspace`` fixture (which carries the ``.sift`` files). S
 """
 
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -192,8 +191,7 @@ def test_xform_to_embedded_patches_cli(seoul_bull_workspace: Path, tmp_path: Pat
         "--to-embedded-patches",
         "extent=fixed,extent_value=1.0",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     recon = SfmrReconstruction.load(str(out))
     assert recon.feature_source == "embedded_patches"

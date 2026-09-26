@@ -3,17 +3,22 @@
 
 """Transform reconstruction command."""
 
-import sys
 from pathlib import Path
 
 import click
 
 from .._cli_utils import timed_command
 from ..xform import apply_transforms
-from ..xform._arg_parser import auto_output_path, parse_transform_args
+from ..xform._arg_parser import (
+    OrderedArgsCommand,
+    auto_output_path,
+    check_against_click,
+    command_args,
+    parse_xform_args,
+)
 
 
-@click.command("xform")
+@click.command("xform", cls=OrderedArgsCommand)
 @timed_command
 @click.help_option("--help", "-h")
 @click.argument("input_path", type=click.Path(exists=True))
@@ -421,6 +426,7 @@ def xform(ctx, input_path, output_path, **kwargs):
     """
     from .._sfmtool.reconstruction import SfmrReconstruction
 
+    raw_input_path, raw_output_path = input_path, output_path
     input_path = Path(input_path)
     output_path_provided = output_path is not None
 
@@ -436,21 +442,16 @@ def xform(ctx, input_path, output_path, **kwargs):
     else:
         output_path = auto_output_path(input_path)
 
-    # Parse transforms from sys.argv to preserve order
+    # Walk the command's own arguments again to keep the transforms in order,
+    # then check that walk against what Click collected.
     try:
-        xform_idx = sys.argv.index("xform")
-        # Skip 'xform', input_path, and output_path (if it was supplied).
-        transform_args_start = xform_idx + (3 if output_path_provided else 2)
-        transform_args = sys.argv[transform_args_start:]
-    except (ValueError, IndexError):
-        transform_args = []
-
-    try:
-        transforms = parse_transform_args(
-            transform_args, max_features=kwargs.get("max_features")
+        parsed = parse_xform_args(
+            command_args(ctx), max_features=kwargs.get("max_features")
         )
     except ValueError as e:
         raise click.UsageError(str(e))
+    check_against_click(parsed, kwargs, [raw_input_path, raw_output_path])
+    transforms = parsed.transforms
 
     # --max-features only feeds --find-points-at-infinity; reject it when that
     # operation isn't in the chain so it isn't silently ignored.

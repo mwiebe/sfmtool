@@ -15,7 +15,6 @@ names no machine and no history. See
 
 import shutil
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -41,9 +40,8 @@ from sfmtool.xform._images import load_workspace_images
 
 
 def _run(args: list[str]):
-    """Invoke the CLI with ``sys.argv`` patched, as ``xform`` reparses it."""
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    """Invoke the CLI and require it to succeed."""
+    result = CliRunner().invoke(main, args)
     assert result.exit_code == 0, result.output
     return result
 
@@ -350,8 +348,7 @@ def test_add_patch_bitmaps_requires_embedded_patches(seoul_bull_workspace):
         str(seoul_bull_workspace.with_name("out.sfmr")),
         "--add-patch-bitmaps",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
     assert result.exit_code != 0
     assert "embedded_patches" in result.output
 

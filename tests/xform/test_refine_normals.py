@@ -376,7 +376,7 @@ def test_missing_image_is_hard_error(seoul_bull_workspace):
 
 
 def test_cli_refine_normals(seoul_bull_workspace):
-    """End-to-end CLI run rewrites normals; the sys.argv reparse needs patching.
+    """End-to-end CLI run rewrites normals.
 
     ``--refine-normals`` requires embedded_patches, so the run converts first in
     the same pipeline (``--to-embedded-patches --refine-normals``)."""
@@ -393,8 +393,7 @@ def test_cli_refine_normals(seoul_bull_workspace):
         # normals, not textures).
         "resolution=12,init_steps=5,refine_levels=2,bitmaps=false",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
     assert output_sfmr.exists()
@@ -443,10 +442,7 @@ def test_cli_refine_normals_bare_before_other_option(
         captured.append(self)
         return recon
 
-    with (
-        patch("sys.argv", ["sfm"] + args),
-        patch.object(RefineNormalsTransform, "apply", _stub_apply),
-    ):
+    with patch.object(RefineNormalsTransform, "apply", _stub_apply):
         result = CliRunner().invoke(main, args)
 
     assert result.exit_code == 0, result.output
@@ -480,8 +476,7 @@ def test_refine_normals_rejects_sift_files(seoul_bull_workspace):
         str(output_sfmr),
         "--refine-normals",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code != 0
     assert "embedded_patches" in result.output
@@ -502,8 +497,7 @@ def test_refine_normals_rejects_wrong_chain_order(seoul_bull_workspace):
         "--refine-normals",
         "--to-embedded-patches",
     ]
-    with patch("sys.argv", ["sfm"] + args):
-        result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(main, args)
 
     assert result.exit_code != 0
     assert "embedded_patches" in result.output
