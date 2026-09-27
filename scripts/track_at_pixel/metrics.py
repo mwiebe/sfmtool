@@ -214,6 +214,18 @@ def score(
         if s is not None:
             gt_scales.append(s)
     m.update(_scale_stats("gt_texel_scale", gt_scales))
+    # Apparent size: the built patch's sampling ratio in the queried photograph
+    # against the ground truth's there. Unlike the world-size ratio it stays
+    # meaningful when one of the two is at infinity.
+    built_q = _texel_scales(dataset, track).get(qo) if qo is not None else None
+    gt_q = texel_scale(
+        cam, gt_xyz, dataset.point_u[point], dataset.point_v[point], gt_w
+    )
+    m["apparent_size_ratio"] = (
+        built_q["scale"] / gt_q["scale"]
+        if built_q is not None and gt_q is not None and gt_q["scale"] > 0
+        else None
+    )
 
     zncc = _track_numbers(rows, "zncc")
     m.update(_stats("zncc", zncc))

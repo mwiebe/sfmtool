@@ -11,7 +11,9 @@ Per (run, pass):
        (good tracks at infinity get credit 1: they have no normal)
   S  = (G + 2 N) / 3                          (perfect = 1)
 Also: N10 = good with normal err <= 10 deg, median normal err of good,
-median and p90 seconds per query.
+precision (good / built), the median apparent-size ratio of the good tracks
+(their sampling ratio in the queried photograph against the ground truth's),
+and the median and p90 seconds per query.
 """
 
 import json
@@ -51,7 +53,14 @@ def score_rows(rows):
         "normal_med": float(np.median(errs)) if errs else float("nan"),
         "sec_med": float(np.median(secs)),
         "sec_p90": float(np.percentile(secs, 90)),
+        "precision": len(good) / max(1, sum(r["status"] == "ok" for r in rows)),
+        "size_med": _median(r.get("apparent_size_ratio") for r in good),
     }
+
+
+def _median(values):
+    v = [x for x in values if x is not None]
+    return float(np.median(v)) if v else float("nan")
 
 
 def load(run: Path):
@@ -62,7 +71,7 @@ def load(run: Path):
 def main():
     print(
         f"{'run':38s} {'pass':5s} {'q':>5s} {'good':>5s} {'G':>6s} {'N':>6s} "
-        f"{'S':>6s} {'N10':>6s} {'nrm°':>6s} {'s/q':>6s} {'p90':>6s}"
+        f"{'S':>6s} {'N10':>6s} {'nrm°':>6s} {'prec':>5s} {'size':>5s} {'s/q':>6s} {'p90':>6s}"
     )
     for arg in [a for a in sys.argv[1:] if Path(a).is_dir()]:
         run = Path(arg)
@@ -76,7 +85,8 @@ def main():
             print(
                 f"{run.name[:38]:38s} {p:5s} {m['queries']:5d} {m['good']:5d} "
                 f"{m['G']:6.3f} {m['N']:6.3f} {m['S']:6.3f} {m['N10']:6.3f} "
-                f"{m['normal_med']:6.1f} {m['sec_med']:6.2f} {m['sec_p90']:6.2f}"
+                f"{m['normal_med']:6.1f} {m['precision']:5.2f} {m['size_med']:5.2f} "
+                f"{m['sec_med']:6.2f} {m['sec_p90']:6.2f}"
             )
         print(
             f"{'':38s} {'mean':5s} {'':5s} {'':5s} {'':6s} {'':6s} {np.mean(ss):6.3f}"

@@ -95,6 +95,7 @@ SUMMARY_METRICS = [
     "position_err_in_gt_halves",
     "normal_err_deg",
     "half_extent_ratio",
+    "apparent_size_ratio",
     "texel_scale_min",
     "texel_scale_median",
     "texel_scale_max",
