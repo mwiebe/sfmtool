@@ -40,6 +40,12 @@ harness on seoul_bull and the Kerry Park candidate ground truth:
    The other sources (``nb2d``, ``nb2d_principal``, ``photo_from_nb``) and
    options (``challenger``, ``regrow``, ``photo_scales``, ``photo_views``)
    are the variants the harness measured and did not keep.
+
+   Two sources come from ``specs/drafts/surface-co-solve.md``. ``nbpos`` and
+   ``nb3dpos`` are ``nbchain`` and ``nb3d`` with each neighbour admitted by
+   position rather than relative depth (prototype 1, kept in
+   ``candidates/cosolve.py``). ``photowide`` follows the reading of the
+   tilted track past the 45 degree cap (prototype 2, not kept).
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from api import TrackAtPixelError, TrackAtPixelResult
 from candidates import core_cascade
 from candidates.common import (
     FINISH_DEFAULTS,
+    anchor,
     anchored_fit,
     clean,
     max_projection_offset,
@@ -83,6 +90,30 @@ DEFAULTS = {
         [30.0, 8, 0.15, "inv2", "principal"],
         [40.0, 12, 0.30, "inv2", "principal"],
     ],
+    # "nbpos" and "nb3dpos" (surface-co-solve prototype 1): the neighbour chain
+    # and the 3D neighbours with the relative-depth test replaced by a
+    # position test. A neighbour counts only when the track's centre lies
+    # within `plane_tol` half-sizes (the larger of the two) of its plane and
+    # within `max_dist` half-sizes of its centre.
+    # Each link is [radius_px, k, plane_tol, max_dist, weighting, mode].
+    "nbpos_chain": [
+        [10.0, 5, 1.0, 2.5, "inv2", "principal"],
+        [20.0, 5, 1.5, 3.0, "inv2", "principal"],
+        [30.0, 8, 2.0, 4.0, "inv2", "principal"],
+        [40.0, 12, 3.0, 5.0, "inv2", "principal"],
+    ],
+    "nb3dpos_tol": 1.5,
+    "nb3dpos_max_dist": 5.0,
+    # "photowide" (prototype 2): from the capped photometric estimate, the
+    # tilt followed by reading the track (median ZNCC less
+    # `photowide_shift_weight` times the median peak offset) up to
+    # `photowide_range_deg` from the mean viewing direction; the mean viewing
+    # direction is kept unless the result beats it by `photowide_flat`.
+    "photowide_range_deg": 80.0,
+    "photowide_step_deg": 7.5,
+    "photowide_search_deg": [10.0, 5.0],
+    "photowide_shift_weight": 0.02,
+    "photowide_flat": 0.005,
     "photo_scale": 2.0,
     # When set, the photometric normal is estimated at each of these scales and
     # the results averaged.
@@ -207,6 +238,180 @@ def nb3d_normal(ctx, xyz, half, to_cam, opts):
     return _face(_unit((w[:, None] * ns).sum(0)), to_cam)
 
 
+def _plane_agrees(X, nb_xyz, nb_normal, half, nb_half, tol, max_dist):
+    """Whether ``X`` lies within ``tol`` half-sizes of the neighbour's plane, and near it.
+
+    A half-size is the larger of the two. Near the plane is not enough on its
+    own: the plane of a house wall extended ten metres passes a chimney.
+    """
+    scale = max(half, nb_half, 1e-9)
+    d = X - nb_xyz
+    return (
+        abs(float(d @ nb_normal)) <= tol * scale
+        and float(np.linalg.norm(d)) <= max_dist * scale
+    )
+
+
+def nb_position_normal(ctx, image, pixel, xyz, half, to_cam, opts):
+    """The neighbour chain, with each neighbour admitted by position, not depth.
+
+    The relative-depth test admits a surface several metres behind a small
+    object when the object is far away (a roof behind a chimney at 31 m passes
+    a 5% test). Here a neighbour counts only when the track's centre lies near
+    the neighbour's own plane, measured in patch half-sizes.
+    """
+    links = opts["nbpos_chain"]
+    widest = max(link[0] for link in links)
+    allnear = [
+        o
+        for o in ctx.observations_near(image, pixel, widest)
+        if o.get("position") is not None
+    ]
+    for radius, k, tol, max_dist, weighting, mode in links:
+        near = [
+            o
+            for o in allnear
+            if o["distance_px"] <= radius
+            and _plane_agrees(
+                xyz, o["position"], o["normal"], half, o["half_extent"], tol, max_dist
+            )
+        ][:k]
+        if not near:
+            continue
+        d = np.asarray([o["distance_px"] for o in near])
+        w = 1.0 / (1.0 + d) if weighting == "inv" else 1.0 / (1.0 + d) ** 2
+        ns = np.asarray([_face(o["normal"], to_cam) for o in near])
+        if mode == "principal":
+            M = (w[:, None, None] * ns[:, :, None] * ns[:, None, :]).sum(0)
+            return _face(np.linalg.eigh(M)[1][:, -1], to_cam)
+        return _face(_unit((w[:, None] * ns).sum(0)), to_cam)
+    return None
+
+
+def nb3d_position_normal(ctx, xyz, half, to_cam, opts):
+    """``nb3d`` over only the 3D neighbours whose plane the track's centre lies near."""
+    near = [
+        o
+        for o in ctx.points_near(xyz, k=opts["nb3d_k"])
+        if _plane_agrees(
+            xyz,
+            o["position"],
+            o["normal"],
+            half,
+            o["half_extent"],
+            opts["nb3dpos_tol"],
+            opts["nb3dpos_max_dist"],
+        )
+    ]
+    if not near:
+        return None
+    w = np.asarray([1.0 / (1.0 + o["distance"] / max(half, 1e-9)) for o in near])
+    ns = [_face(o["normal"], to_cam) for o in near]
+    return _face(_unit((w[:, None] * ns).sum(0)), to_cam)
+
+
+def pose_reading(ctx, track, q, pixel, normal, shift_weight):
+    """The track tilted to ``normal``, anchored and read (not fit): its score and track.
+
+    The score is the median ZNCC over the ``in`` views less ``shift_weight``
+    times their median correlation peak offset in pixels. The peak offset moves
+    much more with a wrong pose than the ZNCC does.
+    """
+    t = shape_track(ctx, track, q, pixel, normal)
+    t = anchor(ctx, t, q, pixel)
+    z = median_zncc(t)
+    shifts = [
+        o["track"]["seed_shift_px"]
+        for o in t.observations
+        if o["verdict"] == "in" and o.get("track", {}).get("seed_shift_px") is not None
+    ]
+    shift = float(np.median(shifts)) if shifts else 0.0
+    return z - shift_weight * shift, t
+
+
+def photo_wide_normal(ctx, track, q, pixel, mean_view, to_cam, opts):
+    """The photometric normal with no cap near the mean viewing direction.
+
+    The side of a house seen only at grazing angles has its normal 62 degrees
+    from the mean viewing direction, out of reach of a 45 degree search, and
+    the fronto-parallel prior pulls every estimate toward it; along the path
+    to the true normal the ZNCC and the peak offset improve almost
+    monotonically. So from the capped photometric estimate the track keeps
+    tilting along the same arc, away from the mean viewing direction, in
+    ``photowide_step_deg`` steps while the reading (``pose_reading``)
+    improves, up to ``photowide_range_deg``; then a coordinate search in
+    halving steps tries tilts in four directions. The mean viewing direction
+    is kept unless the result reads better by ``photowide_flat``: when no tilt
+    changes the score there is no surface to find a normal for.
+    """
+    capped = photo_normal(ctx, track, mean_view, to_cam, opts)
+    if q is None or mean_view is None:
+        return capped
+    w = opts["photowide_shift_weight"]
+
+    def read(n):
+        try:
+            return pose_reading(ctx, track, q, pixel, n, w)[0]
+        except ValueError:
+            return float("-inf")
+
+    base = read(mean_view)
+    best_n, best = mean_view, base
+    walked = 0
+    if capped is not None:
+        sc = read(capped)
+        if sc > best:
+            best_n, best = capped, sc
+        axis = _unit(capped - (capped @ mean_view) * mean_view)
+        theta = float(np.arccos(np.clip(capped @ mean_view, -1, 1)))
+        step = np.radians(opts["photowide_step_deg"])
+        while axis is not None and theta + step <= np.radians(
+            opts["photowide_range_deg"]
+        ):
+            theta += step
+            n = np.cos(theta) * mean_view + np.sin(theta) * axis
+            sc = read(n)
+            if sc <= best:
+                break
+            best_n, best, walked = n, sc, walked + 1
+    for step_deg in opts["photowide_search_deg"]:
+        improved = True
+        while improved:
+            improved = False
+            e1, e2 = _tangent(best_n)
+            t = np.tan(np.radians(step_deg))
+            for d in (e1, -e1, e2, -e2):
+                n = _face(_unit(best_n + t * d), to_cam)
+                if (
+                    np.degrees(np.arccos(np.clip(n @ mean_view, -1, 1)))
+                    > opts["photowide_range_deg"]
+                ):
+                    continue
+                sc = read(n)
+                if sc > best + 1e-4:
+                    best_n, best, improved = n, sc, True
+                    break
+    chose = "search"
+    if best < base + opts["photowide_flat"]:
+        best_n, chose = mean_view, "mean_view"
+    ctx.renormal_note = {
+        "photowide": {
+            "chose": chose,
+            "walked": walked,
+            "gain": best - base,
+            "vs_mean_deg": _deg(best_n, mean_view),
+            "vs_capped_deg": _deg(best_n, capped),
+        }
+    }
+    return best_n
+
+
+def _deg(a, b):
+    if a is None or b is None:
+        return None
+    return float(np.degrees(np.arccos(np.clip(abs(float(a @ b)), -1, 1))))
+
+
 def camera_views(ctx):
     from sfmtool._sfmtool import patches
 
@@ -288,7 +493,7 @@ def _photo_normal_at(ctx, track, init, to_cam, opts, **kw):
     return n
 
 
-def estimate(ctx, track, image, pixel, opts):
+def estimate(ctx, track, image, pixel, opts, q=None):
     xyz = np.asarray(track.position, float)
     cam = ctx.camera(image)
     to_cam = _unit(cam.center - xyz)
@@ -315,6 +520,12 @@ def estimate(ctx, track, image, pixel, opts):
             n = nb_chain_normal(ctx, image, pixel, depth, to_cam, opts)
         elif src == "nb3d":
             n = nb3d_normal(ctx, xyz, half, to_cam, opts)
+        elif src == "nbpos":
+            n = nb_position_normal(ctx, image, pixel, xyz, half, to_cam, opts)
+        elif src == "nb3dpos":
+            n = nb3d_position_normal(ctx, xyz, half, to_cam, opts)
+        elif src == "photowide":
+            n = photo_wide_normal(ctx, track, q, pixel, current, to_cam, opts)
         elif src == "photo":
             n = photo_normal(ctx, track, current, to_cam, opts)
         elif src == "photo_from_nb":
@@ -325,6 +536,8 @@ def estimate(ctx, track, image, pixel, opts):
         else:
             raise ValueError(f"unknown source {src!r}")
         if n is not None:
+            if isinstance(getattr(ctx, "renormal_note", None), dict):
+                ctx.renormal_note["source"] = src
             return n
     return None
 
@@ -439,8 +652,9 @@ def build_track(ctx, image: int, pixel, options: dict | None = None):
     track, q, diag = result.track, result.query_observation, result.diagnostics
     if track.at_infinity or opts["source"] == "none":
         return result
-    normal = estimate(ctx, track, image, pixel, opts)
-    info = {"estimated": normal is not None}
+    ctx.renormal_note = {}
+    normal = estimate(ctx, track, image, pixel, opts, q=q)
+    info = {"estimated": normal is not None, **ctx.renormal_note}
     diag["renormal"] = info
     if normal is None:
         return result
