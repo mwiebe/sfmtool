@@ -560,6 +560,44 @@ is the fits, which already run in Rust. A Rust version would gain by fitting
 the eight copies in parallel and by sharing the image tiles the nine
 neighbouring patches read, not by making the fits cheaper.
 
+### Prototype 9: position, then views, then the normal
+
+`candidates/staged.py` follows the order that worked by hand on Kerry Park
+point 309 (the draft's "One query, step by step"). It takes the cascade's
+track for its position, then:
+- carries the pixel through every cluster that triangulates cleanly;
+- grows the views with the geometry search, turning in views the ZNCC bar
+  refused that land where the geometry says;
+- takes the neighbours' normal, or else the photometric normal on the grown
+  track, refined by the grid seeded on it when no point is near;
+- grows again, judges the relaxed views again at 0.8, cleans and gates.
+
+| Run | Pass | G | N | S | s/query | p90 |
+|---|---|---|---|---|---|---|
+| seoul_bull | full | 0.819 | 0.562 | 0.648 | 0.25 | 0.97 |
+| | empty | 0.793 | 0.291 | 0.458 | 0.80 | 1.88 |
+| Kerry Park | full | 0.790 | 0.627 | 0.681 | 0.44 | 2.38 |
+| | empty | 0.728 | 0.281 | 0.430 | 1.82 | 5.15 |
+
+The mean `S` is 0.554, against `cosolve`'s 0.551: level. It gains on
+seoul_bull's empty pass (0.458 against 0.448) and matches `cosolve`
+elsewhere.
+
+Two of the first version's choices cost the full pass, and are fixed in the
+numbers above. Running the grid in the full pass lost, as for prototype 3.
+Accepting the neighbours' normal only when the reading rose lost too. On
+seoul_bull the neighbours' normal is right, but on tracks with few views it
+often reads lower than the cameras-facing tilt it replaces, and refusing it
+took the full pass from 0.645 to 0.621.
+
+On point 309 itself the order does not reproduce the bench result. The
+relaxed views let in wrong sightings as well as right ones (L09, 3.5 px from
+the true point), where a person chose which candidates looked plausible. For
+two of the point's six queries the cascade's position is already 1.7 and 3.2
+true half-sizes off, and nothing after it recovers. The order depends on a
+first step that finds good anchors near the pixel, which is being worked on
+separately (`--mode anchors`).
+
 ## Files
 
 | File | Role |

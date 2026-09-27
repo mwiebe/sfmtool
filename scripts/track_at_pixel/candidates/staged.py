@@ -27,10 +27,14 @@ the query traced in its "One query, step by step". The cascade's track (with
 3. **The normal** (``normal``, a chain as in ``renormal``). ``nbpos`` and
    ``nb3dpos`` take the reconstruction's neighbours by position (prototype 1).
    ``photo_grid`` is the photometric search on the grown track, then the
-   seeded grid laid out on its estimate (``grid_rounds`` rounds). Each step is
-   kept only when the track's reading does not fall: the median ZNCC less
-   ``accept_shift_weight`` times the median correlation peak offset, with
-   ``accept_tolerance``. The peak offset separates normals the ZNCC cannot.
+   seeded grid laid out on its estimate (``grid_rounds`` rounds; with
+   ``grid_when="empty"`` only when no reconstructed point is near the
+   track). The photometric and grid steps are kept only when the track's
+   reading does not fall: the median ZNCC less ``accept_shift_weight`` times
+   the median correlation peak offset, with ``accept_tolerance``. The peak
+   offset separates normals the ZNCC cannot. A neighbours' normal is kept
+   whatever the reading says (``accept_neighbours="always"``): on a track with
+   few views the right normal can read lower than a wrong one.
 4. **Growth again** (``regrow_rounds``), now that the patch faces the right
    way, then the relaxed views judged again at ``final_min_zncc``, the
    cleaning and ``renormal``'s gates.

@@ -439,6 +439,20 @@ What this suggests, and prototype 9 tests:
 The trace is recorded in a page outside the repository; the bench session
 that produced the five-view track is not saved.
 
+**What prototype 9 measured.** `candidates/staged.py` runs this order on the
+cascade's track. Its mean `S` is 0.554, level with `cosolve`'s 0.551: 0.648
+and 0.458 on seoul_bull's full and empty passes, 0.681 and 0.430 on Kerry
+Park's. Two choices had to change. The grid runs only when no point is near,
+as in `cosolve`. A neighbours' normal is kept even when the reading falls,
+because on a track with few views the right normal can read lower than a
+wrong one; refusing it lost 0.024 in seoul_bull's full pass. On point 309 it
+does not reproduce the bench result. The relaxed views let in wrong
+sightings as well as right ones, where a person chose which candidates
+looked plausible. For two of the point's six queries the cascade's position
+is already 1.7 and 3.2 true half-sizes off, and nothing after it recovers.
+The order depends on its first step, finding good anchors near the pixel,
+which is being worked on on its own (next subsection).
+
 ### Anchors: reinforced depth readings near the pixel
 
 The first step of building a track at a pixel is to go from knowing nothing
