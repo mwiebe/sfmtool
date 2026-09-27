@@ -1,6 +1,7 @@
 # Solving depth and normal together over a neighbourhood of patches
 
-**Status:** Draft. Decided: nothing yet. This draft sets out an approach, the
+**Status:** Draft. Decided: nothing yet. Prototypes 1 to 5 have been measured
+(see "What the harness measured"). This draft sets out an approach, the
 evidence for it, and the prototypes to build and measure in the
 leave-one-track-out harness
 ([`scripts/track_at_pixel/`](../../scripts/track_at_pixel/README.md)). It
@@ -295,6 +296,54 @@ cases above.
 The order is by cost and by how directly the evidence supports each. Numbers
 from 3 onward depend on how well a grid can be fitted where the query's own
 track is weak, which only the harness will show.
+
+### What the harness measured
+
+Prototypes 1 to 5 were built on `renormal` and measured on both ground truths
+and both passes; the numbers, the options and the cost are in the harness
+README, "Surface co-solve prototypes". The mean `S` over the four passes was
+0.538 for `renormal`.
+
+- **Kept: 1, neighbours by position.** Kerry Park's full pass rises from
+  0.672 to 0.682; seoul_bull does not change. The chimney's full-pass normal
+  goes from 62 degrees off to 7. A plane test alone was not enough: the plane
+  of the house side, ten metres away, passes the chimney, so a neighbour must
+  also lie within a few half-sizes of the track.
+- **Kept, in the empty pass: 3, the seeded grid.** The empty pass rises from
+  0.438 to 0.448 on seoul_bull and from 0.398 to 0.429 on Kerry Park (normal
+  credit 0.261 to 0.278, and 0.239 to 0.282). On Kerry Park's cases the flat
+  ground goes from 50 degrees off to 17, the hill from 44 to 8, the window
+  from 18 to 11, rock 322 from 35 to 15 and the house side from 24 to 14. Run
+  in the full pass it loses 0.11 to 0.14, because the reconstruction's
+  neighbours give better normals than the grid, so it runs only when no
+  reconstructed point is near the track. A cross of five did worse than the
+  3 by 3 grid, and so did a third round or a spacing of three quarters of a
+  diameter. Two changes from the plan above were needed: every patch takes
+  the plane through the whole grid (a copy's fit can slide two or three
+  half-sizes along the surface and still lie in the plane), and the geometry
+  search runs again after the tilt (on the ground, the right normal loses a
+  view that the search then finds).
+- **Not kept: 2, no cap.** Following the reading past 45 degrees helped the
+  house side (24 to 20 degrees) and rock 321, and lost 0.043 and 0.011 in the
+  empty passes: on most tracks the reading improves while the normal moves
+  away from the ground truth.
+- **Not kept: 4, split patches.** Alone, as the normal source, they lost
+  0.20 and 0.15 in the full passes. In the grid they never run, because a 3
+  by 3 grid's centres always spread in two directions; with that spread
+  required to be larger, they run on a few hundred queries and change
+  nothing. They are for rows, which the grid does not produce.
+- **Not kept: 5, the size curve.** It grows the patches to the ground truth's
+  apparent size or past it (0.54 to 1.09 of it on seoul_bull, 0.72 to 1.18 on
+  Kerry Park) and scores slightly lower everywhere, alone and with the grid.
+
+`cosolve` in the harness is 1 with 3 when no point is near: a mean `S` of
+0.551. The empty pass's normal credit, 0.278 and 0.282, is still below the
+0.33 that photometry reaches at the ground truth's position, so the grid does
+not yet beat single-patch photometry at the right pose. Where the grid fails
+is the chimney: with no surface, the fitted centres scatter along the rays,
+and the plane through them is 25 degrees off where the mean viewing direction
+was 4. A test that tells a scatter from a surface is open; the plane
+residual did not separate them.
 
 ## Open questions
 

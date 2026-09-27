@@ -384,6 +384,182 @@ the full and empty passes, and 0.690 and 0.453 against 0.645 and 0.438 on all
 of seoul_bull, at 18 to 25 times the time. Most of its gain is good tracks in
 the full pass.
 
+## Surface co-solve prototypes
+
+[`specs/drafts/surface-co-solve.md`](../../specs/drafts/surface-co-solve.md)
+proposes solving a patch's depth and normal together over a neighbourhood of
+fitted patches. Five of its prototypes were built on `renormal` and measured
+here with the score `S` above, on both ground truths and both passes. The
+baseline is `renormal` rerun on the same branch; it reproduces the numbers
+above.
+
+1. **Neighbours by position** (`renormal --opt source=nbpos+nb3dpos+photo`).
+   The neighbour chain and the 3D neighbours admit a neighbour only when the
+   track's centre lies within 1 to 3 half-sizes of the neighbour's plane and
+   within 2.5 to 5 half-sizes of its centre, rather than within a fraction of
+   the depth.
+2. **No cap near the mean viewing direction**
+   (`renormal --opt source=nbchain+nb3d+photowide`). From the capped
+   photometric estimate, the track keeps tilting away from the mean viewing
+   direction while its reading improves (median ZNCC less 0.02 times the
+   median peak offset in pixels), up to 80 degrees, then a coordinate search
+   in 10 and 5 degree steps. The mean viewing direction is kept unless the
+   result reads 0.005 better.
+3. **The seeded grid** (`cosolve --opt grid=3x3`, or `cross`). Copies of the
+   track shifted half a diameter along its in-plane axes are fitted; the
+   normal is the plane through all the fitted centres (only the turn a line
+   fixes, where they lie along one), and the patches are tilted and refitted
+   for two rounds, the centre anchored on the pixel. A copy more than 0.75
+   half-sizes off the plane is dropped. The geometry search then runs again
+   from the query. `grid_when` says when it runs: `always`; `photo`, when
+   `renormal`'s normal came from photometry; `empty`, when the reconstruction
+   holds no point near the track.
+4. **Split patches** (`cosolve --opt split_source=true`, or `--opt
+   grid_split=true` in the grid). Two copies of half the size, half a size
+   either side of the centre, are fitted, and the line between their centres
+   lies in the surface.
+5. **The size curve** (`cosolve --opt size=curve`). The track is resized to
+   1, 1.5, 2 and 3 times its half-size and refitted; the largest size whose
+   median ZNCC is within 0.02 of the best and that passes the gates is kept.
+   The harness now reports the **apparent size** (`apparent_size_ratio`): the
+   track's sampling ratio in the queried photograph against the ground
+   truth's, which stays meaningful when one of them is at infinity.
+
+`cosolve`'s defaults are the combination kept: 1, and 3 when no point is near.
+`--opt renormal_source=nbchain+nb3d+photo --opt grid=none` gives `renormal`
+back. The prototypes measured through `cosolve` alone ran with `renormal`'s
+own sources.
+
+| Run | seoul_bull full | seoul_bull empty | Kerry Park full | Kerry Park empty | Mean S |
+|---|---|---|---|---|---|
+| `renormal` (baseline) | 0.645 | 0.438 | 0.672 | 0.398 | 0.538 |
+| 1. neighbours by position | 0.645 | 0.438 | 0.682 | 0.398 | 0.541 |
+| 2. no cap near the mean viewing direction | 0.645 | 0.395 | 0.672 | 0.387 | 0.525 |
+| 3. the 3x3 grid, always | 0.502 | 0.448 | 0.560 | 0.429 | 0.485 |
+| 3. the cross of five, always | 0.491 | 0.435 | 0.549 | 0.422 | 0.474 |
+| 3. the 3x3 grid, when the normal is photometric | 0.645 | 0.448 | 0.672 | 0.429 | 0.548 |
+| 4. split patches alone | 0.446 | 0.382 | 0.519 | 0.393 | 0.435 |
+| 4. split patches in the 3x3 grid, always | 0.502 | 0.448 | 0.560 | 0.429 | 0.485 |
+| 4. split patches in the photometric grid, at 0.6 half-sizes | 0.645 | 0.446 | 0.672 | 0.428 | 0.548 |
+| 5. the size curve | 0.637 | 0.435 | 0.667 | 0.394 | 0.533 |
+| 1 + 3, when the normal is photometric | 0.643 | 0.448 | 0.673 | 0.429 | 0.548 |
+| **1 + 3, when no point is near: `cosolve`** | 0.645 | 0.448 | 0.682 | 0.429 | 0.551 |
+
+Each dataset and pass (apparent size is the median over the good tracks;
+times are the median and p90 over the pass's queries, with two runs of 15
+shards sharing the machine):
+
+| Run | Dataset | Pass | G | N | S | Median normal err (deg) | Precision | Apparent size | s/query | p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| baseline | seoul_bull | full | 0.818 | 0.559 | 0.645 | 7.0 | 0.86 | 0.54 | 0.20 | 0.82 |
+| baseline | seoul_bull | empty | 0.792 | 0.261 | 0.438 | 22.9 | 0.87 | 0.53 | 0.16 | 0.87 |
+| baseline | Kerry Park | full | 0.787 | 0.614 | 0.672 | 1.9 | 0.83 | 0.72 | 0.35 | 2.54 |
+| baseline | Kerry Park | empty | 0.716 | 0.239 | 0.398 | 28.8 | 0.78 | 0.71 | 0.29 | 2.36 |
+| 1 | seoul_bull | full | 0.817 | 0.559 | 0.645 | 6.8 | 0.86 | 0.53 | 0.17 | 0.67 |
+| 1 | seoul_bull | empty | 0.792 | 0.261 | 0.438 | 22.9 | 0.87 | 0.53 | 0.14 | 0.71 |
+| 1 | Kerry Park | full | 0.788 | 0.629 | 0.682 | 1.9 | 0.83 | 0.71 | 0.41 | 2.93 |
+| 1 | Kerry Park | empty | 0.716 | 0.239 | 0.398 | 28.8 | 0.78 | 0.71 | 0.40 | 3.14 |
+| 2 | seoul_bull | full | 0.818 | 0.559 | 0.645 | 7.0 | 0.86 | 0.54 | 0.23 | 0.90 |
+| 2 | seoul_bull | empty | 0.785 | 0.199 | 0.395 | 29.4 | 0.86 | 0.48 | 0.29 | 0.99 |
+| 2 | Kerry Park | full | 0.787 | 0.614 | 0.672 | 1.9 | 0.83 | 0.72 | 0.42 | 2.90 |
+| 2 | Kerry Park | empty | 0.713 | 0.223 | 0.387 | 31.2 | 0.78 | 0.67 | 0.69 | 3.38 |
+| 3 always | seoul_bull | full | 0.807 | 0.350 | 0.502 | 17.2 | 0.85 | 0.49 | 0.60 | 1.36 |
+| 3 always | seoul_bull | empty | 0.786 | 0.278 | 0.448 | 22.1 | 0.86 | 0.45 | 0.48 | 1.11 |
+| 3 always | Kerry Park | full | 0.787 | 0.447 | 0.560 | 10.2 | 0.83 | 0.66 | 2.24 | 5.48 |
+| 3 always | Kerry Park | empty | 0.723 | 0.282 | 0.429 | 23.8 | 0.79 | 0.63 | 1.95 | 5.16 |
+| 3 cross | seoul_bull | full | 0.806 | 0.334 | 0.491 | 18.8 | 0.85 | 0.50 | 0.55 | 1.40 |
+| 3 cross | seoul_bull | empty | 0.780 | 0.263 | 0.435 | 23.0 | 0.85 | 0.45 | 0.48 | 1.22 |
+| 3 cross | Kerry Park | full | 0.789 | 0.430 | 0.549 | 11.7 | 0.84 | 0.67 | 1.62 | 4.41 |
+| 3 cross | Kerry Park | empty | 0.718 | 0.274 | 0.422 | 24.5 | 0.79 | 0.64 | 1.49 | 4.65 |
+| 3 photometric | seoul_bull | full | 0.818 | 0.559 | 0.645 | 7.0 | 0.86 | 0.54 | 0.23 | 0.89 |
+| 3 photometric | seoul_bull | empty | 0.786 | 0.278 | 0.448 | 22.1 | 0.86 | 0.45 | 0.68 | 1.62 |
+| 3 photometric | Kerry Park | full | 0.787 | 0.614 | 0.672 | 1.9 | 0.83 | 0.72 | 0.39 | 2.96 |
+| 3 photometric | Kerry Park | empty | 0.723 | 0.282 | 0.429 | 23.8 | 0.79 | 0.63 | 2.03 | 5.44 |
+| 4 alone | seoul_bull | full | 0.802 | 0.268 | 0.446 | 24.5 | 0.84 | 0.48 | 0.40 | 1.00 |
+| 4 alone | seoul_bull | empty | 0.771 | 0.187 | 0.382 | 30.4 | 0.84 | 0.46 | 0.36 | 0.91 |
+| 4 alone | Kerry Park | full | 0.792 | 0.382 | 0.519 | 16.2 | 0.84 | 0.69 | 1.21 | 4.01 |
+| 4 alone | Kerry Park | empty | 0.725 | 0.227 | 0.393 | 30.3 | 0.79 | 0.66 | 1.35 | 4.32 |
+| 4 in grid | seoul_bull | full | 0.818 | 0.559 | 0.645 | 7.0 | 0.86 | 0.54 | 0.21 | 1.02 |
+| 4 in grid | seoul_bull | empty | 0.785 | 0.277 | 0.446 | 22.4 | 0.86 | 0.45 | 0.72 | 1.68 |
+| 4 in grid | Kerry Park | full | 0.787 | 0.614 | 0.672 | 1.9 | 0.83 | 0.72 | 0.42 | 2.91 |
+| 4 in grid | Kerry Park | empty | 0.724 | 0.280 | 0.428 | 24.1 | 0.79 | 0.63 | 1.68 | 4.78 |
+| 5 | seoul_bull | full | 0.807 | 0.551 | 0.637 | 7.1 | 0.85 | 1.09 | 0.33 | 1.01 |
+| 5 | seoul_bull | empty | 0.785 | 0.260 | 0.435 | 22.9 | 0.86 | 1.16 | 0.28 | 0.93 |
+| 5 | Kerry Park | full | 0.780 | 0.610 | 0.667 | 1.9 | 0.83 | 1.18 | 0.86 | 3.35 |
+| 5 | Kerry Park | empty | 0.706 | 0.238 | 0.394 | 28.7 | 0.77 | 1.25 | 0.64 | 2.88 |
+| 1 + 3 photometric | seoul_bull | full | 0.817 | 0.556 | 0.643 | 7.0 | 0.86 | 0.53 | 0.23 | 0.90 |
+| 1 + 3 photometric | seoul_bull | empty | 0.786 | 0.278 | 0.448 | 22.1 | 0.86 | 0.45 | 0.67 | 1.57 |
+| 1 + 3 photometric | Kerry Park | full | 0.788 | 0.616 | 0.673 | 1.9 | 0.83 | 0.70 | 0.41 | 3.24 |
+| 1 + 3 photometric | Kerry Park | empty | 0.723 | 0.282 | 0.429 | 23.8 | 0.79 | 0.63 | 2.06 | 5.50 |
+| `cosolve` | seoul_bull | full | 0.817 | 0.559 | 0.645 | 6.8 | 0.86 | 0.53 | 0.17 | 0.67 |
+| `cosolve` | seoul_bull | empty | 0.786 | 0.278 | 0.448 | 22.1 | 0.86 | 0.45 | 0.58 | 1.44 |
+| `cosolve` | Kerry Park | full | 0.788 | 0.629 | 0.682 | 1.9 | 0.83 | 0.71 | 0.32 | 2.36 |
+| `cosolve` | Kerry Park | empty | 0.723 | 0.282 | 0.429 | 23.8 | 0.79 | 0.63 | 1.44 | 3.97 |
+
+**What was kept.** Prototype 1 raises Kerry Park's full pass from 0.672 to
+0.682 and leaves seoul_bull unchanged: it fixes the chimney (point 218),
+whose neighbour chain copied a roof's normal from 10 metres behind it (62
+degrees off, now 6.6). The seeded grid raises the empty pass on both datasets
+(normal credit 0.261 to 0.278 on seoul_bull, 0.239 to 0.282 on Kerry Park),
+but in the full pass it overrides the neighbours' normals, which are better,
+and loses 0.11 to 0.14. Run only when no neighbour gave a normal, it keeps
+both. Stacked on 1, `grid_when=photo` also runs it where 1 refuses every
+neighbour in the full pass (228 Kerry Park queries) and gives back 1's gain;
+`grid_when=empty` keeps both, for a mean `S` of 0.551 against 0.538.
+
+**What was not kept.**
+
+| Idea | Result |
+|---|---|
+| 2, the photometric normal followed past the cap | −0.043 and −0.011 in the empty passes. The walk moves further from the ground truth than the capped estimate on most tracks; on the cases it helps the house side (point 20, 23.5 to 20.4 degrees) and rock 321, and costs the window 15 degrees |
+| 3 as a cross of five | 0.013 and 0.007 below the 3x3 grid in the empty passes |
+| 3 with three rounds; with a spacing of 1.5 half-sizes | −0.004 and +0.002; −0.006 and −0.009 |
+| 3 kept only when its median ZNCC is within 0.01 of `renormal`'s | +0.005 on seoul_bull, −0.005 on Kerry Park |
+| 3, refusing the grid's normal when its fitted centres lie off their plane | the residual does not separate the chimney (0.10 to 0.40 spacings) from surfaces (0.06 to 0.30) |
+| 4 alone | −0.20 and −0.15 in the full passes, −0.06 and −0.005 in the empty ones: two short lines between fits of half-size patches are noisier than any other source |
+| 4 in the grid | a 3x3 grid's centres always spread in two directions, so the split never runs; with the spread needed raised to 0.6 half-sizes it runs on 115 and 473 queries and changes nothing (−0.002 and −0.001) |
+| 5 | grows the patches to the ground truth's apparent size or past it (0.54 to 1.09 on seoul_bull, 0.72 to 1.18 on Kerry Park) and scores slightly lower everywhere (−0.003 to −0.008); with the grid, −0.003 and −0.026 in the empty passes |
+
+**The cases.** On Kerry Park, the draft's cases move in the empty pass
+(`surface/cases.py`, median normal error of the good tracks, in degrees):
+
+| Case | `renormal` empty | `cosolve` empty |
+|---|---|---|
+| ground, flat (115 points) | 50.2 | 17.2 |
+| ground, sloped (33 points) | 43.9 | 8.2 |
+| window 15/121/122/124 | 18.3 | 11.1 |
+| rock 322 | 34.5 | 15.0 |
+| house side 20 | 23.5 | 14.2 |
+| hedge | 26.5 | 25.3 |
+| grass 348 to 352 | 52.5 | 42.1 |
+| sign 326 to 333 | 36.7 | 41.2 |
+| chimney 218 | 4.0 | 25.3 |
+
+In the full pass `cosolve` matches `renormal` on every case except where
+prototype 1 changed the neighbours: the chimney (62.4 to 6.6 degrees), and
+the normal credit of the house side (0.54 to 0.69) and rock 322 (0.37 to
+0.45). The
+grid follows a surface where there is one. The hedge (a curved row) and the
+grass (four oblique views from one side) barely move, and the sign's 3-view
+tracks are too few to read. The chimney shows the grid's failure: with no
+surface, the fitted centres scatter along the rays, and the plane through
+them is 25 degrees off where the mean viewing direction was 4.
+
+**Why not further.** The soft target was an empty-pass normal credit above
+the 0.33 of photometry at the ground truth's position and views. The grid
+reaches 0.278 and 0.282: better than the pipeline's photometry (0.261 and
+0.239), not better than photometry at the true position. The grid's normal is
+limited by how well its copies are fitted: a depth error of a tenth of a
+half-size in one copy turns the plane by about 6 degrees, and the copies of a
+track with two or three views fit worse than that.
+
+**Cost.** The grid runs about 22 more fits and 7 more reads a query than
+`renormal` (26 fits and 15 reads against 4 and 8, counted on 12 Kerry Park
+empty-pass queries), which is 1 to 1.3 s more on one thread. Almost all of it
+is the fits, which already run in Rust. A Rust version would gain by fitting
+the eight copies in parallel and by sharing the image tiles the nine
+neighbouring patches read, not by making the fits cheaper.
+
 ## Files
 
 | File | Role |
@@ -405,10 +581,12 @@ the full pass.
 | `candidates/centred.py` | The ensemble, preferring within the winning group the tracks whose queried view's correlation peak is within 0.5 px of the pixel |
 | `candidates/renormal.py` | The core cascade with the gates at two views and 0.7, Python fallbacks when it refuses, and the track re-oriented by the tight-to-wide neighbour chain, the 3D neighbours or the photometric normal. The variants the harness measured and did not keep are options |
 | `candidates/core_vote.py` | Each Rust cascade member run alone, their tracks voting on the depth as the ensemble's do |
+| `candidates/cosolve.py` | `renormal` with its neighbours admitted by position, and the seeded grid when no reconstructed point is near; the other surface co-solve prototypes are options (see "Surface co-solve prototypes") |
 | `ground_truth_ceiling.py` | Scores the ground-truth tracks themselves, as a run directory: the ceiling the good-track bar allows |
 | `run_sharded.py` | Runs the harness over every point in parallel shards and merges them into one run directory |
 | `goal_score.py` | The normal-weighted score `S` of "Normals, gates and fallbacks", with each pass's median time |
 | `normal_sources/` | Each normal source measured alone against the ground-truth normal: `normal_diag.py` (neighbours in 2D and 3D, planes, photometric), `nb_sweep.py` (the neighbour estimator's parameters and chains), `photo_diag.py` (`refine_normals` settings), `affine_diag.py` (cluster members' affine shapes), `cluster_nb_diag.py` (pseudo-neighbours from clusters), `photo_bias.py` (how the photometric normal misses the ground truth's, and priors that might correct it), `photo_neighbour_oracle.py` (averaging over true neighbours' photometric normals) |
+| `surface/` | The surface co-solve diagnostics: `landscape.py` (the depth x normal landscape around one point), `group.py` (a group of points: readings, photometry, run outcomes), `neighbour_positions.py` (the fit, neighbour-position normal, tilt and refit loop on a group), `split_patch.py` (split patches recovering a lean) and `cases.py` (runs scored on the draft's Kerry Park cases) |
 | `candidates/ensemble.py` | Runs every member above at 1, 1.5 and 2 times its own patch size, with the ray consensus in the finish and gates at the good-track bar's ZNCC. The members' tracks all lie on the pixel's ray, so they vote on the depth; the group most distinct members agree on wins, and its track is chosen in the cascade's order |
 
 The baseline's `size_policy` option (`prior`, `largest_view`, `median_view`,
