@@ -292,6 +292,13 @@ cases above.
    apparent size to the ground truth's, which the harness should report in
    place of the world-size ratio (that one is meaningless when a track at
    infinity is compared with a finite point).
+9. **Position first, then views, then the normal.** The order that worked on
+   the query traced in "One query, step by step" below: vet the clusters near
+   the pixel by triangulating their members, lock the position, grow the view
+   set without turning out views for a low ZNCC while the normal is still a
+   guess, then estimate the normal photometrically and refine it with the
+   seeded grid laid out on that estimate. Each normal step is judged by the
+   correlation peak offset as well as the ZNCC.
 
 The order is by cost and by how directly the evidence supports each. Numbers
 from 3 onward depend on how well a grid can be fitted where the query's own
@@ -344,6 +351,136 @@ is the chimney: with no surface, the fitted centres scatter along the rays,
 and the plane through them is 25 degrees off where the mean viewing direction
 was 4. A test that tells a scatter from a surface is open; the plane
 residual did not separate them.
+
+### One query, step by step
+
+To see why the grid helps and where the pipeline loses, one query was traced
+through every step of `cosolve` with the grid always on, then worked by hand
+on the bench in SfM Explorer. It is Kerry Park point 309, a spot of flat
+ground queried in `fisheye_right/frame_04` (R04) in the empty pass. `renormal`
+returns it with two views and a normal 76 degrees off; `cosolve` with the grid
+returns six views and 0.7 degrees. Every camera sees this spot at 65 to 82
+degrees from the ground's normal, so the patch's first guess, facing the
+cameras, is 66 degrees wrong before anything is measured.
+
+**The clusters are not vetted.** Five clusters of the cluster-patches file
+have a member within 16 px of the pixel. By eye, and by triangulating each
+cluster's members with the posed cameras, two are real (6719 and 3704) and
+three are spurious. The real clusters' members meet at one point with
+reprojection errors under 1 px; the spurious clusters' best points lie behind
+the camera, with errors of 24 to 440 px. The two real clusters are both a
+bench beside the pixel, and they agree: their points are 0.4 m apart and give
+the same distance along the pixel's ray within 0.1 m. That agreement is
+evidence of structure next to the pixel, and a place to start from. The
+cascade does not use it. It tries only the nearest three clusters, so it never
+reaches 3704, which is the cluster that links R04 to the close views R02 and
+R03. It carries the pixel through clusters whose member in the queried image
+the refinement had rejected, and it keeps a spurious cluster (5165) that the
+refinement's statuses alone accept at a ZNCC of 0.91. A check that a cluster's
+reference and kept members triangulate in front of the cameras with a small
+reprojection error needs only the poses, so it works in the empty pass, and
+here it keeps exactly the two real clusters.
+
+**The position is locked early, and a true view is turned out.** The cascade
+still ends with a good position: 0.23 true half-sizes from the point, from R04
+and R05. The geometry search finds `fisheye_left/frame_10` (L10), which sees
+the spot from the other side of the rig, reads it at 0.76 and turns it out at
+the 0.85 bar. L10's keypoint is 0.7 px from the true point's projection: it is
+a true sighting, and it is the view that fixes the depth, since R04 and R05
+are only 3.2 degrees apart as seen from the point. Rebuilt on the bench with
+L10 turned in, one more geometry search found R03 and `fisheye_right/frame_06`
+(R06), and a fit over the five views dropped the triangulation's condition
+number from 1248 to 66 and the height error from 5.2 cm to 1.4 cm. L10 read
+low because of the tilt, not the view: at the cameras-facing tilt it reads
+0.86 among five views, at the true tilt 0.96. R03, the closest and steepest
+view, reads 0.78 and 0.90; it is also the sharpest view, and a sharp view
+compared with a template fused from blurrier ones reads lower than it should.
+While the normal is a guess, a fixed ZNCC bar turns out exactly the views that
+would fix the depth and the normal.
+
+**The normal is estimated too early.** `renormal`'s photometric search runs on
+the two-view track and returns its starting direction unchanged, although the
+median ZNCC over the two views rises by 0.10 from the cameras-facing tilt to
+the true one. On the five-view track the same search, unchanged, lands 13
+degrees from the truth. The search itself is erratic: with five views,
+widening its range from 45 to 90 degrees returns the starting direction
+instead.
+
+**The grid works best seeded on a good estimate.** In the traced run the grid
+got its normal from positions, not photometry: each copy's fit slid 1 to 6
+half-sizes along its ray onto the ground, and the plane through where the
+copies landed was the answer. On the five-view track, seeded facing the
+cameras, the copies' fits move a median of 1.07 half-sizes off their seeded
+plane, and the grid ends 16 degrees off; seeded on the photometric normal they
+move 0.08, and the grid ends 4.2 degrees off, with the copies 0.06 spacings
+(RMS) off its plane against 0.36. With more views each copy is held more
+firmly, so a copy seeded far from the surface lands only partway back, and the
+start matters more.
+
+**ZNCC cannot judge the last step; the peak offset can.** Between the
+photometric normal (13 degrees off) and the grid's (4 degrees off) the median
+ZNCC over the five views is 0.953 and 0.949, while the median correlation peak
+offset falls from 0.28 px to 0.10 px.
+
+What this suggests, and prototype 9 tests:
+
+1. Vet the clusters near the pixel by triangulation, take every one that
+   passes rather than the nearest three, and treat clusters that triangulate
+   to one place as one hypothesis with more support.
+2. Lock the position before anything else.
+3. Grow the view set with the geometry search, keeping a view that lands where
+   the geometry predicts with a clear correlation peak even when its ZNCC is
+   under the bar, and search again once views are added.
+4. Estimate the normal on the grown track: the photometric search for a coarse
+   normal, then the seeded grid laid out on it for the fine one.
+5. Judge each normal step by the correlation peak offset as well as the ZNCC,
+   and judge the views by the usual bar only once the normal is settled.
+
+The trace is recorded in a page outside the repository; the bench session
+that produced the five-view track is not saved.
+
+### Anchors: reinforced depth readings near the pixel
+
+The first step of building a track at a pixel is to go from knowing nothing
+about the pixel's depth to having one or more **anchors**: 3D points near the
+pixel that several photographs agree on, each with the pixel it sits at in the
+queried image. An anchor need not be on the pixel's own surface. On point 309
+the two real clusters are a bench beside a spot of ground, and they are still
+the right place to start: they put the search within a few pixels in the views
+that see the spot from about the query's angle, and later steps walk from
+there to the pixel, solving the depth again where the reading changes.
+
+Anchors come from three sources, strongest first. The finder stops once it has
+enough anchors close to the pixel, and otherwise goes on to the next source:
+
+1. **Tracks.** The reconstruction's own points observed near the pixel in the
+   queried image, finite, seen in two or more images, every observation close
+   to the point's projection. A solver already agreed on these; they are the
+   strongest readings when they are near enough and well measured.
+2. **Clusters.** The cluster-patches clusters with a member near the pixel,
+   vetted with the posed cameras: the queried image's member is the reference
+   or kept, and the reference and kept members triangulate in front of every
+   camera with small reprojection errors. Every cluster that passes is used,
+   not the nearest three.
+3. **Constellation queries.** The SIFT index's constellation query from the
+   pixel. Each image it matches carries the pixel into its own frame by the
+   constellation's affine warp; those sightings are triangulated, dropping the
+   worst while three or more remain. This anchor sits at the pixel itself. The
+   cluster refinement is not used to read the sightings: on point 309 it
+   rejects every true match, reading grazing ground at a fixed radius.
+
+Anchors from different sources that give the same depth from the queried
+camera, near each other in the image, **support** each other: two independent
+readings of one structure, as the bench's two clusters are.
+
+The harness measures this step on its own (`harness.py --mode anchors`, with
+`scripts/track_at_pixel/anchors.py`): no track is built, and each query's
+anchors are scored against the ground truth, which the finder never sees. Per
+source it reports how often a query gets an anchor, how far the nearest one is
+in pixels and in true half-sizes, how often one lies within two half-sizes of
+the true point or on its surface (within a quarter of a half-size of its
+plane), how often an anchor at the pixel is within 5% of the true depth, and
+how often an anchor is supported by another source.
 
 ## Open questions
 
