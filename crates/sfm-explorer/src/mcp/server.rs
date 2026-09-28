@@ -315,13 +315,23 @@ impl ServerHandler for Viewer {
                 width,
                 height,
                 caption,
-            }) => CallToolResult::success(vec![
-                ContentBlock::text(format!("{width}×{height} px. {caption}")),
-                ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    "image/png",
-                ),
-            ]),
+                widgets,
+            }) => {
+                let mut blocks = vec![
+                    ContentBlock::text(format!("{width}×{height} px. {caption}")),
+                    ContentBlock::image(
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        "image/png",
+                    ),
+                ];
+                // The listing of the same frame, after the picture, as JSON
+                // text: a client that surfaces text to its model reads it the
+                // way it reads get_widgets.
+                if let Some(widgets) = widgets {
+                    blocks.push(ContentBlock::text(widgets.to_string()));
+                }
+                CallToolResult::success(blocks)
+            }
             Err(refusal) => CallToolResult::error(vec![ContentBlock::text(refusal.0)]),
         }
         .into())
@@ -334,16 +344,18 @@ impl ServerHandler for Viewer {
 /// process on this machine and nothing else — and the writes
 /// `destructiveHint: false`, because none of them touches a file on disk:
 /// `close_reconstruction` unloads a reconstruction, it does not delete one, and
-/// an edit makes a new version the human can undo. The exception is
-/// `save_reconstruction`, which can overwrite a file and is annotated
-/// `destructiveHint: true` for it.
+/// an edit makes a new version the human can undo. Two kinds are annotated
+/// `destructiveHint: true`: `save_reconstruction`, which can overwrite a file,
+/// and the input tools, which can press the menu items that save, quit or open
+/// a file chooser.
 fn advertise(spec: &tools::ToolSpec) -> Tool {
     let read_only = spec.kind == ToolKind::Read;
     let mut annotations = ToolAnnotations::new()
         .read_only(read_only)
         .open_world(false);
     if !read_only {
-        annotations = annotations.destructive(spec.kind == ToolKind::Save);
+        annotations =
+            annotations.destructive(matches!(spec.kind, ToolKind::Save | ToolKind::Input));
     }
     Tool::new(
         spec.name,
