@@ -89,6 +89,12 @@ DEFAULTS = {
     # (:func:`distance_range`, :func:`_camera_spread`, :func:`_bounded`), kept
     # as the reference the Rust one was measured against.
     "range_impl": "rust",
+    # Which implementation runs the matching sources that have been moved into
+    # core (`_RUST_SOURCES`): "rust", the core functions through their
+    # bindings (`specs/core/bench/nearby-sources.md`), or "python", this
+    # module's own (:func:`from_tracks` and the others), kept as the reference
+    # the Rust ones were measured against.
+    "sources_impl": "rust",
     # Infinity: after the other sources, when they gave no usable anchor, more
     # than one layer, or none at the pixel ("needed"), or always, or never. The pixel's patch is
     # compared with every image at its position at infinity; it is at infinity
@@ -417,11 +423,13 @@ def _constellation_at(ctx, image, at, pixel, opts):
 
 def _keypoints_near(ctx, image, pixel, radius_px, skip_px, limit):
     """Rows of ``image``'s keypoints within ``radius_px`` of the pixel and
-    further than ``skip_px``, nearest first."""
+    further than ``skip_px``, nearest first; rows at one distance (SIFT puts
+    two keypoints at one position when it finds two orientations there) keep
+    their order, as the core sources keep them."""
     xy, _ = ctx.keypoints(image)
     d = np.linalg.norm(np.asarray(xy, float) - np.asarray(pixel, float), axis=1)
     rows = np.flatnonzero((d <= radius_px) & (d > skip_px))
-    return rows[np.argsort(d[rows])][:limit]
+    return rows[np.argsort(d[rows], kind="stable")][:limit]
 
 
 def from_constellation(ctx, image, pixel, opts):
@@ -603,11 +611,140 @@ def from_sweep(ctx, image, pixel, opts):
     return [a]
 
 
+def _rust_tracks(ctx, image, pixel, opts):
+    """:func:`from_tracks` by the core ``nearby_points``."""
+    from sfmtool._sfmtool import bench as B
+
+    return B.nearby_points(
+        ctx.edited,
+        ctx.pyramids,
+        int(image),
+        (float(pixel[0]), float(pixel[1])),
+        options={
+            "radius_px": float(opts["track_radius_px"]),
+            "max_points": int(opts["track_max"]),
+            "min_views": int(opts["track_min_views"]),
+            "max_reproj_px": float(opts["max_reproj_px"]),
+        },
+    )
+
+
+def _rust_inputs(ctx):
+    """The dataset's ``NearbyTrackSources``, built on first use and kept: the
+    SIFT index, every image's keypoints and ``.sift`` descriptors, and the
+    cluster-patches clusters."""
+    ds = ctx.dataset
+    if getattr(ds, "_nearby_sources", None) is None:
+        from sfmtool._sfmtool import bench as B
+        from sfmtool.sift.file import get_sift_path_for_image
+
+        ds._nearby_sources = B.NearbyTrackSources(
+            ctx.edited,
+            forest=ds.forest,
+            keypoints=[tuple(kp) for kp in ds.keypoints],
+            matches=ds.matches,
+            sift=[
+                str(get_sift_path_for_image(ds.prepared.workspace / name))
+                for name in ds.image_names
+            ],
+        )
+    return ds._nearby_sources
+
+
+def _rust_clusters(ctx, image, pixel, opts):
+    """:func:`from_clusters` by the core ``nearby_cluster_tracks``."""
+    from sfmtool._sfmtool import bench as B
+
+    return B.nearby_cluster_tracks(
+        ctx.edited,
+        ctx.pyramids,
+        _rust_inputs(ctx),
+        int(image),
+        (float(pixel[0]), float(pixel[1])),
+        options={
+            "radius_px": float(opts["cluster_radius_px"]),
+            "max_clusters": int(opts["cluster_max"]),
+            "max_reproj_px": float(opts["max_reproj_px"]),
+            "members": opts["cluster_members"],
+        },
+    )
+
+
+def _rust_guided(ctx, image, pixel, opts):
+    """:func:`from_guided` by the core ``guided_matches``."""
+    from sfmtool._sfmtool import bench as B
+
+    return B.guided_matches(
+        ctx.edited,
+        ctx.pyramids,
+        _rust_inputs(ctx),
+        int(image),
+        (float(pixel[0]), float(pixel[1])),
+        options={
+            "radius_px": float(opts["guided_radius_px"]),
+            "max_keypoints": int(opts["guided_max"]),
+            "skip_px": float(opts["guided_skip_px"]),
+            "epipolar_px": float(opts["guided_epipolar_px"]),
+            "ratio": float(opts["guided_ratio"]),
+            "max_distance": float(opts["guided_max_dist"]),
+            "loose_distance": float(opts["guided_loose_dist"]),
+            "min_views": int(opts["guided_min_views"]),
+            "max_reproj_px": float(opts["max_reproj_px"]),
+        },
+    )
+
+
+def _rust_constellation(ctx, image, pixel, opts):
+    """:func:`from_constellation` by the core ``constellation_seeds``."""
+    from sfmtool._sfmtool import bench as B
+
+    return B.constellation_seeds(
+        ctx.edited,
+        ctx.pyramids,
+        _rust_inputs(ctx),
+        int(image),
+        (float(pixel[0]), float(pixel[1])),
+        options={
+            "target": int(opts["constellation_target"]),
+            "min_inliers": int(opts["constellation_min_inliers"]),
+            "seed_radius_px": float(opts["constellation_radius_px"]),
+            "max_reproj_px": float(opts["constellation_max_reproj_px"]),
+            "at": opts["constellation_at"],
+            "lateral_max": int(opts["lateral_max"]),
+            "lateral_radius_px": float(opts["lateral_radius_px"]),
+        },
+    )
+
+
+# The sources moved into core, by the harness's name for each.
+_RUST_SOURCES = {
+    "tracks": _rust_tracks,
+    "clusters": _rust_clusters,
+    "guided": _rust_guided,
+    "constellation": _rust_constellation,
+}
+
+
+def _by_impl(name, python):
+    """The source ``name``, run by the implementation ``sources_impl`` names."""
+
+    def run(ctx, image, pixel, opts):
+        impl = opts["sources_impl"]
+        if impl == "python":
+            return python(ctx, image, pixel, opts)
+        if impl != "rust":
+            raise ValueError(f"unknown sources_impl {impl!r} (expected rust|python)")
+        return _RUST_SOURCES[name](ctx, image, pixel, opts)
+
+    run.__name__ = python.__name__
+    return run
+
+
 SOURCES = {
-    "tracks": from_tracks,
-    "clusters": from_clusters,
-    "constellation": from_constellation,
-    "guided": from_guided,
+    "tracks": _by_impl("tracks", from_tracks),
+    "clusters": _by_impl("clusters", from_clusters),
+    "constellation": _by_impl("constellation", from_constellation),
+    "guided": _by_impl("guided", from_guided),
     "sweep": from_sweep,
 }
 

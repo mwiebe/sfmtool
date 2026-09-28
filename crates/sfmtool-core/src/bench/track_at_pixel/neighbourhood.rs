@@ -124,6 +124,11 @@ impl<'a> ViewCamera<'a> {
         Some([u, v])
     }
 
+    /// A camera-frame direction turned into the world frame.
+    pub(crate) fn world_direction(&self, direction: &Vector3<f64>) -> Vector3<f64> {
+        self.rotation.transpose() * direction
+    }
+
     /// The world-frame unit ray through a pixel.
     pub(crate) fn ray(&self, pixel: [f64; 2]) -> Vector3<f64> {
         let d = self.view.camera.pixel_to_ray(pixel[0], pixel[1]);
@@ -188,13 +193,13 @@ struct ImageObservations {
 ///
 /// A point observed twice in one image is listed at its first observation
 /// there, in track order.
-pub(super) struct ObservationIndex<'a> {
+pub(crate) struct ObservationIndex<'a> {
     edited: &'a EditedReconstruction,
     per_image: Vec<ImageObservations>,
 }
 
 impl<'a> ObservationIndex<'a> {
-    pub(super) fn new(edited: &'a EditedReconstruction) -> Self {
+    pub(crate) fn new(edited: &'a EditedReconstruction) -> Self {
         let mut per_image: Vec<ImageObservations> = (0..edited.image_count())
             .map(|_| ImageObservations {
                 points: Vec::new(),
@@ -228,7 +233,7 @@ impl<'a> ObservationIndex<'a> {
 
     /// Every observation in `image` within `radius_px` of `pixel`, nearest
     /// first, read through `camera` (the queried image's).
-    pub(super) fn near(
+    pub(crate) fn near(
         &self,
         image: u32,
         pixel: [f64; 2],
@@ -303,7 +308,7 @@ impl<'a> ObservationIndex<'a> {
     }
 
     /// Every observation of `point`, as `(image, keypoint)` in track order.
-    pub(super) fn point_observations(&self, point: u32) -> Vec<(u32, [f64; 2])> {
+    pub(crate) fn point_observations(&self, point: u32) -> Vec<(u32, [f64; 2])> {
         let Some(view) = self.edited.point(point) else {
             return Vec::new();
         };
@@ -318,19 +323,25 @@ impl<'a> ObservationIndex<'a> {
     }
 
     /// A live point's position, or `None` for one the version does not hold.
-    pub(super) fn position(&self, point: u32) -> Option<Point3<f64>> {
+    pub(crate) fn position(&self, point: u32) -> Option<Point3<f64>> {
         Some(self.edited.point(point)?.point().position)
     }
 }
 
 /// The member-status legend of the `.matches` cluster-patches section: the
 /// reference member.
-const STATUS_REFERENCE: u8 = 0;
+pub(crate) const STATUS_REFERENCE: u8 = 0;
 /// The member-status legend: a member the refinement kept.
-const STATUS_KEPT: u8 = 1;
+pub(crate) const STATUS_KEPT: u8 = 1;
+/// The member-status legend: a member whose ZNCC against the reference fell
+/// under the refinement's bar.
+pub(crate) const STATUS_REJECTED_LOW_ZNCC: u8 = 2;
+/// The member-status legend: a member the refinement moved too far from its
+/// seed.
+pub(crate) const STATUS_REJECTED_SHIFT: u8 = 3;
 /// The member-status legend: a member nothing evaluated, which is what every
 /// member of a file with no cluster-patches section is.
-const STATUS_NOT_EVALUATED: u8 = 5;
+pub(crate) const STATUS_NOT_EVALUATED: u8 = 5;
 
 /// Why a `.matches` file cannot serve as the clusters a track-at-pixel query
 /// reads.
