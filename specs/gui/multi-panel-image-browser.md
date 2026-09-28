@@ -519,8 +519,8 @@ track observes; an image it does not observe shows at most the **ghost
 outline** described below, which takes the patch-wide handles while Track View's
 *Lock* is ticked.
 
-The colours are the bench's own, one violet per verdict (`in`, `candidate`,
-`out`), used nowhere else in the panel, so a mark on the bench is never read as
+The colours are the bench's own, one violet per verdict (`in`, `out`), used
+nowhere else in the panel, so a mark on the bench is never read as
 committed structure; the strokes are thicker than a feature ellipse's.
 
 What is drawn is the track's own geometry rather than a symbol for it, and
@@ -542,7 +542,7 @@ differs by stage:
   own keypoint as a filled dot and, for **every** observation whatever its
   verdict, in that observation's own colour, the segment from that dot to the
   patch's own projection with a hollow circle at the projection: the gap is
-  the *Proj. off* column, drawn. Where the two coincide the segment has no
+  the *Proj. err (px / deg)* column's first number, drawn. Where the two coincide the segment has no
   length and is not seen, which needs no special casing and is the answer as
   much as a long segment is. It is drawn for a judged observation as well as a
   proposed one because where this image's feature sits relative to the
@@ -580,8 +580,7 @@ differs by stage:
   drawn at that many pixels before anything has evaluated it.
 
 **The ghost outline.** An image counts as the track's when it holds an
-observation of any verdict, so a `candidate` or an `out` sighting is drawn as
-above. In an image with **no** observation, the track stage still has a patch
+observation of any verdict, so an `out` sighting is drawn as above. In an image with **no** observation, the track stage still has a patch
 standing in the world, and the layer draws where this camera sees it: the
 patch's own square, not re-anchored on anything since there is no keypoint
 here, sampled and projected as the member outline is and in the same stroke,
@@ -1136,7 +1135,7 @@ task is holding; adding to the bench track is greyed until a track is active,
 with *"No track is being edited: tick Edit in Track View, or double-click a
 Bench item in the Scene tree."*, since a bench with items on it can have none
 active. An image the active track already holds a sighting in is not a
-refusal -- a second one joins as a candidate and is scored like any other, and
+refusal -- a second one joins unpinned and `out` and is scored like any other, and
 it is the `in` verdict a track cannot hold twice
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md)). A busy
 node greys all four, carrying the state's own busy sentence.

@@ -58,7 +58,7 @@ pub(super) fn get_bench(state: &AppState, label: &str) -> JsonReply {
         .iter()
         .filter_map(|entry| {
             let track = entry.item.as_track()?;
-            let (kept, candidates, out) = track.verdict_counts();
+            let (kept, out) = track.verdict_counts();
             Some(json!({
                 "item": entry.label,
                 "kind": "track",
@@ -69,7 +69,6 @@ pub(super) fn get_bench(state: &AppState, label: &str) -> JsonReply {
                 "counts": {
                     "observations": track.observations.len(),
                     "in": kept,
-                    "candidate": candidates,
                     "out": out,
                 },
             }))
@@ -138,7 +137,7 @@ pub(super) fn get_bench_track(state: &AppState, label: &str, named: Option<&str>
         .track(&item)
         .ok_or_else(|| no_such_item(bench, &item))?;
     let stage = track.stage_kind();
-    let (kept, candidates, out) = track.verdict_counts();
+    let (kept, out) = track.verdict_counts();
     let observations: Vec<Value> = track
         .observations
         .iter()
@@ -171,7 +170,6 @@ pub(super) fn get_bench_track(state: &AppState, label: &str, named: Option<&str>
         "counts": {
             "observations": track.observations.len(),
             "in": kept,
-            "candidate": candidates,
             "out": out,
         },
         "stage_data": stage_data(track),
@@ -196,7 +194,6 @@ fn evaluation(state: &AppState, id: ReconId, item: &str) -> Value {
         "state": evaluation.name(),
         "reason": evaluation.reason(),
         "running": state.bench_evaluation_running(id, item),
-        "search_px": state.bench_search_px(),
     })
 }
 
@@ -567,7 +564,7 @@ pub(super) fn discard_bench_item(state: &mut AppState, label: &str, item: &str) 
     Ok(with_item(reply, item))
 }
 
-/// `add_bench_track_observation`: one more candidate of the track, at the place
+/// `add_bench_track_observation`: one more observation of the track, at the place
 /// the seed names.
 ///
 /// The reply carries the index the observation took, which is the end of the
@@ -947,25 +944,34 @@ pub(super) fn set_bench_track_verdict(
     label: &str,
     named: Option<&str>,
     observation: usize,
-    verdict: Verdict,
+    verdict: Option<Verdict>,
 ) -> JsonReply {
     let (id, item) = target(state, label, named)?;
-    let reply = edit::edited(state, id, |state| {
-        state.set_bench_verdict(id, &item, observation, verdict)
+    let reply = edit::edited(state, id, |state| match verdict {
+        Some(verdict) => state.set_bench_verdict(id, &item, observation, verdict),
+        None => state.unpin_bench_verdict(id, &item, observation),
     })?;
+    // The verdict and the pin the observation carries now, which for an
+    // unpinning is what the thresholds gave it.
+    let now = state
+        .bench_track(id, &item)
+        .and_then(|track| track.observations.get(observation))
+        .map(|o| (o.verdict, o.pinned));
     let mut reply = with_item(reply, &item);
     insert(&mut reply, "observation", json!(observation));
-    insert(&mut reply, "verdict", json!(verdict.to_string()));
+    if let Some((verdict, pinned)) = now {
+        insert(&mut reply, "verdict", json!(verdict.to_string()));
+        insert(&mut reply, "pinned", json!(pinned));
+    }
     Ok(reply)
 }
 
 /// `apply_bench_track_thresholds`: the bars, and the painting they produce, as
 /// one step.
 ///
-/// One call for the two because they are one gesture: the panel's sliders
-/// propose until its button is pressed, and what the button applies is the
-/// painting those positions produce. A bar the call does not name stays where
-/// the track has it.
+/// One call for the two because they are one gesture: letting go of one of
+/// the panel's threshold boxes applies the painting the bars produce. A bar
+/// the call does not name stays where the track has it.
 pub(super) fn apply_bench_track_thresholds(
     state: &mut AppState,
     label: &str,
@@ -1090,32 +1096,15 @@ fn point_written(state: &AppState, id: ReconId, written: crate::bench::Committed
     })
 }
 
-/// `set_bench_search_px`: the radius every bench track is evaluated at.
-///
-/// Not a step on any node: the radius is the viewer's, as the slider's
-/// position is, so it pushes no version and writes no Action Log row, and the
-/// reply is the radius read back.
-pub(super) fn set_bench_search_px(state: &mut AppState, search_px: f64) -> JsonReply {
-    state
-        .set_bench_search_px(search_px)
-        .map_err(ToolError::new)?;
-    Ok(json!({ "search_px": state.bench_search_px() }))
-}
-
 /// `fit_bench_track`: the track localized, re-triangulated, re-fused and read
 /// back, on a worker thread.
-pub(super) fn fit_bench_track(
-    state: &mut AppState,
-    label: &str,
-    named: Option<&str>,
-    search_px: Option<f64>,
-) -> Outcome {
+pub(super) fn fit_bench_track(state: &mut AppState, label: &str, named: Option<&str>) -> Outcome {
     let (id, item) = match target(state, label, named) {
         Ok(target) => target,
         Err(error) => return Outcome::Done(Err(error)),
     };
     let since = state.action_log.revision();
-    match state.start_bench_fit(id, &item, search_px) {
+    match state.start_bench_fit(id, &item) {
         Err(message) => Outcome::Done(Err(ToolError::new(message))),
         Ok(()) => started(state, id, since),
     }
@@ -1145,7 +1134,7 @@ pub(super) fn set_bench_track_stage(
 }
 
 /// `search_bench_track_descriptors`: the images that hold the patch around one
-/// observation, each added as a candidate, on a worker thread.
+/// observation, each added `out` and unpinned, on a worker thread.
 pub(super) fn search_bench_track_descriptors(
     state: &mut AppState,
     label: &str,
@@ -1166,7 +1155,7 @@ pub(super) fn search_bench_track_descriptors(
 }
 
 /// `search_bench_track_geometry`: the photographs whose own view of the
-/// track's patch matches it, each added as a candidate, on a worker thread.
+/// track's patch matches it, each added `out` and unpinned, on a worker thread.
 pub(super) fn search_bench_track_geometry(
     state: &mut AppState,
     label: &str,

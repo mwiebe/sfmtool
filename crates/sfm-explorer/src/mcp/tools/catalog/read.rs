@@ -252,19 +252,18 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           empty on a track that is not active), and every observation with what put it \
                           there, the verdict on it, where it sits and whatever each stage has \
                           measured about it. The measurements are kept evaluated: every change \
-                          to the track, to the reconstruction under it or to the search radius \
-                          (set_bench_search_px) evaluates it again on a worker, with no call to \
-                          ask for it. evaluation.state says which numbers these are: current \
+                          to the track, its max_shift_px bar among them since that is the radius \
+                          each peak is looked for within, or to the reconstruction under it \
+                          evaluates it again on a worker, with no call to ask for it. evaluation.state says which numbers these are: current \
                           when they are the evaluation of the track as it stands, evaluating \
                           when an evaluation of the current inputs is running or about to start \
                           (evaluation.running says which) and the numbers are the previous \
                           evaluation's, so read again until it says current; refused or failed \
                           with evaluation.reason when the \
-                          track cannot be evaluated as it stands. evaluation.search_px is the \
-                          radius it reads at. An observation's pixel is where it sits whether or \
+                          track cannot be evaluated as it stands. An observation's pixel is where it sits whether or \
                           not anything has measured it: the track-stage keypoint, else the \
                           refined cluster position, else the seed it was proposed at. So a \
-                          candidate a search has just added says where it is without being \
+                          observation a search has just added says where it is without being \
                           evaluated first. An observation is addressed by its position in the \
                           list, which is \
                           stable for the life of the track — observations are appended and never \
@@ -296,9 +295,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           where the cell is flat. A part has fewer pixels than the whole, so it \
                           reads higher for the same texture. Both grids cover the whole square, \
                           corners included. zncc_self_similarity_radius is how far, in grid px, \
-                          the tile's core can slide over itself by whole pixels and still match \
-                          itself as well as a true match between two views would: 0 on a corner \
-                          or busy texture, 1 to 1.41 or 2 to 2.24 in between, and 3 meaning 3 or \
+                          the tile's core can slide over itself and still match itself as well \
+                          as a true match between two views would, read where its ZNCC against \
+                          itself, interpolated linearly between whole-pixel shifts, falls through \
+                          that level: under 1 on a corner or busy texture, and 3 meaning 3 or \
                           more, on a straight edge or a flat patch. zncc_self_similarity_radius_middle \
                           and zncc_self_similarity_radius_grid read the middle square and each \
                           cell of the same split the same way, and zncc_self_similarity_slide_grid \

@@ -17,8 +17,8 @@
 //! `&AppState` while it draws, and a step needs it mutably.
 //!
 //! Almost no state lives here. The bench is the node's, at its cursor, so what
-//! the panel owns is the slider positions during a drag, the *Lock* box Image Detail reads a
-//! dot drag by, the tiles it has rendered, and the painting the sliders
+//! the panel owns is the threshold boxes' values during a drag, the *Lock* box Image Detail reads a
+//! dot drag by, the tiles it has rendered, and the painting the boxes
 //! produce. The last two are cached against the
 //! track's own `Arc` rather than recomputed per frame, because the painting is
 //! `apply_thresholds` run over a copy (and a copy of a track carries its
@@ -50,7 +50,7 @@ pub(crate) use table::RowSummary;
 /// What one frame of the panel asks the dock to do.
 ///
 /// Every field is one gesture, and at most one of them is set on a frame: the
-/// entries that push a version are buttons and slider releases, and each is
+/// entries that push a version are buttons and box releases, and each is
 /// made once.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct TrackEditResponse {
@@ -58,16 +58,12 @@ pub struct TrackEditResponse {
     pub discard: Option<String>,
     /// *Rename* was committed: the item, and the label it should take.
     pub rename: Option<(String, String)>,
-    /// *Fit*, which runs at the radius the live evaluation reads at.
+    /// *Fit*.
     pub fit: bool,
-    /// The *search px* slider was released, or a value typed into it was
-    /// committed: the radius the bench's evaluation should read at. Set only
-    /// when it differs from the viewer's own.
-    pub search_px: Option<f64>,
     /// The *Stage* toggle, carrying the stage it asks for.
     pub set_stage: Option<StageKind>,
-    /// A threshold slider was released, or a value typed into one was
-    /// committed: the bars the four sliders stand at, for the active track.
+    /// A threshold box was released, or a value typed into one was
+    /// committed: the bars the four boxes stand at, for the active track.
     /// Set only when they differ from the track's own.
     pub apply_thresholds: Option<Thresholds>,
     /// A kept-at-seed row's *Accept walk*, carrying the observation: put its
@@ -93,9 +89,13 @@ pub struct TrackEditResponse {
     /// A track-stage row's *Find matches by geometry*, carrying the
     /// observation whose appearance is the explicit reference.
     pub search_geometry: Option<usize>,
-    /// A verdict control was clicked: the observation, and the verdict it
-    /// cycled to.
+    /// A row's *Keep* switch was clicked: the observation, and the verdict it
+    /// switched to.
     pub set_verdict: Option<(usize, Verdict)>,
+    /// A row's *Unpin, let the thresholds decide*, carrying the observation.
+    pub unpin_verdict: Option<usize>,
+    /// The header's go-to button: open the *Go to Point* dialog.
+    pub request_goto_point: bool,
     /// A row was clicked -- select this image, as a view-mode row does.
     pub select_image: Option<usize>,
     /// A row was double-clicked -- enter camera view for this image, as a
@@ -113,22 +113,24 @@ pub struct TrackEditResponse {
 
 /// Track View's edit-mode state.
 pub struct TrackEdit {
-    /// Where the threshold sliders stand.
+    /// Where the threshold boxes stand.
     ///
-    /// The **active track's own bars**, copied from it on every frame no slider
+    /// The **active track's own bars**, copied from it on every frame no box
     /// is being dragged, so an undo, a redo, a step over the wire or a change
-    /// of active item moves the sliders with it. Only during a drag does this
+    /// of active item moves the boxes with it. Only during a drag does this
     /// hold a value the track does not: the drag repaints the table live, and
     /// its release applies the bars to the track as one version. The panel
     /// therefore never holds bars a *Fit* would not use.
     thresholds: Thresholds,
-    /// Whether a threshold slider was being dragged on the last frame, which is
+    /// Whether a threshold box was being dragged on the last frame, which is
     /// what keeps [`TrackEdit::thresholds`] from being reset to the track's bars
     /// in the middle of the drag.
     sliding: bool,
-    /// The verdicts the sliders propose for the active track, one per
-    /// observation, which is what the rows are painted by.
-    painted: Vec<Verdict>,
+    /// The verdicts the boxes propose for the active track, one per
+    /// observation, which is what the rows are painted by: `None` for an
+    /// observation nothing at the track's stage has measured, which has no
+    /// proposal.
+    painted: Vec<Option<Verdict>>,
     /// The item and the exact track value [`TrackEdit::painted`] was computed
     /// from: the label, and the address of the track's `Arc`. A step on the
     /// track gives it a new `Arc`, which is what says the painting is stale.
@@ -182,15 +184,6 @@ pub struct TrackEdit {
     /// refusal is asked every frame, in front of this, because that one is free
     /// and does move.
     build_refusal: Option<(ReconId, Option<String>)>,
-    /// Where the *search px* slider stands, in patch-grid px.
-    ///
-    /// The viewer's own radius ([`AppState::bench_search_px`]), copied on
-    /// every frame the slider is not being dragged, as the threshold sliders
-    /// copy the track's bars. A release hands the new radius to the dock, and
-    /// every track is then evaluated again at it.
-    search_px: f64,
-    /// Whether the *search px* slider was being dragged on the last frame.
-    searching: bool,
     /// Where the active track's evaluation stood when this frame drew it:
     /// what the status at the head of the toolbar says, and how the rows print
     /// their numbers.
@@ -232,8 +225,6 @@ impl TrackEdit {
             plots: HashMap::new(),
             rows: Vec::new(),
             build_refusal: None,
-            search_px: crate::bench::default_search_px(),
-            searching: false,
             evaluation: Evaluation::Evaluating,
             lock: true,
             scroll_offset_y: None,
@@ -246,16 +237,10 @@ impl TrackEdit {
         &self.rows
     }
 
-    /// Where the sliders stand.
+    /// Where the boxes stand.
     #[cfg(test)]
     pub(crate) fn thresholds(&self) -> &Thresholds {
         &self.thresholds
-    }
-
-    /// Where the search control stands, in patch-grid px.
-    #[cfg(test)]
-    pub(crate) fn search_px(&self) -> f64 {
-        self.search_px
     }
 
     /// Where the active track's evaluation stood when the panel last drew it.
@@ -318,9 +303,6 @@ impl TrackEdit {
 
         self.showing = Some((id, label.clone()));
         self.reseat_thresholds(track);
-        if !self.searching {
-            self.search_px = state.bench_search_px();
-        }
         self.evaluation = state
             .bench_evaluation(id, &label)
             .unwrap_or(Evaluation::Evaluating);
@@ -334,13 +316,18 @@ impl TrackEdit {
             self.build_refusal = Some((id, state.sift_sources_refusal(id)));
         }
 
-        show_header(ui, &label, track);
+        // The ID of the point the track was read from, where that point is
+        // still in the version at the cursor: what the header's copy button
+        // copies, and what the *Go to Point* dialog takes back.
+        let point_id = state
+            .resolved_origin(node, track)
+            .map(|index| crate::scene::point_id(node, index as usize));
+        response.request_goto_point = show_header(ui, &label, track, point_id.as_deref());
         self.show_toolbar(ui, state, node, &label, track, &mut response);
-        // A release applies what the drag left the sliders at. Painted by this
+        // A release applies what the drag left the boxes at. Painted by this
         // frame's value from the next frame on, which is the frame the dock
         // has applied it by.
         response.apply_thresholds = self.show_thresholds(ui, state.busy_refusal(id), track);
-        response.search_px = self.show_search_px(ui, state.bench_search_px());
         ui.separator();
         self.show_table(ui, node.recon(), id, state, track, &mut response);
         response
@@ -360,9 +347,11 @@ impl TrackEdit {
         let id = node.id;
         let busy = state.busy_refusal(id);
         ui.horizontal_wrapped(|ui| {
+            // The arrow is U+23F5, which egui's bundled fonts draw; they have no
+            // glyph for U+2192, which draws as a box.
             let (next, stage_label) = match track.stage_kind() {
-                StageKind::Cluster => (StageKind::Track, "Stage: cluster \u{2192} track"),
-                StageKind::Track => (StageKind::Cluster, "Stage: track \u{2192} cluster"),
+                StageKind::Cluster => (StageKind::Track, "Stage: cluster \u{23f5} track"),
+                StageKind::Track => (StageKind::Cluster, "Stage: track \u{23f5} cluster"),
             };
             let refusals = photometric_refusals(busy.as_deref(), track, next);
             show_evaluation(ui, &self.evaluation);
@@ -475,13 +464,13 @@ impl TrackEdit {
         }
     }
 
-    /// The threshold sliders, which apply to the active track: a drag paints
+    /// The threshold boxes, which apply to the active track: a drag paints
     /// the table live, and its release (or a typed value's commit) hands back
     /// the bars to apply as one version. `None` on every other frame, and on a
     /// release that left the bars where the track has them.
     ///
     /// Greyed while the node is busy, with the busy sentence: a release there
-    /// would be refused, and a slider that snapped back after a drag would say
+    /// would be refused, and a box that snapped back after a drag would say
     /// less than one that could not be dragged.
     fn show_thresholds(
         &mut self,
@@ -495,27 +484,53 @@ impl TrackEdit {
         ui.horizontal_wrapped(|ui| {
             ui.label("Thresholds");
             let bars = &mut self.thresholds;
-            // The ZNCC bars read in percent, as the table's ZNCC column does;
-            // the track stores them on the 0 to 1 scale.
-            let sliders = [
-                percent(egui::Slider::new(&mut bars.min_zncc, 0.0..=1.0)).text(MIN_ZNCC_LABEL),
+            // Each bar is a label and a box that is dragged left and right to
+            // change it, or clicked to type into: a slider's rail beside the
+            // box would say nothing the box does not. The ZNCC bars read in
+            // percent, as the table's ZNCC column does; the track stores them
+            // on the 0 to 1 scale.
+            let boxes = [
+                (
+                    MIN_ZNCC_LABEL,
+                    percent(egui::DragValue::new(&mut bars.min_zncc)),
+                ),
                 // The bar on the middle reading; 0 turns it off.
-                percent(egui::Slider::new(&mut bars.min_zncc_middle, 0.0..=1.0))
-                    .text(MIN_ZNCC_MIDDLE_LABEL),
-                egui::Slider::new(&mut bars.max_shift_px, 0.0..=20.0).text(MAX_SHIFT_LABEL),
-                egui::Slider::new(&mut bars.max_keypoint_uncertainty, 0.0..=2.0)
-                    .text("max \u{3c3}_pos"),
+                (
+                    MIN_ZNCC_MIDDLE_LABEL,
+                    percent(egui::DragValue::new(&mut bars.min_zncc_middle)),
+                ),
+                // In patch-grid px, and also the radius the evaluation looks
+                // for each peak within.
+                (
+                    MAX_SHIFT_LABEL,
+                    egui::DragValue::new(&mut bars.max_shift_px)
+                        .range(0.0..=24.0)
+                        .speed(0.05)
+                        .max_decimals(1),
+                ),
+                (
+                    "max \u{3c3}_pos",
+                    egui::DragValue::new(&mut bars.max_keypoint_uncertainty)
+                        .range(0.0..=2.0)
+                        .speed(0.005)
+                        .max_decimals(2),
+                ),
                 // The fourth bar of `Thresholds`, which view selection scores a
                 // candidate by as a fraction of the track's own self-agreement:
-                // a bar with no slider is a bar only the wire can move.
-                percent(egui::Slider::new(&mut bars.min_relative_zncc, 0.0..=1.0))
-                    .text(MIN_RELATIVE_ZNCC_LABEL),
+                // a bar with no box is a bar only the wire can move.
+                (
+                    MIN_RELATIVE_ZNCC_LABEL,
+                    percent(egui::DragValue::new(&mut bars.min_relative_zncc)),
+                ),
             ];
-            for slider in sliders {
+            for (label, value) in boxes {
+                let named = ui.add_enabled(enabled, egui::Label::new(label));
+                if label == MAX_SHIFT_LABEL {
+                    named.on_hover_text(MAX_SHIFT_TIP);
+                }
                 // A typed value lands when the field is left, not per
                 // keystroke, so typing "90" is one version and not two.
-                let slider = slider.max_decimals(2).update_while_editing(false);
-                let r = ui.add_enabled(enabled, slider);
+                let r = ui.add_enabled(enabled, value.update_while_editing(false));
                 let r = match &busy {
                     Some(why) => r.on_disabled_hover_text(why),
                     None => r.on_hover_text(
@@ -533,42 +548,13 @@ impl TrackEdit {
             .then(|| self.thresholds.clone())
     }
 
-    /// The *search px* slider: how far around each observation the evaluation
-    /// looks for its correlation peak. Its release, or a typed value's commit,
-    /// hands back the radius to set; `None` on every other frame, and on a
-    /// release that left it at `current`.
-    ///
-    /// Not a threshold: it is an input to the evaluation rather than a bar the
-    /// painting judges by, which is why it stands on a row of its own, and it
-    /// applies to every track rather than to the active one. Never greyed by a
-    /// busy node, because setting it is no step on the node: the evaluations
-    /// it asks for wait until the node is free.
-    fn show_search_px(&mut self, ui: &mut egui::Ui, current: f64) -> Option<f64> {
-        let r = ui
-            .add(
-                egui::Slider::new(&mut self.search_px, 1.0..=24.0)
-                    .text(SEARCH_PX_LABEL)
-                    .max_decimals(1)
-                    .update_while_editing(false),
-            )
-            .on_hover_text(
-                "How far around each observation the evaluation looks for the correlation \
-                 peak, in patch-grid px. Every track is evaluated again at it when it is \
-                 released",
-            );
-        self.searching = r.dragged();
-        let released = r.drag_stopped() || (r.changed() && !r.dragged());
-        (released && !self.searching && self.search_px.to_bits() != current.to_bits())
-            .then_some(self.search_px)
-    }
-
-    /// Put the sliders where the active track's own bars are, unless a slider
+    /// Put the boxes where the active track's own bars are, unless a box
     /// is being dragged.
     ///
-    /// Every frame, rather than when something is seen to change: the sliders
+    /// Every frame, rather than when something is seen to change: the boxes
     /// show the track's bars and nothing else, so whatever moved them -- a
-    /// slider's release here, `apply_bench_track_thresholds` over the wire, an
-    /// undo or redo of either, another item made active -- the sliders follow.
+    /// box's release here, `apply_bench_track_thresholds` over the wire, an
+    /// undo or redo of either, another item made active -- the boxes follow.
     fn reseat_thresholds(&mut self, track: &EditableTrack) {
         if !self.sliding {
             self.thresholds = track.thresholds.clone();
@@ -578,8 +564,8 @@ impl TrackEdit {
     /// Recompute the painting when the track or the bars have moved.
     ///
     /// The painting **is** what applying the thresholds would do, computed by
-    /// the same core function a slider's release applies, so a row can never be
-    /// painted one way and turned another when the slider is let go. A pinned verdict
+    /// the same core function a box's release applies, so a row can never be
+    /// painted one way and turned another when the box is let go. A pinned verdict
     /// comes back unchanged from that call, which is what leaves it alone.
     fn repaint_if_stale(&mut self, label: &str, track: &std::sync::Arc<EditableTrack>) {
         let key = (
@@ -593,7 +579,12 @@ impl TrackEdit {
         let mut with_bars = (**track).clone();
         with_bars.thresholds = self.thresholds.clone();
         let (painted, _) = apply_thresholds(&with_bars);
-        self.painted = painted.observations.iter().map(|o| o.verdict).collect();
+        let stage = track.stage_kind();
+        self.painted = painted
+            .observations
+            .iter()
+            .map(|o| is_measured(o, stage).then_some(o.verdict))
+            .collect();
         self.painted_for = Some(key);
     }
 
@@ -709,35 +700,23 @@ impl TrackEdit {
     }
 }
 
-/// A patch ZNCC as a table cell prints it, in percent under a `ZNCC (%)`
-/// heading: the whole-patch reading, then the middle one (`92 / 61`).
+/// A patch ZNCC as a table cell prints it, in percent: the whole-patch
+/// reading over the middle one (`92% whole` over `61% mid`).
 ///
 /// The middle ZNCC is the same samples read over the middle square of the
 /// patch only, so the pair says whether an agreement is carried by the
 /// pixel's own neighbourhood or by its surroundings. Percent carries the same
-/// two digits as `0.92` in two fewer characters, which keeps the pair narrow
-/// enough for one column. `-` stands for a reading that is not there: no
-/// whole-patch ZNCC at all, or no middle one beside it, as on a track read
-/// back from a committed point. A reading that was taken and came out
-/// non-finite prints `NaN`.
+/// two digits as `0.92` in fewer characters, which keeps the column narrow.
+/// `-` stands for a reading that is not there: no whole-patch ZNCC at all, or
+/// no middle one beside it, as on a track read back from a committed point. A
+/// reading that was taken and came out non-finite prints `NaN`.
 pub(crate) fn zncc_text(whole: Option<f64>, middle: Option<f64>) -> String {
-    zncc_pair(whole, middle, "")
+    stacked(whole, middle, |value| format!("{:.0}%", 100.0 * value))
 }
 
-/// [`zncc_text`] for a sentence, which has no heading to carry the unit, so
-/// each number carries it (`92% / 61%`).
+/// [`zncc_text`] for a sentence, on one line (`92% / 61%`).
 pub(crate) fn zncc_sentence(whole: Option<f64>, middle: Option<f64>) -> String {
-    zncc_pair(whole, middle, "%")
-}
-
-fn zncc_pair(whole: Option<f64>, middle: Option<f64>, unit: &str) -> String {
-    let number = |value: f64| {
-        if value.is_finite() {
-            format!("{:.0}{unit}", 100.0 * value)
-        } else {
-            "NaN".to_string()
-        }
-    };
+    let number = |value: f64| finite_or_nan(value, |v| format!("{:.0}%", 100.0 * v));
     match whole {
         None => "-".to_string(),
         Some(whole) => format!(
@@ -749,42 +728,61 @@ fn zncc_pair(whole: Option<f64>, middle: Option<f64>, unit: &str) -> String {
 }
 
 /// A patch localizability as a table cell prints it, sigma_pos in grid px:
-/// the whole tile's, then its middle square's (`0.08 / 0.12`).
+/// the whole tile's over its middle square's (`0.08 px whole` over
+/// `0.12 px mid`), to two decimals.
 ///
-/// `-` stands for a reading that is not there, as [`zncc_text`] has it. Two
-/// decimals, so the pair fits one column.
+/// `-` stands for a reading that is not there, as [`zncc_text`] has it.
 pub(crate) fn sigma_text(whole: Option<f64>, middle: Option<f64>) -> String {
-    let number = |value: f64| {
-        if value.is_finite() {
-            format!("{value:.2}")
-        } else {
-            "NaN".to_string()
-        }
-    };
-    match whole {
-        None => "-".to_string(),
-        Some(whole) => format!(
-            "{} / {}",
-            number(whole),
-            middle.map_or_else(|| "-".to_string(), number)
-        ),
-    }
+    stacked(whole, middle, |value| format!("{value:.2} px"))
 }
 
 /// A ZNCC self-similarity radius as a table cell prints it, in grid px: the
-/// whole tile's, then its middle square's (`0 / 1.41`), to two decimals with
-/// trailing zeros dropped, and `3+` for the largest radius the reading
-/// searches, which stands for that far or further.
+/// whole tile's over its middle square's (`0.4 px whole` over `3+ px mid`), to
+/// one decimal, and `3+` for the largest radius the reading searches, which
+/// stands for that far or further.
 ///
 /// `-` stands for a reading that is not there, as [`zncc_text`] has it.
 fn self_similarity_text(whole: Option<f64>, middle: Option<f64>) -> String {
-    match whole {
-        None => "-".to_string(),
-        Some(whole) => format!(
-            "{} / {}",
-            radius_number(whole),
-            middle.map_or_else(|| "-".to_string(), radius_number)
-        ),
+    stacked(whole, middle, |value| {
+        format!("{} px", radius_number(value))
+    })
+}
+
+/// A whole-patch reading over its middle's, as a two-reading cell prints them:
+/// each through `number`, with the name of the part it reads (`93% whole` over
+/// `89% mid`).
+///
+/// A missing whole reading prints `-` alone, since there is nothing to name;
+/// a missing middle beside a whole prints `- mid`, as on a track read back from
+/// a committed point. A reading that was taken and came out non-finite prints
+/// `NaN`.
+fn stacked(whole: Option<f64>, middle: Option<f64>, number: impl Fn(f64) -> String) -> String {
+    let Some(whole) = whole else {
+        return "-".to_string();
+    };
+    let number = |value: f64| finite_or_nan(value, &number);
+    format!(
+        "{} whole\n{} mid",
+        number(whole),
+        middle.map_or_else(|| "-".to_string(), number)
+    )
+}
+
+/// `number(value)` for a finite value, and `NaN` for one that is not.
+fn finite_or_nan(value: f64, number: impl Fn(f64) -> String) -> String {
+    if value.is_finite() {
+        number(value)
+    } else {
+        "NaN".to_string()
+    }
+}
+
+/// Whether anything at `stage` has measured `observation`: whether it carries
+/// the ZNCC the thresholds judge first, without which they propose nothing.
+fn is_measured(observation: &Observation, stage: StageKind) -> bool {
+    match stage {
+        StageKind::Cluster => observation.cluster.as_ref().and_then(|m| m.zncc).is_some(),
+        StageKind::Track => observation.track.as_ref().and_then(|m| m.zncc).is_some(),
     }
 }
 
@@ -794,8 +792,9 @@ fn max_self_similarity_radius() -> f64 {
     f64::from(sfmtool_core::patch::self_similarity::SelfSimilarityParams::default().max_radius)
 }
 
-/// One self-similarity radius as the cell and the grid's hover print it:
-/// `0`, `1`, `1.41`, `2`, `2.24`, and `3+` at the maximum.
+/// One self-similarity radius as the cell and the grid's hover print it: to
+/// one decimal (`0.4`, `1.3`), and `3+` at the maximum, which reads "that far
+/// or further".
 fn radius_number(value: f64) -> String {
     if !value.is_finite() {
         return "NaN".to_string();
@@ -804,8 +803,7 @@ fn radius_number(value: f64) -> String {
     if value >= max {
         return format!("{max:.0}+");
     }
-    let text = format!("{value:.2}");
-    text.trim_end_matches('0').trim_end_matches('.').to_string()
+    format!("{value:.1}")
 }
 
 /// The three three-by-three grids a row draws: the ZNCC grid, the deprecated
@@ -919,18 +917,19 @@ pub(crate) fn sigma_cell_color(sigma: f64, bar: f64) -> Option<egui::Color32> {
     Some(red_to_green(1.0 - t.clamp(0.0, 1.0)))
 }
 
-/// The colour a self-similarity grid cell is drawn in: green at 0, yellow at
-/// 1 to 1.41, orange at 2 to 2.24 and red at the largest radius searched,
-/// which reads "that far or further". `None` for a cell with no reading.
+/// The colour a self-similarity grid cell is drawn in: green under 1, where
+/// a match locks within a pixel; yellow from 1 to 2; orange from 2 to under
+/// the largest radius searched; and red at it, which reads "that far or
+/// further". `None` for a cell with no reading.
 fn self_similarity_cell_color(radius: f64) -> Option<egui::Color32> {
     if !radius.is_finite() {
         return None;
     }
     let t = if radius >= max_self_similarity_radius() {
         0.0
-    } else if radius >= 1.5 {
+    } else if radius >= 2.0 {
         0.25
-    } else if radius >= 0.5 {
+    } else if radius >= 1.0 {
         0.5
     } else {
         1.0
@@ -946,22 +945,24 @@ fn red_to_green(t: f64) -> egui::Color32 {
     egui::Color32::from_rgb((220.0 * red) as u8, (200.0 * green) as u8, 40)
 }
 
-/// The minimum-ZNCC slider's label, in one constant so the tests aim at the
+/// The minimum-ZNCC box's label, in one constant so the tests aim at the
 /// label drawn.
 pub(crate) const MIN_ZNCC_LABEL: &str = "min ZNCC (%)";
 
-/// The minimum-middle-ZNCC slider's label.
+/// The minimum-middle-ZNCC box's label.
 pub(crate) const MIN_ZNCC_MIDDLE_LABEL: &str = "min middle ZNCC (%)";
 
-/// The minimum-relative-ZNCC slider's label.
+/// The minimum-relative-ZNCC box's label.
 pub(crate) const MIN_RELATIVE_ZNCC_LABEL: &str = "min relative ZNCC (%)";
 
-/// A slider over a `0 ..= 1` bar that shows and takes the value in percent, in
-/// whole steps: `70` for a stored `0.7`. A typed value may carry a trailing
-/// `%`.
-fn percent(slider: egui::Slider<'_>) -> egui::Slider<'_> {
-    slider
-        .step_by(0.01)
+/// A box over a `0 ..= 1` bar that shows and takes the value in percent, in
+/// whole steps: `70` for a stored `0.7`, half a percent per point dragged. A
+/// typed value may carry a trailing `%`.
+fn percent(value: egui::DragValue<'_>) -> egui::DragValue<'_> {
+    value
+        .range(0.0..=1.0)
+        .speed(0.005)
+        .max_decimals(2)
         .custom_formatter(|value, _| format!("{:.0}", 100.0 * value))
         .custom_parser(parse_percent)
 }
@@ -973,9 +974,16 @@ fn parse_percent(text: &str) -> Option<f64> {
     number.parse::<f64>().ok().map(|v| v / 100.0)
 }
 
-/// The maximum-shift slider's label: the bar the painting judges a seed shift
-/// by and the bound on how far a fit may move a sighting.
-pub(crate) const MAX_SHIFT_LABEL: &str = "max shift px";
+/// The shift box's label: the bar the painting judges a shift by, the radius
+/// the evaluation looks for each peak within, and the bound on how far a fit
+/// may move a sighting.
+pub(crate) const MAX_SHIFT_LABEL: &str = "shift px";
+
+/// The shift box's hover text.
+const MAX_SHIFT_TIP: &str = "The largest shift a sighting may have, in patch-grid px: how \
+    far the correlation peak may sit from where the sighting is. The evaluation looks for each \
+    peak within this distance, a row whose peak is further is painted out, and a fit moves no \
+    sighting further than this.";
 
 /// A kept-at-seed row's menu entry, which puts the sighting where the fit's
 /// walk would have taken it.
@@ -996,10 +1004,6 @@ pub(crate) const SEARCH_DESCRIPTORS_LABEL: &str = "Find matches by SIFT query";
 /// The track-stage geometry search entry. It is separate from the SIFT label
 /// because it reads poses and photographs, and requires no descriptor index.
 pub(crate) const SEARCH_GEOMETRY_LABEL: &str = "Find matches by geometry";
-
-/// The *search px* slider's label, in one constant so the tests aim at the
-/// label drawn.
-pub(crate) const SEARCH_PX_LABEL: &str = "search px";
 
 /// What the toolbar says while an evaluation of the active track's current
 /// inputs is running or waiting to start, and what each row's status cell says
@@ -1043,17 +1047,55 @@ fn show_evaluation(ui: &mut egui::Ui, evaluation: &Evaluation) {
 }
 
 /// The header: what the active track is, and what the last evaluation of it
-/// made of it.
-fn show_header(ui: &mut egui::Ui, label: &str, track: &EditableTrack) {
-    let (kept, candidates, out) = track.verdict_counts();
+/// made of it. Returns whether its go-to button was clicked.
+///
+/// `point_id` is the ID of the point the track was read from, when that point
+/// is still in the version at the cursor. It carries the copy and the go-to
+/// buttons view mode's header draws beside a point ID, so an ID copied here is
+/// one the *Go to Point* dialog takes back. A track put on the bench from a
+/// point is labelled with that ID unless it was renamed, and the ID is then
+/// printed once, as the label.
+fn show_header(
+    ui: &mut egui::Ui,
+    label: &str,
+    track: &EditableTrack,
+    point_id: Option<&str>,
+) -> bool {
+    use crate::track_view::header_buttons::{copy_button, goto_button};
+    let (kept, out) = track.verdict_counts();
+    let mut goto_clicked = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new(label).strong());
+        match point_id {
+            Some(id) if id == label => {
+                ui.label(egui::RichText::new(label).monospace().strong());
+            }
+            Some(id) => {
+                ui.label(egui::RichText::new(label).strong());
+                ui.weak("· point");
+                ui.label(egui::RichText::new(id).monospace());
+            }
+            None => {
+                ui.label(egui::RichText::new(label).strong());
+            }
+        }
+        if let Some(id) = point_id {
+            if copy_button(ui, "Copy Point ID") {
+                ui.ctx().copy_text(id.to_string());
+            }
+            goto_clicked = goto_button(ui);
+        }
         ui.weak(format!("· the {} stage", track.stage_kind()));
-        ui.weak(match track.origin {
-            Some(origin) => format!("· from point {}", origin.point),
-            None => "· new".to_string(),
-        });
-        ui.label(format!("{kept} in · {candidates} candidates · {out} out"));
+        match (track.origin, point_id) {
+            (None, _) => {
+                ui.weak("· new");
+            }
+            // The point is gone from this version: say which it was.
+            (Some(origin), None) => {
+                ui.weak(format!("· from point {}", origin.point));
+            }
+            (Some(_), Some(_)) => {}
+        }
+        ui.label(format!("{kept} kept · {out} out"));
     });
     match &track.stage {
         sfmtool_core::bench::Stage::Cluster(payload) => {
@@ -1093,6 +1135,7 @@ fn show_header(ui: &mut egui::Ui, label: &str, track: &EditableTrack) {
             });
         }
     }
+    goto_clicked
 }
 
 /// Why *Split off selected rows* cannot run, or `None`.
@@ -1194,27 +1237,46 @@ fn measurements(
     observation: &Observation,
     stage: StageKind,
     evaluation: &Evaluation,
-) -> [String; 8] {
+) -> [String; 6] {
     match evaluation {
         Evaluation::Current => measured(observation, stage),
         Evaluation::Evaluating => {
             let mut cells = measured(observation, stage);
-            cells[7] = EVALUATING_LABEL.to_string();
+            cells[5] = EVALUATING_LABEL.to_string();
             cells
         }
         Evaluation::Refused(_) | Evaluation::Failed(_) => {
-            let mut cells: [String; 8] = Default::default();
-            cells[..7].fill("-".to_string());
-            cells[7] = NOT_EVALUATED.to_string();
+            let mut cells: [String; 6] = Default::default();
+            cells[..5].fill("-".to_string());
+            cells[5] = NOT_EVALUATED.to_string();
             cells
         }
     }
 }
 
+/// A reprojection error as its table cell prints it: in pixels over the
+/// same residual as an angle in degrees, each to two decimals (`0.65 px` over
+/// `0.08°`). `-` stands for a reading that is not there, as [`zncc_text`] has
+/// it.
+fn projection_error_text(px: Option<f64>, deg: Option<f64>) -> String {
+    let px = px.map_or_else(
+        || "-".to_string(),
+        |v| finite_or_nan(v, |v| format!("{v:.2} px")),
+    );
+    let deg = deg.map_or_else(
+        || "-".to_string(),
+        |v| finite_or_nan(v, |v| format!("{v:.2}\u{b0}")),
+    );
+    if px == "-" && deg == "-" {
+        return "-".to_string();
+    }
+    format!("{px}\n{deg}")
+}
+
 /// The cells of [`measurements`] for the numbers the track carries.
-fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
-    let number = |value: Option<f64>, digits: usize| match value {
-        Some(v) if v.is_finite() => format!("{v:.digits$}"),
+fn measured(observation: &Observation, stage: StageKind) -> [String; 6] {
+    let px = |value: Option<f64>| match value {
+        Some(v) if v.is_finite() => format!("{v:.2} px"),
         Some(_) => "NaN".to_string(),
         None => "-".to_string(),
     };
@@ -1223,7 +1285,7 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
             let m = observation.cluster.as_ref();
             [
                 zncc_text(m.and_then(|m| m.zncc), m.and_then(|m| m.zncc_middle)),
-                number(m.and_then(|m| m.shift_px), 2),
+                px(m.and_then(|m| m.shift_px)),
                 "-".to_string(),
                 sigma_text(
                     m.and_then(|m| m.localizability_deprecated),
@@ -1233,8 +1295,6 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
                     m.and_then(|m| m.zncc_self_similarity_radius),
                     m.and_then(|m| m.zncc_self_similarity_radius_middle),
                 ),
-                "-".to_string(),
-                "-".to_string(),
                 m.and_then(|m| m.status)
                     .map_or_else(|| "not evaluated".to_string(), |s| format!("{s:?}")),
             ]
@@ -1243,8 +1303,16 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
             let m = observation.track.as_ref();
             [
                 zncc_text(m.and_then(|m| m.zncc), m.and_then(|m| m.zncc_middle)),
-                number(m.and_then(|m| m.seed_shift_px), 2),
-                number(m.and_then(|m| m.projection_offset_px), 2),
+                px(m.and_then(|m| m.seed_shift_px)),
+                // One column for the reprojection error: in px to the
+                // triangulated point, or before there is one to the patch's
+                // centre, which is kept on the point once it exists, so the
+                // two are one number wherever both are measured; then the same
+                // residual in degrees.
+                projection_error_text(
+                    m.and_then(|m| m.reprojection_error.or(m.projection_offset_px)),
+                    m.and_then(|m| m.ray_angle_deg),
+                ),
                 sigma_text(
                     m.and_then(|m| m.localizability_deprecated),
                     m.and_then(|m| m.localizability_middle_deprecated),
@@ -1253,8 +1321,6 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
                     m.and_then(|m| m.zncc_self_similarity_radius),
                     m.and_then(|m| m.zncc_self_similarity_radius_middle),
                 ),
-                number(m.and_then(|m| m.reprojection_error), 2),
-                number(m.and_then(|m| m.ray_angle_deg), 2),
                 // A row without a score says which of the reading's refusals it
                 // was, in the evaluation's own sentence. An evaluation drops
                 // nothing, so "no ZNCC" always has one of those answers behind
@@ -1269,7 +1335,7 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 8] {
                 // two numbers a person accepting the walk or not decides by.
                 match m {
                     Some(m) if m.walked_px.is_some() => format!(
-                        "walked {:.0} px{}, kept at seed",
+                        "walked {:.0} grid px{}, kept at seed",
                         m.walked_px.expect("just matched"),
                         match m.walked_zncc {
                             Some(z) if z.is_finite() => format!(

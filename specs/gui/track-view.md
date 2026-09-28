@@ -47,7 +47,7 @@ selection changes), `header`, `table` and `patch`; the numbers it displays come
 from [metrics/](../../crates/sfm-explorer/src/metrics), at the crate root,
 because the Image Detail overlay and the MCP surface read the same ones.
 [edit/](../../crates/sfm-explorer/src/track_view/edit/) is edit mode: `mod.rs`
-the header, the toolbar and the sliders, `table.rs` the observation table and
+the header, the toolbar and the boxes, `table.rs` the observation table and
 `tile.rs` the tile each row draws. The bench steps it reports are `AppState`
 methods in [bench.rs](../../crates/sfm-explorer/src/bench.rs), and the dock
 applies them in [dock.rs](../../crates/sfm-explorer/src/dock.rs).
@@ -97,10 +97,9 @@ pub struct PointTrackViewResponse {
 pub struct TrackEditResponse {
     pub discard: Option<String>,
     pub rename: Option<(String, String)>,
-    pub fit: bool,                   // at the radius the evaluation reads at
-    pub search_px: Option<f64>,      // the search px slider released
+    pub fit: bool,
     pub set_stage: Option<StageKind>,
-    pub apply_thresholds: Option<Thresholds>, // a threshold slider released
+    pub apply_thresholds: Option<Thresholds>, // a threshold box released
     pub accept_walk: Option<usize>,           // a kept-at-seed row's Accept walk
     pub split: Option<Vec<usize>>,
     pub duplicate: bool,
@@ -108,7 +107,9 @@ pub struct TrackEditResponse {
     pub build_index_files: bool,           // a row's Build/Rebuild Index Files
     pub search_descriptors: Option<usize>,  // Find matches by SIFT query
     pub search_geometry: Option<usize>,     // Find matches by geometry; track stage only
-    pub set_verdict: Option<(usize, Verdict)>,
+    pub set_verdict: Option<(usize, Verdict)>, // a row's Keep switch, or its pin pinning
+    pub unpin_verdict: Option<usize>,          // its pin unpinning, or Unpin in a menu
+    pub request_goto_point: bool,              // the header's go-to button
     pub select_image: Option<usize>,
     pub request_camera_view: Option<usize>,
     pub reveal_feature: Option<[f32; 2]>,
@@ -146,7 +147,7 @@ if let Some(on) = response.set_edit.or(response.edit_selected_point.then_some(tr
 **Two bodies behind one tab, not one body.** The two modes' state is disjoint.
 View mode caches thumbnails and patch tiles per image of a committed point;
 edit mode caches tiles per observation of a bench track keyed on its `Arc`, and
-the slider seeding, the painting and the commit refusal. Keeping each as the
+the box seeding, the painting and the commit refusal. Keeping each as the
 struct it is means neither cache learns about the other, and each body's
 headless tests read what that body drew. What the panel adds is the checkbox,
 the dispatch on it and the notice.
@@ -529,13 +530,19 @@ cluster after Edit has been cleared is its row under *Bench Clusters*.
 Almost no state lives in the body. The bench is the node's, at its cursor, so a
 step taken anywhere, in this panel, in the Scene tree or by an undo, shows here on
 the next frame. What the body owns is about looking rather than about the track:
-where the sliders stand, whether *Lock* is ticked, which rows are selected, the
+where the boxes stand, whether *Lock* is ticked, which rows are selected, the
 tiles it has rendered, and the painting.
 
 #### The header
 
-The active track's label, its stage as a word, its origin as a point index or
-`new`, and `N in · M candidates · K out`. Under it the stage's own headline: at
+The active track's label, its stage as a word, and `N kept · K out`. When the
+point the track was read from is still in the version at the cursor, its
+portable Point ID follows the label with the two icon buttons view mode's
+header draws beside an ID: copy it, and open *Go to Point*, so an ID copied
+here is one that dialog takes back. A track put on from a point is labelled with
+that ID until it is renamed, and the ID is then printed once, as the label. A
+track whose point is gone says `from point N`, the index it had, and a track
+with no origin says `new`. Under it the stage's own headline: at
 the cluster stage the reference observation and whether a template has been cut,
 and at the track stage the coordinate with the last triangulation's condition
 number, or the sentence saying nothing has triangulated it yet. The header is not
@@ -653,87 +660,97 @@ cannot say which of two tracks it belongs to.
 
 #### The thresholds
 
-Five sliders, one per bar of `Thresholds`: minimum ZNCC, minimum middle ZNCC,
+Five boxes, one per bar of `Thresholds`: minimum ZNCC, minimum middle ZNCC,
 maximum shift, maximum keypoint uncertainty and minimum relative ZNCC, so no bar
-is one only the wire can move. The first four are the bars the painting reads;
-the fifth is the fraction of the track's own self-agreement a sweep candidate is
-scored by. The three ZNCC sliders read and take percent in whole steps, as the
+is one only the wire can move. Each is its label and a number box: dragging the
+box left or right changes the bar (half a percent per point for the ZNCC bars,
+0.05 grid px per point for the shift, 0.005 per point for the keypoint
+uncertainty),
+and clicking it takes a typed value. There is no slider rail beside it, since a
+rail would say nothing the box does not. The first four are the bars the painting reads;
+the fifth is the fraction of the track's own self-agreement a geometry search's view is
+scored by. The three ZNCC boxes read and take percent in whole steps, as the
 table's ZNCC column reads, so *min ZNCC (%)* and *min middle ZNCC (%)* both show
 70 on a new track while the track and the wire hold 0.7; a typed value may end
 in `%`. A middle bar of 0 turns it off, and a row with no middle reading clears
 it.
-`max shift px` is also the bound on how far a *Fit* may move a sighting
+*shift px*, the maximum shift, is in patch-grid px, the unit of the
+self-similarity radius, and 6 on a new track. It is three things at once, since
+they are one question -- how far from where a sighting is the correlation may
+put it: the bar the *Shift* column is painted by, the radius the evaluation
+looks for each peak within, so moving it evaluates the track again, and the
+bound on how far a *Fit* may move a sighting
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
-fit's walk is bounded by the person's bar"), 8 px on a new track.
+fit's walk is bounded by the person's bar"). Its label's hover text says so.
+There is no separate search radius.
 
-**A slider applies to the active track when it is let go.** Dragging one
+**A box applies to the active track when it is let go.** Dragging one
 repaints the table live; releasing it sets the track's bars to where the five
-sliders stand and turns the painting into verdicts, one version carrying both,
+boxes stand and turns the painting into verdicts, one version carrying both,
 with the row `Applied the thresholds to …` in the Action Log, and Undo reverses
 it. A typed value is the same gesture, applied when the field is left rather
-than per keystroke, and an arrow key on a focused slider is one step each. No
+than per keystroke, and an arrow key on a focused box is one step each. No
 intermediate drag position pushes a version, and a release that leaves the bars
 where the track has them pushes nothing. There is no separate *Apply* button:
-a slider that painted the table while the track kept its old bar would let a
-*Fit* run on a bar the person had already moved away from. The sliders are
+a box that painted the table while the track kept its old bar would let a
+*Fit* run on a bar the person had already moved away from. The boxes are
 greyed with the busy sentence while the node is busy, since a release there
 would be refused.
 
 **The painting is `apply_thresholds` run over a copy**, the core step itself
-with the sliders' bars, so a row can never be painted one way and turned the
-other way when the slider is released, and a pinned verdict comes back
+with the boxes' bars, so a row can never be painted one way and turned the
+other way when the box is released, and a pinned verdict comes back
 unchanged. It is recomputed when the track's `Arc` or the bars move, and not per
 frame, because a copy of a track carries its consensus bitmap.
 
-**The sliders show the active track's own bars**, copied from it on every frame
-no slider is being dragged, so whatever moved them -- a release here,
+**The boxes show the active track's own bars**, copied from it on every frame
+no box is being dragged, so whatever moved them -- a release here,
 `apply_bench_track_thresholds` over the wire, an undo or redo of either, another
-item made active -- the sliders follow. Only during a drag do they hold a value
+item made active -- the boxes follow. Only during a drag do they hold a value
 the track does not.
-
-**Below them, one control that is not a threshold**: *search px*, how far from
-each observation's own pixel the evaluation looks for its correlation peak, in
-patch-grid px, starting at `EvaluateOptions::default`'s radius. It is an input
-to the evaluation rather than a bar the painting judges by, so it repaints
-nothing; it is the viewer's rather than a track's (`AppState::bench_search_px`),
-so it pushes no version and Undo does not reverse it. Like a threshold slider it
-applies when it is let go or a typed value is committed, and then every track is
-evaluated again at the new radius. A *Fit* runs at it too, so a fit's numbers
-and the evaluation's are measured in one window. It is not greyed by a busy
-node: setting it is no step, and the evaluations it asks for wait until the
-node is free.
 
 #### The observation table
 
 One row per observation, in index order, with the headings above the scroll
 area. Each heading has hover text over the width of its column saying what the
-column holds; the *ZNCC (%)* heading's says what a ZNCC is, that the first
-number is over the whole patch and the second over its middle half, what the
-two apart mean, and how the grid beside them is coloured. The *σ_pos* heading's
-says it is the deprecated score, shown while it is compared with the
-self-similarity radius, and then the same of its two numbers and its grid. The
-*Self-sim.* heading's says what the radius is and what its two numbers, its
-colours and its lines mean.
+column holds; the *Keep* heading's says what a kept observation is used for,
+when the thresholds set the switch, and what a click on the switch and on the
+pin does. The *ZNCC* heading's says what a ZNCC is, that `whole` is over the
+whole patch and `mid` over its middle half, what the two apart mean, and how
+the grid beside them is coloured. The *σ_pos* heading's says it is the
+deprecated score, shown while it is compared with the self-similarity radius,
+and then the same of its two readings and its grid. The *Self-similarity* heading's
+says what the radius is and what its two readings, its colours and its lines
+mean. The *Proj. err* heading's says what the error is measured to before and
+after the track is triangulated, and that the degrees are the same residual as
+an angle.
+
+**A cell with two readings prints them on two lines**, each with its unit, and
+the whole patch's and the middle's each with its name: `93% whole` over
+`89% mid`, `0.08 px whole` over `0.12 px mid`, and `0.65 px` over `0.08°` for
+the reprojection error. The rows are tall enough for the tile, so the second
+line costs no height, and a reading that names its own part and unit needs no
+explanation in the heading, which carries the column's name alone. A reading
+that is not there prints a bare `-`, with no unit.
 
 | Column | Cluster stage | Track stage |
 |---|---|---|
-| Verdict | a three-state control, clicked to cycle `in` / `out` / `candidate`; a dot marks a verdict set by hand | same |
+| Keep | a switch, on for `in` and off for `out`, then a pushpin, solid on a verdict set by hand and a faint outline otherwise; each takes clicks over the whole height of the row | same |
 | Tile | the `R x R` grid the refinement kernel samples where the observation sits, at its shape | the patch re-rendered from this observation, re-anchored where it sits, through view mode's warp |
-| Img, Name | as view mode | as view mode |
-| ZNCC (%) | against the reference template, then the middle ZNCC: `92 / 61`, then the ZNCC grid | leave-one-out against the consensus, at the correlation peak within *search px* of the observation, then the middle ZNCC: `92 / 61`, then the ZNCC grid |
-| Seed sh. | how far the refinement moved off the seed, px | how far that peak sits from the observation's own keypoint, px |
-| Proj. off | absent | how far the keypoint sits from the point's projection, px |
-| σ_pos | the tile's deprecated localizability, then its middle square's: `0.08 / 0.12`, then the localizability grid | the same |
-| Self-sim. | the tile's ZNCC self-similarity radius, then its middle square's: `0 / 1.41`, `3+` for the largest, then the self-similarity grid | the same |
-| Error, Angle | absent | the reprojection error and the ray angle |
-| Status | the kernel's `member_status` | `walked 19 px (ZNCC 87% / 41% there), kept at seed` where the last fit refused to move it, the ZNCC being the one the fit scored at the walked peak (left out where it scored none), `localized` where the evaluation scored it, the reason's own sentence where it could not, `not evaluated` where nothing has been read |
+| Img, Name | as view mode; the name is elided in its middle to fit, and hovering it shows it whole | as view mode, and the same |
+| ZNCC | against the reference template, over the middle ZNCC: `92% whole` over `61% mid`, then the ZNCC grid | leave-one-out against the consensus, at the correlation peak within *shift px* of the observation, over the middle ZNCC, then the ZNCC grid |
+| Proj. err | absent | the reprojection error: how far the keypoint sits from the point's projection, or, before the track is triangulated, from its patch's centre's, over the same residual as the ray angle, comparable across lenses and depths: `0.65 px` over `0.08°` |
+| σ_pos | the tile's deprecated localizability over its middle square's: `0.08 px whole` over `0.12 px mid`, then the localizability grid | the same |
+| Self-similarity | the tile's ZNCC self-similarity radius over its middle square's: `0.4 px whole` over `3+ px mid`, `3+` for the largest, then the self-similarity grid and the surface plot | the same |
+| Shift | how far the refinement moved the member off its seed, in patch-grid px: `1.20 px` | how far the correlation peak, looked for within *shift px*, sits from the observation's own keypoint, in patch-grid px on the patch's plane; just before Status, which says what a fit did with a shift past the bar |
+| Status | the kernel's `member_status` | `walked 19 grid px (ZNCC 87% / 41% there), kept at seed` where the last fit refused to move it, the ZNCC being the one the fit scored at the walked peak (left out where it scored none), `localized` where the evaluation scored it, the reason's own sentence where it could not, `not evaluated` where nothing has been read |
 | From | the provenance | the provenance |
 
 A cell with nothing measured behind it reads `-`, which says the difference
 between a number a round produced and a round that has not been run.
 
-**The ZNCC cell holds two readings of the same samples.** The first is the
-whole-patch ZNCC, the number the bars and the painting judge. The second is the
+**The ZNCC cell holds two readings of the same samples.** `whole` is the
+whole-patch ZNCC, the number the bars and the painting judge. `mid` is the
 middle ZNCC: the same samples, at the same peak and against the same reference,
 correlated over only the centred square half the grid's width (the middle
 `12 x 12` of a `24 x 24` grid). A whole-patch ZNCC can be high because of the
@@ -741,18 +758,16 @@ parts of the patch away from its centre: a small near object whose patch is
 mostly the background behind it, a pixel at a depth edge, a texture that
 repeats along the epipolar line. The middle reading is low in each of those
 cases, so the pair shows whether a match is carried by the pixel's own
-neighbourhood or by its surroundings. Both print in percent, `92` for a ZNCC
-of `0.92`, which says the same two digits in two fewer characters and keeps
-the pair within one column; the heading `ZNCC (%)` carries the unit, and a
-sentence that quotes a pair, such as the walk's Status cell, writes it on each
-number (`87% / 41%`). The bars and the wire keep ZNCC on its own `0 .. 1`
-scale. A row with
-a ZNCC and no middle reading prints `-` for the second, as on a track read back
-from a committed point before its first evaluation, since `.sfmr` stores the
-whole-patch score alone. The table has no column sort, so nothing is ordered by
+neighbourhood or by its surroundings. Both print in percent, `92%` for a
+ZNCC of `0.92`, which says the same two digits in fewer characters and keeps
+the column narrow. A sentence that quotes a pair, such as the walk's Status
+cell, writes it on one line (`87% / 41%`). The bars and the wire keep ZNCC on
+its own `0 .. 1` scale. A row with a ZNCC and no middle reading prints `- mid`
+under it, as on a track read back from a committed point before its first
+evaluation, since `.sfmr` stores the whole-patch score alone. The table has no column sort, so nothing is ordered by
 either reading.
 
-**Beside the two numbers is the ZNCC grid**, drawn as three rows of three
+**Beside the two readings is the ZNCC grid**, drawn as three rows of three
 boxes with a border: the same samples correlated over each ninth of the patch's
 whole square, corners included, with every pixel weighted equally (see
 [`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
@@ -763,9 +778,9 @@ corner that disagrees. A box is red at a ZNCC of `0.5` and below, green at
 absent where the cell prints `-`. Hovering it shows its nine numbers in
 percent, in the same layout.
 
-**The σ_pos cell holds the same pair and a grid of its own.** The first number
-is the tile's localizability, the one the *max σ_pos* bar judges; the second is
-its middle square's alone; the grid is each ninth of the tile scored alone
+**The σ_pos cell holds the same pair and a grid of its own.** `whole` is the
+tile's localizability, the one the *max σ_pos* bar judges; `mid` is its middle
+square's alone; the grid is each ninth of the tile scored alone
 (§ "The parts of the localizability" of the same spec). A part has fewer pixels
 than the whole, so it reads higher for the same texture. Each box also carries
 a dark mark saying how many directions that ninth pins, judged by the same bar:
@@ -778,19 +793,20 @@ when neither is. The stronger axis's uncertainty is the cell's times
 is green at half
 the track's *max σ_pos* bar and below, red at twice the bar and above, and
 yellow at the bar, on a log scale so that each doubling moves the colour the
-same distance; the number prints to two decimals so the pair fits one column.
+same distance; each reading prints to two decimals.
 
-**The Self-sim. cell holds the ZNCC self-similarity radius** (see
+**The Self-similarity cell holds the ZNCC self-similarity radius** (see
 [`../core/patch/zncc-self-similarity-radius.md`](../core/patch/zncc-self-similarity-radius.md)
 and § "The ZNCC self-similarity radius" of
 [`../core/bench/editable-track.md`](../core/bench/editable-track.md)): how far,
-in patch-grid pixels, the tile's core can slide over itself by whole pixels and
-still match itself as well as a true match between two views would. The first
-number is the whole core's and the second its middle square's, each to two
-decimals with trailing zeros dropped (`0`, `1`, `1.41`, `2`, `2.24`), and `3+`
-for the largest radius searched, which reads "3 or more". Beside them is the
-grid of each ninth of the core read alone: a box is green at `0`, yellow at `1`
-to `1.41`, orange at `2` to `2.24` and red at `3` or more, and carries a dark
+in patch-grid pixels, the tile's core can slide over itself and still match
+itself as well as a true match between two views would, read where its ZNCC
+against itself, interpolated between whole-pixel shifts, falls through that
+level. `whole` is the whole core's and `mid` its middle square's, each to one
+decimal (`0.4 px`, `1.4 px`), and `3+ px` for the largest radius searched,
+which reads "3 or more". Beside them is the grid of each ninth of the core read
+alone: a box is green under `1`, yellow from `1` to `2`, orange from `2` to
+`3` and red at `3` or more, and carries a dark
 line along its slide where the slide is at least `0.5` long, so the ninth's
 matching shifts line up along one direction, as on an edge. Hovering it shows
 its nine numbers as the cell prints them. No bar judges the radius, so it
@@ -821,19 +837,28 @@ the track has left. When the track cannot be evaluated or its evaluation
 failed, every number cell reads `-` and every Status cell `not evaluated`, and
 the toolbar says why.
 
-**The two distances are two columns because they are two questions.** *Seed sh.*
+**The two distances are two columns because they are two questions.** *Shift*
 is the sighting's own evidence, where the correlation would rather sit, and is
-what the `max shift px` bar paints on. *Proj. off* is a statement about the
-point: a mis-triangulated track shows a column of large offsets beside a column
-of near-zero shifts, the picture that says the position is wrong and the
+what the *shift px* bar paints on. *Proj. err* is a statement about
+the point: a mis-triangulated track shows a column of large errors beside a
+column of near-zero shifts, the picture that says the position is wrong and the
 sightings are not.
+
+**One column holds the reprojection error.** The measurement carries it twice:
+`projection_offset_px`, to where the patch's centre projects, and
+`reprojection_error`, to where the triangulated point projects. The patch's
+centre is kept on the point once there is one, so wherever both are measured
+they are one number, and the column shows the error to the point, or to the
+patch's centre before the track is triangulated. Both fields stay on the wire
+and in the Python dicts. The same residual as an angle, `ray_angle_deg`, is the
+cell's second line, so the error reads in pixels and in degrees together.
 
 **The Status cell names the refusal.** An evaluation drops nothing, so a row without
 a ZNCC has one of core's `Unmeasured` reasons behind it, and the cell prints that
 sentence (`it sits off the photograph`, `its ray grazes the patch`, `its seed
 sits 2,483 px from the projection, beyond the 64 px bound`) elided to its
 column. **It also names the walk a fit refused**: a sighting the fit's kernels
-wanted to carry further than the `max shift px` bar kept its seed
+wanted to carry further than the *shift px* bar kept its seed
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
 fit's walk is bounded by the person's bar"), which a person reading `localized`
 would get wrong, so the walk comes first among a scored row's answers. The
@@ -855,15 +880,34 @@ beside it never shift.
 **Where the observation sits is one rule** at either stage: the track-stage
 keypoint, else the refined cluster position, else the seed it was proposed
 at (`crate::bench::observation_site`, which the marks, the reveal and the wire
-read too). A candidate a search has just added carries only that seed, and its
+read too). A row a search has just added carries only that seed, and its
 tile is cut around it, so nothing has to be evaluated for a fresh row to show its
 patch. The photographs are the node's full-resolution cache, which the dock fills
 for the active track's images before edit mode draws; the rendered tiles are kept
 against the track's `Arc` and rebuilt when a step moves it.
 
-**Each row is painted** by what the sliders propose for it: green for
+**Each row is painted** by what the boxes propose for it: green for
 would-pass, red for would-not, the panel's faint background for a row nothing
-has measured.
+has measured. The *Keep* switch shows the verdict itself, so a pinned row whose
+switch and colour disagree is one the person ruled on against the bars.
+
+**The Keep switch is the verdict.** On is `in`: the evaluation and a fit read
+the track by the observation, and a commit writes it. Off is `out`. The
+thresholds set it for every unpinned row when a threshold box is let go, and a
+row added by a search or a pixel gesture joins `out` and is switched on by the
+evaluation that first measures it when it clears the bars
+([`../core/bench/editable-track.md`](../core/bench/editable-track.md) §
+"Evaluating"). A click sets the other verdict by hand and pins it. The switch's
+part of the cell, the whole height of the row, takes the click, since a
+switch's own few points are a small target. There is no third state: a row
+nobody has ruled on is an unpinned `out`.
+
+**The pin beside the switch says whether a hand set the verdict**, and is the
+control for it: a solid pushpin on a pinned verdict, which the thresholds leave
+alone, and a faint outline on one they set. Clicking a solid pin unpins the
+verdict and gives the row the one the bars propose; clicking an outline pins
+the verdict as it stands. A pushpin says "pinned" where a dot said only that
+something was marked, and the control sits where the state is shown.
 
 #### Row gestures
 
@@ -876,21 +920,31 @@ has measured.
   no pixel, and its double-click enters camera view without the turn. The rows of both modes are observations of one track in one
   table position, and a gesture that worked in one mode and did nothing in the
   other would be a trap.
-- **Click the verdict control**: cycle the verdict. The row rect is registered
-  first and the control after it, so the control keeps its own click.
+- **Click the Keep switch**: turn the observation `in` or `out` by hand, which
+  pins it (`AppState::set_bench_verdict`). The row rect is registered first and
+  the switch after it, so the switch keeps its own click. Turning a row `in`
+  while another row of its image is `in` is refused with core's sentence.
+- **Click the pin**: on a pinned row, clear the pin and give the row the
+  verdict the bars propose (`AppState::unpin_bench_verdict`, core's
+  `unpin_verdict`); on an unpinned row, pin the verdict it carries
+  (`AppState::set_bench_verdict` with that verdict). One version and one
+  `Bench` row either way.
+- **Right-click the Keep switch**, or the row: *Unpin, let the thresholds
+  decide*, the same unpinning as a click on a solid pin, on a pinned row only
+  (greyed on the others).
 - **Hover a row**: set the cross-panel hover.
 - **Right-click a row**: the searches the stage offers. *Find matches by SIFT
   query* runs the descriptor search from that observation
   ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) §
-  "Searching the descriptor index") and adds what it finds as candidates with
-  `search (N)` in *From*; it is a row gesture because what a search searches
+  "Searching the descriptor index") and adds what it finds, unpinned and `out`,
+  with `search (N)` in *From*; it is a row gesture because what a search searches
   from is one sighting's patch. With no index beside the node, or a stale one,
   the entry is the remedy instead, *Build Index Files* or *Rebuild Search
   Files*, which starts the build of the node's index files and runs no search
   ([`sift-index.md`](sift-index.md) § "The search entry"). At the track stage
   the menu also carries *Find matches by geometry*, which projects the patch into
-  every camera and appends each newly admitted image as an untouched `candidate`
-  with `sweep` provenance
+  every camera and appends each newly admitted image, unpinned and `out`, with
+  `sweep` provenance
   ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) §
   "Searching by geometry"); it is absent at the cluster stage, which has no
   geometry to project, and needs no index. Both searches run as cancellable
@@ -919,7 +973,7 @@ mode, so a session finds the index the last one built without anyone asking.
 
 #### The gestures that name a pixel
 
-Starting a cluster and adding a candidate sighting act at a pixel, and the
+Starting a cluster and adding a sighting act at a pixel, and the
 viewer's way to name a pixel is a right-click in **Image Detail**, so both are
 entries in that panel's context menu, *Start cluster on the bench here* and
 *Add observation to bench track here*
@@ -927,9 +981,10 @@ entries in that panel's context menu, *Start cluster on the bench here* and
 the context menu"). *Start cluster* puts the cluster on the bench active and
 raises Track View on it (`AppState::start_cluster_here`); its radius is the
 node's own default patch radius in that image (`AppState::default_patch_radius`),
-converted to the cluster stage's keypoint-frame units. *Add observation* adds a
-candidate at the clicked pixel; on a track-stage track that pixel is its
-keypoint, so the row reads from it and, once turned `in`, commits at it without a
+converted to the cluster stage's keypoint-frame units. *Add observation* adds
+an unpinned `out` sighting at the clicked pixel, which its first evaluation
+switches on when it clears the bars; on a track-stage track that pixel is its
+keypoint, so the row reads from it and, once `in`, commits at it without a
 *Fit* first, while on a cluster it is a seed. It greys while nothing is active,
 with *"No track is being edited: tick Edit in Track View, or double-click a Bench
 item in the Scene tree."*
@@ -1035,13 +1090,21 @@ The whole bench family is [`bench.md`](bench.md) § "The wire" and
   bench showing core's refusal sentence where the state would be; **no item tabs**, the labels
   of two other items on the bench appearing nowhere in what the frame painted; a
   row per observation in index order; a verdict under the same observation index,
-  pinned; the painting matching what applying the bars produces and leaving a
-  pinned verdict; the cells following the stage; every row's tile at both stages,
-  and a fresh candidate's cut around its seed; the sliders showing the track's
+  pinned; the *Keep* switch's cell taking a click the row behind it does not,
+  and turning a kept row out; a click on the pin pinning an unpinned row's
+  verdict as it stands and unpinning a pinned one, and *Unpin* offered from the
+  switch's menu
+  and the row's, a second unpin being no effect; the header printing the point's
+  ID once, beside a renamed label, and the old index for a point that is gone,
+  and a track from a point resolving the ID its copy button copies; a hover on
+  an elided name showing it whole, with the row still hovered; the painting
+  matching what applying the bars produces and leaving a pinned verdict; the
+  cells following the stage; every row's tile at both stages,
+  and a fresh row's cut around its seed; the boxes showing the track's
   bars outside a drag, following them when a step, an undo or a redo moves them,
-  and re-seating on another item; a drag of *max shift px* pushing exactly one
+  and re-seating on another item; a drag of *shift px* pushing exactly one
   version and one row on its release, with the track's bar where it was let go
-  and an undo taking bar and slider back; no *Apply thresholds* button drawn; a
+  and an undo taking bar and box back; no *Apply thresholds* button drawn; a
   fit after a release to a zero bar keeping sightings at their seeds, *Accept
   walk* absent from a row before that and offered on exactly the kept rows
   after, reporting the observation, and accepting it moving the keypoint to the
@@ -1078,7 +1141,7 @@ The whole bench family is [`bench.md`](bench.md) § "The wire" and
   singleton.
 - **Listing the bench in the panel.** The Scene tree's two Bench groups are the
   list, per node, with the stage each item is at.
-- **Deciding anything from a number.** The sliders propose and the person
+- **Deciding anything from a number.** The boxes propose and the person
   decides.
 - **A second tile beside the first**, the cluster template and each member warped
   onto it side by side, and **the remaining searches**, both proposed in

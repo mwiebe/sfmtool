@@ -531,13 +531,9 @@ pub(crate) fn parse(
             reconstruction_label: args.required_string("reconstruction_label")?,
             track: args.optional_string("track")?,
         },
-        "set_bench_search_px" => Command::SetBenchSearchPx {
-            search_px: args.required_f64("search_px")?,
-        },
         "fit_bench_track" => Command::FitBenchTrack {
             reconstruction_label: args.required_string("reconstruction_label")?,
             track: args.optional_string("track")?,
-            search_px: args.optional_f64("search_px")?,
         },
         "set_bench_track_stage" => Command::SetBenchTrackStage {
             reconstruction_label: args.required_string("reconstruction_label")?,
@@ -1272,17 +1268,18 @@ impl Args<'_> {
             .collect()
     }
 
-    /// A verdict, in the three words the bench spells them with.
-    fn verdict(&self, key: &str) -> Result<sfmtool_core::bench::Verdict, ToolError> {
+    /// A verdict to pin, in the two words the bench spells them with, or
+    /// `None` for `unpin`, which hands the verdict back to the thresholds.
+    fn verdict(&self, key: &str) -> Result<Option<sfmtool_core::bench::Verdict>, ToolError> {
         use sfmtool_core::bench::Verdict;
         match self.optional_string(key)?.as_deref() {
-            Some("in") => Ok(Verdict::In),
-            Some("out") => Ok(Verdict::Out),
-            Some("candidate") => Ok(Verdict::Candidate),
+            Some("in") => Ok(Some(Verdict::In)),
+            Some("out") => Ok(Some(Verdict::Out)),
+            Some("unpin") => Ok(None),
             Some(other) => Err(self.error(format!(
-                "does not know the verdict {other:?} — the verdicts are in, out and candidate."
+                "does not know the verdict {other:?} — it is one of in, out and unpin."
             ))),
-            None => Err(self.error(format!("needs {key} — one of in, out and candidate."))),
+            None => Err(self.error(format!("needs {key} — one of in, out and unpin."))),
         }
     }
 

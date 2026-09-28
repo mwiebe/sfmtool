@@ -92,7 +92,7 @@ pub struct TrackMeasurement {
     pub zncc: Option<f64>,
     pub zncc_middle: Option<f64>,            // the same samples over the middle square
     pub zncc_grid: Option<[[f64; 3]; 3]>,    // and over each ninth of the tile
-    pub seed_shift_px: Option<f64>,          // the peak's move from the sighting
+    pub seed_shift_px: Option<f64>,          // the peak's move from the sighting, grid px
     pub projection_offset_px: Option<f64>,   // the sighting's distance from the point
     pub reprojection_error: Option<f64>,
     pub ray_angle_deg: Option<f64>,
@@ -106,7 +106,7 @@ pub struct TrackMeasurement {
     pub zncc_self_similarity_slide_grid: Option<[[[f64; 2]; 3]; 3]>, // each ninth's slide
     pub zncc_self_similarity_surface: Option<Vec<f64>>, // the whole core's ZNCC at every shift
     pub zncc_self_similarity_tolerance: Option<f64>, // the deficit it was judged by
-    pub walked_px: Option<f64>,              // set when a fit refused the walk and kept the seed
+    pub walked_px: Option<f64>,              // grid px, set when a fit refused the walk and kept the seed
     pub walked_to: Option<[f64; 2]>,         // where that walk would have put it
     pub walked_zncc: Option<f64>,            // the ZNCC the localizer scored there
     pub walked_zncc_middle: Option<f64>,     // and its middle reading
@@ -123,7 +123,7 @@ pub enum Unmeasured {
     Unscorable,
 }
 
-pub enum Verdict { In, Out, Candidate }
+pub enum Verdict { In, Out }
 
 pub enum Provenance {
     Origin,
@@ -148,9 +148,9 @@ pub struct Thresholds {
     pub max_keypoint_uncertainty: f64,
     pub min_relative_zncc: f64,
 }
-// The bench's own default bars: the shift bar wider than the cluster
-// refinement's 3 px, the ZNCC bars below its 0.85.
-pub const BENCH_MAX_SHIFT_PX: f64 = 8.0;
+// The bench's own default bars: the shift bar the localizer's search radius,
+// in patch-grid px, the ZNCC bars below the cluster refinement's 0.85.
+pub const BENCH_MAX_SHIFT_PX: f64 = 6.0;
 pub const BENCH_MIN_ZNCC: f64 = 0.7;
 pub const BENCH_MIN_ZNCC_MIDDLE: f64 = 0.7;
 
@@ -177,6 +177,11 @@ pub fn set_verdict(
     track: &EditableTrack,
     observation: usize,
     verdict: Verdict,
+) -> Result<(EditableTrack, VerdictReport), TrackEditError>;
+
+pub fn unpin_verdict(
+    track: &EditableTrack,
+    observation: usize,
 ) -> Result<(EditableTrack, VerdictReport), TrackEditError>;
 
 pub fn apply_thresholds(track: &EditableTrack) -> (EditableTrack, ThresholdReport);
@@ -508,7 +513,6 @@ pub fn open_localizer() -> KeypointLocalizeParams;
 pub struct EvaluateOptions {
     pub cluster: ClusterRefineParams,
     pub localize: KeypointLocalizeParams,   // open_localizer, one round
-    pub search_px: f64,                     // patch-grid px
     pub max_seed_offset_px: f64,            // how far a seed may sit, 64
     pub max_cache_bytes: usize,             // one round's tiles, 256 MiB
 }
@@ -641,7 +645,7 @@ observation sits takes the keypoint first (`Observation::site`).
 
 **The verdict and the pin are separate fields.** `verdict` is what the person
 has decided and `pinned` is whether they decided it by hand. Without the second,
-a threshold slider would either be unable to propose anything or would silently
+a threshold box would either be unable to propose anything or would silently
 overwrite a judgement, and the whole difference between the bench and the batch
 pipeline is that here the numbers are shown and the person decides.
 
@@ -701,7 +705,7 @@ and a script that just read the files.
 **The kernel parameters are not the track's thresholds.** `EvaluateOptions` and
 `FitOptions` carry what the kernels are allowed to do; the track's `Thresholds`
 are what the *painting* judges the result against. Keeping them apart is what
-makes a slider a question about verdicts rather than about numbers: moving one
+makes a box a question about verdicts rather than about numbers: moving one
 repaints, and it cannot change what was measured. The one bar a fit reads is
 `max_shift_px`, and it reads it as a bound on where the fit may put a sighting,
 never as a gate on what the kernels see (§ "The fit's walk is bounded by the
@@ -758,16 +762,19 @@ on: it is what a cluster started on a `.sift` keypoint carries. A search's
 observation sits wherever that image's affine warp puts the pixel that was
 searched from, which is in general no feature at all; what stands behind it is
 the number of correspondences that agreed on the warp, so that is the number
-`Search` carries, and it is what ranks a search's candidates against one
+`Search` carries, and it is what ranks the images a search finds against one
 another.
 
-**A verdict** is `in`, `out` or `candidate`. `in` observations are what the
-kernels run over and what a commit writes. `out` is a sighting the person
-refused, kept in the list so a later search does not propose it again and so the
-refusal stays visible. `candidate` is something proposed and not yet ruled on.
+**A verdict** is `in` or `out`. `in` observations are what the kernels run
+over and what a commit writes. `out` is every other observation: one added and
+not yet measured, one the thresholds did not take, or one the person refused.
+It stays in the list so a later search does not propose it again and so the
+refusal stays visible. **A pin** says the verdict was set by hand, and the
+thresholds leave a pinned verdict where it is; an unpinned `out` is one nobody
+has ruled on.
 
 **One `in` observation per image.** A track cannot observe an image twice. A
-second candidate in an image already held is allowed, and is shown and scored
+second observation in an image already held is allowed, and is shown and scored
 like any other, but turning it `in` while the other is `in` is refused naming
 the observation that holds the image. This is the same rule the cluster kernel
 spells `duplicate_image`.
@@ -890,7 +897,8 @@ the one thing a person looking at the photographs can check -- the rms distance,
 in px, from each sighting to where the candidate projects in its own image,
 which is
 [`observation_metrics`](../../../crates/sfmtool-core/src/bench/evaluate.rs)'
-own first number and so the same residual the *Error* column shows -- and:
+own first number and so the same residual the *Proj. err (px / deg)* column's first
+number shows -- and:
 
 - a **finite** answer stands only where the point's residual comes under
   `residual_margin` of the bearing's **and** under it by more than
@@ -1022,8 +1030,9 @@ The kernels a fit runs stay gate-free and cap-free, for the reason
 `open_localizer` gives: a sighting that does not belong is turned out by the
 person or by a threshold, not deleted from the evidence by a kernel. What *is*
 bounded is where a fit may put a sighting. A row whose refined keypoint lands
-further than `max_shift_px` from its seed keeps the seed, records how far the
-peak sat in `walked_px`, and still casts its ray -- from the seed. The
+further than `max_shift_px` from its seed, measured on the patch's plane in
+grid px, keeps the seed, records how far the peak sat in `walked_px`, and still
+casts its ray -- from the seed. The
 `FitReport` counts them in `kept_at_seed`.
 
 The bound is not a verdict and turns nothing out: a correlation that jumped onto
@@ -1048,9 +1057,8 @@ the three walk fields among it, is dropped. There is no separate step for it,
 because what it writes is exactly what that step writes.
 
 The bar is the track's own `max_shift_px`, the same bar the painting judges a
-seed shift by. Its bench default, 8 px, is wider than the cluster refinement's
-3 px for this reason: a person who moves a patch by hand and fits expects the
-sightings to follow further than the batch pass's drift bound allows.
+seed shift by and the radius the evaluation looks for each peak within. Its
+bench default, 6 grid px, is the keypoint localizer's own search radius.
 
 ### The middle ZNCC
 
@@ -1156,9 +1164,10 @@ score. All are `None` wherever `localizability_deprecated` is.
 Beside the localizability, at both stages and for every observation with a
 pixel, is the observation's own tile's **ZNCC self-similarity radius** (see
 [`zncc-self-similarity-radius.md`](../patch/zncc-self-similarity-radius.md)):
-how far, in patch-grid pixels, the tile's `R×R` core can slide over itself by
-whole pixels and still match itself as well as a true match between two views
-would, `0 ..= 3` with `3` read as "3 or more", under the default
+how far, in patch-grid pixels, the tile's `R×R` core can slide over itself and
+still match itself as well as a true match between two views would, read where
+its ZNCC against itself, interpolated between whole-pixel shifts, falls through
+that level, `0 ..= 3` with `3` read as "3 or more", under the default
 `SelfSimilarityParams`. The tile is read over the same frame as the
 localizability, grown so the shifted windows have pixels to read: at the track
 stage the keypoint-anchored frame is rendered with its half-extent grown by
@@ -1212,8 +1221,9 @@ minted from it.
 
 ### Growing and judging
 
-`add_observation` appends a `candidate`, unpinned, with a cluster seed at the
-named pixel. The shape defaults to the reference observation's own, so a pixel
+`add_observation` appends an `out` observation, unpinned, with a cluster seed
+at the named pixel. The evaluation that first measures it turns it `in` when it
+clears the thresholds (§ "Evaluating"). The shape defaults to the reference observation's own, so a pixel
 gesture on a track that already has a scale needs no radius prompt and lands at
 that track's size. With no reference to copy it is the identity, which is one
 pixel to the keypoint-frame unit: a patch of `[-radius, radius]` pixels, and
@@ -1232,16 +1242,21 @@ keeps no shape of its own per observation and a descriptor search run from that
 row warps the one it carries. At the cluster stage the step writes the seed
 alone: a cluster has no keypoints.
 
-`set_verdict` sets one verdict **by hand** and pins it. `apply_thresholds`
-paints the proposed verdicts from the stored measurements onto the unpinned
-observations, and leaves a pinned one where it is. An observation nothing has
-measured at the track's current stage is left alone: there is no proposal to
-apply. An observation that *was* measured and failed is turned `out`, because a
-measured refusal is something the person should see.
+`set_verdict` sets one verdict **by hand** and pins it. Setting the verdict an
+observation already carries still pins it, which is a change when it was not
+pinned. `unpin_verdict` is the way back: it clears the pin and gives the
+observation the verdict the thresholds propose from its stored measurements,
+`in` only when no other `in` observation holds its image; an observation
+nothing has measured keeps its verdict. `apply_thresholds` paints the proposed
+verdicts from the stored measurements onto the unpinned observations, and
+leaves a pinned one where it is. An observation nothing has measured at the
+track's current stage is left alone: there is no proposal to apply. An
+observation that *was* measured and failed is turned `out`, because a measured
+refusal is something the person should see.
 
 The painting cannot produce a track that observes an image twice. It walks the
 observations best score first, and where several unpinned sightings of one image
-would pass, the best takes the `in` and the rest stay candidates.
+would pass, the best takes the `in` and the rest are turned `out`.
 
 ### Splitting
 
@@ -1590,7 +1605,7 @@ to the consensus, weighted towards the centre
 three-point model RANSAC drew. Both are the cluster stage's own convention (§ "The cluster
 stage's units"), which is what the next evaluation reads at either stage: at the
 cluster stage the refinement registers the seed, and at the track stage the
-candidate's pixel is also its keypoint (§ "Growing and judging") and it is a row
+new observation's pixel is also its keypoint (§ "Growing and judging") and it is a row
 the reading measures and the thresholds propose a verdict for. The step sets no verdict and moves nothing that was already on the track.
 
 **Where the search runs from** is one observation, named by index, and its pixel
@@ -1602,8 +1617,8 @@ at. The shape falls through the same order `add_observation` does: the
 observation's own, else the cluster's reference's, else the identity.
 
 **An image the track already names is left alone**, whatever the verdict on it.
-`out` is a decision the person made and a search does not overturn it; a
-`candidate` is already on the table. Those images are reported rather than
+`out` may be a decision the person made, and a search does not overturn it; an
+unpinned `out` is already on the table. Those images are reported rather than
 dropped, and the count of them is in the report's sentence, so "the search found
 nothing new" and "the search found nothing" read differently.
 
@@ -1635,15 +1650,15 @@ the finite patch or direction patch (`w = 0`) into every supplied camera,
 requires the existing front-facing, cheirality and image-support gates, and
 admits a view only when its rendered patch clears the relative-ZNCC bar against
 a trustworthy reference appearance. The bar is the editable track's own
-`thresholds.min_relative_zncc`; changing the panel slider therefore changes the
+`thresholds.min_relative_zncc`; changing the panel box therefore changes the
 next geometry search by the same rule it changes a batch view selection.
 
 **The row names the appearance being searched from.** Its observation is first
-in the reference basis even when its verdict is `candidate` or `out`; the
+in the reference basis even when its verdict is `out`; the
 track's other `in` observations follow in observation order. Duplicate images
 are removed first-seen, so the selected row wins. Each basis render is anchored
-at that observation's own `site()`, while a candidate has no sighting yet and is
-scored at the patch's projection. This is patch-view selection's anchored
+at that observation's own `site()`, while an image the search considers has no
+sighting yet and is scored at the patch's projection. This is patch-view selection's anchored
 reference mode: the row gesture chooses real source appearance without giving
 up the robust consensus of the observations already accepted.
 
@@ -1652,9 +1667,9 @@ patch centre's projection, which is also its keypoint, as for any observation
 added at the track stage. Its shape is the projected `u`/`v` half-frame,
 converted from the negative-determinant patch-frame convention into the
 positive-determinant cluster/SIFT convention and divided by the cluster radius,
-exactly as a track-to-cluster stage change seeds an observation. The row is a
-`candidate` with `Provenance::Sweep`, carries no measurement, and the next
-evaluation or fit judges it. An image the track already names is reported and
+exactly as a track-to-cluster stage change seeds an observation. The row is an
+unpinned `out` with `Provenance::Sweep`, carries no measurement, and the next
+evaluation turns it `in` when it clears the thresholds. An image the track already names is reported and
 left byte-for-byte alone, including an `out` verdict or a pin; the source image
 and all other reference images are excluded by the selector itself. Repeating
 the same search is therefore idempotent.
@@ -1668,7 +1683,7 @@ does not carry.
 The work reports `build reference`, `score views`, and `add candidates` through
 `Progress`. It polls before and after reference construction and between views
 and additions; cancellation returns no grown track, so a caller never installs
-a partial candidate list. Candidate and report order is deterministic: newly
+a partial list. The order of the added rows and of the report is deterministic: newly
 admitted views are in ascending image index, after the selector's reference
 basis.
 
@@ -1676,10 +1691,20 @@ basis.
 
 `evaluate` fills the measurement slots of every observation at the stage the
 track is in, whatever its verdict, and **moves nothing else**: the position, the
-frame, the bitmap, every keypoint and every verdict come back as they went in.
-An `out` observation is scored the way a candidate is, so a refusal is shown
-beside the number it would have been judged on and a slider can propose taking
-it back.
+frame, the bitmap and every keypoint come back as they went in, and so does
+every verdict but one kind. An `out` observation is scored the way an `in` one
+is, so a refusal is shown beside the number it would have been judged on and a
+box can propose taking it back.
+
+**An added observation's first reading can take it in.** An observation that is
+`out`, unpinned, and unmeasured at this stage before the call, and that clears
+every bar once measured, is turned `in`, best score first, when no `in`
+observation holds its image. That is how a row a search or a pixel gesture
+added joins the track without a person turning it in. Nothing is turned `out`,
+so a track put on the bench from a point, which arrives `in` and unmeasured,
+keeps the point's verdicts. The measurements came from the round that read the
+new row `out`, so the next evaluation reads the new `in` set; it has no first
+readings of its own, so it turns nothing and the two settle.
 
 **At the cluster stage** every observation's seed is a member of an in-memory
 `.matches` cluster, and
@@ -1710,10 +1735,10 @@ reading. What lands in each slot is:
 
 | Slot | What it says |
 |------|--------------|
-| `zncc` | The leave-one-out agreement at the peak, within `search_px` of where the sighting is. With `seed_shift_px` near zero it is the agreement at the keypoint itself. |
+| `zncc` | The leave-one-out agreement at the peak, within the track's `max_shift_px` of where the sighting is. With `seed_shift_px` near zero it is the agreement at the keypoint itself. |
 | `zncc_middle` | The same samples at the same peak against the same consensus, read over the middle square of the tile only (§ "The middle ZNCC"). |
 | `zncc_grid` | The same samples read over each ninth of the tile (§ "The ZNCC grid"). |
-| `seed_shift_px` | How far that peak sits from the observation's own keypoint, in source-image px. The **sighting's** own evidence, and what `max_shift_px` paints on. |
+| `seed_shift_px` | How far that peak sits from the observation's own keypoint, in patch-grid px on the patch's plane, both ends through the unprojection the localizer seeds from. The **sighting's** own evidence, and what `max_shift_px` paints on. In the unit of the self-similarity radius, so a shift inside the radius is within what the patch cannot tell apart. |
 | `projection_offset_px` | How far the observation's keypoint sits from the point's projection. A statement about the **point**: a mis-triangulated track shows a column of large offsets beside a column of zero shifts. |
 | `reprojection_error`, `ray_angle_deg` | The same residual in px and in degrees, against the position the track carries and the pixel the observation sits at. |
 | `localizability_deprecated` | The observation's own tile `sigma_pos`, through the frame anchored at its keypoint. |
@@ -1743,15 +1768,20 @@ decided before any correlation, from the observation and the geometry, which is
 what lets the row carry the reason instead of simply going missing from the
 kernel's answer.
 
+**The search radius is the track's shift bar.** How far from a sighting the
+reading looks for its peak and how far a peak may sit before the bar refuses it
+are one question, so they are one number, `max_shift_px`, in patch-grid px:
+moving the bar evaluates the track again at the new radius.
+
 **The search window is widened to reach the furthest seed.** The kernel anchors
 its window at the point's projection and clips the integer part of a seed beyond
-`search` back onto that bound, so a window sized for `search_px` alone would
+`search` back onto that bound, so a window sized for the bar alone would
 start a far-out sighting short of where it actually is and report the
 correlation of a place the sighting is not. Each round therefore runs at
-`search_px` plus the furthest seed's own offset
+`max_shift_px` plus the furthest seed's own offset
 ([`keypoint_grid_offset`](../patch/patch-keypoint-localization.md) is that
 offset). In return, an observation in a round that holds a far-out seed can
-report a peak further than `search_px` from itself, which is the honest reading
+report a peak further than the bar from itself, which is the honest reading
 of a window that had to be that wide.
 
 **And the widening is bounded, because it is a memory bound.** Every view of a
@@ -1938,7 +1968,7 @@ and every reader of one relies on.
 - **With `in` observations whose provenance names a point** other than the
   origin, those points are deleted as well, because a track cannot observe an
   image twice and a reconstruction should not hold two points for one surface.
-  Only `in` observations count: a candidate or an `out` sighting pulled from a
+  Only `in` observations count: an `out` sighting pulled from a
   point leaves that point alone. This is the merge, and the map becomes a
   `Chain` of the write and a `Removed` of what it absorbed, which is what
   `absorbed()` reads back.
@@ -2000,7 +2030,8 @@ Two of the thresholds default to the kernels' own bars, read from those
 kernels' parameter types rather than written out again, so the bench and the
 batch pass start from the same bar and moving one is the person choosing to
 differ. The other three are the bench's own. `max_shift_px` is
-`BENCH_MAX_SHIFT_PX`, because on the bench it is also the bound on a fit's walk
+`BENCH_MAX_SHIFT_PX`, the localizer's own search radius, because on the bench
+it is also the radius a reading searches and the bound on a fit's walk
 (§ "The fit's walk is bounded by the person's bar"). `min_zncc` is
 `BENCH_MIN_ZNCC`, below the cluster refinement's `0.85`, because the one bar
 judges both stages and the track stage's leave-one-out ZNCC, scored against a
@@ -2014,7 +2045,7 @@ earlier default carries that default until someone moves it.
 |-----------|---------|---------|
 | `min_zncc` | `0.7` | The ZNCC an observation has to reach: the achieved template ZNCC at the cluster stage, the leave-one-out ZNCC at the track stage. `BENCH_MIN_ZNCC`, not `ClusterRefineParams::default`'s `0.85`, which stays the batch pass's bar. |
 | `min_zncc_middle` | `0.7` | The `zncc_middle` an observation has to reach, at either stage. `BENCH_MIN_ZNCC_MIDDLE`; `0` turns the bar off, and a row with no middle reading clears it (§ "The middle ZNCC"). |
-| `max_shift_px` | `8.0` | How far the correlation peak may sit from where the observation sits: the drift from its seed at the cluster stage, `seed_shift_px` at the track stage, both in source-image px; and at the track stage how far a fit may move a sighting from where it sat. `BENCH_MAX_SHIFT_PX`, not `ClusterRefineParams::default`'s 3 px, which stays the batch pass's bar. The other track-stage distance, `projection_offset_px`, is deliberately **not** judged: it is a verdict on the point, and painting sightings by it would turn out the observations that would move a mis-triangulated point back. |
+| `max_shift_px` | `6.0` | How far the correlation peak may sit from where the observation sits, in patch-grid px: the drift from its seed at the cluster stage (the refined position's offset in the seed's keypoint frame, `resolution` grid px across `2 · radius` units), `seed_shift_px` at the track stage; and at the track stage the radius the reading looks for each peak within and how far a fit may move a sighting from where it sat. `BENCH_MAX_SHIFT_PX`, the localizer's own search radius; `ClusterRefineParams::default`'s 3 source-image px stays the batch pass's bar. The other track-stage distance, `projection_offset_px`, is deliberately **not** judged: it is a verdict on the point, and painting sightings by it would turn out the observations that would move a mis-triangulated point back. |
 | `max_keypoint_uncertainty` | `0.35` | The largest tile localizability an observation may have, in grid px. From `KeypointLocalizeParams::default`'s `max_member_keypoint_uncertainty`. |
 | `min_relative_zncc` | `0.7` | The fraction of the track's own self-agreement a sweep candidate has to reach. From `ViewSelectParams::default`. |
 
@@ -2024,7 +2055,6 @@ machine, so they live on `EvaluateOptions` beside the search radius.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `search_px` | `6.0` | How far from each observation's own pixel the correlation peak is looked for, in patch-grid px. From `KeypointLocalizeParams::default`'s `search`. |
 | `max_seed_offset_px` | `64.0` | How far from the point's projection a seed may sit and still be read, in patch-grid px. Past it the row carries `SeedTooFar` and is left out of the round. |
 | `max_cache_bytes` | `256 MiB` | What one round's per-view tiles may take together. A round past it is refused with `TooLarge`, before anything is allocated. |
 
@@ -2096,9 +2126,9 @@ rather than the commit.
 names and the same shape as the Rust ones; `EditableTrack` is a read-only value
 class whose observations cross as dicts, with each stage's measurements under
 `"cluster"` and `"track"` and a key present exactly when something has measured
-it. Verdicts and provenance kinds are the lowercase words (`"in"`, `"out"`,
-`"candidate"`; `"origin"`, `"descriptor"`, `"search"`, `"sweep"`, `"pixel"`,
-`"point"`). Refusals are `ValueError` carrying the core sentence.
+it. Verdicts and provenance kinds are the lowercase words (`"in"`, `"out"`;
+`"origin"`, `"descriptor"`, `"search"`, `"sweep"`, `"pixel"`, `"point"`).
+`EditableTrack.verdict_counts` is `(in, out)`. Refusals are `ValueError` carrying the core sentence.
 
 `create_cluster` takes either `radius_px`, a half-width in that image's pixels,
 or `shape`, a 2x2 in keypoint-frame units; `EditableTrack.radius` is the
@@ -2115,10 +2145,10 @@ absent for the commit that wrote nothing, as it is for one that created.
 
 `evaluate`, `fit` and `set_stage` take `images` the way every patch kernel does
 -- a list of `HxW[xC]` `uint8` arrays, one per image of the reconstruction, or a
-prebuilt `ImagePyramidSet`. `evaluate` and `fit` take three optional keywords --
-`search_px`, the radius the reading looks for each peak in, and
+prebuilt `ImagePyramidSet`. `evaluate` and `fit` take two optional keywords,
 `max_seed_offset_px` and `max_cache_bytes`, the two memory bounds above, each
-defaulting to the reading's own. `fit` and `set_stage` take the
+defaulting to the reading's own; the radius the reading looks for each peak in
+is the track's `max_shift_px`. `fit` and `set_stage` take the
 classification's three knobs as well, `noise_floor_px`,
 `inverse_depth_z_cutoff` and `residual_margin`, each defaulting to core's own
 value;
@@ -2372,12 +2402,12 @@ that see the point stand close to it, a bearing placed at the point looks within
 3% of its old size in each of those three images, a point taken to a bearing and
 back looks within 1% of its old size, and with nothing to measure in the extents
 fall back to the observing distance and then to the numbers they had; a
-sighting moved four pixels off with the bar at two keeps its seed, carries
-`walked_px`, a `walked_to` within a pixel of where it was moved from and a
+sighting moved four pixels off with the bar at two grid px keeps its seed,
+carries `walked_px`, a `walked_to` within a pixel of where it was moved from and a
 `walked_zncc`, and is still scored there while the other seven move, and
 `sight_observation` at `walked_to` puts its keypoint there, pinned, with the
-walk fields gone; the bench's `max_shift_px` defaults to 8 while the cluster
-refinement's stays 3; a bearing taken
+walk fields gone; the bench's `max_shift_px` defaults to 6, the localizer's
+own search radius, while the cluster refinement's stays 3; a bearing taken
 down to the cluster stage and back up comes back a bearing at the size it was and
 commits as a `w = 0` row with a unit direction, a zero normal and a zero normal
 confidence, counted in the materialised value's `infinity_point_count`; and a
@@ -2407,11 +2437,11 @@ one of the sentence's four shapes, and the word `NaN` appears in none of them.
 The search is tested over a corpus built in the test
 ([bench/search/tests.rs](../../../crates/sfmtool-core/src/bench/search/tests.rs)):
 a patch planted in three images under two warps the test states, written to a
-`.kdf` and reopened, so the seed a candidate takes is a number the assertions
+`.kdf` and reopened, so the seed an added row takes is a number the assertions
 can name rather than merely something that appeared. It covers the searched
-image never being a candidate of its own search; the found image's candidate
-landing at the observation's pixel and shape under the planted warp, as a
-`candidate` with the search's own provenance and inlier count; an image the
+image never being added by its own search; the found image's row landing at the
+observation's pixel and shape under the planted warp, as an unpinned `out` with
+the search's own provenance and inlier count; an image the
 track already names being reported and left exactly as it was, pin and `out`
 verdict included; a bar no image reaches leaving the track untouched; and the
 three refusals -- an observation past the end, one with no place in its
@@ -2425,7 +2455,7 @@ The geometry search is covered in
 [bench/tests.rs](../../../crates/sfmtool-core/src/bench/tests.rs) over the
 textured-plane scene: a matching third view lands at the exact patch
 projection with positive-chirality seed geometry; existing observations are
-unchanged; repeating the search leaves an `out`, pinned candidate untouched;
+unchanged; repeating the search leaves an `out`, pinned row untouched;
 an explicitly selected `out` row remains part of the reference basis; the
 cluster stage is refused; and the real call reports all three phases and stops
 on cancellation without returning a partial track.

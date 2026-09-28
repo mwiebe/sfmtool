@@ -33,11 +33,12 @@ use sfmtool_core::bench::{
     shape_observation as core_shape_observation, sight_observation as core_sight_observation,
     spin_patch as core_spin_patch, split as core_split, tilt_patch as core_tilt_patch,
     translate_patch as core_translate_patch,
-    translate_patch_to_pixel as core_translate_patch_to_pixel, Bench, BenchItem,
-    ClassificationReason, ClusterSeed, CreateTrackOptions, Edge, EditableTrack, EvaluateOptions,
-    EvaluateReport, FitOptions, FitReport, Found, GeometrySearchOptions, GeometrySearchReport,
-    ItemKind, Observation, ObservationSeed, Provenance, ResizeReport, SearchOptions, SearchReport,
-    StageKind, TrackClassification, Verdict, Viewpoint, DEFAULT_RADIUS_PX,
+    translate_patch_to_pixel as core_translate_patch_to_pixel, unpin_verdict as core_unpin_verdict,
+    Bench, BenchItem, ClassificationReason, ClusterSeed, CreateTrackOptions, Edge, EditableTrack,
+    EvaluateOptions, EvaluateReport, FitOptions, FitReport, Found, GeometrySearchOptions,
+    GeometrySearchReport, ItemKind, Observation, ObservationSeed, Provenance, ResizeReport,
+    SearchOptions, SearchReport, StageKind, TrackClassification, Verdict, Viewpoint,
+    DEFAULT_RADIUS_PX,
 };
 use sfmtool_core::features::kdforest::{ConstellationParams, ImageKeypoints};
 use sfmtool_core::patch::normal_refine::ProjectedImage;
@@ -67,9 +68,8 @@ fn parse_verdict(word: &str) -> PyResult<Verdict> {
     match word {
         "in" => Ok(Verdict::In),
         "out" => Ok(Verdict::Out),
-        "candidate" => Ok(Verdict::Candidate),
         other => Err(PyValueError::new_err(format!(
-            "unknown verdict: {other:?} (expected in|out|candidate)"
+            "unknown verdict: {other:?} (expected in|out)"
         ))),
     }
 }
@@ -371,9 +371,9 @@ impl PyEditableTrack {
         self.inner.observations.len()
     }
 
-    /// ``(in, candidate, out)``.
+    /// ``(in, out)``.
     #[getter]
-    fn verdict_counts(&self) -> (usize, usize, usize) {
+    fn verdict_counts(&self) -> (usize, usize) {
         self.inner.verdict_counts()
     }
 
@@ -536,9 +536,9 @@ impl PyEditableTrack {
     }
 
     fn __repr__(&self) -> String {
-        let (inside, candidates, out) = self.inner.verdict_counts();
+        let (inside, out) = self.inner.verdict_counts();
         format!(
-            "EditableTrack(stage={}, {inside} in, {candidates} candidates, {out} out)",
+            "EditableTrack(stage={}, {inside} in, {out} out)",
             self.inner.stage_kind()
         )
     }
@@ -747,10 +747,11 @@ fn create_cluster(
     Ok((PyBench::wrap(next), track))
 }
 
-/// Add a candidate observation to `track`.
+/// Add an observation to `track`.
 ///
-/// It joins as a ``candidate``: something proposed it and nobody has ruled on
-/// it. A second observation in an image the track already holds is allowed and
+/// It joins ``out`` and unpinned: nothing has measured it yet, and the first
+/// :func:`evaluate` that does turns it ``in`` when it clears the thresholds. A
+/// second observation in an image the track already holds is allowed and
 /// is scored like any other; what it cannot do is be turned ``in`` while the
 /// other is.
 ///
@@ -816,6 +817,32 @@ fn set_verdict(
 ) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
     let (next, report) =
         core_set_verdict(&track.inner, observation, parse_verdict(verdict)?).map_err(refused)?;
+    let d = PyDict::new(py);
+    d.set_item("observation", report.observation)?;
+    d.set_item("was", report.was.to_string())?;
+    d.set_item("is", report.is.to_string())?;
+    d.set_item("changed", report.changed)?;
+    Ok((
+        PyEditableTrack {
+            inner: Arc::new(next),
+        },
+        d.unbind(),
+    ))
+}
+
+/// Hand one observation's verdict back to the thresholds: clear the pin
+/// :func:`set_verdict` set, and give it the verdict the thresholds propose from
+/// its stored measurements, ``in`` only when no other ``in`` observation holds
+/// its image. An observation nothing has measured keeps its verdict.
+///
+/// Returns ``(EditableTrack, report)``, the report as :func:`set_verdict`'s.
+#[pyfunction]
+fn unpin_verdict(
+    py: Python<'_>,
+    track: &PyEditableTrack,
+    observation: usize,
+) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
+    let (next, report) = core_unpin_verdict(&track.inner, observation).map_err(refused)?;
     let d = PyDict::new(py);
     d.set_item("observation", report.observation)?;
     d.set_item("was", report.was.to_string())?;
@@ -1357,16 +1384,13 @@ fn fit_report_dict<'py>(py: Python<'py>, report: &FitReport) -> PyResult<Bound<'
 }
 
 /// The reading options a call runs with: the defaults, with the caller's own
-/// search radius and memory bounds where they named them.
+/// memory bounds where they named them. The search radius is the track's own
+/// ``max_shift_px``.
 fn evaluate_options(
-    search_px: Option<f64>,
     max_seed_offset_px: Option<f64>,
     max_cache_bytes: Option<usize>,
 ) -> EvaluateOptions {
     let mut options = EvaluateOptions::default();
-    if let Some(search_px) = search_px {
-        options.search_px = search_px;
-    }
     if let Some(max_seed_offset_px) = max_seed_offset_px {
         options.max_seed_offset_px = max_seed_offset_px;
     }
@@ -1377,10 +1401,9 @@ fn evaluate_options(
 }
 
 /// The fit options a call runs with. The reading the fit ends with takes the
-/// same search radius and the same bounds, so a fit and an `evaluate` of its
-/// result are stated in one set of terms.
+/// same bounds, so a fit and an `evaluate` of its result are stated in one set
+/// of terms.
 fn fit_options(
-    search_px: Option<f64>,
     max_seed_offset_px: Option<f64>,
     max_cache_bytes: Option<usize>,
     noise_floor_px: Option<f64>,
@@ -1388,7 +1411,7 @@ fn fit_options(
     residual_margin: Option<f64>,
 ) -> FitOptions {
     let mut options = FitOptions {
-        evaluate: evaluate_options(search_px, max_seed_offset_px, max_cache_bytes),
+        evaluate: evaluate_options(max_seed_offset_px, max_cache_bytes),
         ..FitOptions::default()
     };
     if let Some(noise_floor_px) = noise_floor_px {
@@ -1417,8 +1440,10 @@ fn parse_stage(word: &str) -> PyResult<StageKind> {
 /// Read `track` as it stands: fill the measurement slots of every observation,
 /// whatever its verdict, at the stage it is in, and **move nothing else**. The
 /// position, the frame, the bitmap, every keypoint and every verdict come back
-/// exactly as they went in. An ``out`` observation is scored the way a
-/// candidate is.
+/// exactly as they went in, except that an unpinned ``out`` observation
+/// measured for the first time is turned ``in`` when it clears the thresholds
+/// and no ``in`` observation holds its image. An ``out`` observation is scored
+/// the way an ``in`` one is.
 ///
 /// Nothing is dropped. The kernels run with their per-view gates off and the
 /// consensus-basis cap lifted, because a gate is a decision and this makes
@@ -1440,8 +1465,9 @@ fn parse_stage(word: &str) -> PyResult<StageKind> {
 /// far the *point* is off), the reprojection error, the ray angle, and its tile's
 /// deprecated localizability and ZNCC self-similarity radius.
 ///
-/// `search_px` is how far from each observation the peak is looked for, in
-/// patch-grid px; the default is the localizer's own search radius.
+/// The peak is looked for within the track's ``max_shift_px`` of each
+/// observation, in patch-grid px, the bar the shift is judged by; both shifts
+/// are in patch-grid px.
 ///
 /// Two bounds keep a wide window from asking for memory the machine does not
 /// have -- the window is widened to reach the furthest seed and each view's
@@ -1464,7 +1490,6 @@ fn parse_stage(word: &str) -> PyResult<StageKind> {
     edited,
     images,
     *,
-    search_px = None,
     max_seed_offset_px = None,
     max_cache_bytes = None,
 ))]
@@ -1473,7 +1498,6 @@ fn evaluate(
     track: &PyEditableTrack,
     edited: &PyEditedReconstruction,
     images: &Bound<'_, PyAny>,
-    search_px: Option<f64>,
     max_seed_offset_px: Option<f64>,
     max_cache_bytes: Option<usize>,
 ) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
@@ -1484,7 +1508,7 @@ fn evaluate(
         &track.inner,
         &edited.inner,
         &views,
-        &evaluate_options(search_px, max_seed_offset_px, max_cache_bytes),
+        &evaluate_options(max_seed_offset_px, max_cache_bytes),
         &Progress::none(),
     )
     .map_err(refused)?;
@@ -1541,7 +1565,6 @@ fn evaluate(
     edited,
     images,
     *,
-    search_px = None,
     max_seed_offset_px = None,
     max_cache_bytes = None,
     noise_floor_px = None,
@@ -1554,7 +1577,6 @@ fn fit(
     track: &PyEditableTrack,
     edited: &PyEditedReconstruction,
     images: &Bound<'_, PyAny>,
-    search_px: Option<f64>,
     max_seed_offset_px: Option<f64>,
     max_cache_bytes: Option<usize>,
     noise_floor_px: Option<f64>,
@@ -1569,7 +1591,6 @@ fn fit(
         &edited.inner,
         &views,
         &fit_options(
-            search_px,
             max_seed_offset_px,
             max_cache_bytes,
             noise_floor_px,
@@ -1647,7 +1668,6 @@ fn set_stage(
         &views,
         stage,
         &fit_options(
-            None,
             None,
             None,
             noise_floor_px,
@@ -1958,11 +1978,12 @@ fn search_report_dict<'py>(py: Python<'py>, report: &SearchReport) -> PyResult<B
 /// Grow a track-stage `track` from its geometry: project its patch into every
 /// image of `edited`, vet each projected appearance against a reference fused
 /// from observation `observation` and the track's ``in`` observations, and
-/// append every admitted image the track does not name yet as a ``candidate``.
+/// append every admitted image the track does not name yet, ``out`` and
+/// unpinned.
 ///
 /// This is the single-point form of the view expansion ``sfm embed-patches``
 /// runs. An admitted image arrives at the patch centre's projection, seeded
-/// with the projected frame as its shape, and with no verdict: the next
+/// with the projected frame as its shape, and ``out`` and unpinned: the next
 /// :func:`evaluate` or :func:`fit` judges it. The admission bar is the track's
 /// own ``min_relative_zncc`` threshold, as it is in the viewer. The keywords are
 /// the view selector's rendering and trust tunables, each defaulting to the
@@ -2077,6 +2098,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_cluster, m)?)?;
     m.add_function(wrap_pyfunction!(add_observation, m)?)?;
     m.add_function(wrap_pyfunction!(set_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(unpin_verdict, m)?)?;
     m.add_function(wrap_pyfunction!(translate_patch_to_pixel, m)?)?;
     m.add_function(wrap_pyfunction!(translate_patch, m)?)?;
     m.add_function(wrap_pyfunction!(tilt_patch, m)?)?;

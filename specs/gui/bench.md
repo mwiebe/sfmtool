@@ -163,7 +163,7 @@ impl AppState {
         pub(crate) clamped_from: Option<[f64; 2]>,
     }
     /// Set the track's bars and paint their verdicts, as one version: Track
-    /// View's threshold slider released, or `apply_bench_track_thresholds`.
+    /// View's threshold box released, or `apply_bench_track_thresholds`.
     pub(crate) fn apply_bench_thresholds(&mut self, id: ReconId, label: &str,
                                          thresholds: &Thresholds) -> Result<(), String>;
     /// Track View's *Accept walk*: put a sighting the last fit kept at its seed
@@ -218,14 +218,12 @@ impl AppState {
     pub(crate) fn commit_bench_track(&mut self, id: ReconId, label: &str)
         -> Result<Committed, String>;
     /// Move it: localize, re-triangulate, re-fuse, then read the result back.
-    /// `search_px` is how far around each observation the correlation peak is
-    /// looked for; `None` is the radius the live evaluation reads at.
-    pub(crate) fn start_bench_fit(&mut self, id: ReconId, label: &str,
-                                  search_px: Option<f64>) -> Result<(), String>;
+    /// The reading looks for each peak within the track's `max_shift_px`.
+    pub(crate) fn start_bench_fit(&mut self, id: ReconId, label: &str) -> Result<(), String>;
     pub(crate) fn start_bench_stage(&mut self, id: ReconId, label: &str, stage: StageKind)
         -> Result<(), String>;
     /// Ask the node's SIFT index which other photographs hold the patch
-    /// around one observation, and add each as a candidate.
+    /// around one observation, and add each, unpinned and `out`.
     pub(crate) fn start_bench_descriptor_search(
         &mut self, id: ReconId, label: &str, observation: usize,
         radius_px: Option<f64>, min_inliers: Option<usize>) -> Result<(), String>;
@@ -243,10 +241,6 @@ impl AppState {
     pub(crate) fn bench_evaluation(&self, id: ReconId, item: &str) -> Option<Evaluation>;
     /// Whether an evaluation of that track's current inputs is on a worker now.
     pub(crate) fn bench_evaluation_running(&self, id: ReconId, item: &str) -> bool;
-    /// The radius every evaluation reads at, and its setter: Track View's
-    /// *search px* slider and the wire's `set_bench_search_px`.
-    pub(crate) fn bench_search_px(&self) -> f64;
-    pub(crate) fn set_bench_search_px(&mut self, search_px: f64) -> Result<(), String>;
     /// Once per frame: land a finished evaluation, cancel one whose inputs
     /// have moved on, start the next. True when the next frame has to draw.
     pub(crate) fn drive_bench_evaluation(&mut self) -> bool;
@@ -580,7 +574,10 @@ holds the same three things:
 |---|---|---|
 | The track value: observations, their seeds and keypoints, verdicts, pins, the stage and its patch frame, position and template | every bench step on the track -- a put, an add, a verdict, a patch or sighting edit, *Accept walk*, the thresholds (their painting moves verdicts), a fit, a stage change, a search, a split, a duplicate -- and an undo, redo or jump that lands on another version of it | the track is a new `Arc` |
 | The document half of the version: the poses and camera intrinsics the kernels project with | every document edit under the track -- a bundle adjustment, a resection, a refit or switch of the camera model, a commit -- and an undo, redo or jump across one | the version's `document_serial` moves |
-| The search radius | Track View's *search px* slider, the wire's `set_bench_search_px` | `AppState::bench_search_px` moves |
+
+The radius the evaluation looks for each peak within is the track's own
+`max_shift_px` bar, so it is part of the track value: moving it is a thresholds
+step like any other. There is no viewer-wide radius.
 
 So no step has to remember to ask for an evaluation, and none does. The track's
 label is part of the key too, so a renamed item is evaluated under its new
@@ -593,7 +590,7 @@ and then either cancels the running one when its inputs are no longer the
 track's, or, when nothing is running, starts the next track whose evaluation is
 `Evaluating`: the active track of each bench first, then the rest in bench
 order, in scene order. It does not start the next until a cancelled one has
-reported back, so a slider drag that moves an input on every frame has at most
+reported back, so a box drag that moves an input on every frame has at most
 one worker behind it rather than a queue. It also waits while a background task
 holds the node, since that task's answer replaces the inputs it would read.
 
@@ -1026,7 +1023,6 @@ create_bench_cluster."*
 // shape_bench_observation    { "reconstruction_label": "bull", "observation": 3,
 //                              "shape": [[7.1, -0.4], [0.4, 7.1]] }
 // apply_bench_track_thresholds { "reconstruction_label": "bull", "min_zncc": 0.8 }
-// set_bench_search_px          { "search_px": 8.0 }   // the viewer's, every track
 // fit_bench_track           { "reconstruction_label": "bull" }
 // set_bench_track_stage        { "reconstruction_label": "bull", "stage": "track" }
 // select_bench_observations    { "reconstruction_label": "bull", "observations": [3, 5, 8] }
@@ -1055,7 +1051,7 @@ grouping on the wire would be the panel's layout rather than the bench's own
 state. Both carry each track's `evaluation`: its `state` (`current`, `evaluating`,
 `refused` or `failed`, § "Live evaluation"), the `reason` sentence where it is
 refused or failed, `running` for whether an evaluation of the current inputs is
-on a worker now rather than waiting to start, and the `search_px` it reads at.
+on a worker now rather than waiting to start.
 An agent that has just made a step reads `evaluating` and the previous numbers,
 and reads again until it says `current`. `get_bench_track` is
 Track View's edit-mode table: the stage and its data, the origin, the thresholds, and
@@ -1293,9 +1289,9 @@ point's exact projection and a photograph cached for every image:
   first item is the same `Arc` throughout;
 - putting a point on the bench twice activates the track it already made;
 - the two gestures the Image Detail context menu carries -- a cluster started at
-  a pixel, then a candidate added at one in the same image -- are one version and
-  one `Bench` row each, the second sighting joining as a candidate, and an undo
-  walks them back one at a time;
+  a pixel, then a sighting added at one in the same image -- are one version and
+  one `Bench` row each, the second sighting joining unpinned and `out`, and an
+  undo walks them back one at a time;
 - a verdict and a stage change are two versions and the evaluations after them
   none, undo retraces them in order and redo replays them;
 - a document edit between two bench steps is a version in its place, and undoing
@@ -1421,8 +1417,9 @@ The wire is tested in
 fixture with a label on the node, for what the boundary owes: each tool being
 the `AppState` call the panel makes, the reads reporting `evaluation.state` as
 `evaluating` until the evaluation lands and `current` after it,
-`set_bench_search_px` pushing no version and making a track `evaluating` at the
-new radius, an observation index surviving the steps
+a move of the `max_shift_px` bar, which is the search radius, pushing one
+version and making the track `evaluating`, an observation index surviving the
+steps
 that follow it, a refusal arriving as the step's own sentence, and the two
 photometric steps deferring to a worker and landing their version
 ([mcp-server.md](mcp-server.md) § "Testing"). Two of its cases are about what a

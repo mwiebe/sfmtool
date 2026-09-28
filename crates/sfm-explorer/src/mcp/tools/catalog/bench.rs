@@ -205,10 +205,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "add_bench_track_observation",
-            description: "Add one candidate observation of a bench track, in a camera image, at \
-                          the place the seed names — a pixel, a pixel with a radius_px or an \
-                          affine shape, or a .sift feature. It joins as a candidate and unpinned: \
-                          something proposed it and nobody has ruled on it. On a track-stage \
+            description: "Add one observation of a bench track, in a camera image, at the \
+                          place the seed names — a pixel, a pixel with a radius_px or an affine \
+                          shape, or a .sift feature. It joins out and unpinned, and the \
+                          evaluation that first measures it turns it in when it clears the \
+                          thresholds. On a track-stage \
                           track the pixel is also its keypoint, so a reading measures it there \
                           and, once it is turned in, a commit writes it without a fit. A second \
                           observation \
@@ -518,12 +519,15 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "set_bench_track_verdict",
-            description: "Rule on one observation of a bench track by hand: in, out, or back to \
-                          candidate. A verdict set this way is pinned, which is what leaves it \
-                          alone when the thresholds are applied. A track cannot see one image \
+            description: "Rule on one observation of a bench track by hand, in or out, or hand \
+                          it back to the thresholds with unpin. A verdict set in or out is \
+                          pinned, which is what leaves it alone when the thresholds are applied. \
+                          unpin clears the pin and gives the observation the verdict the \
+                          thresholds propose from its measurements. A track cannot see one image \
                           twice, so turning an observation in while another observation of the \
-                          same image is in is refused. Setting the verdict an observation already \
-                          has changes nothing and pushes no version.",
+                          same image is in is refused. A call that changes nothing pushes no \
+                          version. The reply carries the verdict and the pin the observation \
+                          has afterwards.",
             kind: Write,
             schema: object(
                 &[("track", bench_track_schema())],
@@ -534,11 +538,12 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                         "verdict",
                         json!({
                             "type": "string",
-                            "enum": ["in", "out", "candidate"],
+                            "enum": ["in", "out", "unpin"],
                             "description":
                                 "in: the observation belongs to the track, and a commit writes \
-                                 it. out: it was refused, and stays in the list so the refusal \
-                                 is visible. candidate: proposed and not ruled on.",
+                                 it. out: the track does not keep it; it stays in the list so \
+                                 the refusal is visible. unpin: clear a verdict set by hand and \
+                                 take the one the thresholds propose.",
                         }),
                     ),
                 ],
@@ -551,7 +556,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           they propose, and an observation ruled on by hand is left alone. A bar \
                           the call does not name stays where the track has it. The reply's report \
                           says how many were turned in, turned out, left pinned and left \
-                          unmeasured. Track View's threshold sliders are this step: releasing \
+                          unmeasured. Track View's threshold boxes are this step: releasing \
                           one applies the five bars as one version.",
             kind: Write,
             schema: object(
@@ -578,11 +583,13 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                         "max_shift_px",
                         threshold_schema(
                             "How far the correlation peak may sit from where the observation \
-                             sits, in source-image px: the refinement's drift from the seed at \
-                             the cluster stage, seed_shift_px at the track stage. At the track \
-                             stage it is also how far fit_bench_track may move a sighting; one \
-                             it would move further keeps its place and reports walked_px and \
-                             walked_to. The bench's default is 8.",
+                             sits, in patch-grid px: the refinement's drift from the seed \
+                             (shift_px) at the cluster stage, seed_shift_px at the track stage. \
+                             At the track stage it is also the radius the evaluation looks for \
+                             each peak within, so moving it evaluates the track again, and how \
+                             far fit_bench_track may move a sighting; one it would move further \
+                             keeps its place and reports walked_px and walked_to. The bench's \
+                             default is 6, the keypoint localizer's own search radius.",
                         ),
                     ),
                     (
@@ -595,8 +602,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     (
                         "min_relative_zncc",
                         threshold_schema(
-                            "The fraction of the track's own self-agreement a candidate's ZNCC \
-                             has to reach.",
+                            "The fraction of the track's own self-agreement a view's ZNCC has \
+                             to reach for a geometry search to add it.",
                         ),
                     ),
                 ],
@@ -676,32 +683,6 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
-            name: "set_bench_search_px",
-            description: "Set how far around each observation the bench's evaluation looks for \
-                          the correlation peak, in patch-grid px: Track View's search px slider. \
-                          It is the viewer's setting rather than a track's, so it pushes no \
-                          version and undo does not reverse it; every track on every bench is \
-                          evaluated again at the new radius. There is no call that evaluates a \
-                          track: every change to a track, to the reconstruction under it or to \
-                          this radius evaluates it again on a worker, and get_bench_track \
-                          reports under evaluation whether the numbers it returns are current \
-                          or an evaluation of the current inputs is still running.",
-            kind: Write,
-            schema: object(
-                &[],
-                &[(
-                    "search_px",
-                    json!({
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description":
-                            "The radius, in patch-grid px. A wider window finds a feature the \
-                             sighting sits further from, and says so in seed_shift_px.",
-                    }),
-                )],
-            ),
-        },
-        ToolSpec {
             name: "fit_bench_track",
             description: "Fit a bench track at the stage it is in — the step that MOVES it. At \
                           the track stage it localizes every sighting against the patch, \
@@ -711,8 +692,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           is dropped by a gate: a sighting that does not belong is turned out \
                           with set_bench_track_verdict or by the thresholds, not deleted from \
                           the evidence. The fit ends by evaluating its own result, and the \
-                          track is then evaluated again at the viewer's search radius like \
-                          after any other change. Refused for a track stage with fewer than two \
+                          track is then evaluated again like after any other change. Refused for a track stage with fewer than two \
                           in observations, which an evaluation permits. It runs on a worker \
                           thread, so a fit still going after 200 ms replies with running: true \
                           and an operation_id to poll with get_background_task instead of the \
@@ -720,10 +700,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           demand.",
             kind: Write,
             schema: object(
-                &[
-                    ("track", bench_track_schema()),
-                    ("search_px", search_px_schema()),
-                ],
+                &[("track", bench_track_schema())],
                 &[("reconstruction_label", edited_label_schema())],
             ),
         },
@@ -755,13 +732,15 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "search_bench_track_descriptors",
             description: "Ask the node's SIFT index which OTHER photographs hold the patch \
-                          around one observation of a bench track, and add each as a candidate. \
+                          around one observation of a bench track, and add each, out and \
+                          unpinned, for the evaluation that follows to judge. \
                           It is a constellation query, not a lookup of one descriptor: the \
                           detected keypoints within radius_px of the observation are looked up in \
                           the index, the hits are grouped by image, and an image whose hits agree \
                           on a single affine warp with at least min_inliers of them is found. That \
                           warp applied to the observation's own pixel and shape is the seed the \
-                          new candidate takes, so it arrives where and at the size the warp says \
+                          new observation takes, so it arrives where and at the size the warp \
+                          says \
                           the patch is — the evaluation that follows is what scores it. An image the \
                           track already has an observation in is left alone whatever its verdict, \
                           and so is the searched image itself. Needs a CURRENT SIFT index: \
@@ -806,7 +785,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "search_bench_track_geometry",
             description: "Ask the reconstruction's GEOMETRY which other photographs see the \
-                          patch of a bench track, and add each as a candidate. This is the \
+                          patch of a bench track, and add each, out and unpinned. This is the \
                           per-point form of the view expansion sfm embed-patches runs: the \
                           track's patch is projected into every camera of the node, the ones \
                           it does not face or that hold it behind them are dropped, and each \
@@ -814,9 +793,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           the named observation and the track's in observations. A view is \
                           admitted when that score clears the track's own min_relative_zncc \
                           bar, so apply_bench_track_thresholds moves what the next search \
-                          admits. A candidate arrives at the patch's own projection, with the \
-                          projected patch shape and sweep provenance, carrying no verdict and \
-                          no measurement — the evaluation that follows is what scores it. An \
+                          admits. An added observation arrives at the patch's own projection, \
+                          with the projected patch shape and sweep provenance and no \
+                          measurement — the evaluation that follows scores it and turns it in \
+                          when it clears the thresholds. An \
                           image the track already has an observation in is left alone whatever \
                           its verdict, so repeating the search changes nothing. Needs the TRACK \
                           stage and a fitted patch; a cluster-stage track has no geometry to \

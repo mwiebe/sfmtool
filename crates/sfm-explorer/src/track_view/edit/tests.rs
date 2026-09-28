@@ -5,9 +5,9 @@
 //!
 //! egui needs no GPU to lay out a frame, so the whole body runs through
 //! `Context::run_ui` here: `show` really does draw the header, the toolbar,
-//! the sliders and every row of the table. What the assertions target
+//! the boxes and every row of the table. What the assertions target
 //! is what the panel *decides* -- which rows it drew, what each says, what the
-//! sliders paint, and what it reports back to the dock -- rather than pixels.
+//! boxes paint, and what it reports back to the dock -- rather than pixels.
 
 use sfmtool_core::bench::{StageKind, Thresholds, Verdict};
 use sfmtool_core::camera::remap::{ImageU8, ImageU8Pyramid};
@@ -115,7 +115,7 @@ fn at_pointer(
 
 /// The y at which the row for `image` answers the pointer, found by walking
 /// down the panel: what sits above the table is the header, the toolbar and
-/// the sliders, and a hard-coded offset would go stale the moment
+/// the boxes, and a hard-coded offset would go stale the moment
 /// one of them gains a line.
 fn row_y(panel: &mut TrackEdit, ctx: &egui::Context, state: &AppState, image: usize) -> f32 {
     for step in 0..(VIEWPORT.y as usize / 8) {
@@ -267,13 +267,17 @@ fn a_verdict_shows_under_the_same_observation_index() {
 #[test]
 fn the_thresholds_paint_the_rows_and_move_no_pinned_verdict() {
     let (mut state, id, label, mut panel, ctx) = on_the_bench();
-    // Measure the track, so the rows have numbers for the bars to judge. The
-    // fixture's track is at the track stage, where the leave-one-out ZNCC the
-    // stored column carries is what a fresh bench track arrives with.
+    // Measure the track, so the rows have numbers for the bars to judge.
     state
         .set_bench_verdict(id, &label, 1, Verdict::Out)
         .expect("observation 1 exists");
+    state.settle_bench_evaluation();
     run_frame(&mut panel, &ctx, &state);
+    assert!(
+        panel.rows().iter().all(|row| row.painted.is_some()),
+        "every row is measured: {:?}",
+        panel.rows()
+    );
     let pinned_before = panel.rows()[1].verdict;
 
     // A bar nothing can clear: every measured row would be refused.
@@ -281,7 +285,7 @@ fn the_thresholds_paint_the_rows_and_move_no_pinned_verdict() {
     run_frame(&mut panel, &ctx, &state);
     let rows = panel.rows();
     assert!(
-        rows.iter().any(|row| row.painted == Verdict::Out),
+        rows.iter().any(|row| row.painted == Some(Verdict::Out)),
         "an unreachable bar painted nothing out: {rows:?}"
     );
     assert_eq!(
@@ -289,7 +293,8 @@ fn the_thresholds_paint_the_rows_and_move_no_pinned_verdict() {
         "the painting moved a verdict the person set"
     );
     assert_eq!(
-        rows[1].painted, pinned_before,
+        rows[1].painted,
+        Some(pinned_before),
         "a pinned row is painted as what it is, not as what the bars propose"
     );
 
@@ -300,7 +305,8 @@ fn the_thresholds_paint_the_rows_and_move_no_pinned_verdict() {
     run_frame(&mut panel, &ctx, &state);
     for row in panel.rows() {
         assert_eq!(
-            row.verdict, row.painted,
+            Some(row.verdict),
+            row.painted,
             "applying the bars produced a verdict the painting did not show"
         );
     }
@@ -423,12 +429,11 @@ fn a_search_candidate_draws_its_tile_where_the_seed_put_it() {
 #[test]
 fn the_cells_follow_the_stage_the_track_is_in() {
     let (mut state, id, label, mut panel, ctx) = on_the_bench();
-    // The eight cells are ZNCC, seed shift, projection offset, sigma_pos,
-    // self-similarity, reprojection error, ray angle, status. At the track
-    // stage the last three
-    // and the projection offset have numbers behind them; at the cluster stage
-    // there is no geometry behind an observation and they are absent.
-    assert_eq!(panel.rows()[0].cells[5], "-", "nothing has measured it yet");
+    // The six cells are ZNCC, seed shift, projection error, sigma_pos,
+    // self-similarity and status. At the track stage the projection error has
+    // numbers behind it; at the cluster stage there is no geometry behind an
+    // observation and it is absent.
+    assert_eq!(panel.rows()[0].cells[2], "-", "nothing has measured it yet");
 
     state
         .start_bench_stage(id, &label, StageKind::Cluster)
@@ -440,13 +445,18 @@ fn the_cells_follow_the_stage_the_track_is_in() {
     let rows = panel.rows();
     assert_ne!(rows[0].cells[0], "-", "the ZNCC column is unmeasured");
     let (whole, middle) = rows[0].cells[0]
-        .split_once(" / ")
-        .expect("the ZNCC cell shows the whole and the middle reading");
-    assert!(whole.parse::<f64>().is_ok(), "{whole}");
-    assert!(middle.parse::<f64>().is_ok(), "{middle}");
+        .split_once('\n')
+        .expect("the ZNCC cell shows the whole over the middle reading");
+    let percent = |line: &str, part: &str| {
+        let number = line
+            .strip_suffix(part)
+            .and_then(|rest| rest.strip_suffix("% "))
+            .unwrap_or_else(|| panic!("{line:?} is not a percent named {part}"));
+        assert!(number.parse::<f64>().is_ok(), "{line}");
+    };
+    percent(whole, "whole");
+    percent(middle, "mid");
     assert_eq!(rows[0].cells[2], "-", "a cluster has no point to project");
-    assert_eq!(rows[0].cells[5], "-", "a cluster has no reprojection error");
-    assert_eq!(rows[0].cells[6], "-", "a cluster has no ray angle");
     // Beside the ZNCC and the sigma_pos cells, the row draws their grids.
     assert!(rows[0].grids.zncc.is_some(), "no ZNCC grid drawn");
     assert!(
@@ -454,9 +464,17 @@ fn the_cells_follow_the_stage_the_track_is_in() {
         "no localizability grid drawn"
     );
     assert!(rows[0].grids.slide.is_some(), "no slide lines drawn");
-    assert!(rows[0].cells[3].contains(" / "), "{}", rows[0].cells[3]);
+    assert!(
+        rows[0].cells[3].contains(" px whole\n") && rows[0].cells[3].ends_with(" px mid"),
+        "{}",
+        rows[0].cells[3]
+    );
     // And beside the self-similarity cell, its grid and its slides.
-    assert!(rows[0].cells[4].contains(" / "), "{}", rows[0].cells[4]);
+    assert!(
+        rows[0].cells[4].contains(" px whole\n") && rows[0].cells[4].ends_with(" px mid"),
+        "{}",
+        rows[0].cells[4]
+    );
     assert!(
         rows[0].grids.radius.is_some(),
         "no self-similarity grid drawn"
@@ -496,7 +514,7 @@ fn a_row_seeded_far_from_the_projection_says_so_in_the_status_cell() {
     run_frame(&mut panel, &ctx, &state);
 
     let rows = panel.rows();
-    let status = rows.last().expect("the row just added").cells[7].clone();
+    let status = rows.last().expect("the row just added").cells[5].clone();
     assert!(
         status.contains("beyond the 64 px bound"),
         "the cell names the bound the seed passed: {status}"
@@ -509,20 +527,17 @@ fn a_row_seeded_far_from_the_projection_says_so_in_the_status_cell() {
 
 /// Evaluation is live, so there is no *Evaluate* button: the toolbar offers
 /// *Fit*, which moves the track, and says where the evaluation of the track as
-/// it stands is. The search radius is a control of its own beside the
-/// threshold sliders -- an input to the evaluation rather than a bar the
-/// painting judges by.
+/// it stands is. There is no search radius control: the evaluation looks
+/// within the *shift px* bar.
 #[test]
 fn the_toolbar_offers_the_fit_and_says_where_the_evaluation_stands() {
     let (mut state, _, _, mut panel, ctx) = on_the_bench();
-    assert_eq!(
-        panel.search_px(),
-        crate::bench::default_search_px(),
-        "the control starts where core's own evaluation does"
-    );
-
     let texts = painted(&mut panel, &ctx, &state, Vec::new());
-    for label in ["Fit", super::SEARCH_PX_LABEL, super::EVALUATING_LABEL] {
+    assert!(
+        !texts.iter().any(|t| t == "search px"),
+        "the search px box is still drawn: {texts:?}"
+    );
+    for label in ["Fit", super::MAX_SHIFT_LABEL, super::EVALUATING_LABEL] {
         assert!(
             texts.iter().any(|t| t == label),
             "{label} is not in the toolbar: {texts:?}"
@@ -556,7 +571,7 @@ fn the_rows_read_evaluating_until_the_evaluation_of_the_current_inputs_lands() {
         panel
             .rows()
             .iter()
-            .all(|row| row.cells[7] == super::EVALUATING_LABEL),
+            .all(|row| row.cells[5] == super::EVALUATING_LABEL),
         "{:?}",
         panel.rows()
     );
@@ -568,7 +583,7 @@ fn the_rows_read_evaluating_until_the_evaluation_of_the_current_inputs_lands() {
         panel
             .rows()
             .iter()
-            .all(|row| row.cells[7] != super::EVALUATING_LABEL),
+            .all(|row| row.cells[5] != super::EVALUATING_LABEL),
         "{:?}",
         panel.rows()
     );
@@ -582,7 +597,7 @@ fn the_rows_read_evaluating_until_the_evaluation_of_the_current_inputs_lands() {
         panel
             .rows()
             .iter()
-            .all(|row| row.cells[7] == super::EVALUATING_LABEL),
+            .all(|row| row.cells[5] == super::EVALUATING_LABEL),
         "{:?}",
         panel.rows()
     );
@@ -804,10 +819,10 @@ fn the_lock_is_greyed_at_the_cluster_stage() {
     assert!(panel.lock(), "a greyed box took the click");
 }
 
-/// Outside a drag the sliders hold no value of their own: whatever the panel
+/// Outside a drag the boxes hold no value of their own: whatever the panel
 /// had is replaced by the track's bars on the next frame.
 #[test]
-fn the_sliders_show_the_active_track_s_bars_outside_a_drag() {
+fn the_boxes_show_the_active_track_s_bars_outside_a_drag() {
     let (state, id, label, mut panel, ctx) = on_the_bench();
     panel.thresholds.min_zncc = 0.5;
     run_frame(&mut panel, &ctx, &state);
@@ -815,12 +830,12 @@ fn the_sliders_show_the_active_track_s_bars_outside_a_drag() {
     assert_eq!(panel.thresholds(), &track.thresholds);
 }
 
-/// The sliders show the **active track's** bars, whoever moved them: a step
+/// The boxes show the **active track's** bars, whoever moved them: a step
 /// taken over the wire moves the track's, and the panel that paints the rows by
 /// them has to be showing the same numbers or it proposes a rule the track does
 /// not hold. An undo moves them back.
 #[test]
-fn the_sliders_follow_the_active_track_s_own_thresholds() {
+fn the_boxes_follow_the_active_track_s_own_thresholds() {
     let (mut state, id, label, mut panel, ctx) = on_the_bench();
     let before = state
         .bench_track(id, &label)
@@ -836,29 +851,26 @@ fn the_sliders_follow_the_active_track_s_own_thresholds() {
     state
         .apply_bench_thresholds(id, &label, &bars)
         .expect("on the bench");
+    state.settle_bench_evaluation();
     run_frame(&mut panel, &ctx, &state);
 
     let track = state.bench_track(id, &label).expect("on the bench");
     assert_eq!(panel.thresholds(), &track.thresholds);
     assert_eq!(panel.thresholds().min_zncc, 0.94);
-    // And the painting is the track's rule rather than the slider's old one.
+    // And the painting is the track's rule rather than the box's old one.
     assert_eq!(
         panel.painted,
         sfmtool_core::bench::apply_thresholds(track)
             .0
             .observations
             .iter()
-            .map(|o| o.verdict)
+            .map(|o| Some(o.verdict))
             .collect::<Vec<_>>()
     );
 
     state.undo(id).expect("the thresholds step undoes");
     run_frame(&mut panel, &ctx, &state);
-    assert_eq!(
-        panel.thresholds(),
-        &before,
-        "an undo moves the sliders back"
-    );
+    assert_eq!(panel.thresholds(), &before, "an undo moves the boxes back");
     state.redo(id).expect("and redoes");
     run_frame(&mut panel, &ctx, &state);
     assert_eq!(panel.thresholds().min_zncc, 0.94, "a redo moves them again");
@@ -885,21 +897,19 @@ fn drag_frames(from: egui::Pos2, to: egui::Pos2) -> Vec<Vec<egui::Event>> {
     ]
 }
 
-/// Drag the *max shift px* slider from `from_frac` to `to_frac` of its rail,
+/// Drag the *max shift px* box `by` points to the right (left when negative),
 /// applying each frame's response the way the dock does, and hand back every
 /// frame's response.
 ///
-/// The rail is found from the slider's own label: egui lays a slider out as
-/// the rail, its value box and then the label, so the rail ends a value box
-/// and two gaps left of the label.
+/// The box is found from its label: the label comes first and the box one
+/// gap to its right.
 fn drag_max_shift(
     panel: &mut TrackEdit,
     ctx: &egui::Context,
     state: &mut AppState,
     id: ReconId,
     label: &str,
-    from_frac: f32,
-    to_frac: f32,
+    by: f32,
 ) -> Vec<TrackEditResponse> {
     let texts = crate::test_support::painted_text_rects(ctx, input(Vec::new()), |ui| {
         panel.show(ui, state);
@@ -907,14 +917,15 @@ fn drag_max_shift(
     let named = texts
         .iter()
         .find(|t| t.text == super::MAX_SHIFT_LABEL)
-        .expect("the max shift slider is drawn")
+        .expect("the max shift box is drawn")
         .rect;
     let spacing = egui::Spacing::default();
-    let rail_right = named.left() - 2.0 * spacing.item_spacing.x - spacing.interact_size.x - 4.0;
-    let rail_left = rail_right - spacing.slider_width;
-    let at = |frac: f32| egui::pos2(rail_left + frac * spacing.slider_width, named.center().y);
+    let start = egui::pos2(
+        named.right() + spacing.item_spacing.x + 0.5 * spacing.interact_size.x,
+        named.center().y,
+    );
     let mut responses = Vec::new();
-    for events in drag_frames(at(from_frac), at(to_frac)) {
+    for events in drag_frames(start, start + egui::vec2(by, 0.0)) {
         let response = run_frame_with(panel, ctx, state, events);
         if let Some(bars) = response.apply_thresholds.as_ref() {
             state
@@ -930,11 +941,11 @@ fn versions(state: &AppState, id: ReconId) -> usize {
     state.node(id).expect("loaded").history.versions().len()
 }
 
-/// A slider applies on its release: the drag's frames push nothing, the
+/// A box applies on its release: the drag's frames push nothing, the
 /// release pushes exactly one version with one Action Log row, and the
-/// track's bar is where the slider was let go.
+/// track's bar is where the box was let go.
 #[test]
-fn releasing_a_threshold_slider_applies_it_as_one_version() {
+fn releasing_a_threshold_box_applies_it_as_one_version() {
     let (mut state, id, label, mut panel, ctx) = on_the_bench();
     let before = versions(&state, id);
     let bar = state
@@ -945,7 +956,7 @@ fn releasing_a_threshold_slider_applies_it_as_one_version() {
     assert_eq!(bar, sfmtool_core::bench::BENCH_MAX_SHIFT_PX);
     state.action_log.clear();
 
-    let responses = drag_max_shift(&mut panel, &ctx, &mut state, id, &label, 0.3, 0.8);
+    let responses = drag_max_shift(&mut panel, &ctx, &mut state, id, &label, 100.0);
     let applied: Vec<&Thresholds> = responses
         .iter()
         .filter_map(|r| r.apply_thresholds.as_ref())
@@ -963,13 +974,13 @@ fn releasing_a_threshold_slider_applies_it_as_one_version() {
     run_frame(&mut panel, &ctx, &state);
     assert_eq!(panel.thresholds(), &track.thresholds);
 
-    // And an undo takes the bar and the slider back together.
+    // And an undo takes the bar and the box back together.
     state.undo(id).expect("undoes");
     run_frame(&mut panel, &ctx, &state);
     assert_eq!(panel.thresholds().max_shift_px, bar);
 }
 
-/// There is no button left to forget to press: the sliders are the whole
+/// There is no button left to forget to press: the boxes are the whole
 /// gesture.
 #[test]
 fn there_is_no_apply_thresholds_button() {
@@ -985,14 +996,14 @@ fn there_is_no_apply_thresholds_button() {
     );
 }
 
-/// The bar a slider was let go at is the bar the next *Fit* bounds its walk
+/// The bar a box was let go at is the bar the next *Fit* bounds its walk
 /// by, and a kept-at-seed row then offers *Accept walk*, which moves the
 /// keypoint to the walked pixel as one version.
 #[test]
 fn a_fit_after_a_release_uses_the_new_bar_and_accept_walk_moves_the_keypoint() {
     let (mut state, id, label, mut panel, ctx) = on_the_bench();
     // A bar of zero: any move at all is a walk past it.
-    drag_max_shift(&mut panel, &ctx, &mut state, id, &label, 0.5, -0.5);
+    drag_max_shift(&mut panel, &ctx, &mut state, id, &label, -400.0);
     assert_eq!(
         state
             .bench_track(id, &label)
@@ -1010,7 +1021,7 @@ fn a_fit_after_a_release_uses_the_new_bar_and_accept_walk_moves_the_keypoint() {
     );
 
     state
-        .start_bench_fit(id, &label, None)
+        .start_bench_fit(id, &label)
         .expect("a framed track with three sightings fits");
     state.finish_background_task();
     let track = state.bench_track(id, &label).expect("on the bench").clone();
@@ -1072,9 +1083,9 @@ fn a_fit_after_a_release_uses_the_new_bar_and_accept_walk_moves_the_keypoint() {
     assert!(super::table::accepted_walk(row).is_none());
 }
 
-/// A second track has its own bars, so making it active moves the sliders.
+/// A second track has its own bars, so making it active moves the boxes.
 #[test]
-fn a_change_of_active_track_reseats_the_sliders() {
+fn a_change_of_active_track_reseats_the_boxes() {
     let (mut state, id, first, mut panel, ctx) = on_the_bench();
     state
         .apply_bench_thresholds(
@@ -1468,7 +1479,7 @@ fn header_text(track: &sfmtool_core::bench::EditableTrack) -> String {
         ..Default::default()
     };
     crate::test_support::painted_texts(&ctx, input, |ui| {
-        super::show_header(ui, "item", track);
+        super::show_header(ui, "item", track, None);
     })
     .join(" | ")
 }
@@ -1526,22 +1537,22 @@ fn a_sighting_kept_at_its_seed_says_so_in_the_status_cell() {
     };
     let current = crate::bench::live::Evaluation::Current;
     let cells = super::measurements(&walked, StageKind::Track, &current);
-    assert_eq!(cells[7], "walked 19 px, kept at seed");
+    assert_eq!(cells[5], "walked 19 grid px, kept at seed");
     // With the ZNCC the fit scored at the walked peak, where it scored one.
     let mut scored = walked.clone();
     let slot = scored.track.as_mut().expect("a track slot");
     slot.walked_zncc = Some(0.873);
     slot.walked_zncc_middle = Some(0.412);
     assert_eq!(
-        super::measurements(&scored, StageKind::Track, &current)[7],
-        "walked 19 px (ZNCC 87% / 41% there), kept at seed"
+        super::measurements(&scored, StageKind::Track, &current)[5],
+        "walked 19 grid px (ZNCC 87% / 41% there), kept at seed"
     );
 
     // The same row without the flag is the ordinary scored row.
     let mut moved = walked.clone();
     moved.track.as_mut().expect("a track slot").walked_px = None;
     assert_eq!(
-        super::measurements(&moved, StageKind::Track, &current)[7],
+        super::measurements(&moved, StageKind::Track, &current)[5],
         "localized"
     );
 }
@@ -1571,17 +1582,17 @@ fn the_zncc_cell_shows_the_whole_and_the_middle_reading() {
     };
     assert_eq!(
         super::measurements(&row, StageKind::Cluster, &current)[0],
-        "92 / 61"
+        "92% whole\n61% mid"
     );
     assert_eq!(
         super::measurements(&row, StageKind::Track, &current)[0],
-        "95 / 20"
+        "95% whole\n20% mid"
     );
     // A committed track read back carries the stored ZNCC and no middle.
     row.track.as_mut().expect("a track slot").zncc_middle = None;
     assert_eq!(
         super::measurements(&row, StageKind::Track, &current)[0],
-        "95 / -"
+        "95% whole\n- mid"
     );
     row.track.as_mut().expect("a track slot").zncc = None;
     assert_eq!(
@@ -1602,10 +1613,10 @@ fn a_typed_percent_is_read_as_the_fraction_it_stands_for() {
 fn zncc_text_formats_both_readings() {
     use super::zncc_sentence;
     use super::zncc_text;
-    assert_eq!(zncc_text(Some(0.918), Some(0.607)), "92 / 61");
-    assert_eq!(zncc_text(Some(0.5), None), "50 / -");
-    assert_eq!(zncc_text(Some(f64::NAN), Some(0.3)), "NaN / 30");
-    assert_eq!(zncc_text(Some(-0.35), Some(1.0)), "-35 / 100");
+    assert_eq!(zncc_text(Some(0.918), Some(0.607)), "92% whole\n61% mid");
+    assert_eq!(zncc_text(Some(0.5), None), "50% whole\n- mid");
+    assert_eq!(zncc_text(Some(f64::NAN), Some(0.3)), "NaN whole\n30% mid");
+    assert_eq!(zncc_text(Some(-0.35), Some(1.0)), "-35% whole\n100% mid");
     assert_eq!(zncc_text(None, Some(0.3)), "-");
     assert_eq!(zncc_sentence(Some(0.918), Some(0.607)), "92% / 61%");
     assert_eq!(zncc_sentence(Some(0.918), None), "92% / -");
@@ -1681,8 +1692,11 @@ fn the_photometric_entries_grey_with_their_own_sentence_on_a_frameless_track() {
 #[test]
 fn sigma_text_formats_the_whole_and_the_middle() {
     use super::sigma_text;
-    assert_eq!(sigma_text(Some(0.0812), Some(0.1234)), "0.08 / 0.12");
-    assert_eq!(sigma_text(Some(0.3), None), "0.30 / -");
+    assert_eq!(
+        sigma_text(Some(0.0812), Some(0.1234)),
+        "0.08 px whole\n0.12 px mid"
+    );
+    assert_eq!(sigma_text(Some(0.3), None), "0.30 px whole\n- mid");
     assert_eq!(sigma_text(None, Some(0.3)), "-");
 }
 
@@ -1751,35 +1765,33 @@ fn a_grid_s_hover_text_holds_its_nine_numbers() {
  0.12  0.12  0.12
  0.12  0.12  0.12"
     );
-    let radii = [
-        [0.0, 1.0, 2f64.sqrt()],
-        [2.0, 5f64.sqrt(), 3.0],
-        [f64::NAN, 0.0, 3.0],
-    ];
+    let radii = [[0.37, 1.0, 1.44], [2.0, 2.26, 3.0], [f64::NAN, 0.04, 3.0]];
     assert_eq!(
         grid_numbers(&radii, GridKind::SelfSimilarity),
-        "    0     1  1.41
-    2  2.24    3+
-    -     0    3+"
+        "  0.4   1.0   1.4
+  2.0   2.3    3+
+    -   0.0    3+"
     );
 }
 
-/// The self-similarity cell prints the whole and the middle radius to two
-/// decimals, trailing zeros dropped, with `3+` for the largest radius the
-/// reading searches.
+/// The self-similarity cell prints the whole and the middle radius to one
+/// decimal, with `3+` for the largest radius the reading searches.
 #[test]
 fn the_self_similarity_cell_shows_the_whole_and_the_middle_radius() {
     use super::self_similarity_text;
     assert_eq!(
-        self_similarity_text(Some(0.0), Some(2f64.sqrt())),
-        "0 / 1.41"
+        self_similarity_text(Some(0.37), Some(1.44)),
+        "0.4 px whole\n1.4 px mid"
     );
     assert_eq!(
-        self_similarity_text(Some(3.0), Some(5f64.sqrt())),
-        "3+ / 2.24"
+        self_similarity_text(Some(3.0), Some(2.26)),
+        "3+ px whole\n2.3 px mid"
     );
-    assert_eq!(self_similarity_text(Some(1.0), Some(2.0)), "1 / 2");
-    assert_eq!(self_similarity_text(Some(3.0), None), "3+ / -");
+    assert_eq!(
+        self_similarity_text(Some(1.0), Some(2.96)),
+        "1.0 px whole\n3.0 px mid"
+    );
+    assert_eq!(self_similarity_text(Some(3.0), None), "3+ px whole\n- mid");
     assert_eq!(self_similarity_text(None, Some(1.0)), "-");
 
     // At both stages, from the fields the measurement carries, beside the
@@ -1788,7 +1800,7 @@ fn the_self_similarity_cell_shows_the_whole_and_the_middle_radius() {
     let current = crate::bench::live::Evaluation::Current;
     let mut cluster = ClusterMeasurement::from_seed([10.0, 12.0], [[1.0, 0.0], [0.0, 1.0]]);
     cluster.zncc_self_similarity_radius = Some(3.0);
-    cluster.zncc_self_similarity_radius_middle = Some(1.0);
+    cluster.zncc_self_similarity_radius_middle = Some(1.04);
     let row = Observation {
         image: 0,
         provenance: Provenance::Origin,
@@ -1798,24 +1810,24 @@ fn the_self_similarity_cell_shows_the_whole_and_the_middle_radius() {
         track: Some(TrackMeasurement {
             keypoint: Some([10.0, 12.0]),
             zncc: Some(0.9),
-            zncc_self_similarity_radius: Some(0.0),
-            zncc_self_similarity_radius_middle: Some(2f64.sqrt()),
+            zncc_self_similarity_radius: Some(0.37),
+            zncc_self_similarity_radius_middle: Some(1.44),
             ..TrackMeasurement::default()
         }),
     };
     assert_eq!(
         super::measurements(&row, StageKind::Cluster, &current)[4],
-        "3+ / 1"
+        "3+ px whole\n1.0 px mid"
     );
     assert_eq!(
         super::measurements(&row, StageKind::Track, &current)[4],
-        "0 / 1.41"
+        "0.4 px whole\n1.4 px mid"
     );
 }
 
-/// The self-similarity grid runs green at 0, yellow at 1 to 1.41, orange at
-/// 2 to 2.24 and red at the largest radius; a cell with no reading has no
-/// colour.
+/// The self-similarity grid runs green under 1, yellow from 1 to 2, orange
+/// from 2 to under the largest radius and red at it; a cell with no reading
+/// has no colour.
 #[test]
 fn self_similarity_cells_run_from_green_to_red() {
     use super::self_similarity_cell_color;
@@ -1824,10 +1836,11 @@ fn self_similarity_cells_run_from_green_to_red() {
     let orange = egui::Color32::from_rgb(220, 100, 40);
     let red = egui::Color32::from_rgb(220, 0, 40);
     assert_eq!(self_similarity_cell_color(0.0), Some(green));
+    assert_eq!(self_similarity_cell_color(0.99), Some(green));
     assert_eq!(self_similarity_cell_color(1.0), Some(yellow));
-    assert_eq!(self_similarity_cell_color(2f64.sqrt()), Some(yellow));
+    assert_eq!(self_similarity_cell_color(1.99), Some(yellow));
     assert_eq!(self_similarity_cell_color(2.0), Some(orange));
-    assert_eq!(self_similarity_cell_color(5f64.sqrt()), Some(orange));
+    assert_eq!(self_similarity_cell_color(2.99), Some(orange));
     assert_eq!(self_similarity_cell_color(3.0), Some(red));
     assert_eq!(self_similarity_cell_color(f64::NAN), None);
 }
@@ -1859,7 +1872,7 @@ fn the_localizability_headings_say_which_score_is_deprecated() {
     let headings = super::table::ColumnLayout::new().headers();
     assert!(headings
         .iter()
-        .any(|&(_, heading, _)| heading == "Self-sim."));
+        .any(|&(_, heading, _)| heading == "Self-similarity"));
     assert!(super::table::SIGMA_POS_TIP.contains("deprecated"));
     let tip = super::table::SELF_SIMILARITY_TIP;
     assert!(tip.contains("middle") && tip.contains("3+"), "{tip}");
@@ -1969,4 +1982,189 @@ fn a_ridge_s_contour_runs_to_the_edge_of_the_disk() {
     let plot = SurfacePlot::new(&surface, 0.05).expect("a textured surface");
     assert!(plot.inside.contains(&[3, 0]) && plot.inside.contains(&[-3, 0]));
     assert!(!plot.inside.iter().any(|&[_, dy]| dy != 0));
+}
+
+/// The projection error cell prints the error in pixels over the same
+/// residual as an angle in degrees, and says `-` for either that is not there.
+#[test]
+fn the_projection_error_cell_shows_pixels_and_degrees() {
+    use super::projection_error_text;
+    assert_eq!(
+        projection_error_text(Some(0.654), Some(0.081)),
+        "0.65 px\n0.08\u{b0}"
+    );
+    assert_eq!(projection_error_text(Some(1.5), None), "1.50 px\n-");
+    assert_eq!(projection_error_text(None, None), "-");
+
+    // Before the track is triangulated there is no point, so the error is
+    // measured to the patch's centre.
+    use sfmtool_core::bench::{Observation, Provenance, TrackMeasurement};
+    let current = crate::bench::live::Evaluation::Current;
+    let mut row = Observation {
+        image: 0,
+        provenance: Provenance::Origin,
+        verdict: Verdict::In,
+        pinned: false,
+        cluster: None,
+        track: Some(TrackMeasurement {
+            keypoint: Some([10.0, 12.0]),
+            projection_offset_px: Some(2.25),
+            ..TrackMeasurement::default()
+        }),
+    };
+    assert_eq!(
+        super::measurements(&row, StageKind::Track, &current)[2],
+        "2.25 px\n-"
+    );
+    // Once there is a point, the error to it, with its angle.
+    let slot = row.track.as_mut().expect("a track slot");
+    slot.reprojection_error = Some(0.5);
+    slot.ray_angle_deg = Some(0.07);
+    assert_eq!(
+        super::measurements(&row, StageKind::Track, &current)[2],
+        "0.50 px\n0.07\u{b0}"
+    );
+}
+
+/// A row's *Keep* switch turns a kept row out, and the whole cell takes the
+/// click rather than the row behind it.
+#[test]
+fn clicking_the_keep_switch_turns_a_kept_row_out() {
+    let (state, _, _, mut panel, ctx) = on_the_bench();
+    assert_eq!(panel.rows()[1].verdict, Verdict::In);
+    let y = row_y(&mut panel, &ctx, &state, 1);
+    // Left of the switch itself, still in its cell.
+    let response = at_pointer(&mut panel, &ctx, &state, egui::pos2(12.0, y + 8.0), true);
+    assert_eq!(response.set_verdict, Some((1, Verdict::Out)));
+    assert_eq!(
+        response.pick_row, None,
+        "the row behind the switch took the click"
+    );
+}
+
+/// A verdict set by hand is handed back to the thresholds from the switch's
+/// own menu and from the row's.
+#[test]
+fn a_pinned_row_offers_to_unpin_from_the_switch_and_from_the_row() {
+    let (mut state, id, label, mut panel, ctx) = on_the_bench();
+    state
+        .set_bench_verdict(id, &label, 0, Verdict::Out)
+        .expect("observation 0 exists");
+    run_frame(&mut panel, &ctx, &state);
+    assert!(panel.rows()[0].pinned);
+
+    let y = row_y(&mut panel, &ctx, &state, 0);
+    for x in [12.0, 400.0] {
+        let at = egui::pos2(x, y + 8.0);
+        open_row_menu(&mut panel, &ctx, &state, at);
+        let entry = menu_entry_pos(&mut panel, &ctx, &state, super::table::UNPIN_LABEL);
+        let response = at_pointer(&mut panel, &ctx, &state, entry, true);
+        assert_eq!(response.unpin_verdict, Some(0), "from x = {x}");
+    }
+
+    let before = versions(&state, id);
+    state
+        .unpin_bench_verdict(id, &label, 0)
+        .expect("observation 0 exists");
+    assert_eq!(versions(&state, id), before + 1);
+    let track = state.bench_track(id, &label).expect("on the bench");
+    assert!(!track.observations[0].pinned);
+    state
+        .unpin_bench_verdict(id, &label, 0)
+        .expect("observation 0 exists");
+    assert_eq!(
+        versions(&state, id),
+        before + 1,
+        "a second unpin is no effect"
+    );
+}
+
+/// The header prints the ID of the point the track came from once: as the
+/// label when the label is that ID, and beside a renamed label otherwise. A
+/// point that is gone from the version is named by its old index instead.
+#[test]
+fn the_header_names_the_point_the_track_came_from() {
+    let mut track = bearing_track();
+    track.origin = Some(sfmtool_core::bench::Origin {
+        version: 1,
+        point: 12,
+    });
+    let ctx = egui::Context::default();
+    let header = |label: &str, id: Option<&str>| {
+        crate::test_support::painted_texts(&ctx, input(Vec::new()), |ui| {
+            super::show_header(ui, label, &track, id);
+        })
+    };
+
+    let same = header("pt3d_ab_12", Some("pt3d_ab_12"));
+    assert_eq!(same.iter().filter(|t| t.contains("pt3d_ab_12")).count(), 1);
+    assert!(!same.iter().any(|t| t.contains("from point")), "{same:?}");
+
+    let renamed = header("my track", Some("pt3d_ab_12"));
+    assert!(renamed.iter().any(|t| t == "pt3d_ab_12"), "{renamed:?}");
+
+    let gone = header("my track", None);
+    assert!(gone.iter().any(|t| t == "\u{b7} from point 12"), "{gone:?}");
+}
+
+/// A track put on the bench from a point knows its point's ID, which is what
+/// the header's copy button copies.
+#[test]
+fn a_track_from_a_point_resolves_the_id_the_header_copies() {
+    let (state, id, label, _, _) = on_the_bench();
+    let node = state.node(id).expect("the node");
+    let track = state.bench_track(id, &label).expect("on the bench");
+    let index = state
+        .resolved_origin(node, track)
+        .expect("the point is live");
+    assert_eq!(crate::scene::point_id(node, index as usize), label);
+}
+
+/// The pin beside the switch pins a verdict the thresholds set, as it stands,
+/// and hands a pinned one back to the thresholds.
+#[test]
+fn the_pin_pins_a_verdict_and_unpins_a_pinned_one() {
+    let (mut state, id, label, mut panel, ctx) = on_the_bench();
+    let y = row_y(&mut panel, &ctx, &state, 1);
+    let pin = egui::pos2(52.0, y + 8.0);
+    let response = at_pointer(&mut panel, &ctx, &state, pin, true);
+    assert_eq!(response.set_verdict, Some((1, Verdict::In)));
+    assert_eq!(
+        response.pick_row, None,
+        "the row behind the pin took the click"
+    );
+
+    state
+        .set_bench_verdict(id, &label, 1, Verdict::In)
+        .expect("observation 1 exists");
+    let response = at_pointer(&mut panel, &ctx, &state, pin, true);
+    assert_eq!(response.unpin_verdict, Some(1));
+    assert_eq!(response.set_verdict, None);
+}
+
+/// The Name column elides a long name in its middle, and hovering it shows
+/// the name whole.
+#[test]
+fn hovering_a_name_shows_it_whole() {
+    let (state, id, _, mut panel, ctx) = on_the_bench();
+    let node = state.node(id).expect("the node");
+    let name = node.recon().image_table.images[1].name.clone();
+    let y = row_y(&mut panel, &ctx, &state, 1);
+    let at = egui::pos2(190.0, y + 8.0);
+    let response = at_pointer(&mut panel, &ctx, &state, at, false);
+    assert_eq!(response.hovered_image, Some(1), "the row lost its hover");
+    // A tooltip shows after the pointer has rested, so a few more frames.
+    let mut texts = Vec::new();
+    for _ in 0..4 {
+        texts = painted(
+            &mut panel,
+            &ctx,
+            &state,
+            vec![egui::Event::PointerMoved(at)],
+        );
+    }
+    assert!(
+        texts.iter().any(|t| t == &name),
+        "{name:?} not in {texts:?}"
+    );
 }

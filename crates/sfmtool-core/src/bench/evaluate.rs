@@ -109,20 +109,6 @@ pub struct EvaluateOptions {
     /// walk every view towards a shared optimum is run once, over the
     /// observations where they already sit.
     pub localize: KeypointLocalizeParams,
-    /// How far from each observation's own keypoint the correlation peak is
-    /// looked for, in **patch-grid px** -- the localizer's own unit, the same
-    /// number [`KeypointLocalizeParams::search`] carries.
-    ///
-    /// It is written into `localize.search` per round, widened by the furthest
-    /// seed's offset from the point's projection: the kernel anchors its search
-    /// window at that projection and clips a seed beyond `search` back to it, so
-    /// a window sized for the search radius alone would start an observation
-    /// short of where it actually sits and report the correlation somewhere the
-    /// sighting is not.
-    ///
-    /// The widening is bounded by [`Self::max_seed_offset_px`], because the
-    /// tile the widening sizes costs the radius **squared** per view.
-    pub search_px: f64,
     /// How far from the projection a seed may sit and still be read, in
     /// **patch-grid px**.
     ///
@@ -167,7 +153,6 @@ impl Default for EvaluateOptions {
                 max_iters: 1,
                 ..open_localizer()
             },
-            search_px: KeypointLocalizeParams::default().search,
             max_seed_offset_px: DEFAULT_MAX_SEED_OFFSET_PX,
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
         }
@@ -368,7 +353,8 @@ impl std::fmt::Display for EvaluateReport {
 /// **At the track stage** the track's patch is read in every view, at the pixel
 /// that view's observation already sits at: one round of the localizer scores
 /// each against the leave-one-out consensus of the round's others and finds the
-/// correlation peak within [`EvaluateOptions::search_px`] of it. What lands in
+/// correlation peak within the track's
+/// [`max_shift_px`](super::track::Thresholds::max_shift_px) of it. What lands in
 /// each slot is that ZNCC, how far the peak sits from the observation's own
 /// keypoint, how far that keypoint sits from the point's projection, the
 /// reprojection error, the ray angle and the tile localizability -- and, for an
@@ -376,6 +362,13 @@ impl std::fmt::Display for EvaluateReport {
 /// score. **The keypoint itself is not written**, nor the position, the frame or
 /// the bitmap: what a reading gives back is the same track with its own account
 /// of itself.
+///
+/// **An added observation measured for the first time is taken in when it
+/// clears the thresholds**: one that is `out`, unpinned, was unmeasured before
+/// the call, and whose image no `in` observation holds. It joined the track
+/// `out` with nothing measured, and this is the first point at which there is
+/// a proposal to act on. Nothing is turned `out` and every other verdict stays
+/// where it was.
 ///
 /// `progress` is where the call names its phases, the names the batch kernels
 /// carry: `refine` and `localizability` at the cluster stage, `localize` and
@@ -414,10 +407,12 @@ pub fn evaluate(
 ) -> Result<(EditableTrack, EvaluateReport), EvaluateError> {
     check_views(edited, images)?;
     evaluate_preconditions(track)?;
-    match &track.stage {
-        Stage::Cluster(payload) => evaluate_cluster(track, payload, images, options, progress),
-        Stage::Track(payload) => evaluate_track(track, images, payload, options, progress),
-    }
+    let (mut read, report) = match &track.stage {
+        Stage::Cluster(payload) => evaluate_cluster(track, payload, images, options, progress)?,
+        Stage::Track(payload) => evaluate_track(track, images, payload, options, progress)?,
+    };
+    super::steps::apply_thresholds_to_first_readings(track, &mut read);
+    Ok((read, report))
 }
 
 /// Whether `track` can be read at the stage it stands in, judged on the track
@@ -476,8 +471,8 @@ pub(super) fn check_views(
     Ok(())
 }
 
-/// Every observation, in index order. An `out` observation is read like a
-/// candidate, so the person sees the number the refusal stands beside; only the
+/// Every observation, in index order. An `out` observation is read like an
+/// `in` one, so the person sees the number the refusal stands beside; only the
 /// `in` set decides anything.
 pub(super) fn evaluated(track: &EditableTrack) -> Vec<usize> {
     (0..track.observations.len()).collect()
@@ -633,7 +628,20 @@ pub(super) fn evaluate_cluster(
         measurement.zncc_grid = measurement
             .zncc
             .map(|_| result.member_zncc_grid[k].map(|row| row.map(f64::from)));
-        measurement.shift_px = finite(f64::from(result.member_shift_px[k]));
+        // The drift in grid px, the unit of the bar: the refined position's
+        // offset from the seed in the seed's keypoint frame, scaled to the
+        // template grid.
+        measurement.shift_px = measurement
+            .position
+            .and_then(|position| {
+                grid_drift(
+                    measurement.seed_position,
+                    measurement.seed_shape,
+                    position,
+                    &params,
+                )
+            })
+            .and_then(finite);
         measurement.status = Some(status);
         if fitted {
             measured += 1;
@@ -1228,8 +1236,12 @@ fn read_round(
             continue;
         }
         let peak = localized.keypoints[slot];
+        // The shift is read on the patch's plane, in grid px, the unit of the
+        // bar and of the self-similarity radius: both ends through the same
+        // unprojection the localizer seeds from.
+        let view = &images[image as usize];
         let shift = match seeds[at] {
-            Some(seed) => (peak[0] - seed[0]).hypot(peak[1] - seed[1]),
+            Some(seed) => grid_distance(frame, view, seed, peak, &params),
             None => f64::NAN,
         };
         let zncc = localized.loo_zncc[slot];
@@ -1280,9 +1292,51 @@ pub(super) fn round_cache_bytes(
         .fold(0usize, |total, bytes| total.saturating_add(bytes))
 }
 
-/// The search radius one round runs at, in patch-grid px:
-/// [`EvaluateOptions::search_px`] plus the furthest seed's own offset from the
-/// point's projection.
+/// The distance from `from` to `to`, two pixels of `view`, on `frame`'s plane
+/// in patch-grid px, or `NaN` where either does not reach the plane.
+pub(super) fn grid_distance(
+    frame: &OrientedPatch,
+    view: &ProjectedImage<'_>,
+    from: [f64; 2],
+    to: [f64; 2],
+    params: &KeypointLocalizeParams,
+) -> f64 {
+    match (
+        keypoint_grid_offset(frame, view, from, params),
+        keypoint_grid_offset(frame, view, to, params),
+    ) {
+        (Some(a), Some(b)) => (b[0] - a[0]).hypot(b[1] - a[1]),
+        _ => f64::NAN,
+    }
+}
+
+/// The cluster stage's drift from `seed` to `position`, both in source-image
+/// px, in patch-grid px: through the inverse of the seed's shape (keypoint-frame
+/// units to pixels), then `resolution` grid px across `2 · radius` units.
+/// `None` for a singular shape.
+fn grid_drift(
+    seed: [f64; 2],
+    shape: [[f64; 2]; 2],
+    position: [f64; 2],
+    params: &ClusterRefineParams,
+) -> Option<f64> {
+    let det = shape[0][0] * shape[1][1] - shape[0][1] * shape[1][0];
+    if det == 0.0 || !det.is_finite() || params.radius <= 0.0 {
+        return None;
+    }
+    let d = [position[0] - seed[0], position[1] - seed[1]];
+    let u = (shape[1][1] * d[0] - shape[0][1] * d[1]) / det;
+    let v = (-shape[1][0] * d[0] + shape[0][0] * d[1]) / det;
+    Some(u.hypot(v) * f64::from(params.resolution) / (2.0 * params.radius))
+}
+
+/// The search radius one round runs at, in patch-grid px: the track's
+/// [`max_shift_px`](super::track::Thresholds::max_shift_px) plus the furthest
+/// seed's own offset from the point's projection.
+///
+/// The bar is the radius because it is the same question: how far from where a
+/// sighting sits the correlation may put it. A peak the bar would refuse is
+/// one this window can still find, at its edge or past it.
 ///
 /// The kernel anchors its window at that projection and clips a seed beyond
 /// `search` back onto the bound, so a window sized for the search radius alone
@@ -1290,8 +1344,8 @@ pub(super) fn round_cache_bytes(
 /// correlation of a place the sighting is not. Widening by the furthest offset
 /// is what lets every observation be read where it actually is; in return, an
 /// observation in a round that holds a far-out seed may report a peak further
-/// than `search_px` from itself, which is the honest reading of a window that
-/// had to be that wide.
+/// than the bar from itself, which is the honest reading of a window that had
+/// to be that wide.
 ///
 /// The widening is bounded, and the bound is applied a step earlier: a seed past
 /// [`EvaluateOptions::max_seed_offset_px`] is not in the round at all
@@ -1317,7 +1371,7 @@ fn search_radius(
             }
         }
     }
-    options.search_px.max(0.0) + widest
+    track.thresholds.max_shift_px.max(0.0) + widest
 }
 
 /// One observation's reprojection error in px and the angle its ray makes with

@@ -72,9 +72,7 @@ pub(crate) use geometry::PatchEdit;
 /// confused at a glance -- and one violet cannot mean `in` in one panel and
 /// something else in the other.
 pub(crate) const IN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 92, 246);
-/// [`IN_COLOR`]'s companion for an observation nobody has judged yet.
-pub(crate) const CANDIDATE_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 140, 255);
-/// [`IN_COLOR`]'s companion for an observation judged out.
+/// [`IN_COLOR`]'s companion for an observation the track does not keep.
 pub(crate) const OUT_COLOR: egui::Color32 = egui::Color32::from_rgb(130, 104, 150);
 
 /// The distance from `pos` to the segment `a`-`b`, in panel px.
@@ -120,7 +118,6 @@ pub(crate) fn resize_cursor(direction: egui::Vec2) -> egui::CursorIcon {
 pub(crate) fn verdict_color(verdict: Verdict) -> egui::Color32 {
     match verdict {
         Verdict::In => IN_COLOR,
-        Verdict::Candidate => CANDIDATE_COLOR,
         Verdict::Out => OUT_COLOR,
     }
 }
@@ -270,25 +267,6 @@ pub(crate) fn active_track_label(bench: &Bench) -> Option<&str> {
     bench.active_label(sfmtool_core::bench::ItemKind::Track)
 }
 
-/// The reading options a bench step runs with: core's own, at `search_px`.
-///
-/// The live evaluation reads at [`AppState::bench_search_px`], which Track
-/// View's *search px* slider and the wire's `set_bench_search_px` set, and a
-/// fit passes its radius through to the reading it ends with, so every number
-/// on screen was measured in one window.
-fn evaluate_options(search_px: f64) -> EvaluateOptions {
-    EvaluateOptions {
-        search_px,
-        ..EvaluateOptions::default()
-    }
-}
-
-/// The radius the viewer's bench evaluation starts the session at, which is
-/// core's own default.
-pub(crate) fn default_search_px() -> f64 {
-    EvaluateOptions::default().search_px
-}
-
 /// Where one observation sits, and with what shape.
 ///
 /// One rule in one place, because everything that draws or names a sighting
@@ -313,7 +291,7 @@ pub(crate) struct ObservationSite {
 ///
 /// The same order the evaluation's own seeding uses
 /// (`sfmtool_core::bench::evaluate`) -- the measured position wins over the
-/// seed -- so a fresh candidate, which has only a seed, is drawn and reported
+/// seed -- so a fresh observation, which has only a seed, is drawn and reported
 /// where the step that proposed it put it rather than nowhere.
 pub(crate) fn observation_site(observation: &Observation) -> Option<ObservationSite> {
     Some(ObservationSite {
@@ -627,7 +605,7 @@ impl AppState {
         })
     }
 
-    /// Add a candidate observation of the track called `label` in `image`, at
+    /// Add an observation of the track called `label` in `image`, at
     /// the place `seed` names.
     ///
     /// A seed with no shape of its own is added at the track's own scale, which
@@ -690,16 +668,51 @@ impl AppState {
         let name = self.image_name(ImageRef::new(id, image));
         if !report.changed {
             self.no_effect(format!(
-                "Left {name} {verdict} in {label}: no effect, it is {verdict} already"
+                "Left {name} {verdict} in {label}: no effect, it is {verdict} and pinned already"
             ));
             return Ok(());
         }
         let bench = install(&bench, label, next)?;
-        let text = match verdict {
-            Verdict::In => format!("Turned {name} in to {label}"),
-            Verdict::Out => format!("Turned {name} out of {label}"),
-            Verdict::Candidate => format!("Made {name} a candidate of {label}"),
+        let text = match (verdict, report.was == verdict) {
+            (Verdict::In, false) => format!("Turned {name} in to {label}"),
+            (Verdict::Out, false) => format!("Turned {name} out of {label}"),
+            (_, true) => format!("Pinned {name} ({verdict}) in {label}"),
         };
+        self.push_bench_step(index, bench, text);
+        Ok(())
+    }
+
+    /// Hand one observation's verdict back to the thresholds: clear the pin a
+    /// hand verdict set, and give it the verdict the bars propose.
+    ///
+    /// One version, as a hand verdict is; an observation that was not pinned
+    /// and already carries the proposed verdict is a no-effect row instead.
+    pub(crate) fn unpin_bench_verdict(
+        &mut self,
+        id: ReconId,
+        label: &str,
+        observation: usize,
+    ) -> Result<(), String> {
+        let (index, bench, track) = self.bench_step_target(id, label)?;
+        let image = track
+            .observations
+            .get(observation)
+            .map(|o| o.image as usize)
+            .ok_or_else(|| format!("{label} has no observation {observation}."))?;
+        let (next, report) = bench::unpin_verdict(&track, observation)
+            .map_err(|e| format!("Cannot unpin that verdict: {e}"))?;
+        let name = self.image_name(ImageRef::new(id, image));
+        if !report.changed {
+            self.no_effect(format!(
+                "Left {name} to the thresholds in {label}: no effect, it is not pinned"
+            ));
+            return Ok(());
+        }
+        let bench = install(&bench, label, next)?;
+        let text = format!(
+            "Handed {name} back to the thresholds in {label}: {}",
+            report.is
+        );
         self.push_bench_step(index, bench, text);
         Ok(())
     }
@@ -895,7 +908,7 @@ impl AppState {
     /// onto its unpinned observations.
     ///
     /// One version for the two, because they are one gesture: a threshold
-    /// slider's release in Track View, or one `apply_bench_track_thresholds`
+    /// box's release in Track View, or one `apply_bench_track_thresholds`
     /// call, and what it applies is the painting those bars produce.
     pub(crate) fn apply_bench_thresholds(
         &mut self,
@@ -1348,10 +1361,8 @@ impl AppState {
     /// The step that **moves** the track: at the track stage it localizes every
     /// sighting against the patch, re-triangulates the `in` ones, re-centres
     /// the frame and fuses the consensus, and then reads the result back so the
-    /// numbers it leaves behind are the ones an evaluation reports.
-    /// `search_px` is how far from each observation the correlation peak is
-    /// looked for; `None` takes [`AppState::bench_search_px`], the radius the
-    /// live evaluation reads at.
+    /// numbers it leaves behind are the ones an evaluation reports. The
+    /// reading looks for each peak within the track's own `max_shift_px`.
     ///
     /// The photographs the kernels read are decoded **on that worker**: the
     /// file reads and the pyramid builds are seconds of work, and a step that
@@ -1369,13 +1380,8 @@ impl AppState {
     /// refused in the caller's own hand -- a greyed button, a status line, a
     /// tool error -- rather than starting a task whose only act is to decode a
     /// dozen images and then fail.
-    pub(crate) fn start_bench_fit(
-        &mut self,
-        id: ReconId,
-        label: &str,
-        search_px: Option<f64>,
-    ) -> Result<(), String> {
-        let outcome = self.begin_bench_fit(id, label, search_px);
+    pub(crate) fn start_bench_fit(&mut self, id: ReconId, label: &str) -> Result<(), String> {
+        let outcome = self.begin_bench_fit(id, label);
         if let Err(message) = &outcome {
             self.action_log.fail(Kind::Bench, message.clone());
         }
@@ -1384,15 +1390,10 @@ impl AppState {
 
     /// The fit up to the moment the worker has it, so that everything this can
     /// refuse is refused before a photograph is read.
-    fn begin_bench_fit(
-        &mut self,
-        id: ReconId,
-        label: &str,
-        search_px: Option<f64>,
-    ) -> Result<(), String> {
+    fn begin_bench_fit(&mut self, id: ReconId, label: &str) -> Result<(), String> {
         let (_, _, track) = self.bench_step_target(id, label)?;
         bench::fit_preconditions(&track).map_err(|e| format!("Cannot fit {label}: {e}"))?;
-        let job = self.bench_fit_job(id, label, search_px)?;
+        let job = self.bench_fit_job(id, label)?;
         self.start_background_task(Operation::BENCH_FIT, id, job)
     }
 
@@ -1745,9 +1746,9 @@ impl AppState {
     /// Everything it captures is an input of the evaluation, which is what
     /// [`crate::bench::live`]'s `Inputs` holds to say whether a track's
     /// measurements are current: the track, the value at the cursor (its
-    /// poses and camera intrinsics), and `search_px`. The photographs are
-    /// decoded on the worker, from the node's cached pyramids where it has
-    /// them.
+    /// poses and camera intrinsics). The search radius is the track's own
+    /// `max_shift_px`, so it is part of the track. The photographs are decoded
+    /// on the worker, from the node's cached pyramids where it has them.
     ///
     /// A track-stage track with a placement and no consensus bitmap also gets
     /// its bitmap fused where it stands (`bench::fuse_bitmap_in_place`), which
@@ -1758,11 +1759,10 @@ impl AppState {
         &mut self,
         id: ReconId,
         label: &str,
-        search_px: f64,
     ) -> Result<live::EvaluationJob, String> {
         let (edited, track, sources) = self.bench_photometric_inputs(id, label)?;
         let label = label.to_string();
-        let options = evaluate_options(search_px);
+        let options = EvaluateOptions::default();
         Ok(Box::new(move |progress| {
             // The decode is seconds of file reads with no poll of its own, so
             // the flag is read on either side of it: a cancel during it is
@@ -1811,19 +1811,10 @@ impl AppState {
     /// Reachable from the crate's tests as well as from the step, so the test
     /// that holds [`Operation::BENCH_FIT`]'s cancellable declaration to its
     /// claim runs the real work rather than a stand-in for it.
-    pub(crate) fn bench_fit_job(
-        &mut self,
-        id: ReconId,
-        label: &str,
-        search_px: Option<f64>,
-    ) -> Result<Job, String> {
-        let search_px = search_px.unwrap_or(self.bench_search_px);
+    pub(crate) fn bench_fit_job(&mut self, id: ReconId, label: &str) -> Result<Job, String> {
         let (edited, track, sources) = self.bench_photometric_inputs(id, label)?;
         let label = label.to_string();
-        let options = FitOptions {
-            evaluate: evaluate_options(search_px),
-            ..FitOptions::default()
-        };
+        let options = FitOptions::default();
         Ok(Box::new(move |progress| {
             if progress.is_cancelled() {
                 return Finished::Cancelled;

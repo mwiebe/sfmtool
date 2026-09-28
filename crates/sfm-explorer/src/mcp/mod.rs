@@ -477,7 +477,9 @@ pub(crate) enum Command {
         /// The observation's position in the track's list, which is stable for
         /// the life of the track.
         observation: usize,
-        verdict: sfmtool_core::bench::Verdict,
+        /// The verdict to pin, or `None` to clear the pin and give the
+        /// observation the verdict the thresholds propose.
+        verdict: Option<sfmtool_core::bench::Verdict>,
     },
     /// Set the track's bars and paint the proposed verdicts onto its unpinned
     /// observations, which is the one gesture the panel's button is.
@@ -505,18 +507,11 @@ pub(crate) enum Command {
         reconstruction_label: String,
         track: Option<String>,
     },
-    /// Set the radius every bench track is evaluated at, in patch-grid px.
-    SetBenchSearchPx {
-        search_px: f64,
-    },
     /// Fit the track at the stage it is in, on a worker: the step that moves
     /// it, and which ends by reading its own result.
     FitBenchTrack {
         reconstruction_label: String,
         track: Option<String>,
-        /// The search radius the fit runs at, or `None` for the one the live
-        /// evaluation reads at.
-        search_px: Option<f64>,
     },
     /// Move the track between its two representations, on a worker.
     SetBenchTrackStage {
@@ -525,7 +520,7 @@ pub(crate) enum Command {
         stage: sfmtool_core::bench::StageKind,
     },
     /// Ask the node's SIFT index which other photographs hold the patch
-    /// around one observation, and add each as a candidate, on a worker.
+    /// around one observation, and add each `out` and unpinned, on a worker.
     SearchBenchTrackDescriptors {
         reconstruction_label: String,
         track: Option<String>,
@@ -540,7 +535,7 @@ pub(crate) enum Command {
         min_inliers: Option<usize>,
     },
     /// Project the track's patch into every camera of the node and add each
-    /// photometrically admitted photograph as a candidate, on a worker.
+    /// photometrically admitted photograph, `out` and unpinned, on a worker.
     SearchBenchTrackGeometry {
         reconstruction_label: String,
         track: Option<String>,
@@ -1559,14 +1554,10 @@ pub(crate) fn apply_with_window(
             &reconstruction_label,
             track.as_deref(),
         )),
-        Command::SetBenchSearchPx { search_px } => {
-            done(bench::set_bench_search_px(state, search_px))
-        }
         Command::FitBenchTrack {
             reconstruction_label,
             track,
-            search_px,
-        } => bench::fit_bench_track(state, &reconstruction_label, track.as_deref(), search_px),
+        } => bench::fit_bench_track(state, &reconstruction_label, track.as_deref()),
         Command::SetBenchTrackStage {
             reconstruction_label,
             track,

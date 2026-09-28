@@ -61,21 +61,21 @@ pub enum Provenance {
     },
 }
 
-/// What the person has decided about one observation.
+/// Whether the track keeps one observation.
 ///
 /// A measurement is a report and never a decision: the thresholds propose a
-/// verdict and a step applies the proposal, but the verdict itself is always
-/// the person's, and [`Observation::pinned`] says when one was set by hand.
+/// verdict and the steps apply the proposal to the observations nobody has
+/// ruled on by hand, and [`Observation::pinned`] says when one was set by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The observation belongs to the track. The kernels run over these, and a
     /// commit writes exactly these.
     In,
-    /// The observation was refused. It stays in the list so a search does not
-    /// propose it again and so the refusal is visible.
+    /// The track does not keep the observation: it was added and not yet
+    /// measured, the thresholds did not take it, or the person refused it,
+    /// which a pin says. It stays in the list so a search does not propose it
+    /// again and so the refusal is visible.
     Out,
-    /// Proposed by something and not yet ruled on.
-    Candidate,
 }
 
 impl std::fmt::Display for Verdict {
@@ -83,7 +83,6 @@ impl std::fmt::Display for Verdict {
         match self {
             Verdict::In => write!(f, "in"),
             Verdict::Out => write!(f, "out"),
-            Verdict::Candidate => write!(f, "candidate"),
         }
     }
 }
@@ -130,7 +129,11 @@ pub struct ClusterMeasurement {
     /// disagreement is. `None` wherever `zncc` is; a single cell is
     /// `NaN` where the template is flat over it.
     pub zncc_grid: Option<[[f64; 3]; 3]>,
-    /// How far the refinement moved off the seed, in source-image px.
+    /// How far the refinement moved off the seed, in **patch-grid px**: the
+    /// drift in the seed's own keypoint frame, scaled to the template's grid
+    /// (`resolution` samples across `2 · radius` keypoint-frame units), so it is
+    /// measured in the unit [`Thresholds::max_shift_px`] and the self-similarity
+    /// radius are.
     pub shift_px: Option<f64>,
     /// The observation's own tile localizability, sigma_pos in template-grid
     /// px.
@@ -340,8 +343,10 @@ pub struct TrackMeasurement {
     /// `NaN` where the consensus is flat over it.
     pub zncc_grid: Option<[[f64; 3]; 3]>,
     /// How far that correlation peak sits from the observation's own keypoint,
-    /// in source-image px: the observation's own evidence, and what
-    /// [`Thresholds::max_shift_px`] paints on.
+    /// in **patch-grid px** on the patch's plane: the observation's own
+    /// evidence, and what [`Thresholds::max_shift_px`] paints on. In the unit of
+    /// the self-similarity radius, so the two compare directly: a shift inside
+    /// the radius is within what the patch cannot tell apart.
     pub seed_shift_px: Option<f64>,
     /// How far the observation's keypoint sits from the point's projection, in
     /// source-image px: the number that says how far the **point** is off,
@@ -412,7 +417,7 @@ pub struct TrackMeasurement {
     pub zncc_self_similarity_tolerance: Option<f64>,
     /// How far the last fit's correlation peak sat from this sighting's seed,
     /// when that was further than [`Thresholds::max_shift_px`] and the seed was
-    /// therefore kept, in source-image px.
+    /// therefore kept, in patch-grid px.
     ///
     /// **Present is the whole statement**: this sighting did not move, and the
     /// number says how far the kernel wanted to take it. The fit's kernels run
@@ -481,8 +486,9 @@ pub struct Observation {
 }
 
 impl Observation {
-    /// A candidate in `image`, seeded for the cluster stage at `position` with
-    /// `shape`, measured at neither stage.
+    /// An unpinned `out` observation in `image`, seeded for the cluster stage
+    /// at `position` with `shape`, measured at neither stage. Its first
+    /// evaluation takes it in when it clears the thresholds.
     pub fn seeded(
         image: u32,
         provenance: Provenance,
@@ -492,7 +498,7 @@ impl Observation {
         Self {
             image,
             provenance,
-            verdict: Verdict::Candidate,
+            verdict: Verdict::Out,
             pinned: false,
             cluster: Some(ClusterMeasurement::from_seed(position, shape)),
             track: None,
@@ -504,7 +510,7 @@ impl Observation {
     /// position or the seed it started from, else nothing.
     ///
     /// The same order the evaluation's own seeding walks -- a measured position
-    /// wins over the seed it was measured from -- so a fresh candidate, which
+    /// wins over the seed it was measured from -- so a fresh observation, which
     /// has only a seed, is placed where the step that proposed it put it rather
     /// than nowhere. One rule in one place, because everything that draws,
     /// names or moves a sighting has to agree about where it is. `None` is the
@@ -704,8 +710,13 @@ pub struct Thresholds {
     /// [`Self::max_keypoint_uncertainty`].
     pub min_zncc_middle: f64,
     /// How far the correlation peak may sit from where the observation sits, in
-    /// source-image px: [`ClusterMeasurement::shift_px`] at the cluster stage
+    /// **patch-grid px**: [`ClusterMeasurement::shift_px`] at the cluster stage
     /// and [`TrackMeasurement::seed_shift_px`] at the track stage.
+    ///
+    /// At the track stage it is also how far from each observation the
+    /// evaluation looks for the peak, so one number says how far a sighting may
+    /// be from where the correlation wants it, how far the evaluation looks, and
+    /// how far a fit may walk it.
     ///
     /// Both are the observation's **own** evidence. The bar is deliberately not
     /// judged on [`TrackMeasurement::projection_offset_px`], which is a verdict
@@ -724,13 +735,12 @@ pub struct Thresholds {
     pub min_relative_zncc: f64,
 }
 
-/// The bench's default [`Thresholds::max_shift_px`], in source-image px.
+/// The bench's default [`Thresholds::max_shift_px`], in patch-grid px.
 ///
-/// Separate from the cluster refinement's own `max_shift_px` (3 px), which
-/// stays the batch pass's bar. On the bench the same number bounds how far a
-/// fit may move a sighting from where the person put it, and 3 px kept
-/// sightings at their seeds that a person moving a patch by hand wanted moved.
-pub const BENCH_MAX_SHIFT_PX: f64 = 8.0;
+/// The keypoint localizer's own search radius, so a track's evaluation looks
+/// as far as the batch localizer does. Separate from the cluster refinement's
+/// own `max_shift_px` (3 source-image px), which stays the batch pass's bar.
+pub const BENCH_MAX_SHIFT_PX: f64 = 6.0;
 
 /// The bench's default [`Thresholds::min_zncc`].
 ///
@@ -773,9 +783,9 @@ impl Default for Thresholds {
 /// one; the thresholds are the bars the painting proposes verdicts against.
 ///
 /// One `in` observation per image is the invariant every step that sets a
-/// verdict holds: a track cannot observe an image twice, so a second candidate
-/// in an image already held is shown and scored but cannot be turned `in` until
-/// the other is turned `out`.
+/// verdict holds: a track cannot observe an image twice, so a second
+/// observation in an image already held is shown and scored but cannot be
+/// turned `in` until the other is turned `out`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditableTrack {
     /// The observations, in the order they were added. Never renumbered.
@@ -808,17 +818,14 @@ impl EditableTrack {
         self.stage.kind()
     }
 
-    /// How many observations carry each verdict, as `(in, candidate, out)`.
-    pub fn verdict_counts(&self) -> (usize, usize, usize) {
-        let mut counts = (0, 0, 0);
-        for observation in &self.observations {
-            match observation.verdict {
-                Verdict::In => counts.0 += 1,
-                Verdict::Candidate => counts.1 += 1,
-                Verdict::Out => counts.2 += 1,
-            }
-        }
-        counts
+    /// How many observations carry each verdict, as `(in, out)`.
+    pub fn verdict_counts(&self) -> (usize, usize) {
+        let kept = self
+            .observations
+            .iter()
+            .filter(|o| o.verdict == Verdict::In)
+            .count();
+        (kept, self.observations.len() - kept)
     }
 
     /// The indexes of the `in` observations, ascending.
