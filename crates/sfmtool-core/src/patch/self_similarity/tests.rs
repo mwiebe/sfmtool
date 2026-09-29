@@ -408,14 +408,11 @@ fn parts_agree_with_separate_calls() {
 }
 
 #[test]
-fn the_surface_is_one_at_the_centre_and_nan_outside_the_disk() {
+fn the_surface_is_one_at_the_centre_and_covers_the_whole_square() {
     let s = centred(&edge(18, 30.0), 1, 12, 3);
     assert_eq!(s.surface.len(), 49);
     assert_eq!(surface_at(&s, 3, 0, 0), 1.0);
-    for (dx, dy) in [(-3, -3), (3, -2), (-2, 3), (3, 3)] {
-        assert!(surface_at(&s, 3, dx, dy).is_nan());
-    }
-    assert!(surface_at(&s, 3, 3, 0).is_finite() && surface_at(&s, 3, 2, 2).is_finite());
+    assert!(s.surface.iter().all(|z| z.is_finite()));
 }
 
 #[test]
@@ -634,7 +631,15 @@ fn overlap_agrees_with_the_ringed_reading_on_a_cut_patch() {
                 a.radius,
                 b.radius
             );
-            for (x, y) in a.surface.iter().zip(&b.surface) {
+            let side = 2 * r + 1;
+            for (k, (x, y)) in a.surface.iter().zip(&b.surface).enumerate() {
+                let (dx, dy) = ((k % side) as i64 - r as i64, (k / side) as i64 - r as i64);
+                if dx * dx + dy * dy > (r * r) as i64 {
+                    // The ringed reading keeps the corners outside the disk,
+                    // and the overlap reading leaves them NaN.
+                    assert!(x.is_finite() && y.is_nan(), "{what}: {x} vs {y}");
+                    continue;
+                }
                 assert!(
                     x.is_nan() && y.is_nan() || (x - y).abs() < 1e-5,
                     "{what}: {x} vs {y}"

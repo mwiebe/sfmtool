@@ -506,12 +506,15 @@ pub(crate) fn parse(
             observation: args.required_usize("observation")?,
             degrees: args.required_f64("degrees")?,
         },
-        "set_bench_track_verdict" => Command::SetBenchTrackVerdict {
-            reconstruction_label: args.required_string("reconstruction_label")?,
-            track: args.optional_string("track")?,
-            observation: args.required_usize("observation")?,
-            verdict: args.verdict("verdict")?,
-        },
+        "set_bench_track_verdict" => {
+            let verdict = args.verdict("verdict")?;
+            Command::SetBenchTrackVerdict {
+                reconstruction_label: args.required_string("reconstruction_label")?,
+                track: args.optional_string("track")?,
+                rows: args.verdict_rows(!matches!(verdict, super::VerdictAction::Set(_)))?,
+                verdict,
+            }
+        }
         "apply_bench_track_thresholds" => Command::ApplyBenchTrackThresholds {
             reconstruction_label: args.required_string("reconstruction_label")?,
             track: args.optional_string("track")?,
@@ -1332,18 +1335,51 @@ impl Args<'_> {
             .collect()
     }
 
+    /// The observations a verdict call names: `observation` alone, or for a
+    /// pin or an unpin `observations` instead, as a list of indexes or
+    /// `"all"`. `several` says whether the call may name more than one.
+    fn verdict_rows(&self, several: bool) -> Result<super::VerdictRows, ToolError> {
+        use super::VerdictRows;
+        let one = self.optional_usize("observation")?;
+        let many = self.map.get("observations").filter(|v| !v.is_null());
+        match (one, many) {
+            (Some(_), Some(_)) => Err(self.error("takes observation or observations, not both.")),
+            (Some(observation), None) => Ok(VerdictRows::One(observation)),
+            (None, Some(_)) if !several => Err(self.error(
+                "names several observations only to pin or unpin them; set in or out one \
+                 observation at a time.",
+            )),
+            (None, Some(Value::String(word))) if word == "all" => Ok(VerdictRows::All),
+            (None, Some(value)) if value.is_array() => {
+                Ok(VerdictRows::Listed(self.observations("observations")?))
+            }
+            (None, Some(value)) => Err(self.wrong_type(
+                "observations",
+                "an array of observation indexes, or \"all\"",
+                value,
+            )),
+            (None, None) => Err(self.error(if several {
+                "needs observation, or observations to name several."
+            } else {
+                "needs observation."
+            })),
+        }
+    }
+
     /// A verdict to pin, in the two words the bench spells them with, or
     /// `None` for `unpin`, which hands the verdict back to the thresholds.
-    fn verdict(&self, key: &str) -> Result<Option<sfmtool_core::bench::Verdict>, ToolError> {
+    fn verdict(&self, key: &str) -> Result<super::VerdictAction, ToolError> {
+        use super::VerdictAction;
         use sfmtool_core::bench::Verdict;
         match self.optional_string(key)?.as_deref() {
-            Some("in") => Ok(Some(Verdict::In)),
-            Some("out") => Ok(Some(Verdict::Out)),
-            Some("unpin") => Ok(None),
+            Some("in") => Ok(VerdictAction::Set(Verdict::In)),
+            Some("out") => Ok(VerdictAction::Set(Verdict::Out)),
+            Some("pin") => Ok(VerdictAction::Pin),
+            Some("unpin") => Ok(VerdictAction::Unpin),
             Some(other) => Err(self.error(format!(
-                "does not know the verdict {other:?} — it is one of in, out and unpin."
+                "does not know the verdict {other:?} — it is one of in, out, pin and unpin."
             ))),
-            None => Err(self.error(format!("needs {key} — one of in, out and unpin."))),
+            None => Err(self.error(format!("needs {key} — one of in, out, pin and unpin."))),
         }
     }
 

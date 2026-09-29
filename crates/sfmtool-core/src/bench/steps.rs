@@ -23,8 +23,8 @@ use crate::reconstruction::edited::EditedReconstruction;
 use super::fit::FitOptions;
 use super::stage::{set_stage, StageError};
 use super::track::{
-    ClusterMeasurement, ClusterPayload, EditableTrack, Observation, Origin, Provenance, Stage,
-    StageKind, Thresholds, TrackMeasurement, TrackPayload, Verdict,
+    ClusterMeasurement, ClusterPayload, EditableTrack, Observation, Origin, Provenance,
+    RepaintMark, Stage, StageKind, Thresholds, TrackMeasurement, TrackPayload, Verdict,
 };
 use super::{Bench, BenchItem, ItemKind};
 
@@ -139,7 +139,10 @@ impl std::error::Error for CreateTrackError {}
 /// Put the point at `point` on the bench as a track-stage editable track.
 ///
 /// The track arrives with the point's own frame, bitmap and keypoints, its
-/// origin set to that point, and every observation `in` and unpinned. The
+/// origin set to that point, and every observation `in` and **pinned**: the
+/// point's observations are the ones a reconstruction already decided on, so
+/// they stand until a person hands them to the bars ([`unpin_verdicts`]), and
+/// the evaluations that read the track leave them where they are. The
 /// measurements are carried from what the record stores and nothing is
 /// recomputed: the leave-one-out ZNCC is `observation_confidence` read back out
 /// of its byte scale where the column exists, and everything an evaluation
@@ -183,7 +186,7 @@ pub fn create_track(
             image: obs.image_index,
             provenance: Provenance::Origin,
             verdict: Verdict::In,
-            pinned: false,
+            pinned: true,
             cluster: None,
             track: Some(TrackMeasurement {
                 keypoint: view.keypoint_xy(k),
@@ -219,6 +222,7 @@ pub fn create_track(
             point,
         }),
         thresholds: Thresholds::default(),
+        repaint: RepaintMark::default(),
     };
 
     let base = match &options.label {
@@ -391,8 +395,9 @@ impl std::error::Error for CreateClusterError {}
 /// Put a new cluster-stage track on the bench with `seed` as its one
 /// observation and its reference.
 ///
-/// The observation is `in`: it is the thing the person pointed at, and the
-/// cluster is the set of images that register onto it. The template is left
+/// The observation is `in` and pinned: it is the thing the person pointed at,
+/// and the cluster is the set of images that register onto it, so an
+/// evaluation's repaint does not turn it out however it reads. The template is left
 /// uncut, because cutting it reads the reference's pixels and this step reads
 /// no photograph.
 ///
@@ -422,12 +427,14 @@ pub fn create_cluster(
     };
     let mut observation = Observation::seeded(seed.image, provenance, seed.pixel, seed.shape);
     observation.verdict = Verdict::In;
+    observation.pinned = true;
 
     let track = EditableTrack {
         observations: vec![observation],
         stage: Stage::Cluster(ClusterPayload::default()),
         origin: None,
         thresholds: Thresholds::default(),
+        repaint: RepaintMark::default(),
     };
 
     let (bench, label) = bench.put(&seed.label(), BenchItem::Track(Arc::new(track)));
@@ -659,8 +666,8 @@ pub struct AddObservationReport {
 ///
 /// It joins `out` and unpinned: nothing has measured it, so the track does not
 /// use it yet, and nobody has ruled on it. The first evaluation that measures
-/// it takes it in when it clears the thresholds
-/// ([`evaluate`](super::evaluate::evaluate)). A second observation in an image
+/// it takes it in when it clears the thresholds, by the repaint every
+/// evaluation makes ([`evaluate`](super::evaluate::evaluate)). A second observation in an image
 /// the track already holds is allowed and is scored like any other; what it
 /// cannot do is be turned `in` while the other is ([`set_verdict`] refuses
 /// that).
@@ -751,8 +758,8 @@ pub struct VerdictReport {
 
 /// Set the verdict of one observation, by hand.
 ///
-/// The verdict is pinned by this: it is the person's, and
-/// [`apply_thresholds`] leaves a pinned verdict where it is.
+/// The verdict is pinned by this: it is the person's, and neither
+/// [`apply_thresholds`] nor an evaluation's repaint moves a pinned verdict.
 ///
 /// Turning an observation `in` is refused when another `in` observation already
 /// holds its image, because a track observes an image once.
@@ -795,49 +802,158 @@ pub fn set_verdict(
     ))
 }
 
-/// Hand one observation's verdict back to the thresholds.
+/// What one unpin did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpinReport {
+    /// How many of the named observations were pinned, and are not now.
+    pub unpinned: usize,
+    /// How many observations the bars then turned `in`.
+    pub turned_in: usize,
+    /// How many they turned `out`.
+    pub turned_out: usize,
+    /// Whether anything changed. False exactly when none of the named
+    /// observations was pinned, and then the track comes back as it was.
+    pub changed: bool,
+}
+
+/// Hand the verdicts of `observations` back to the thresholds, in one step.
 ///
-/// The pin [`set_verdict`] set is cleared, and the observation takes the
-/// verdict the thresholds propose from its stored measurements, as
-/// [`apply_thresholds`] would give it: `in` when it clears every bar and no
-/// other `in` observation holds its image, `out` otherwise. An observation
-/// nothing at this stage has measured keeps its verdict until an evaluation
-/// measures it. The report's `changed` is true when the pin or the verdict
-/// moved.
-pub fn unpin_verdict(
+/// The pins [`set_verdict`] set are cleared, and then the bars decide the rows
+/// together, exactly as [`apply_thresholds`] does: best score first, one `in`
+/// per image, each row that clears every bar taking its image when no pinned
+/// `in` row holds it. Together, in one step and one version, because
+/// unpinning rows one at a time decides each while the others are still
+/// pinned: of two rows of one image, the first unpinned would take the image
+/// from the other still pinned `out`, whichever scores better, and only the
+/// second unpin would give it to the better one. A row nothing at this stage
+/// has measured keeps its verdict until an evaluation measures it.
+///
+/// The painting covers every unpinned row, not only the named ones, because an
+/// unpinned row is one the bars decide. A row can differ from what the bars
+/// propose only when the evaluation that last read it followed a repaint
+/// ([`RepaintMark`]), and this brings it back in step.
+///
+/// When none of `observations` is pinned nothing changes: the report says
+/// `changed: false` and a caller pushes no version for it. An index past the
+/// end is refused, and a repeated index counts once.
+///
+/// # Example
+///
+/// ```no_run
+/// # use sfmtool_core::bench::{unpin_verdicts, EditableTrack};
+/// # fn run(track: &EditableTrack) -> Result<(), Box<dyn std::error::Error>> {
+/// let every: Vec<usize> = (0..track.observations.len()).collect();
+/// let (next, report) = unpin_verdicts(track, &every)?;
+/// println!("unpinned {}: {} in, {} out", report.unpinned, report.turned_in, report.turned_out);
+/// # let _ = next;
+/// # Ok(())
+/// # }
+/// ```
+pub fn unpin_verdicts(
     track: &EditableTrack,
-    observation: usize,
-) -> Result<(EditableTrack, VerdictReport), TrackEditError> {
-    let current = track
-        .observations
-        .get(observation)
-        .ok_or(TrackEditError::NoSuchObservation {
+    observations: &[usize],
+) -> Result<(EditableTrack, UnpinReport), TrackEditError> {
+    let observation_count = track.observations.len();
+    if let Some(&observation) = observations.iter().find(|&&i| i >= observation_count) {
+        return Err(TrackEditError::NoSuchObservation {
             observation,
-            observation_count: track.observations.len(),
-        })?;
-    let was = current.verdict;
-    let is = match proposed_verdict(current, track.stage_kind(), &track.thresholds) {
-        None => was,
-        Some(Verdict::In)
-            if track
-                .in_observation_of_image(current.image)
-                .is_none_or(|held| held == observation) =>
-        {
-            Verdict::In
-        }
-        Some(_) => Verdict::Out,
-    };
+            observation_count,
+        });
+    }
     let mut next = track.clone();
-    let target = &mut next.observations[observation];
-    target.verdict = is;
-    target.pinned = false;
+    let mut unpinned = 0;
+    for &i in observations {
+        if next.observations[i].pinned {
+            next.observations[i].pinned = false;
+            unpinned += 1;
+        }
+    }
+    if unpinned == 0 {
+        return Ok((
+            next,
+            UnpinReport {
+                unpinned: 0,
+                turned_in: 0,
+                turned_out: 0,
+                changed: false,
+            },
+        ));
+    }
+    let (painted, report) = apply_thresholds(&next);
+    Ok((
+        painted,
+        UnpinReport {
+            unpinned,
+            turned_in: report.turned_in,
+            turned_out: report.turned_out,
+            changed: true,
+        },
+    ))
+}
+
+/// What one pin did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinReport {
+    /// How many of the named observations were not pinned, and are now.
+    pub pinned: usize,
+    /// Whether anything changed. False exactly when every named observation
+    /// was pinned already, and then the track comes back as it was.
+    pub changed: bool,
+}
+
+/// Pin the verdicts of `observations` as they stand, in one step.
+///
+/// Each named row that is not pinned becomes pinned and keeps its verdict
+/// exactly as it is: nothing is painted, so an `in` row stays `in` and an `out`
+/// row stays `out` whatever the bars say about it. From then on neither
+/// [`apply_thresholds`] nor an evaluation's repaint moves them, as for a
+/// verdict set by hand with [`set_verdict`]. This is the inverse of
+/// [`unpin_verdicts`]: it fixes the verdicts the bars have given, where the
+/// unpin hands them back.
+///
+/// Pinning changes no verdict, so the track keeps the one `in` per image it
+/// had.
+///
+/// When every one of `observations` is pinned already nothing changes: the
+/// report says `changed: false` and a caller pushes no version for it. An
+/// index past the end is refused, and a repeated index counts once.
+///
+/// # Example
+///
+/// ```no_run
+/// # use sfmtool_core::bench::{pin_verdicts, EditableTrack};
+/// # fn run(track: &EditableTrack) -> Result<(), Box<dyn std::error::Error>> {
+/// let every: Vec<usize> = (0..track.observations.len()).collect();
+/// let (next, report) = pin_verdicts(track, &every)?;
+/// assert!(next.observations.iter().all(|o| o.pinned));
+/// println!("pinned {} verdicts as they stood", report.pinned);
+/// # Ok(())
+/// # }
+/// ```
+pub fn pin_verdicts(
+    track: &EditableTrack,
+    observations: &[usize],
+) -> Result<(EditableTrack, PinReport), TrackEditError> {
+    let observation_count = track.observations.len();
+    if let Some(&observation) = observations.iter().find(|&&i| i >= observation_count) {
+        return Err(TrackEditError::NoSuchObservation {
+            observation,
+            observation_count,
+        });
+    }
+    let mut next = track.clone();
+    let mut pinned = 0;
+    for &i in observations {
+        if !next.observations[i].pinned {
+            next.observations[i].pinned = true;
+            pinned += 1;
+        }
+    }
     Ok((
         next,
-        VerdictReport {
-            observation,
-            was,
-            is,
-            changed: current.pinned || was != is,
+        PinReport {
+            pinned,
+            changed: pinned > 0,
         },
     ))
 }
@@ -2326,7 +2442,6 @@ pub struct ThresholdReport {
 /// `in` and the rest are turned `out`, so the painting can never produce a track
 /// that observes an image twice.
 pub fn apply_thresholds(track: &EditableTrack) -> (EditableTrack, ThresholdReport) {
-    let stage = track.stage_kind();
     let mut report = ThresholdReport {
         turned_in: 0,
         turned_out: 0,
@@ -2335,40 +2450,15 @@ pub fn apply_thresholds(track: &EditableTrack) -> (EditableTrack, ThresholdRepor
         changed: false,
     };
     let mut next = track.clone();
-    // The images an `in` observation this painting cannot move already holds.
-    let mut held: Vec<u32> = track
-        .observations
-        .iter()
-        .filter(|o| o.pinned && o.verdict == Verdict::In)
-        .map(|o| o.image)
-        .collect();
-
-    // Best score first, so the observation that takes an image's one `in` slot
-    // is the one that registered best rather than the one that was added first.
-    let mut order: Vec<usize> = (0..track.observations.len()).collect();
-    order.sort_by(|&a, &b| {
-        score(&track.observations[b], stage)
-            .partial_cmp(&score(&track.observations[a], stage))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    for i in order {
+    for (i, painted) in paint(track, &[]).into_iter().enumerate() {
         let observation = &track.observations[i];
-        if observation.pinned {
-            report.pinned += 1;
+        let Some(verdict) = painted else {
+            if observation.pinned {
+                report.pinned += 1;
+            } else {
+                report.unmeasured += 1;
+            }
             continue;
-        }
-        let Some(proposed) = proposed_verdict(observation, stage, &track.thresholds) else {
-            report.unmeasured += 1;
-            continue;
-        };
-        // An image already spoken for takes no second `in`: the observation is
-        // not taken, and the person turns the other one out first.
-        let verdict = if proposed == Verdict::In && !held.contains(&observation.image) {
-            held.push(observation.image);
-            Verdict::In
-        } else {
-            Verdict::Out
         };
         if observation.verdict != verdict {
             match verdict {
@@ -2382,59 +2472,75 @@ pub fn apply_thresholds(track: &EditableTrack) -> (EditableTrack, ThresholdRepor
     (next, report)
 }
 
-/// Turn `in` each unpinned `out` observation that `read` measures for the
-/// first time and that the thresholds would take.
+/// The verdict each observation of `track` would take were its own verdict
+/// unpinned, or `None` for one nothing at the track's stage has measured.
 ///
-/// An observation joins a track `out` and unpinned ([`add_observation`]), and
-/// whether it belongs is not known until it is measured. So the evaluation that
-/// first measures it takes it in when it clears every bar and its image is
-/// free. That is the whole of what this does: it never turns anything `out`,
-/// never moves a pinned verdict, and leaves the verdicts of observations that
-/// were measured before where they are until a threshold moves. A track put on
-/// the bench from a point arrives `in` and unmeasured, and its first
-/// evaluation leaves those verdicts alone for the same reason: they were the
-/// point's, and nobody has asked the thresholds about them. `before` is the
-/// track the evaluation read and `read` what it gave back.
-///
-/// The measurements `read` carries were taken with the new observations `out`,
-/// so a turn here changes the next evaluation's input and that evaluation reads
-/// the new `in` set. It has no first readings of its own, so it turns nothing.
-///
-/// One `in` per image holds here as in [`apply_thresholds`]: the best of the
-/// new observations takes a free image's `in`, and an image an `in`
-/// observation already holds takes none.
-pub(super) fn apply_thresholds_to_first_readings(before: &EditableTrack, read: &mut EditableTrack) {
-    let stage = read.stage_kind();
-    let mut fresh: Vec<usize> = (0..read.observations.len())
-        .filter(|&i| {
-            let now = &read.observations[i];
-            !now.pinned
-                && now.verdict == Verdict::Out
-                && before
-                    .observations
-                    .get(i)
-                    .is_some_and(|was| proposed_verdict(was, stage, &before.thresholds).is_none())
-                && proposed_verdict(now, stage, &read.thresholds) == Some(Verdict::In)
+/// For an unpinned observation this is the verdict [`apply_thresholds`] gives
+/// it. For a pinned one it is the verdict [`unpin_verdicts`] of that row alone
+/// would give it: its bars judged as any other row's are,
+/// with the pins of the other observations still standing, so it takes its
+/// image's `in` only when no pinned `in` observation of that image holds it
+/// and no unpinned observation of that image that the painting takes scores
+/// better. It is what the thresholds say about each row whatever the person
+/// decided, which is what a viewer shows beside a verdict set by hand to say
+/// whether the hand agrees with the bars.
+pub fn verdicts_if_unpinned(track: &EditableTrack) -> Vec<Option<Verdict>> {
+    let painted = paint(track, &[]);
+    (0..track.observations.len())
+        .map(|i| {
+            if track.observations[i].pinned {
+                paint(track, &[i])[i]
+            } else {
+                painted[i]
+            }
         })
+        .collect()
+}
+
+/// The verdicts the painting gives, one per observation: `None` for an
+/// observation it leaves alone, because its verdict is pinned or nothing at the
+/// track's stage has measured it. `unpinned` names pinned observations to
+/// judge as though they were not.
+///
+/// One `in` per image: the images a pinned `in` observation holds are taken
+/// first, and the observations the painting may move are judged best score
+/// first, so the one that takes an image's one `in` is the one that registered
+/// best rather than the one that was added first.
+fn paint(track: &EditableTrack, unpinned: &[usize]) -> Vec<Option<Verdict>> {
+    let stage = track.stage_kind();
+    let movable = |i: usize| !track.observations[i].pinned || unpinned.contains(&i);
+    // The images an `in` observation this painting cannot move already holds.
+    let mut held: Vec<u32> = (0..track.observations.len())
+        .filter(|&i| !movable(i) && track.observations[i].verdict == Verdict::In)
+        .map(|i| track.observations[i].image)
         .collect();
-    let mut held: Vec<u32> = read
-        .observations
-        .iter()
-        .filter(|o| o.verdict == Verdict::In)
-        .map(|o| o.image)
-        .collect();
-    fresh.sort_by(|&a, &b| {
-        score(&read.observations[b], stage)
-            .partial_cmp(&score(&read.observations[a], stage))
+    let mut order: Vec<usize> = (0..track.observations.len()).collect();
+    order.sort_by(|&a, &b| {
+        score(&track.observations[b], stage)
+            .partial_cmp(&score(&track.observations[a], stage))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    for i in fresh {
-        let image = read.observations[i].image;
-        if !held.contains(&image) {
-            held.push(image);
-            read.observations[i].verdict = Verdict::In;
+    let mut painted = vec![None; track.observations.len()];
+    for i in order {
+        if !movable(i) {
+            continue;
         }
+        let observation = &track.observations[i];
+        let Some(proposed) = proposed_verdict(observation, stage, &track.thresholds) else {
+            continue;
+        };
+        // An image already spoken for takes no second `in`: the observation is
+        // not taken, and the person turns the other one out first.
+        painted[i] = Some(
+            if proposed == Verdict::In && !held.contains(&observation.image) {
+                held.push(observation.image);
+                Verdict::In
+            } else {
+                Verdict::Out
+            },
+        );
     }
+    painted
 }
 
 /// The ZNCC the painting ranks an observation by at `stage`, or negative
@@ -2447,13 +2553,75 @@ fn score(observation: &Observation, stage: StageKind) -> f64 {
     zncc.unwrap_or(f64::NEG_INFINITY)
 }
 
-/// What the thresholds propose for one observation at `stage`, or `None` when
-/// nothing at that stage has measured it.
+/// What one bar says about one reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarCheck {
+    /// The reading clears the bar.
+    Pass,
+    /// The reading does not clear the bar. A `NaN` reading is one no round
+    /// ever produced, and fails every bar it is judged by.
+    Fail,
+    /// The bar did not judge the reading: the bar is off, or there is no
+    /// reading for it to judge. A reading nobody judged clears its bar.
+    NotJudged,
+}
+
+impl BarCheck {
+    /// Judge `reading` by `clears`: a missing reading is not judged and a
+    /// `NaN` one fails.
+    fn of(reading: Option<f64>, clears: impl Fn(f64) -> bool) -> Self {
+        match reading {
+            None => BarCheck::NotJudged,
+            Some(v) if !v.is_nan() && clears(v) => BarCheck::Pass,
+            Some(_) => BarCheck::Fail,
+        }
+    }
+}
+
+/// What each of the four bars of [`Thresholds`] says about one observation,
+/// from [`bar_checks`]. Each field is named after the bar that judged it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarChecks {
+    /// The whole-patch ZNCC against [`Thresholds::min_zncc`]. Never
+    /// [`BarCheck::NotJudged`]: a row without that reading is one nothing has
+    /// measured, which has no checks at all.
+    pub min_zncc: BarCheck,
+    /// The middle ZNCC against [`Thresholds::min_zncc_middle`], not judged
+    /// when the bar is off at `0`.
+    pub min_zncc_middle: BarCheck,
+    /// The observation's own shift against [`Thresholds::max_shift_px`].
+    pub max_shift_px: BarCheck,
+    /// The whole tile's ZNCC self-similarity radius against
+    /// [`Thresholds::max_zncc_self_similarity_radius`].
+    pub max_zncc_self_similarity_radius: BarCheck,
+}
+
+impl BarChecks {
+    /// Whether the observation clears every bar: no bar failed it. The
+    /// thresholds propose `in` exactly when this holds and the observation's
+    /// image is free.
+    pub fn clears_every_bar(&self) -> bool {
+        [
+            self.min_zncc,
+            self.min_zncc_middle,
+            self.max_shift_px,
+            self.max_zncc_self_similarity_radius,
+        ]
+        .iter()
+        .all(|&check| check != BarCheck::Fail)
+    }
+}
+
+/// What each bar of `thresholds` says about `observation` at `stage`, or
+/// `None` when nothing at that stage has measured it, which is when it carries
+/// no whole-patch ZNCC.
 ///
-/// A `NaN` score is one no round ever produced and clears no bar, so it
-/// proposes `out` rather than reading as unmeasured: the difference matters,
-/// because an observation that was measured and failed is a refusal the person
-/// should see.
+/// This is the whole of what the thresholds judge a row by, so the verdict
+/// they propose and anything that shows a reading as passing or failing its
+/// bar come from one computation. The middle bar is off at `0`, and a bar has
+/// nothing to judge on a row without its reading, which clears it. A `NaN`
+/// reading fails rather than reading as unmeasured: an observation that was
+/// measured and failed is a refusal the person should see.
 ///
 /// The distance the `max_shift_px` bar is judged on is the observation's **own**
 /// evidence at either stage -- the drift from its seed at the cluster stage, and
@@ -2463,11 +2631,11 @@ fn score(observation: &Observation, stage: StageKind) -> f64 {
 /// [`projection_offset_px`](super::track::TrackMeasurement::projection_offset_px),
 /// is a verdict on the point: judging sightings by it would turn out the very
 /// observations that would move a mis-triangulated point back.
-fn proposed_verdict(
+pub fn bar_checks(
     observation: &Observation,
     stage: StageKind,
     thresholds: &Thresholds,
-) -> Option<Verdict> {
+) -> Option<BarChecks> {
     let (zncc, middle, shift, radius) = match stage {
         StageKind::Cluster => {
             let m = observation.cluster.as_ref()?;
@@ -2488,16 +2656,35 @@ fn proposed_verdict(
             )
         }
     };
-    // The middle bar is off at `0`, and a row with no middle reading has
-    // nothing for it to judge.
-    let middle_passes = thresholds.min_zncc_middle <= 0.0
-        || middle.is_none_or(|z| !z.is_nan() && z >= thresholds.min_zncc_middle);
-    let passes = !zncc.is_nan()
-        && zncc >= thresholds.min_zncc
-        && middle_passes
-        && shift.is_none_or(|s| !s.is_nan() && s <= thresholds.max_shift_px)
-        && radius.is_none_or(|r| !r.is_nan() && r <= thresholds.max_zncc_self_similarity_radius);
-    Some(if passes { Verdict::In } else { Verdict::Out })
+    Some(BarChecks {
+        min_zncc: BarCheck::of(Some(zncc), |z| z >= thresholds.min_zncc),
+        min_zncc_middle: if thresholds.min_zncc_middle <= 0.0 {
+            BarCheck::NotJudged
+        } else {
+            BarCheck::of(middle, |z| z >= thresholds.min_zncc_middle)
+        },
+        max_shift_px: BarCheck::of(shift, |s| s <= thresholds.max_shift_px),
+        max_zncc_self_similarity_radius: BarCheck::of(radius, |r| {
+            r <= thresholds.max_zncc_self_similarity_radius
+        }),
+    })
+}
+
+/// What the bars propose for one observation at `stage`, before the one `in`
+/// per image is settled: `in` when no bar of [`bar_checks`] fails it, and
+/// `None` when nothing at that stage has measured it.
+fn proposed_verdict(
+    observation: &Observation,
+    stage: StageKind,
+    thresholds: &Thresholds,
+) -> Option<Verdict> {
+    bar_checks(observation, stage, thresholds).map(|checks| {
+        if checks.clears_every_bar() {
+            Verdict::In
+        } else {
+            Verdict::Out
+        }
+    })
 }
 
 // ---- Splitting one track into two ------------------------------------------

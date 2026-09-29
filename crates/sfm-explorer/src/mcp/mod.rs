@@ -477,12 +477,11 @@ pub(crate) enum Command {
     SetBenchTrackVerdict {
         reconstruction_label: String,
         track: Option<String>,
-        /// The observation's position in the track's list, which is stable for
-        /// the life of the track.
-        observation: usize,
-        /// The verdict to pin, or `None` to clear the pin and give the
-        /// observation the verdict the thresholds propose.
-        verdict: Option<sfmtool_core::bench::Verdict>,
+        /// The observations the call rules on: one for `in` and `out`, and one,
+        /// several or all of them for a pin or an unpin.
+        rows: VerdictRows,
+        /// What the call does to them.
+        verdict: VerdictAction,
     },
     /// Set the track's bars and paint the proposed verdicts onto its unpinned
     /// observations, which is the one gesture the panel's button is.
@@ -791,6 +790,33 @@ pub(crate) enum TranslateTarget {
         /// Where, in that image's own px.
         pixel: [f64; 2],
     },
+}
+
+/// What `set_bench_track_verdict` does to the observations it names: the
+/// wire's `verdict` word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerdictAction {
+    /// `in` or `out`: set the verdict by hand, which pins it.
+    Set(sfmtool_core::bench::Verdict),
+    /// `pin`: pin the verdicts as they stand, moving none.
+    Pin,
+    /// `unpin`: clear the pins and let the bars decide the rows together.
+    Unpin,
+}
+
+/// Which observations `set_bench_track_verdict` names.
+///
+/// `in` and `out` rule on one observation at a time, since each is a hand
+/// ruling on one sighting; a pin or an unpin may name several, or all of them,
+/// because it moves the pins of the rows together in one step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerdictRows {
+    /// One observation, by its position in the track's list.
+    One(usize),
+    /// Several, by their positions.
+    Listed(Vec<usize>),
+    /// Every observation of the track.
+    All,
 }
 
 /// Which photograph a pixel form names its pixel in: the wire's spelling of
@@ -1557,13 +1583,13 @@ pub(crate) fn apply_with_window(
         Command::SetBenchTrackVerdict {
             reconstruction_label,
             track,
-            observation,
+            rows,
             verdict,
         } => done(bench::set_bench_track_verdict(
             state,
             &reconstruction_label,
             track.as_deref(),
-            observation,
+            rows,
             verdict,
         )),
         Command::ApplyBenchTrackThresholds {

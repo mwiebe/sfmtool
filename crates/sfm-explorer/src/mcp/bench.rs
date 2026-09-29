@@ -31,14 +31,13 @@
 
 use serde_json::{json, Value};
 use sfmtool_core::bench::{
-    Bench, Edge, EditableTrack, Observation, Provenance, Stage, StageKind, Thresholds, Verdict,
-    Viewpoint,
+    Bench, Edge, EditableTrack, Observation, Provenance, Stage, StageKind, Thresholds, Viewpoint,
 };
 
 use super::{
     edit, resolve_camera_image, resolve_point_in, resolve_reconstruction, BackgroundReply,
     CameraImageSel, Deferred, JsonReply, Outcome, ResizeTarget, ThresholdChange, ToolError,
-    TranslateTarget, ViewpointSel,
+    TranslateTarget, VerdictAction, VerdictRows, ViewpointSel,
 };
 use crate::bench::{PatchEdit, Seed};
 use crate::scene::ReconId;
@@ -943,25 +942,61 @@ pub(super) fn set_bench_track_verdict(
     state: &mut AppState,
     label: &str,
     named: Option<&str>,
-    observation: usize,
-    verdict: Option<Verdict>,
+    rows: VerdictRows,
+    verdict: VerdictAction,
 ) -> JsonReply {
     let (id, item) = target(state, label, named)?;
-    let reply = edit::edited(state, id, |state| match verdict {
-        Some(verdict) => state.set_bench_verdict(id, &item, observation, verdict),
-        None => state.unpin_bench_verdict(id, &item, observation),
+    let observations = match &rows {
+        VerdictRows::One(observation) => vec![*observation],
+        VerdictRows::Listed(listed) => listed.clone(),
+        VerdictRows::All => {
+            let count = state
+                .bench_track(id, &item)
+                .map_or(0, |track| track.observations.len());
+            (0..count).collect()
+        }
+    };
+    let reply = edit::edited(state, id, |state| match (verdict, &rows) {
+        (VerdictAction::Set(verdict), VerdictRows::One(observation)) => {
+            state.set_bench_verdict(id, &item, *observation, verdict)
+        }
+        // The parse lets several rows through only for a pin or an unpin.
+        (VerdictAction::Set(_), _) => Err("Set in or out one observation at a time.".to_string()),
+        (VerdictAction::Pin, _) => state.pin_bench_verdicts(id, &item, &observations),
+        (VerdictAction::Unpin, _) => state.unpin_bench_verdicts(id, &item, &observations),
     })?;
-    // The verdict and the pin the observation carries now, which for an
-    // unpinning is what the thresholds gave it.
-    let now = state
-        .bench_track(id, &item)
-        .and_then(|track| track.observations.get(observation))
-        .map(|o| (o.verdict, o.pinned));
+    // The verdict and the pin each named observation carries now, which for
+    // an unpin is what the thresholds gave it, and for a pin what it had.
+    let now = |observation: usize| {
+        state
+            .bench_track(id, &item)
+            .and_then(|track| track.observations.get(observation))
+            .map(|o| (o.verdict, o.pinned))
+    };
     let mut reply = with_item(reply, &item);
-    insert(&mut reply, "observation", json!(observation));
-    if let Some((verdict, pinned)) = now {
-        insert(&mut reply, "verdict", json!(verdict.to_string()));
-        insert(&mut reply, "pinned", json!(pinned));
+    match rows {
+        VerdictRows::One(observation) => {
+            insert(&mut reply, "observation", json!(observation));
+            if let Some((verdict, pinned)) = now(observation) {
+                insert(&mut reply, "verdict", json!(verdict.to_string()));
+                insert(&mut reply, "pinned", json!(pinned));
+            }
+        }
+        VerdictRows::Listed(_) | VerdictRows::All => {
+            let rows: Vec<Value> = observations
+                .iter()
+                .filter_map(|&observation| {
+                    now(observation).map(|(verdict, pinned)| {
+                        json!({
+                            "observation": observation,
+                            "verdict": verdict.to_string(),
+                            "pinned": pinned,
+                        })
+                    })
+                })
+                .collect();
+            insert(&mut reply, "observations", json!(rows));
+        }
     }
     Ok(reply)
 }
@@ -1604,7 +1639,7 @@ fn slides(value: Option<[[[f64; 2]; 3]; 3]>) -> Option<[[Option<[f64; 2]>; 3]; 3
 }
 
 /// A square ZNCC surface, stored row-major, as rows of numbers from the top
-/// row (`dy = -r`), with null for a shift outside the disk or with no reading;
+/// row (`dy = -r`), with null for a shift with no reading;
 /// or null for no surface.
 fn surface(value: Option<&[f64]>) -> Option<Vec<Vec<Option<f64>>>> {
     let values = value?;

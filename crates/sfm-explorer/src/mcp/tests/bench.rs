@@ -332,7 +332,9 @@ fn the_patch_tools_slide_resize_and_turn_and_each_is_one_version() {
         .expect("the observations");
     assert!(rows.len() > 1, "the fixture's track is a single sighting");
     for row in rows {
-        assert_eq!(row["pinned"], json!(false), "a slide is not a verdict");
+        // A point's rows arrive pinned, and a slide neither sets a pin nor
+        // clears one.
+        assert_eq!(row["pinned"], json!(true), "a slide is not a verdict");
     }
     {
         let track = state
@@ -482,7 +484,18 @@ fn the_patch_tools_slide_resize_and_turn_and_each_is_one_version() {
 
     // And the tool that moves **one** sighting is still there, for the cluster
     // stage's dot and for a script that means one keypoint: it writes that
-    // observation alone and pins it.
+    // observation alone and pins it. The point's rows arrive pinned, so they
+    // are handed to the bars first.
+    call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": "all",
+            "verdict": "unpin",
+        }),
+    );
     let one = call(
         &mut state,
         &mut viewer,
@@ -2024,7 +2037,7 @@ fn fit_and_set_stage_run_as_background_tasks_and_the_evaluation_follows_them() {
         assert!((0.0..=3.0).contains(&radius), "{track}");
     }
     // The core's ZNCC against itself, seven rows of seven, 1 at the centre
-    // and null outside the disk.
+    // and a number in the corners outside the disk.
     let surface = cluster["zncc_self_similarity_surface"]
         .as_array()
         .unwrap_or_else(|| panic!("no cluster zncc_self_similarity_surface on the wire: {track}"));
@@ -2032,7 +2045,7 @@ fn fit_and_set_stage_run_as_background_tasks_and_the_evaluation_follows_them() {
     assert!(surface
         .iter()
         .all(|row| row.as_array().is_some_and(|row| row.len() == 7)));
-    assert!(surface[0][0].is_null(), "{track}");
+    assert!(surface[0][0].is_number(), "{track}");
     assert!(
         surface[3][3] == json!(1.0) || surface[3][3].is_null(),
         "{track}"
@@ -3022,4 +3035,229 @@ fn set_view_looks_through_a_bench_observation() {
         json!({ "bench_observation": { "reconstruction_label": "run_a", "observation": 40 } }),
     );
     assert!(error.0.contains("there is no observation 40"), "{error}");
+}
+
+/// An unpin names one observation, a list of them, or `"all"`, and each is one
+/// version; `in` and `out` name one observation only.
+#[test]
+fn an_unpin_names_a_list_of_observations_or_all_of_them() {
+    let (mut state, mut viewer) = benchable();
+    let item = on_the_bench(&mut state, &mut viewer);
+    let rows = |state: &mut AppState, viewer: &mut Viewer3D| {
+        let track = call(
+            state,
+            viewer,
+            "get_bench_track",
+            json!({ "reconstruction_label": "run_a" }),
+        );
+        track["observations"]
+            .as_array()
+            .expect("the observations")
+            .iter()
+            .map(|row| row["pinned"] == json!(true))
+            .collect::<Vec<_>>()
+    };
+    let pinned = rows(&mut state, &mut viewer);
+    assert!(pinned.len() > 2, "{pinned:?}");
+    assert!(pinned.iter().all(|&p| p), "a point's rows arrive pinned");
+
+    let before = version_count(&state);
+    let listed = call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": [0, 1],
+            "verdict": "unpin",
+        }),
+    );
+    assert_eq!(listed["item"], json!(item), "{listed}");
+    assert_eq!(listed["changed"], json!(true), "{listed}");
+    let named = listed["observations"]
+        .as_array()
+        .expect("one entry per row");
+    assert_eq!(named.len(), 2, "{listed}");
+    assert_eq!(named[0]["observation"], json!(0), "{listed}");
+    assert_eq!(named[1]["pinned"], json!(false), "{listed}");
+    assert!(
+        listed["report"]
+            .as_str()
+            .expect("a sentence")
+            .starts_with("Handed 2 verdicts back to the thresholds"),
+        "{listed}"
+    );
+    assert_eq!(version_count(&state), before + 1);
+    let now = rows(&mut state, &mut viewer);
+    assert!(!now[0] && !now[1] && now[2..].iter().all(|&p| p), "{now:?}");
+
+    let all = call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": "all",
+            "verdict": "unpin",
+        }),
+    );
+    assert_eq!(all["changed"], json!(true), "{all}");
+    assert_eq!(version_count(&state), before + 2);
+    assert!(rows(&mut state, &mut viewer).iter().all(|&p| !p));
+
+    // Nothing is pinned now, so another unpin of all is no version.
+    let again = call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": "all",
+            "verdict": "unpin",
+        }),
+    );
+    assert_eq!(again["changed"], json!(false), "{again}");
+    assert_eq!(version_count(&state), before + 2);
+
+    // in and out rule on one observation at a time.
+    let several = refused_call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": [0, 1],
+            "verdict": "in",
+        }),
+    );
+    assert!(several.0.contains("only to pin or unpin them"), "{several}");
+    let both = refused_call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observation": 0,
+            "observations": "all",
+            "verdict": "unpin",
+        }),
+    );
+    assert!(both.0.contains("not both"), "{both}");
+    let past = refused_call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": [0, 99],
+            "verdict": "unpin",
+        }),
+    );
+    assert!(past.0.contains("no observation 99"), "{past}");
+}
+
+/// A pin names one observation, a list of them, or `"all"`, and pins each
+/// named row at the verdict it has, as one version; a pin of rows all pinned
+/// already is no version.
+#[test]
+fn a_pin_names_a_list_of_observations_or_all_of_them_and_keeps_their_verdicts() {
+    let (mut state, mut viewer) = benchable();
+    let item = on_the_bench(&mut state, &mut viewer);
+    let rows = |state: &mut AppState, viewer: &mut Viewer3D| {
+        let track = call(
+            state,
+            viewer,
+            "get_bench_track",
+            json!({ "reconstruction_label": "run_a" }),
+        );
+        track["observations"]
+            .as_array()
+            .expect("the observations")
+            .iter()
+            .map(|row| (row["verdict"].clone(), row["pinned"] == json!(true)))
+            .collect::<Vec<_>>()
+    };
+    let verdict = |state: &mut AppState, viewer: &mut Viewer3D, body: Value| {
+        let mut args = json!({ "reconstruction_label": "run_a" });
+        for (key, value) in body.as_object().expect("an object") {
+            args[key] = value.clone();
+        }
+        call(state, viewer, "set_bench_track_verdict", args)
+    };
+    verdict(
+        &mut state,
+        &mut viewer,
+        json!({ "observations": "all", "verdict": "unpin" }),
+    );
+    let unpinned = rows(&mut state, &mut viewer);
+    assert!(unpinned.iter().all(|(_, p)| !p), "{unpinned:?}");
+
+    let before = version_count(&state);
+    let one = verdict(
+        &mut state,
+        &mut viewer,
+        json!({ "observation": 0, "verdict": "pin" }),
+    );
+    assert_eq!(one["item"], json!(item), "{one}");
+    assert_eq!(one["changed"], json!(true), "{one}");
+    assert_eq!(one["observation"], json!(0), "{one}");
+    assert_eq!(one["pinned"], json!(true), "{one}");
+    assert_eq!(one["verdict"], unpinned[0].0, "{one}");
+    assert_eq!(version_count(&state), before + 1);
+
+    let listed = verdict(
+        &mut state,
+        &mut viewer,
+        json!({ "observations": [0, 1], "verdict": "pin" }),
+    );
+    assert_eq!(listed["changed"], json!(true), "{listed}");
+    let named = listed["observations"]
+        .as_array()
+        .expect("one entry per row");
+    assert_eq!(named.len(), 2, "{listed}");
+    assert_eq!(named[1]["pinned"], json!(true), "{listed}");
+    assert!(
+        listed["report"]
+            .as_str()
+            .expect("a sentence")
+            .starts_with("Pinned "),
+        "{listed}"
+    );
+    assert_eq!(version_count(&state), before + 2);
+
+    let all = verdict(
+        &mut state,
+        &mut viewer,
+        json!({ "observations": "all", "verdict": "pin" }),
+    );
+    assert_eq!(all["changed"], json!(true), "{all}");
+    assert_eq!(version_count(&state), before + 3);
+    let now = rows(&mut state, &mut viewer);
+    assert!(now.iter().all(|(_, p)| *p), "{now:?}");
+    assert_eq!(
+        now.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>(),
+        unpinned.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>(),
+        "every verdict stands as it was"
+    );
+
+    // Everything is pinned now, so another pin of all is no version.
+    let again = verdict(
+        &mut state,
+        &mut viewer,
+        json!({ "observations": "all", "verdict": "pin" }),
+    );
+    assert_eq!(again["changed"], json!(false), "{again}");
+    assert_eq!(version_count(&state), before + 3);
+
+    let past = refused_call(
+        &mut state,
+        &mut viewer,
+        "set_bench_track_verdict",
+        json!({
+            "reconstruction_label": "run_a",
+            "observations": [0, 99],
+            "verdict": "pin",
+        }),
+    );
+    assert!(past.0.contains("no observation 99"), "{past}");
 }

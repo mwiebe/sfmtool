@@ -682,37 +682,143 @@ impl AppState {
         Ok(())
     }
 
-    /// Hand one observation's verdict back to the thresholds: clear the pin a
-    /// hand verdict set, and give it the verdict the bars propose.
+    /// Hand the verdicts of `observations` back to the thresholds: clear the
+    /// pins a hand verdict set, and let the bars decide the rows together
+    /// (`sfmtool_core::bench::unpin_verdicts`).
     ///
-    /// One version, as a hand verdict is; an observation that was not pinned
-    /// and already carries the proposed verdict is a no-effect row instead.
-    pub(crate) fn unpin_bench_verdict(
+    /// One version for all of them, as a hand verdict is one; a call none of
+    /// whose rows is pinned is a no-effect row instead. The log names the image
+    /// when one row is named, and counts the rows otherwise.
+    pub(crate) fn unpin_bench_verdicts(
         &mut self,
         id: ReconId,
         label: &str,
-        observation: usize,
+        observations: &[usize],
     ) -> Result<(), String> {
         let (index, bench, track) = self.bench_step_target(id, label)?;
-        let image = track
-            .observations
-            .get(observation)
-            .map(|o| o.image as usize)
-            .ok_or_else(|| format!("{label} has no observation {observation}."))?;
-        let (next, report) = bench::unpin_verdict(&track, observation)
-            .map_err(|e| format!("Cannot unpin that verdict: {e}"))?;
-        let name = self.image_name(ImageRef::new(id, image));
+        if let Some(&missing) = observations
+            .iter()
+            .find(|&&i| i >= track.observations.len())
+        {
+            return Err(format!("{label} has no observation {missing}."));
+        }
+        let (next, report) = bench::unpin_verdicts(&track, observations)
+            .map_err(|e| format!("Cannot unpin those verdicts: {e}"))?;
+        let one = match observations {
+            [observation] => Some((
+                *observation,
+                self.image_name(ImageRef::new(
+                    id,
+                    track.observations[*observation].image as usize,
+                )),
+            )),
+            _ => None,
+        };
         if !report.changed {
-            self.no_effect(format!(
-                "Left {name} to the thresholds in {label}: no effect, it is not pinned"
-            ));
+            self.no_effect(match &one {
+                Some((_, name)) => {
+                    format!("Left {name} to the thresholds in {label}: no effect, it is not pinned")
+                }
+                None => format!(
+                    "Left the verdicts to the thresholds in {label}: no effect, none of them is \
+                     pinned"
+                ),
+            });
             return Ok(());
         }
+        let text = match &one {
+            Some((observation, name)) => format!(
+                "Handed {name} back to the thresholds in {label}: {}",
+                next.observations[*observation].verdict
+            ),
+            None => format!(
+                "Handed {} {} back to the thresholds in {label}: {} in, {} out",
+                report.unpinned,
+                if report.unpinned == 1 {
+                    "verdict"
+                } else {
+                    "verdicts"
+                },
+                report.turned_in,
+                report.turned_out
+            ),
+        };
         let bench = install(&bench, label, next)?;
-        let text = format!(
-            "Handed {name} back to the thresholds in {label}: {}",
-            report.is
-        );
+        self.push_bench_step(index, bench, text);
+        Ok(())
+    }
+
+    /// Pin the verdicts of `observations` as they stand
+    /// (`sfmtool_core::bench::pin_verdicts`): no verdict moves, and the bars
+    /// leave the rows alone from then on.
+    ///
+    /// One version for all of them, as an unpin is one; a call all of whose
+    /// rows are pinned already is a no-effect row instead. The log names the
+    /// image when one row is named, and otherwise counts the rows it pinned
+    /// and how many of those are `in` and `out`.
+    pub(crate) fn pin_bench_verdicts(
+        &mut self,
+        id: ReconId,
+        label: &str,
+        observations: &[usize],
+    ) -> Result<(), String> {
+        let (index, bench, track) = self.bench_step_target(id, label)?;
+        if let Some(&missing) = observations
+            .iter()
+            .find(|&&i| i >= track.observations.len())
+        {
+            return Err(format!("{label} has no observation {missing}."));
+        }
+        let (next, report) = bench::pin_verdicts(&track, observations)
+            .map_err(|e| format!("Cannot pin those verdicts: {e}"))?;
+        let one = match observations {
+            [observation] => Some((
+                *observation,
+                self.image_name(ImageRef::new(
+                    id,
+                    track.observations[*observation].image as usize,
+                )),
+            )),
+            _ => None,
+        };
+        if !report.changed {
+            self.no_effect(match &one {
+                Some((_, name)) => {
+                    format!("Left {name} pinned in {label}: no effect, it is pinned already")
+                }
+                None => format!(
+                    "Left the verdicts pinned in {label}: no effect, every one of them is \
+                     pinned already"
+                ),
+            });
+            return Ok(());
+        }
+        let text = match &one {
+            Some((observation, name)) => format!(
+                "Pinned {name} ({}) in {label}",
+                next.observations[*observation].verdict
+            ),
+            None => {
+                // The rows this step pinned: pinned now and not before.
+                let kept = track
+                    .observations
+                    .iter()
+                    .zip(&next.observations)
+                    .filter(|(was, is)| !was.pinned && is.pinned && is.verdict == Verdict::In)
+                    .count();
+                format!(
+                    "Pinned {} {} in {label}: {kept} in, {} out",
+                    report.pinned,
+                    if report.pinned == 1 {
+                        "verdict"
+                    } else {
+                        "verdicts"
+                    },
+                    report.pinned - kept
+                )
+            }
+        };
+        let bench = install(&bench, label, next)?;
         self.push_bench_step(index, bench, text);
         Ok(())
     }

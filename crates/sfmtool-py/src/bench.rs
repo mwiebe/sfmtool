@@ -26,19 +26,19 @@ use sfmtool_core::bench::{
     add_observation as core_add_observation, apply_thresholds as core_apply_thresholds,
     commit as core_commit, create_cluster as core_create_cluster,
     create_track as core_create_track, duplicate as core_duplicate, evaluate as core_evaluate,
-    fit as core_fit, resize_patch as core_resize_patch,
+    fit as core_fit, pin_verdicts as core_pin_verdicts, resize_patch as core_resize_patch,
     resize_patch_to_pixel as core_resize_patch_to_pixel,
     search_descriptors as core_search_descriptors, search_geometry as core_search_geometry,
     set_stage as core_set_stage, set_verdict as core_set_verdict,
     shape_observation as core_shape_observation, sight_observation as core_sight_observation,
     spin_patch as core_spin_patch, split as core_split, tilt_patch as core_tilt_patch,
     translate_patch as core_translate_patch,
-    translate_patch_to_pixel as core_translate_patch_to_pixel, unpin_verdict as core_unpin_verdict,
-    Bench, BenchItem, ClassificationReason, ClusterSeed, CreateTrackOptions, Edge, EditableTrack,
-    EvaluateOptions, EvaluateReport, FitOptions, FitReport, Found, GeometrySearchOptions,
-    GeometrySearchReport, ItemKind, Observation, ObservationSeed, Provenance, ResizeReport,
-    SearchOptions, SearchReport, StageKind, TrackClassification, Verdict, Viewpoint,
-    DEFAULT_RADIUS_PX,
+    translate_patch_to_pixel as core_translate_patch_to_pixel,
+    unpin_verdicts as core_unpin_verdicts, Bench, BenchItem, ClassificationReason, ClusterSeed,
+    CreateTrackOptions, Edge, EditableTrack, EvaluateOptions, EvaluateReport, FitOptions,
+    FitReport, Found, GeometrySearchOptions, GeometrySearchReport, ItemKind, Observation,
+    ObservationSeed, Provenance, ResizeReport, SearchOptions, SearchReport, StageKind,
+    TrackClassification, Verdict, Viewpoint, DEFAULT_RADIUS_PX,
 };
 use sfmtool_core::features::kdforest::{ConstellationParams, ImageKeypoints};
 use sfmtool_core::patch::normal_refine::ProjectedImage;
@@ -343,6 +343,15 @@ impl PyEditableTrack {
         self.inner.verdict_counts()
     }
 
+    /// Whether the verdicts were set by the repaint of the :func:`evaluate`
+    /// that returned this track, after its readings were taken. An evaluation
+    /// of a track for which this is true reads it without repainting. Any step
+    /// returns a track for which it is false.
+    #[getter]
+    fn repainted(&self) -> bool {
+        self.inner.repainted()
+    }
+
     /// The indexes of the ``in`` observations, ascending.
     #[getter]
     fn in_observations<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
@@ -629,7 +638,9 @@ impl PyBench {
 /// Put the point at `point` on the bench as a track-stage editable track.
 ///
 /// The track arrives with the point's own frame, bitmap and keypoints, its
-/// origin set to that point, and every observation ``in``. The measurements are
+/// origin set to that point, and every observation ``in`` and pinned, so an
+/// :func:`evaluate` leaves those verdicts alone until :func:`unpin_verdict`
+/// hands them to the bars. The measurements are
 /// carried from what the record stores and nothing is recomputed, so putting a
 /// track on the bench and doing nothing shows the numbers the reconstruction
 /// already holds.
@@ -719,7 +730,8 @@ fn create_cluster(
 /// Add an observation to `track`.
 ///
 /// It joins ``out`` and unpinned: nothing has measured it yet, and the first
-/// :func:`evaluate` that does turns it ``in`` when it clears the thresholds. A
+/// :func:`evaluate` that does turns it ``in`` when it clears the thresholds,
+/// as every evaluation sets each unpinned verdict to what the bars propose. A
 /// second observation in an image the track already holds is allowed and
 /// is scored like any other; what it cannot do is be turned ``in`` while the
 /// other is.
@@ -772,8 +784,8 @@ fn add_observation(
 
 /// Set the verdict of one observation, by hand.
 ///
-/// The verdict is pinned by this, so :func:`apply_thresholds` leaves it where it
-/// is. Turning an observation ``in`` is refused when another ``in`` observation
+/// The verdict is pinned by this, so neither :func:`apply_thresholds` nor an
+/// :func:`evaluate` moves it. Turning an observation ``in`` is refused when another ``in`` observation
 /// already holds its image, because a track observes an image once.
 ///
 /// Returns ``(EditableTrack, report)``.
@@ -799,23 +811,83 @@ fn set_verdict(
     ))
 }
 
-/// Hand one observation's verdict back to the thresholds: clear the pin
-/// :func:`set_verdict` set, and give it the verdict the thresholds propose from
-/// its stored measurements, ``in`` only when no other ``in`` observation holds
-/// its image. An observation nothing has measured keeps its verdict.
+/// The observations a pin or an unpin names: one index, a list of them, or
+/// ``"all"``.
+fn verdict_targets(track: &EditableTrack, observations: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    if let Ok(word) = observations.extract::<String>() {
+        if word == "all" {
+            return Ok((0..track.observations.len()).collect());
+        }
+        return Err(PyValueError::new_err(format!(
+            "unknown observations: {word:?} (expected an index, a list of indices, or \"all\")"
+        )));
+    }
+    if let Ok(index) = observations.extract::<usize>() {
+        return Ok(vec![index]);
+    }
+    observations.extract::<Vec<usize>>().map_err(|_| {
+        PyValueError::new_err(
+            "observations must be an index, a list of indices, or \"all\"".to_string(),
+        )
+    })
+}
+
+/// Hand the verdicts of `observations` back to the thresholds, in one step:
+/// clear the pins :func:`set_verdict` set, and let the bars decide the rows
+/// together, as :func:`apply_thresholds` does -- best score first, one ``in``
+/// per image. An observation nothing has measured keeps its verdict until an
+/// evaluation measures it.
 ///
-/// Returns ``(EditableTrack, report)``, the report as :func:`set_verdict`'s.
+/// `observations` is one index, a list of indices, or ``"all"`` for every
+/// observation of the track. When none of them is pinned nothing changes and
+/// the report says ``changed: False``.
+///
+/// Returns ``(EditableTrack, report)``. The report carries ``unpinned`` (how
+/// many pins were cleared), ``turned_in``, ``turned_out`` and ``changed``.
+/// Raises ``ValueError`` for an index past the end.
 #[pyfunction]
 fn unpin_verdict(
     py: Python<'_>,
     track: &PyEditableTrack,
-    observation: usize,
+    observations: &Bound<'_, PyAny>,
 ) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
-    let (next, report) = core_unpin_verdict(&track.inner, observation).map_err(refused)?;
+    let targets = verdict_targets(&track.inner, observations)?;
+    let (next, report) = core_unpin_verdicts(&track.inner, &targets).map_err(refused)?;
     let d = PyDict::new(py);
-    d.set_item("observation", report.observation)?;
-    d.set_item("was", report.was.to_string())?;
-    d.set_item("is", report.is.to_string())?;
+    d.set_item("unpinned", report.unpinned)?;
+    d.set_item("turned_in", report.turned_in)?;
+    d.set_item("turned_out", report.turned_out)?;
+    d.set_item("changed", report.changed)?;
+    Ok((
+        PyEditableTrack {
+            inner: Arc::new(next),
+        },
+        d.unbind(),
+    ))
+}
+
+/// Pin the verdicts of `observations` as they stand, in one step: each named
+/// observation that is not pinned becomes pinned and keeps its verdict, so
+/// :func:`apply_thresholds` and :func:`evaluate` leave it where it is. The
+/// inverse of :func:`unpin_verdict`.
+///
+/// `observations` is one index, a list of indices, or ``"all"`` for every
+/// observation of the track. When every one of them is pinned already nothing
+/// changes and the report says ``changed: False``.
+///
+/// Returns ``(EditableTrack, report)``. The report carries ``pinned`` (how
+/// many pins were set) and ``changed``. Raises ``ValueError`` for an index past
+/// the end.
+#[pyfunction]
+fn pin_verdict(
+    py: Python<'_>,
+    track: &PyEditableTrack,
+    observations: &Bound<'_, PyAny>,
+) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
+    let targets = verdict_targets(&track.inner, observations)?;
+    let (next, report) = core_pin_verdicts(&track.inner, &targets).map_err(refused)?;
+    let d = PyDict::new(py);
+    d.set_item("pinned", report.pinned)?;
     d.set_item("changed", report.changed)?;
     Ok((
         PyEditableTrack {
@@ -1273,6 +1345,8 @@ fn evaluate_report_dict<'py>(
     d.set_item("stage", report.stage.to_string())?;
     d.set_item("measured", report.measured)?;
     d.set_item("unmeasured", report.unmeasured)?;
+    d.set_item("turned_in", report.turned_in)?;
+    d.set_item("turned_out", report.turned_out)?;
     if let Some(reference) = report.reference {
         d.set_item("reference", reference)?;
     }
@@ -1410,12 +1484,19 @@ fn parse_stage(word: &str) -> PyResult<StageKind> {
 }
 
 /// Read `track` as it stands: fill the measurement slots of every observation,
-/// whatever its verdict, at the stage it is in, and **move nothing else**. The
-/// position, the frame, the bitmap, every keypoint and every verdict come back
-/// exactly as they went in, except that an unpinned ``out`` observation
-/// measured for the first time is turned ``in`` when it clears the thresholds
-/// and no ``in`` observation holds its image. An ``out`` observation is scored
-/// the way an ``in`` one is.
+/// whatever its verdict, at the stage it is in, then let the bars decide every
+/// unpinned verdict from those readings, and **move nothing else**. The
+/// position, the frame, the bitmap and every keypoint come back exactly as they
+/// went in; each unpinned observation takes the verdict :func:`apply_thresholds`
+/// would give it, best score first and one ``in`` per image, and a pinned one
+/// keeps its own. An ``out`` observation is scored the way an ``in`` one is.
+///
+/// A track-stage reading is scored against the ``in`` rows, so when that
+/// repaint changes the ``in`` set the track returned says so
+/// (:attr:`EditableTrack.repainted`), and an evaluation of that same track
+/// reads it again under the new set **without** repainting. Evaluating twice
+/// therefore settles the table, and a row the second reading puts out of step
+/// with the bars stays as it is until the next step.
 ///
 /// Nothing is dropped. The kernels run with their per-view gates off and the
 /// consensus-basis cap lifted, because a gate is a decision and this makes
@@ -1449,11 +1530,9 @@ fn parse_stage(word: &str) -> PyResult<StageKind> {
 /// of a score. `max_cache_bytes` (256 MiB by default) is what one round's tiles
 /// may take together; a round past it is refused rather than attempted.
 ///
-/// Nothing here decides anything: the thresholds propose and
-/// :func:`apply_thresholds` applies the proposal.
-///
 /// Returns ``(EditableTrack, report)``. The report carries ``stage``,
-/// ``measured`` and ``unmeasured``; ``reference`` at the cluster stage; and
+/// ``measured``, ``unmeasured``, and ``turned_in`` and ``turned_out`` for what
+/// the repaint moved; ``reference`` at the cluster stage; and
 /// ``position`` and ``condition_number`` at the track stage. Raises
 /// ``ValueError`` with the reason when the reading is refused.
 #[pyfunction]
@@ -2071,6 +2150,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(add_observation, m)?)?;
     m.add_function(wrap_pyfunction!(set_verdict, m)?)?;
     m.add_function(wrap_pyfunction!(unpin_verdict, m)?)?;
+    m.add_function(wrap_pyfunction!(pin_verdict, m)?)?;
     m.add_function(wrap_pyfunction!(translate_patch_to_pixel, m)?)?;
     m.add_function(wrap_pyfunction!(translate_patch, m)?)?;
     m.add_function(wrap_pyfunction!(tilt_patch, m)?)?;

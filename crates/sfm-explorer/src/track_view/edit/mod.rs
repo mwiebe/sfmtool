@@ -18,10 +18,10 @@
 //!
 //! Almost no state lives here. The bench is the node's, at its cursor, so what
 //! the panel owns is the threshold boxes' values during a drag, the *Lock* box Image Detail reads a
-//! dot drag by, the tiles it has rendered, and the painting the boxes
-//! produce. The last two are cached against the
-//! track's own `Arc` rather than recomputed per frame, because the painting is
-//! `apply_thresholds` run over a copy (and a copy of a track carries its
+//! dot drag by, the tiles it has rendered and their hover views, and the
+//! judgement the boxes produce. The last two are cached against the
+//! track's own `Arc` rather than recomputed per frame, because the judgement is
+//! `verdicts_if_unpinned` run over a copy (and a copy of a track carries its
 //! consensus bitmap) and a tile is a warp of a full-resolution photograph.
 //! The row selection is not the panel's: it is the bench's, in
 //! `AppState::bench_rows`, and a row click reports through
@@ -30,7 +30,8 @@
 use std::collections::HashMap;
 
 use sfmtool_core::bench::{
-    apply_thresholds, EditableTrack, Observation, Provenance, StageKind, Thresholds, Verdict,
+    bar_checks, verdicts_if_unpinned, BarChecks, EditableTrack, Observation, Provenance, StageKind,
+    Thresholds, Verdict,
 };
 use sfmtool_core::SfmrReconstruction;
 
@@ -92,8 +93,13 @@ pub struct TrackEditResponse {
     /// A row's *Keep* switch was clicked: the observation, and the verdict it
     /// switched to.
     pub set_verdict: Option<(usize, Verdict)>,
-    /// A row's *Unpin, let the thresholds decide*, carrying the observation.
-    pub unpin_verdict: Option<usize>,
+    /// Verdicts handed back to the thresholds in one step: a row's pin or
+    /// its *Unpin, let the thresholds decide*, the row menu's unpin of a
+    /// selection, or the *Keep* heading's pin, which names every pinned row.
+    pub unpin_verdicts: Option<Vec<usize>>,
+    /// Verdicts pinned as they stand in one step: the *Keep* heading's pin
+    /// when no row is pinned, which names every row.
+    pub pin_verdicts: Option<Vec<usize>>,
     /// The header's go-to button: open the *Go to Point* dialog.
     pub request_goto_point: bool,
     /// A row was clicked -- select this image, as a view-mode row does.
@@ -126,15 +132,16 @@ pub struct TrackEdit {
     /// what keeps [`TrackEdit::thresholds`] from being reset to the track's bars
     /// in the middle of the drag.
     sliding: bool,
-    /// The verdicts the boxes propose for the active track, one per
-    /// observation, which is what the rows are painted by: `None` for an
-    /// observation nothing at the track's stage has measured, which has no
-    /// proposal.
-    painted: Vec<Option<Verdict>>,
-    /// The item and the exact track value [`TrackEdit::painted`] was computed
-    /// from: the label, and the address of the track's `Arc`. A step on the
-    /// track gives it a new `Arc`, which is what says the painting is stale.
-    painted_for: Option<(String, usize, Thresholds)>,
+    /// What the boxes say about each observation of the active track, which
+    /// is what its readings and its *Keep* cell are coloured by: `None` for an
+    /// observation nothing at the track's stage has measured, which the bars
+    /// do not judge.
+    judged: Vec<Option<Judgement>>,
+    /// The item, the exact track value and the bars [`TrackEdit::judged`] was
+    /// computed from: the label, the address of the track's `Arc`, and the
+    /// boxes. A step on the track gives it a new `Arc`, which is what says the
+    /// judgement is stale.
+    judged_for: Option<(String, usize, Thresholds)>,
     /// Why the active track cannot be committed, or `None` when it can, as of
     /// the value and the track [`TrackEdit::commit_refusal_for`] last asked.
     ///
@@ -164,6 +171,11 @@ pub struct TrackEdit {
     /// from: the label, and the address of the track's `Arc`. Any step on the
     /// track gives it a new `Arc`, and every step that moves a tile is one.
     tiles_for: Option<(String, usize)>,
+    /// The hover view of each row's tile, by observation index: rendered the
+    /// first time the pointer rests on that tile, and kept and dropped with
+    /// [`TrackEdit::tiles`], since it is the same picture made wider and goes
+    /// stale exactly when the tile does. `None` is cached as the tile's is.
+    contexts: HashMap<usize, Option<tile::DrawnContext>>,
     /// The self-similarity surface plot of each observation, by observation
     /// index, with the surface and tolerance it was drawn from. Checked
     /// against the row's own reading every frame and redrawn when that
@@ -214,14 +226,15 @@ impl TrackEdit {
         Self {
             thresholds: Thresholds::default(),
             sliding: false,
-            painted: Vec::new(),
-            painted_for: None,
+            judged: Vec::new(),
+            judged_for: None,
             commit_refusal: None,
             commit_refusal_for: None,
             showing: None,
             renaming: None,
             tiles: HashMap::new(),
             tiles_for: None,
+            contexts: HashMap::new(),
             plots: HashMap::new(),
             rows: Vec::new(),
             build_refusal: None,
@@ -264,14 +277,15 @@ impl TrackEdit {
     pub fn forget_recon(&mut self, id: ReconId) {
         self.tiles.clear();
         self.tiles_for = None;
+        self.contexts.clear();
         if self.showing.as_ref().is_some_and(|(of, _)| *of == id) {
             self.showing = None;
         }
-        self.painted_for = None;
+        self.judged_for = None;
         self.commit_refusal_for = None;
         self.build_refusal = None;
         self.sliding = false;
-        self.painted.clear();
+        self.judged.clear();
         self.rows.clear();
     }
 
@@ -306,7 +320,7 @@ impl TrackEdit {
         self.evaluation = state
             .bench_evaluation(id, &label)
             .unwrap_or(Evaluation::Evaluating);
-        self.repaint_if_stale(&label, track);
+        self.rejudge_if_stale(&label, track);
         self.recheck_commit_if_stale(&label, track, node);
         self.retile_if_stale(&label, track);
 
@@ -565,31 +579,37 @@ impl TrackEdit {
         }
     }
 
-    /// Recompute the painting when the track or the bars have moved.
+    /// Recompute the judgement when the track or the bars have moved.
     ///
-    /// The painting **is** what applying the thresholds would do, computed by
-    /// the same core function a box's release applies, so a row can never be
-    /// painted one way and turned another when the box is let go. A pinned verdict
-    /// comes back unchanged from that call, which is what leaves it alone.
-    fn repaint_if_stale(&mut self, label: &str, track: &std::sync::Arc<EditableTrack>) {
+    /// Both halves are the core's own: the readings are judged by
+    /// `bar_checks`, and the proposal is `verdicts_if_unpinned`, which gives an
+    /// unpinned row what applying the bars would do -- the same core step a
+    /// box's release applies, so a row can never be shown one way and turned
+    /// another when the box is let go -- and a pinned row what unpinning it
+    /// would. Both run with the boxes' bars, so they follow a drag live.
+    fn rejudge_if_stale(&mut self, label: &str, track: &std::sync::Arc<EditableTrack>) {
         let key = (
             label.to_string(),
             std::sync::Arc::as_ptr(track) as usize,
             self.thresholds.clone(),
         );
-        if self.painted_for.as_ref() == Some(&key) {
+        if self.judged_for.as_ref() == Some(&key) {
             return;
         }
         let mut with_bars = (**track).clone();
         with_bars.thresholds = self.thresholds.clone();
-        let (painted, _) = apply_thresholds(&with_bars);
         let stage = track.stage_kind();
-        self.painted = painted
-            .observations
-            .iter()
-            .map(|o| is_measured(o, stage).then_some(o.verdict))
+        self.judged = verdicts_if_unpinned(&with_bars)
+            .into_iter()
+            .zip(&with_bars.observations)
+            .map(|(proposal, observation)| {
+                Some(Judgement {
+                    checks: bar_checks(observation, stage, &self.thresholds)?,
+                    proposal: proposal?,
+                })
+            })
             .collect();
-        self.painted_for = Some(key);
+        self.judged_for = Some(key);
     }
 
     /// Ask again why the active track cannot be committed, when the track or the
@@ -659,6 +679,40 @@ impl TrackEdit {
         texture_id
     }
 
+    /// The hover view of one row's tile, rendering it if this is the first
+    /// frame that has asked for it since the track moved.
+    ///
+    /// Asked for only while the pointer rests on the tile, so a table of many
+    /// rows renders the wider picture for the rows a person looks at and no
+    /// others.
+    fn ensure_context(
+        &mut self,
+        ctx: &egui::Context,
+        recon: &SfmrReconstruction,
+        track: &EditableTrack,
+        observation: usize,
+        state: &AppState,
+    ) -> Option<&tile::DrawnContext> {
+        if !self.contexts.contains_key(&observation) {
+            let id = self.showing.as_ref().map(|(id, _)| *id)?;
+            let image = ImageRef::new(id, track.observations.get(observation)?.image as usize);
+            let drawn = state
+                .full_res_cache
+                .get(&image)
+                .and_then(|slot| slot.as_ref())
+                .and_then(|src| tile::context(recon, track, observation, src))
+                .map(|context| {
+                    tile::DrawnContext::new(
+                        ctx,
+                        context,
+                        format!("bench_tile_context_{}_{observation}", image.index()),
+                    )
+                });
+            self.contexts.insert(observation, drawn);
+        }
+        self.contexts.get(&observation).and_then(Option::as_ref)
+    }
+
     /// The self-similarity surface plot of `observation` for `surface` read
     /// at `tolerance`, drawing it if the row's reading has changed since it
     /// was last drawn, or `None` when the reading has nothing to draw.
@@ -700,6 +754,7 @@ impl TrackEdit {
             return;
         }
         self.tiles.clear();
+        self.contexts.clear();
         self.tiles_for = Some(key);
     }
 }
@@ -772,15 +827,6 @@ fn finite_or_nan(value: f64, number: impl Fn(f64) -> String) -> String {
     }
 }
 
-/// Whether anything at `stage` has measured `observation`: whether it carries
-/// the ZNCC the thresholds judge first, without which they propose nothing.
-fn is_measured(observation: &Observation, stage: StageKind) -> bool {
-    match stage {
-        StageKind::Cluster => observation.cluster.as_ref().and_then(|m| m.zncc).is_some(),
-        StageKind::Track => observation.track.as_ref().and_then(|m| m.zncc).is_some(),
-    }
-}
-
 /// The largest radius the self-similarity reading searches, in grid px: the
 /// value that reads "this far or further".
 fn max_self_similarity_radius() -> f64 {
@@ -799,6 +845,16 @@ fn radius_number(value: f64) -> String {
         return format!("{max:.0}+");
     }
     format!("{value:.1}")
+}
+
+/// What the bars say about one measured observation: each reading's check,
+/// and the verdict the bars propose for it were its verdict unpinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Judgement {
+    /// What each bar says about the reading it judges.
+    pub checks: BarChecks,
+    /// The verdict the bars propose, with one `in` per image kept.
+    pub proposal: Verdict,
 }
 
 /// The two three-by-three grids a row draws: the ZNCC grid and the
@@ -1040,6 +1096,7 @@ fn show_header(
 ) -> bool {
     use crate::track_view::header_buttons::{copy_button, goto_button};
     let (kept, out) = track.verdict_counts();
+    let pinned = track.observations.iter().filter(|o| o.pinned).count();
     let mut goto_clicked = false;
     ui.horizontal_wrapped(|ui| {
         match point_id {
@@ -1072,7 +1129,7 @@ fn show_header(
             }
             (Some(_), Some(_)) => {}
         }
-        ui.label(format!("{kept} kept · {out} out"));
+        ui.label(format!("{kept} kept · {out} out · {pinned} pinned"));
     });
     match &track.stage {
         sfmtool_core::bench::Stage::Cluster(payload) => {
