@@ -1,6 +1,6 @@
 # Commit track
 
-The **Commit** button in Track View, which writes the active bench
+The **Commit** button in Track View, which writes the focused bench
 track into the reconstruction as a point. It is the one step of the bench that
 touches the file, and it is one ordinary point edit: one version, one label, one
 Action Log entry of kind `Edit`, undoable like any other.
@@ -25,7 +25,7 @@ and [`../saving.md`](../saving.md).
 *Commit*, in Track View's toolbar. The viewer's half is
 `AppState::commit_bench_track` in
 [bench.rs](../../../crates/sfm-explorer/src/bench.rs); the write itself is
-`sfmtool_core::bench::commit`. It acts on the active track, which
+`sfmtool_core::bench::commit`. It acts on the focused item, which
 is what every gesture in a bench panel that names no item acts on.
 
 The button is enabled exactly when the core commit would succeed: its greying
@@ -101,7 +101,7 @@ and the track back to the half it had before.
 
 **The written point becomes the selection**, through `AppState::select_point`
 like any other, so the 3D viewport puts the track rays on it, Track View
-shows it in view mode once *Edit* is cleared, and the images that observe it light up. That holds
+shows it in Viewed mode once *Edit* is cleared, and the images that observe it light up. That holds
 wherever the selection was standing and whether the commit replaced a point or
 created one: a commit is a gesture about one point, and the index it landed at
 is the one thing the person who asked for it cannot work out.

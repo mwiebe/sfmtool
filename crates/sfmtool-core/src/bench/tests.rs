@@ -466,8 +466,9 @@ fn a_second_cluster_from_the_same_pixel_takes_a_suffix() {
     assert_eq!(third.label, "IMG_0042@142,198 (3)");
     assert_eq!(bench.len(), 3);
     assert_eq!(
-        bench.active_label(ItemKind::Track),
-        Some(third.label.as_str())
+        bench.labels().last(),
+        Some(third.label.as_str()),
+        "the newest item is last"
     );
 }
 
@@ -488,7 +489,6 @@ fn a_rename_frees_the_old_label() {
         .expect("a live item");
     assert!(bench.get(&report.label).is_none());
     assert!(bench.track("bull-nose").is_some());
-    assert_eq!(bench.active_label(ItemKind::Track), Some("bull-nose"));
     // The old label names nothing now, so it mints again without a suffix.
     let (bench, again) = create_cluster(&bench, &seed).expect("a usable seed");
     assert_eq!(again.label, report.label);
@@ -505,7 +505,7 @@ fn a_seed_that_names_a_label_is_put_on_under_it_with_the_collision_suffix() {
     assert_eq!(first.label, "bull-nose");
     let (bench, second) = create_cluster(&bench, &seed).expect("a usable seed");
     assert_eq!(second.label, "bull-nose (2)");
-    assert_eq!(bench.active_label(ItemKind::Track), Some("bull-nose (2)"));
+    assert!(bench.track("bull-nose (2)").is_some());
 }
 
 #[test]
@@ -523,7 +523,7 @@ fn a_rename_onto_a_taken_label_is_refused() {
 #[test]
 fn a_label_that_names_nothing_is_refused_by_name() {
     let err = Bench::new()
-        .activate("bull-nose")
+        .discard("bull-nose")
         .expect_err("an empty bench holds nothing");
     assert_eq!(err, BenchError::NoSuchItem("bull-nose".to_string()));
     assert_eq!(
@@ -532,7 +532,103 @@ fn a_label_that_names_nothing_is_refused_by_name() {
     );
 }
 
-// ---- The list, the activation and the sharing ------------------------------
+// ---- Item IDs --------------------------------------------------------------
+
+#[test]
+fn each_put_gives_its_item_a_distinct_id() {
+    let (bench, first) =
+        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
+    let (bench, second) =
+        create_cluster(&bench, &pixel_seed(2, [20.0, 20.0])).expect("a usable seed");
+    let a = bench.id(&first.label).expect("on the bench");
+    let b = bench.id(&second.label).expect("on the bench");
+    assert_ne!(a, b);
+    // A put on a bench built separately still gets an ID of its own.
+    let (other, third) =
+        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
+    let c = other.id(&third.label).expect("on the bench");
+    assert_ne!(c, a);
+    assert_ne!(c, b);
+    assert_eq!(
+        bench.entries().iter().map(|e| e.id).collect::<Vec<_>>(),
+        [a, b]
+    );
+}
+
+#[test]
+fn replace_and_rename_keep_the_id() {
+    let (bench, report) =
+        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
+    let id = bench.id(&report.label).expect("on the bench");
+
+    let track = track_of(&bench, &report.label);
+    let bench = install(&bench, &report.label, track);
+    assert_eq!(bench.id(&report.label), Some(id));
+
+    let bench = bench
+        .rename(&report.label, "bull-nose")
+        .expect("a live item");
+    assert_eq!(bench.id("bull-nose"), Some(id));
+    assert_eq!(bench.id(&report.label), None);
+    assert_eq!(bench.label_of(id), Some("bull-nose"));
+}
+
+#[test]
+fn a_put_after_a_discard_of_the_same_label_gets_a_new_id() {
+    let seed = pixel_seed(1, [10.0, 10.0]);
+    let (bench, report) = create_cluster(&Bench::new(), &seed).expect("a usable seed");
+    let id = bench.id(&report.label).expect("on the bench");
+
+    let bench = bench.discard(&report.label).expect("a live item");
+    assert_eq!(bench.label_of(id), None);
+
+    let (bench, again) = create_cluster(&bench, &seed).expect("a usable seed");
+    assert_eq!(again.label, report.label, "the label is free again");
+    let new_id = bench.id(&again.label).expect("on the bench");
+    assert_ne!(new_id, id);
+    assert_eq!(bench.label_of(id), None);
+}
+
+#[test]
+fn a_duplicate_and_a_split_give_the_new_item_a_new_id_and_leave_the_original() {
+    let scene = Scene::new();
+    let edited = edited_fixture(&scene, WORLD);
+    let (bench, label) = four_observation_cluster();
+    let id = bench.id(&label).expect("on the bench");
+
+    let (bench, copied) = duplicate(&bench, &label).expect("the label is on the bench");
+    assert_eq!(bench.id(&label), Some(id));
+    let copy_id = bench.id(&copied.label).expect("just put on");
+    assert_ne!(copy_id, id);
+
+    let (bench, halved) = split(&bench, &edited, &label, &[1, 3]).expect("two of four");
+    assert_eq!(bench.id(&label), Some(id), "the first half is the original");
+    let split_id = bench.id(&halved.label).expect("just put on");
+    assert_ne!(split_id, id);
+    assert_ne!(split_id, copy_id);
+}
+
+#[test]
+fn id_and_label_of_round_trip_and_name_nothing_unknown() {
+    let (bench, first) =
+        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
+    let (bench, second) =
+        create_cluster(&bench, &pixel_seed(2, [20.0, 20.0])).expect("a usable seed");
+    for label in [&first.label, &second.label] {
+        let id = bench.id(label).expect("on the bench");
+        assert_eq!(bench.label_of(id), Some(label.as_str()));
+        assert_eq!(id.to_string(), format!("#{}", id.get()));
+    }
+    assert_eq!(bench.id("nothing at all"), None);
+
+    // An ID from another bench names nothing on this one.
+    let (other, third) =
+        create_cluster(&Bench::new(), &pixel_seed(3, [30.0, 30.0])).expect("a usable seed");
+    let foreign = other.id(&third.label).expect("on the other bench");
+    assert_eq!(bench.label_of(foreign), None);
+}
+
+// ---- The list and the sharing ---------------------------------------------
 
 #[test]
 fn a_step_on_one_item_leaves_every_other_the_same_arc() {
@@ -547,12 +643,6 @@ fn a_step_on_one_item_leaves_every_other_the_same_arc() {
         bench.track(&first.label).expect("still on")
     ));
 
-    let bench = bench.activate(&first.label).expect("a live item");
-    assert!(Arc::ptr_eq(
-        &held,
-        bench.track(&first.label).expect("still on")
-    ));
-
     let bench = bench.discard(&second.label).expect("a live item");
     assert!(Arc::ptr_eq(
         &held,
@@ -562,75 +652,37 @@ fn a_step_on_one_item_leaves_every_other_the_same_arc() {
 }
 
 #[test]
-fn discarding_the_active_item_leaves_nothing_active() {
-    let (bench, first) =
-        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
-    let (bench, second) =
-        create_cluster(&bench, &pixel_seed(2, [20.0, 20.0])).expect("a usable seed");
-    assert_eq!(
-        bench.active_label(ItemKind::Track),
-        Some(second.label.as_str())
-    );
-
-    let bench = bench.discard(&second.label).expect("a live item");
-    assert_eq!(bench.len(), 1);
-    assert_eq!(bench.active_label(ItemKind::Track), None);
-    assert!(bench.active_track().is_none());
-
-    let bench = bench.discard(&first.label).expect("a live item");
-    assert!(bench.is_empty());
-    assert_eq!(bench.active_label(ItemKind::Track), None);
-}
-
-#[test]
-fn discarding_an_item_that_is_not_active_keeps_the_activation() {
-    let (bench, first) =
-        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
-    let (bench, second) =
-        create_cluster(&bench, &pixel_seed(2, [20.0, 20.0])).expect("a usable seed");
-    let bench = bench.discard(&first.label).expect("a live item");
-    assert_eq!(
-        bench.active_label(ItemKind::Track),
-        Some(second.label.as_str())
-    );
-}
-
-#[test]
-fn deactivating_leaves_every_item_the_same_arc_and_none_active() {
+fn put_discard_and_rename_change_nothing_but_the_list() {
     let (bench, first) =
         create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
     let (bench, second) =
         create_cluster(&bench, &pixel_seed(2, [20.0, 20.0])).expect("a usable seed");
 
-    let off = bench.deactivate(ItemKind::Track);
-    assert_eq!(off.len(), 2);
-    assert_eq!(off.active_label(ItemKind::Track), None);
-    assert!(off.active_track().is_none());
-    for label in [&first.label, &second.label] {
-        assert!(Arc::ptr_eq(
-            bench.track(label).expect("on before"),
-            off.track(label).expect("still on")
-        ));
-    }
-    // The bench it was called on is unchanged.
+    // A put adds exactly one entry at the end and leaves the others as they
+    // were.
+    let item = bench.get(&first.label).expect("on the bench").clone();
+    let (put, label) = bench.put("extra", item);
+    assert_eq!(put.len(), bench.len() + 1);
+    assert_eq!(&put.entries()[..bench.len()], bench.entries());
     assert_eq!(
-        bench.active_label(ItemKind::Track),
-        Some(second.label.as_str())
+        put.entries().last().map(|e| e.label.as_str()),
+        Some(label.as_str())
     );
 
-    // Activating afterwards restores one.
-    let on = off.activate(&first.label).expect("a live item");
-    assert_eq!(on.active_label(ItemKind::Track), Some(first.label.as_str()));
-}
+    // A put and its discard give back an equal bench, because the bench holds
+    // nothing but its list.
+    let back = put.discard(&label).expect("a live item");
+    assert_eq!(back, bench);
 
-#[test]
-fn deactivating_with_nothing_active_gives_back_an_equal_bench() {
-    assert_eq!(Bench::new().deactivate(ItemKind::Track), Bench::new());
-    let (bench, _) =
-        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
-    let off = bench.deactivate(ItemKind::Track);
-    assert_eq!(off.deactivate(ItemKind::Track), off);
-    assert_ne!(off, bench);
+    // A rename and its reverse give back an equal bench too.
+    let renamed = bench
+        .rename(&second.label, "bull-nose")
+        .expect("a live item");
+    assert_ne!(renamed, bench);
+    let restored = renamed
+        .rename("bull-nose", &second.label)
+        .expect("a live item");
+    assert_eq!(restored, bench);
 }
 
 // ---- Verdicts --------------------------------------------------------------
@@ -3176,7 +3228,7 @@ fn a_track_with_no_frame_has_nothing_to_register_against() {
 // ---- Duplicating -----------------------------------------------------------
 
 #[test]
-fn a_duplicate_is_the_same_patch_with_no_origin_and_becomes_the_active_one() {
+fn a_duplicate_is_the_same_patch_with_no_origin_under_the_label_it_reports() {
     let scene = Scene::new();
     let edited = edited_with_columns(&scene, WORLD);
     let (bench, label) = bench_with_point(&edited, 0);
@@ -3199,9 +3251,9 @@ fn a_duplicate_is_the_same_patch_with_no_origin_and_becomes_the_active_one() {
     assert_eq!(report.observation_count, track.observations.len());
     assert_eq!(bench.len(), 2);
     assert_eq!(
-        bench.active_label(ItemKind::Track),
+        bench.labels().last(),
         Some(report.label.as_str()),
-        "the copy is what the person is about to work on"
+        "the copy goes on after the original"
     );
 
     let copy = bench.track(&report.label).expect("just put on");

@@ -560,7 +560,7 @@ fn starting_a_cluster_needs_only_a_pixel_and_a_node_that_is_not_busy() {
     assert_eq!(
         start_cluster_entry(BenchMenu {
             busy: Some(BUSY),
-            active_track: None,
+            focused_track: None,
             lock: true,
             create_track: None,
         }),
@@ -575,8 +575,8 @@ fn adding_to_the_bench_track_is_greyed_until_a_track_is_on_the_bench() {
         .expect_err("nothing is on the bench to add to");
     assert_eq!(
         why,
-        "No track is being edited: tick Edit in Track View, or double-click a Bench item \
-         in the Scene tree."
+        "No track is being edited: tick Edit in Track View, click a recent item beside it, \
+         or double-click a Bench item in the Scene tree."
     );
 
     // The image the menu is open over is nowhere in the rule: a second
@@ -585,7 +585,7 @@ fn adding_to_the_bench_track_is_greyed_until_a_track_is_on_the_bench() {
     assert_eq!(
         add_bench_observation_entry(BenchMenu {
             busy: None,
-            active_track: Some(&track),
+            focused_track: Some(&track),
             lock: true,
             create_track: None,
         }),
@@ -594,7 +594,7 @@ fn adding_to_the_bench_track_is_greyed_until_a_track_is_on_the_bench() {
     assert_eq!(
         add_bench_observation_entry(BenchMenu {
             busy: Some(BUSY),
-            active_track: Some(&track),
+            focused_track: Some(&track),
             lock: true,
             create_track: None,
         }),
@@ -610,7 +610,7 @@ fn the_context_menu_offers_the_two_bench_entries() {
     let track = a_track();
     let texts = context_menu_texts(BenchMenu {
         busy: None,
-        active_track: Some(&track),
+        focused_track: Some(&track),
         lock: true,
         create_track: None,
     });
@@ -970,7 +970,7 @@ fn edit_on_bench_needs_a_feature_with_a_point_behind_it() {
         edit_on_bench_entry(
             BenchMenu {
                 busy: Some(BUSY),
-                active_track: None,
+                focused_track: None,
                 lock: true,
                 create_track: None,
             },
@@ -1361,7 +1361,7 @@ fn the_bench_layer_outlines_the_patch_where_its_corners_project() {
         0,
         BenchMenu {
             busy: None,
-            active_track: Some(&track),
+            focused_track: Some(&track),
             lock: true,
             create_track: None,
         },
@@ -1481,7 +1481,7 @@ fn the_bench_layer_draws_the_projection_offset_for_every_verdict() {
             0,
             BenchMenu {
                 busy: None,
-                active_track: Some(&judged),
+                focused_track: Some(&judged),
                 lock: true,
                 create_track: None,
             },
@@ -1505,7 +1505,7 @@ fn the_bench_layer_draws_the_projection_offset_for_every_verdict() {
     }
 }
 
-/// The layer is the *active* track's, and its marks are only in the images
+/// The layer is the *focused* item's, and its marks are only in the images
 /// that track observes: an empty bench draws nothing at all, and a photograph
 /// outside the track draws no opaque mark (only the ghost, below).
 #[test]
@@ -1529,7 +1529,7 @@ fn the_bench_layer_draws_nothing_without_a_track_and_no_mark_outside_it() {
             unseen,
             BenchMenu {
                 busy: None,
-                active_track: Some(&track),
+                focused_track: Some(&track),
                 lock: true,
                 create_track: None,
             },
@@ -1622,7 +1622,7 @@ fn the_bench_layer_ghosts_the_patch_in_an_image_the_track_does_not_observe() {
     let photograph = pixels(640, 480);
     let bench = BenchMenu {
         busy: None,
-        active_track: Some(&track),
+        focused_track: Some(&track),
         lock: true,
         create_track: None,
     };
@@ -1683,7 +1683,7 @@ fn a_member_image_draws_its_outline_and_no_ghost_whatever_the_verdict() {
         }
         let bench = BenchMenu {
             busy: None,
-            active_track: Some(&judged),
+            focused_track: Some(&judged),
             lock: true,
             create_track: None,
         };
@@ -1715,7 +1715,7 @@ fn the_cluster_stage_draws_no_ghost() {
     let track = (**bench.track(&report.label).expect("just put on")).clone();
     let menu = BenchMenu {
         busy: None,
-        active_track: Some(&track),
+        focused_track: Some(&track),
         lock: true,
         create_track: None,
     };
@@ -1739,7 +1739,7 @@ fn no_ghost_is_drawn_without_a_placement_or_for_a_patch_it_cannot_see() {
     let (node, track, unseen) = ghost_fixture();
     let menu = |track| BenchMenu {
         busy: None,
-        active_track: Some(track),
+        focused_track: Some(track),
         lock: true,
         create_track: None,
     };
@@ -1755,7 +1755,7 @@ fn no_ghost_is_drawn_without_a_placement_or_for_a_patch_it_cannot_see() {
             unseen,
             BenchMenu {
                 busy: None,
-                active_track: Some(&unplaced),
+                focused_track: Some(&unplaced),
                 lock: true,
                 create_track: None,
             },
@@ -1776,7 +1776,7 @@ fn no_ghost_is_drawn_without_a_placement_or_for_a_patch_it_cannot_see() {
             unseen,
             BenchMenu {
                 busy: None,
-                active_track: Some(&turned),
+                focused_track: Some(&turned),
                 lock: true,
                 create_track: None,
             },
@@ -1865,7 +1865,7 @@ fn the_bench_layer_draws_a_pixel_cluster_at_the_radius_it_was_started_with() {
         0,
         BenchMenu {
             busy: None,
-            active_track: Some(&track),
+            focused_track: Some(&track),
             lock: true,
             create_track: None,
         },
@@ -2093,6 +2093,9 @@ struct Dragged {
     /// Every path that same frame painted, with its colour: the outlines and
     /// the normal's arrow of the preview.
     held_paths: Vec<(Vec<egui::Pos2>, egui::epaint::ColorMode)>,
+    /// The point the release frame asked to select, if its click picked a
+    /// feature.
+    select_point: Option<usize>,
 }
 
 /// Drive one press-move-release over the bench layer and report what it
@@ -2163,6 +2166,7 @@ fn gesture(
     let mut cursor = egui::CursorIcon::Default;
     let mut held_segments = Vec::new();
     let mut held_paths = Vec::new();
+    let mut select_point = None;
     let release = frames.len() - 1;
     for (index, events) in frames.into_iter().enumerate() {
         let input = egui::RawInput {
@@ -2183,7 +2187,7 @@ fn gesture(
                 None,
                 BenchMenu {
                     busy: None,
-                    active_track: Some(track),
+                    focused_track: Some(track),
                     lock,
                     create_track: None,
                 },
@@ -2207,8 +2211,13 @@ fn gesture(
                 collect_all_paths(&clipped.shape, &mut held_paths);
             }
         }
-        if let Some(from_panel) = response.and_then(|response| response.bench_edit) {
-            edit = Some(from_panel);
+        if let Some(response) = response {
+            if index == release {
+                select_point = response.select_point;
+            }
+            if let Some(from_panel) = response.bench_edit {
+                edit = Some(from_panel);
+            }
         }
     }
     Dragged {
@@ -2217,6 +2226,7 @@ fn gesture(
         panned: detail.pan - was,
         held_segments,
         held_paths,
+        select_point,
     }
 }
 
@@ -3012,6 +3022,83 @@ fn a_press_off_the_handles_still_pans_and_a_press_that_does_not_move_edits_nothi
     assert_eq!(still.panned, egui::Vec2::ZERO);
 }
 
+/// A click on a handle of the bench layer that sits over a feature of another
+/// point is the handle's: it selects no point, so the focused item stays
+/// focused.
+///
+/// The handle here is the ghost's centre, which is no observation's mark, so
+/// nothing but the handle's own claim on the click keeps the feature under it
+/// from being picked. The ghost's patch is moved onto another point the image
+/// observes, so its centre lands on that point's feature.
+#[test]
+fn a_click_on_a_handle_over_a_feature_of_another_point_selects_no_point() {
+    // Point 3 of the demo is seen in image 0 alone, so the other images have
+    // no sighting of its track and features of other points.
+    let track_point = 3;
+    let (mut state, id) = crate::bench::tests::state();
+    let label = state
+        .put_point_on_bench(crate::scene::PointRef::new(id, track_point as usize), None)
+        .expect("a live point");
+    let track = on_bench(&state, id, &label);
+    let node = &state.scene[0];
+    // An image the track has no sighting in, and a feature of another point
+    // in it.
+    let (unseen, feature) = (0..node.edited().image_count())
+        .filter(|&i| track.observations.iter().all(|o| o.image as usize != i))
+        .find_map(|i| {
+            super::embedded_image_features(node.edited(), i)
+                .into_iter()
+                .find(|f| f.is_tracked() && f.point_index != track_point)
+                .map(|f| (i, f))
+        })
+        .expect("an image the track does not observe observes another point");
+    let other = feature.point_index as usize;
+    let pixel = [
+        f64::from(feature.position[0]),
+        f64::from(feature.position[1]),
+    ];
+
+    // Off the handles, a click there picks the feature's point.
+    let plain = gesture(node, unseen, &track, pixel, pixel, &[], false, true);
+    assert_eq!(
+        plain.select_point,
+        Some(other),
+        "the feature is not clickable"
+    );
+
+    // With the ghost's centre on it, the handle takes the click.
+    let eye = node.edited().base.image_table.images[unseen].camera_center();
+    let under = node
+        .edited()
+        .point(other as u32)
+        .expect("a live point")
+        .point()
+        .position;
+    let over = with_placement(&track, |placement| {
+        let patch = placement.as_mut().expect("a track-stage patch");
+        *patch = sfmtool_core::patch::cloud::OrientedPatch::from_center_normal(
+            under,
+            eye - under,
+            nalgebra::Vector3::z(),
+            patch.half_extent,
+        );
+    });
+    let clicked = gesture(node, unseen, &over, pixel, pixel, &[], false, true);
+    assert_ne!(
+        clicked.cursor,
+        egui::CursorIcon::Default,
+        "no handle under the feature"
+    );
+    assert_eq!(clicked.edit, None, "a click edited the patch");
+    assert_eq!(clicked.select_point, None, "the click reached the feature");
+
+    // Applied as the dock applies a response, the item stays focused.
+    if let Some(point) = clicked.select_point {
+        state.select_point(crate::scene::PointRef::new(id, point));
+    }
+    assert_eq!(state.focused_item_label(id), Some(label.as_str()));
+}
+
 /// Every sighting of a point at infinity casts the same ray, so its widest pair
 /// is zero degrees whatever the baseline. The three stored numbers are that
 /// direction and not a place: subtracting a camera centre from them measures the
@@ -3225,7 +3312,7 @@ fn the_locked_ghost_draws_a_centre_mark_at_the_ghost_opacity() {
             unseen,
             BenchMenu {
                 busy: None,
-                active_track: Some(&track),
+                focused_track: Some(&track),
                 lock,
                 create_track: None,
             },
@@ -3241,7 +3328,7 @@ fn the_locked_ghost_draws_a_centre_mark_at_the_ghost_opacity() {
     for lock in [true, false] {
         let menu = BenchMenu {
             busy: None,
-            active_track: Some(&track),
+            focused_track: Some(&track),
             lock,
             create_track: None,
         };
@@ -3400,7 +3487,7 @@ fn the_normal_is_drawn_in_member_images_and_in_the_locked_ghost() {
     let track = on_bench(&state, id, &label);
     let menu = |lock| BenchMenu {
         busy: None,
-        active_track: Some(&track),
+        focused_track: Some(&track),
         lock,
         create_track: None,
     };
@@ -3491,7 +3578,7 @@ fn the_normal_is_hidden_end_on_absent_at_the_cluster_stage_and_not_offered_unloc
             member,
             BenchMenu {
                 busy: None,
-                active_track: Some(track),
+                focused_track: Some(track),
                 lock: true,
                 create_track: None,
             },

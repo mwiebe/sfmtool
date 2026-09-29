@@ -604,8 +604,8 @@ pub struct AppState {
 
     /// Full-resolution source images decoded to CPU pixels (RGB `ImageU8`) and
     /// pyramided at the decode. `None` = decode failed (don't retry). Shared by
-    /// ImageDetail (builds its GPU texture from level 0) and PointTrackView
-    /// (CPU-samples it to render per-observation patch tiles). Cleared when the
+    /// ImageDetail (builds its GPU texture from level 0) and Track View
+    /// (CPU-samples it to render per-observation tiles and crops). Cleared when the
     /// scene changes.
     ///
     /// A [`ImageU8Pyramid`] rather than the bare photograph because the
@@ -732,14 +732,55 @@ pub struct AppState {
     /// [`crate::bench::live`].
     pub(crate) bench_evaluations: crate::bench::live::Evaluations,
 
-    /// Which observations of the active bench track are selected: Track
+    /// Which observations of the focused bench track are selected: Track
     /// View's highlighted rows, which *Split off N rows* reads and the 3D
     /// viewer's bench figure draws larger when there is exactly one.
     ///
     /// Part of the bench, but not of a version: selecting pushes none and an
     /// undo does not restore it. Undo, redo and a jump clear it instead, as
-    /// does a change of active item. See [`crate::bench::BenchRows`].
+    /// does a change of focused item. See [`crate::bench::BenchRows`].
     pub(crate) bench_rows: Option<crate::bench::BenchRows>,
+
+    /// What Track View edits while its *Edit* box is ticked: at most one item,
+    /// on one node's bench, for the whole viewer.
+    ///
+    /// Beside the selection rather than in a version: focusing and unfocusing
+    /// push none, and an undo does not restore it. Changed only through
+    /// [`AppState::set_focused_item`], so the selected observations go with
+    /// it. See [`crate::bench::FocusedItem`].
+    ///
+    /// While an item is focused, the selected node is its node and the
+    /// selected point is its origin followed to the cursor, or no point: the
+    /// selection setters unfocus the item when a selection would break that
+    /// ([`AppState::select_point`], [`AppState::select_recon`],
+    /// [`AppState::select_image`], [`AppState::select_camera`]), and focusing
+    /// selects the item's node and origin.
+    pub(crate) focused_item: Option<crate::bench::FocusedItem>,
+
+    /// Every item focused this session, most recently focused first, each
+    /// once: what ticking Track View's *Edit* box with no point selected
+    /// focuses the first of ([`AppState::most_recent_item`]).
+    ///
+    /// Session state, not part of any version. An entry is moved to the front
+    /// whenever its item is focused, and dropped when its node is closed. It
+    /// is not dropped when the item leaves the bench, since an undo can put
+    /// the item back; a reader skips an entry whose item is not on its
+    /// node's bench at the cursor.
+    pub(crate) recent_items: Vec<crate::bench::FocusedItem>,
+
+    /// The viewed tracks: the selected point read as an editable track off
+    /// every bench, for the last few points Track View showed, and which of
+    /// them is current. Session state, not part of any version. See
+    /// [`crate::bench::viewed`].
+    pub(crate) viewed_tracks: crate::bench::viewed::ViewedTracks,
+
+    /// The bars Track View's threshold boxes hold while it shows the viewed
+    /// track. They judge the readings drawn and change no verdict; a put of
+    /// the viewed point carries them onto the new track when they differ from
+    /// the defaults ([`AppState::put_point_on_bench`]). Session state, starting
+    /// at the bench's default bars, and set only through
+    /// [`AppState::set_viewed_thresholds`].
+    pub(crate) viewed_thresholds: sfmtool_core::bench::Thresholds,
 }
 
 /// What the viewer says about a live MCP endpoint.
@@ -846,6 +887,10 @@ impl AppState {
             wake: None,
             bench_evaluations: Default::default(),
             bench_rows: None,
+            focused_item: None,
+            recent_items: Vec::new(),
+            viewed_tracks: Default::default(),
+            viewed_thresholds: Default::default(),
         }
     }
 
@@ -860,6 +905,9 @@ impl AppState {
         node.label = unique_label(&self.scene, &node.label);
         let id = node.id;
         self.scene.push(node);
+        // Selecting the new node unfocuses an item on another, and that row is
+        // written: leaving an item is not implied by the file's arrival.
+        self.unfocus_off_node(id);
         // Muted: arriving *is* a selection change, but the caller's own entry
         // ("Opened x from …", "Loaded demo data") is the action,
         // and a `Selected reconstruction x` beneath it would say nothing more.
@@ -942,6 +990,9 @@ impl AppState {
         self.hovered_image = None;
         self.hovered_point = None;
         self.bench_rows = None;
+        self.focused_item = None;
+        self.recent_items.clear();
+        self.viewed_tracks.clear();
         self.sift_cache.clear();
         self.sift_indexes.clear();
         self.cluster_patches.clear();
@@ -973,6 +1024,9 @@ impl AppState {
         self.hovered_image = self.hovered_image.filter(|i| i.recon != id);
         self.hovered_point = self.hovered_point.filter(|p| p.recon != id);
         self.bench_rows = self.bench_rows.take().filter(|rows| rows.recon != id);
+        self.focused_item = self.focused_item.filter(|focused| focused.node != id);
+        self.recent_items.retain(|recent| recent.node != id);
+        self.viewed_tracks.forget_node(id);
     }
 
     /// Take the panel's own reading of the view it drew, with the dock rectangle
@@ -1012,7 +1066,11 @@ impl AppState {
     /// invariant is that all finer selection state lives inside the selected
     /// reconstruction, so no two panels ever show different files' selections.
     /// Hover is exempt — it is transient and may touch any visible node.
+    ///
+    /// A focused item on another node is unfocused, since the selected node
+    /// is the focused item's while one is focused.
     pub fn select_recon(&mut self, id: ReconId) {
+        self.unfocus_off_node(id);
         let moved = self.selected_recon != Some(id);
         self.selected_recon = Some(id);
         self.selected_image = self.selected_image.filter(|i| i.recon == id);
@@ -1080,7 +1138,14 @@ impl AppState {
     /// says nothing about the lens, and collapsing the intrinsics with it
     /// would be a surprise. A second `Esc`, finding no image, clears the
     /// camera through [`AppState::select_camera`].
+    ///
+    /// An image of another node than the focused item's unfocuses the item;
+    /// an image of its own node keeps it focused, which is how a person moves
+    /// between the photographs an item is being worked on in.
     pub fn select_image(&mut self, image: Option<ImageRef>) {
+        if let Some(image) = image {
+            self.unfocus_off_node(image.recon);
+        }
         let moved = self.selected_image != image;
         let had_one = self.selected_image.is_some();
         self.selected_image = image;
@@ -1173,7 +1238,13 @@ impl AppState {
     /// place `selected_camera` is set to a camera: everything else — the
     /// recon-scoped filters, [`AppState::select_image`] — either clears it or
     /// derives it from an image, so the invariant has one door.
+    ///
+    /// A camera of another node than the focused item's unfocuses the item,
+    /// as [`AppState::select_image`] does.
     pub fn select_camera(&mut self, camera: Option<CameraRef>) {
+        if let Some(camera) = camera {
+            self.unfocus_off_node(camera.recon);
+        }
         let moved = self.selected_camera != camera;
         let had_one = self.selected_camera.is_some() || self.selected_image.is_some();
         self.selected_camera = camera;
@@ -1290,7 +1361,19 @@ impl AppState {
     }
 
     /// Select a 3D point, and with it the reconstruction that owns it.
+    ///
+    /// **Selecting any point but the focused item's origin unfocuses the
+    /// item**, with its `Stopped editing` row before the selection's own, and
+    /// pushes no version. Every point selection gesture comes through here: a
+    /// click in the 3D viewer or Image Detail, Go to Point, the wire's
+    /// `select_point`, and the commit, which re-seats the item's origin on the
+    /// point it wrote before selecting it and so keeps the item focused. The
+    /// selection that follows the point maps after an edit assigns
+    /// `selected_point` directly, and does not unfocus.
     pub fn select_point(&mut self, point: PointRef) {
+        if self.focused_item().is_some() && self.focused_origin() != Some(point) {
+            self.leave_focused_item();
+        }
         let moved = self.selected_point != Some(point);
         self.selected_point = Some(point);
         self.selected_recon = Some(point.recon);

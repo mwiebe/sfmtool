@@ -97,7 +97,14 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           normal and half_extent; null with no patch frame) with its \
                           normal_confidence, and its full track — every observing camera image \
                           with the pixel it was seen at and that observation's reprojection \
-                          error.",
+                          error. When the point is the one Track View is showing with Edit \
+                          clear (the viewed point), the reply adds an evaluation block: the \
+                          point read as a bench track and evaluated live, off the bench, with \
+                          its rows in get_bench_track's shape, its state (current, evaluating, \
+                          refused, failed) and reason, the read-only bars Track View's \
+                          threshold boxes hold, and each row's verdict_by_bars (in, out, or \
+                          null where unmeasured). While evaluating, the measurements are the \
+                          last ones landed. Any other point has no evaluation block.",
             kind: Read,
             schema: object(&[], &[("point", point_schema())]),
         },
@@ -235,8 +242,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             name: "get_bench",
             description: "The bench beside one reconstruction: every item on it by label, with \
                           its kind, the stage it is at, the point it came from where it came \
-                          from one, its observation and verdict counts, and which item of each \
-                          kind is active. The bench is a place beside the reconstruction rather \
+                          from one, its observation and verdict counts, and focused_item: the \
+                          focused item's label when it is on this bench, else null. The bench is a place beside the reconstruction rather \
                           than part of it — nothing on it is saved, and a commit is how it \
                           reaches the file.",
             kind: Read,
@@ -249,7 +256,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           whose normal is the one tilt_bench_patch takes), the point \
                           it came from, the thresholds, the observations selected in Track \
                           View (selected_observations, which select_bench_observations sets; \
-                          empty on a track that is not active), and every observation with what put it \
+                          empty on a track that is not focused), and every observation with what put it \
                           there, the verdict on it, where it sits and whatever each stage has \
                           measured about it. The measurements are kept evaluated: every change \
                           to the track, its max_shift_px bar among them since that is the radius \

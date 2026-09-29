@@ -5,9 +5,9 @@
 //! on, and the [`EditableTrack`] that is the first kind of thing put there.
 //!
 //! `specs/core/bench/bench.md` and `specs/core/bench/editable-track.md` are the
-//! design. A [`Bench`] is an ordered list of labelled items with, per kind of
-//! item, the label of the active one; an item is not part of the
-//! reconstruction, so nothing here writes one except
+//! design. A [`Bench`] is an ordered list of labelled items and nothing else;
+//! which item a caller works on is the caller's to hold. An item is not part of
+//! the reconstruction, so nothing here writes one except
 //! [`commit`](commit::commit), which is the one step that does.
 //!
 //! Everything in this module is a plain value or a pure function over one. No
@@ -54,7 +54,7 @@ pub mod track_at_pixel;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub use classify::{
@@ -118,10 +118,10 @@ pub use track_at_pixel::{
 
 /// One thing on the bench.
 ///
-/// An `enum` with one variant today. The point of the enum is that the list,
-/// the labels and the activation belong to the [`Bench`] and not to the value
-/// being worked on, so a second kind of item joins by adding a variant and its
-/// own active label rather than by widening the track.
+/// An `enum` with one variant today. The point of the enum is that the list and
+/// the labels belong to the [`Bench`] and not to the value being worked on, so
+/// a second kind of item joins by adding a variant rather than by widening the
+/// track.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BenchItem {
     /// A track being worked on.
@@ -130,8 +130,8 @@ pub enum BenchItem {
 
 /// Which kind of item something is, without its value.
 ///
-/// The bench holds one active label per kind, and each kind is edited in a
-/// panel of its own, so the kind is what an activation is keyed by.
+/// Each kind is edited in a panel of its own, and a step's report names the
+/// kind of item it put on or took off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ItemKind {
     /// [`BenchItem::Track`].
@@ -162,6 +162,45 @@ impl BenchItem {
     }
 }
 
+/// The identity of one item on a bench, which stays the same while its label
+/// changes.
+///
+/// A label changes on [`Bench::rename`], and an undo across a rename changes it
+/// back, so a caller that holds on to an item between frames (a selection, a
+/// list of recent items, a cached evaluation) holds its `ItemId` and asks the
+/// bench for the current label with [`Bench::label_of`]. The label stays what a
+/// log row, a tab and a wire call name the item by.
+///
+/// [`Bench::put`] mints each ID from one counter shared by the whole process,
+/// so an ID is never given out twice, not even on another bench. A caller that
+/// keeps benches as versions can undo past a put, drop the redo versions with
+/// a new put, and still never see the new item take the ID of the one it
+/// replaced in history. [`Bench::replace`] and [`Bench::rename`] keep the ID;
+/// [`Bench::discard`] takes it off with the item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ItemId(u64);
+
+/// The next [`ItemId`] to give out. It starts at 1, so no ID is 0.
+static NEXT_ITEM_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ItemId {
+    /// An ID no item in this process has had before.
+    fn mint() -> Self {
+        ItemId(NEXT_ITEM_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The number the ID is.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ItemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
 /// An item on the bench, with the label it is named by everywhere.
 ///
 /// The label lives here rather than inside the item because uniqueness is a
@@ -169,6 +208,9 @@ impl BenchItem {
 /// origin, and neither knows about the other.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BenchEntry {
+    /// Minted by [`Bench::put`] and kept by every step that installs a new
+    /// value under the same entry, so it names the item across a rename.
+    pub id: ItemId,
     /// Unique on this bench, and how the item is named in a log row, on a tab
     /// and on the wire.
     pub label: String,
@@ -205,7 +247,11 @@ impl std::fmt::Display for BenchError {
 impl std::error::Error for BenchError {}
 
 /// The things being worked on beside one reconstruction, in the order they were
-/// put there, and which one of each kind is active.
+/// put there.
+///
+/// The bench is only its list: two benches are equal when their items are.
+/// Which item a caller is working on is the caller's to hold, and a step that
+/// puts an item on gives back the label it minted for that.
 ///
 /// A plain value: `Clone`, no interior mutability. Every operation returns the
 /// next bench rather than changing this one, and every item that the operation
@@ -219,10 +265,6 @@ impl std::error::Error for BenchError {}
 pub struct Bench {
     /// The items, oldest first.
     entries: Vec<BenchEntry>,
-    /// The active label per kind. A kind with no entry has no active item,
-    /// which is the state of an empty bench and of a bench after
-    /// [`Bench::deactivate`] or a discard of the active item.
-    active: BTreeMap<ItemKind, String>,
 }
 
 impl Bench {
@@ -267,15 +309,18 @@ impl Bench {
         self.get(label)?.as_track()
     }
 
-    /// The label of the active item of `kind`, or `None` when none is active:
-    /// the bench holds none of that kind, or holds some with none active.
-    pub fn active_label(&self, kind: ItemKind) -> Option<&str> {
-        self.active.get(&kind).map(String::as_str)
+    /// The ID of the item called `label`, or `None` when nothing is.
+    pub fn id(&self, label: &str) -> Option<ItemId> {
+        self.position(label).map(|i| self.entries[i].id)
     }
 
-    /// The active track, or `None` when no track is active.
-    pub fn active_track(&self) -> Option<&Arc<EditableTrack>> {
-        self.track(self.active_label(ItemKind::Track)?)
+    /// The label the item with ID `id` carries on this bench, or `None` when
+    /// no item on it has that ID.
+    pub fn label_of(&self, id: ItemId) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.label.as_str())
     }
 
     /// `base`, or the first free `"base (n)"` when `base` is already taken.
@@ -293,22 +338,24 @@ impl Bench {
             .expect("the candidate sequence is infinite")
     }
 
-    /// Put `item` on the bench under a label minted from `base`, make it the
-    /// active item of its kind, and give back the bench and the label it took.
+    /// Put `item` at the end of the bench under a label minted from `base`, and
+    /// give back the bench and the label it took.
+    ///
+    /// The item gets a new [`ItemId`], one no other item in the process has
+    /// had.
     pub fn put(&self, base: &str, item: BenchItem) -> (Bench, String) {
         let label = self.mint_label(base);
-        let kind = item.kind();
         let mut next = self.clone();
         next.entries.push(BenchEntry {
+            id: ItemId::mint(),
             label: label.clone(),
             item,
         });
-        next.active.insert(kind, label.clone());
         (next, label)
     }
 
     /// Put the value called `label` back with `item` in its place, leaving the
-    /// order, the label and the activation as they were.
+    /// order, the label and the [`ItemId`] as they were.
     ///
     /// What a step on one item is installed with: the item is a new `Arc` and
     /// every other is the old one.
@@ -321,50 +368,23 @@ impl Bench {
         Ok(next)
     }
 
-    /// Make the item called `label` the active one of its kind.
-    pub fn activate(&self, label: &str) -> Result<Bench, BenchError> {
-        let at = self
-            .position(label)
-            .ok_or_else(|| BenchError::NoSuchItem(label.to_string()))?;
-        let mut next = self.clone();
-        next.active
-            .insert(next.entries[at].item.kind(), label.to_string());
-        Ok(next)
-    }
-
-    /// The bench with no active item of `kind`, every item left where it is.
+    /// Take the item called `label` off the bench, every other item keeping its
+    /// place.
     ///
-    /// Every item is the same `Arc` in both benches. A bench with nothing of
-    /// `kind` active gives back an equal bench, which is how a caller tells a
-    /// deactivation that had no effect.
-    pub fn deactivate(&self, kind: ItemKind) -> Bench {
-        let mut next = self.clone();
-        next.active.remove(&kind);
-        next
-    }
-
-    /// Take the item called `label` off the bench.
-    ///
-    /// When it was the active item of its kind, nothing of that kind is active
-    /// afterwards: the activation is not handed to a neighbour, because the
-    /// item that would arrive is one nobody asked for. Its label is free to be
-    /// minted again, because it names nothing now.
+    /// Its label is free to be minted again, because it names nothing now.
     pub fn discard(&self, label: &str) -> Result<Bench, BenchError> {
         let at = self
             .position(label)
             .ok_or_else(|| BenchError::NoSuchItem(label.to_string()))?;
-        let kind = self.entries[at].item.kind();
         let mut next = self.clone();
         next.entries.remove(at);
-        if next.active.get(&kind).is_some_and(|l| l == label) {
-            next.active.remove(&kind);
-        }
         Ok(next)
     }
 
     /// Rename the item called `label` to `to`.
     ///
-    /// The old label then names nothing, and is free to be minted again.
+    /// The item keeps its [`ItemId`]. The old label then names nothing, and is
+    /// free to be minted again.
     pub fn rename(&self, label: &str, to: &str) -> Result<Bench, BenchError> {
         let at = self
             .position(label)
@@ -377,12 +397,8 @@ impl Bench {
                 return Err(BenchError::LabelTaken(to.to_string()));
             }
         }
-        let kind = self.entries[at].item.kind();
         let mut next = self.clone();
         next.entries[at].label = to.to_string();
-        if next.active.get(&kind).is_some_and(|l| l == label) {
-            next.active.insert(kind, to.to_string());
-        }
         Ok(next)
     }
 }

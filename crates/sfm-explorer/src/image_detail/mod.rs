@@ -10,7 +10,7 @@
 //! - [`overlay`] — the feature-overlay draw modes, hit-testing, and tooltip.
 //! - [`mod@intrinsics`] — the intrinsics overlay layer, drawn independently of
 //!   the feature mode and composing with whichever one is active.
-//! - [`mod@bench_track`]: the bench layer, the active editable track drawn
+//! - [`mod@bench_track`]: the bench layer, the focused editable track drawn
 //!   over everything else in the bench's own colours.
 //! - [`mod@view`] -- what the pan and the zoom mean, as a pure function over the
 //!   frame's geometry, so the row-click reveal and the wire's
@@ -184,7 +184,7 @@ pub struct ImageDetailResponse {
     /// Track View, so `show` keeps it for [`ImageDetail::take_cluster_start`].
     pub start_bench_cluster: Option<[f32; 2]>,
     /// The pixel the context menu's `Add observation to bench track here` was
-    /// clicked for: a candidate joins the bench's active track there.
+    /// clicked for: a candidate joins the focused item there.
     pub add_bench_observation: Option<[f32; 2]>,
     /// The pixel *Create Track Here* was asked for at, in source-image
     /// coordinates: the context menu's entry, at the pixel the menu was opened
@@ -207,11 +207,11 @@ pub struct ImageDetailResponse {
     /// ones committed, as one version.
     ///
     /// Applied by the dock, as `create_track_here` is: the step raises no
-    /// panel, and the active track's point becomes the selection, which Track
+    /// panel, and the focused item's point becomes the selection, which Track
     /// View already follows.
     pub find_nearby_tracks: Option<[f32; 2]>,
     /// A mark of the bench layer was clicked: select this observation's row of
-    /// the active track in Track View. The layer is on top, so a click it
+    /// the focused item in Track View. The layer is on top, so a click it
     /// catches leaves `select_point` alone.
     pub select_bench_row: Option<usize>,
     /// The edit a drag of one of the bench layer's handles just finished, in
@@ -406,6 +406,9 @@ impl ImageDetail {
         image_rect: egui::Rect,
         effective_scale: f32,
         response: &mut ImageDetailResponse,
+        // Set when the button came up this frame on a press a handle had
+        // taken: the click, if egui calls it one, is the handle's.
+        released: &mut bool,
     ) -> Option<bench_track::Handle> {
         // A drag that outlives the image it started in, or the track it was
         // editing, is dropped: its handle names something that is not up.
@@ -481,6 +484,7 @@ impl ImageDetail {
         // under it and leaves the track alone.
         if !down {
             if let Some(drag) = self.bench_drag.take() {
+                *released = true;
                 if drag.moved {
                     response.bench_edit = bench_track::Layer::edit(image_table, track, &drag, lock);
                 }
@@ -691,11 +695,15 @@ impl ImageDetail {
         //
         // A drag that began on a handle is an edit of the track and must not
         // also pan the photograph: the pointer can only mean one of the two,
-        // and what it means was decided where the button went down.
+        // and what it means was decided where the button went down. A click
+        // on a handle is the handle's in the same way: it selects no point
+        // under it and stages none, so a click on the focused item's own
+        // outline cannot pick a feature of another point and so unfocus it.
+        let mut handle_released = false;
         let hovered_handle = self.update_bench_drag(
             ui,
             &interact_response,
-            bench.active_track,
+            bench.focused_track,
             bench.lock,
             chord,
             &edited.base.image_table,
@@ -703,13 +711,14 @@ impl ImageDetail {
             image_rect,
             effective_scale,
             &mut response,
+            &mut handle_released,
         );
 
         // What a double-click means, settled before the view input runs and
         // against the geometry the gesture was made on: on a feature that
         // observes a point it is Edit on Bench, and anywhere else it is the
-        // zoom `handle_input` applies.
-        let double_click_point = (interact_response.double_clicked() && !chord)
+        // zoom `handle_input` applies. On a handle it is neither.
+        let double_click_point = (interact_response.double_clicked() && !chord && !handle_released)
             .then(|| self.point_under_pointer(ui, image_rect, effective_scale))
             .flatten();
         response.edit_on_bench = double_click_point;
@@ -727,7 +736,7 @@ impl ImageDetail {
             self.bench_drag.is_some(),
             // A Control+Shift double-click is two requests for a track, the
             // second refused while the first runs; it is not also a zoom.
-            double_click_point.is_some() || chord,
+            double_click_point.is_some() || chord || handle_released,
         );
 
         // Recompute image rect after pan/zoom changes from input
@@ -793,6 +802,11 @@ impl ImageDetail {
             intrinsics_readout.as_deref(),
             &mut response,
         );
+        // A click a handle took selects no feature's point: the handle is on
+        // top, and one click is one answer.
+        if handle_released {
+            response.select_point = None;
+        }
 
         // What the entries drawn on later frames act at. Recorded after the
         // draw, so an entry clicked on the frame the menu opened at reads the
@@ -825,7 +839,7 @@ impl ImageDetail {
         // The bench layer, last and over everything: it is about the track
         // being worked on rather than about the reconstruction, so no overlay
         // mode turns it off and none of them draws on top of it.
-        if let Some(track) = bench.active_track {
+        if let Some(track) = bench.focused_track {
             bench_track::draw(
                 &painter,
                 ui,

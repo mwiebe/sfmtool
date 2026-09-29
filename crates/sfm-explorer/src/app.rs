@@ -731,7 +731,7 @@ impl App {
             }
         }
 
-        // The bench's active track, as the figure the 3D viewer built out of
+        // The focused item, as the figure the 3D viewer built out of
         // what the dock handed it. Rebuilt and re-uploaded every frame rather
         // than gated on a change the way the rays are: the arrowhead's barbs
         // turn to face the eye, so a camera move alone invalidates it, and it
@@ -852,7 +852,7 @@ impl App {
             .update_track_ray_uniforms(queue, &self.viewer_3d.camera);
         self.scene_renderer.render_track_rays(encoder);
 
-        // The bench's active track, last of the post-EDL passes: it is the
+        // The focused item, last of the post-EDL passes: it is the
         // thing being worked on, so nothing the frame drew is over it.
         self.scene_renderer
             .update_bench_track_uniforms(queue, &self.viewer_3d.camera);
@@ -975,6 +975,10 @@ impl App {
                 // and nothing may: a tab that needs a layout operation reports
                 // it in its response struct and the frame applies it after.
                 let mut dock = std::mem::replace(&mut app_state.dock, DockState::new(Vec::new()));
+                // Track View asks for the viewed track again when it draws, so
+                // a frame in which it is hidden leaves none current and the
+                // live evaluation drops it (`crate::bench::viewed`).
+                app_state.hide_viewed_track();
                 let mut tab_context = TabContext {
                     state: app_state,
                     viewer_3d,
@@ -1226,7 +1230,7 @@ fn note_upload(phase: &mut Phase<'_>, did: Uploaded, unit: &str, units: &str) {
 ///
 /// A double-click arrives as two clicks, and the first of them already selected
 /// the point, so the selection here moves nothing and writes no second Action
-/// Log row. Staging a point a track already came from activates that track
+/// Log row. Staging a point a track already came from focuses that track
 /// rather than putting a second one on ([`crate::state::AppState`]'s bench),
 /// so a double-click on a point already on the bench raises the panel on the
 /// item that is there.
