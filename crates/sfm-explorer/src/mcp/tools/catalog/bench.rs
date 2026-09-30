@@ -753,6 +753,66 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "fit_bench_track_normal",
+            description: "Estimate which way a track-stage bench track's patch faces and turn \
+                          it there, keeping its centre; Track View's Fit Normal, Finite Diff \
+                          Normal and Grid Plane Normal. method \"photometric\" searches for \
+                          the normal at which the in sightings agree best, within about 25 \
+                          degrees of the patch's normal and of the mean viewing direction, so \
+                          a normal further away is reached by calling it again. method \
+                          \"finite_difference\" fits a row of pieces square pieces through the \
+                          centre along each of the patch's two axes and turns the patch to \
+                          the plane through the two lines their fitted centres lie on; method \
+                          \"grid_plane\" fits a pieces-by-pieces grid tiling the whole patch \
+                          and turns it to the least-squares plane through every fitted \
+                          centre. For both, neighbouring pieces overlap by overlap_percent of \
+                          a piece's side, and where the fitted centres give only one line the \
+                          tilt about that line is left as it was. Every method's turn stops \
+                          where any observation's camera would see the patch past the tilt \
+                          cap, and the step ends by reading the track back and fusing its \
+                          bitmap. Refused at the cluster stage, at infinity, and with fewer \
+                          than two in observations. Runs on a worker thread and answers as \
+                          fit_bench_track does.",
+            kind: Write,
+            schema: object(
+                &[
+                    ("track", bench_track_schema()),
+                    (
+                        "pieces",
+                        json!({
+                            "type": "integer",
+                            "minimum": sfmtool_core::bench::normal::MIN_PIECES,
+                            "maximum": sfmtool_core::bench::normal::MAX_PIECES,
+                            "description": "finite_difference and grid_plane only: how many \
+                                            pieces along each axis. Default 2.",
+                        }),
+                    ),
+                    (
+                        "overlap_percent",
+                        json!({
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": sfmtool_core::bench::normal::MAX_OVERLAP * 100.0,
+                            "description": "finite_difference and grid_plane only: how much \
+                                            neighbouring pieces overlap, in percent of a \
+                                            piece's side. Default 0.",
+                        }),
+                    ),
+                ],
+                &[
+                    ("reconstruction_label", edited_label_schema()),
+                    (
+                        "method",
+                        json!({
+                            "type": "string",
+                            "enum": ["photometric", "finite_difference", "grid_plane"],
+                            "description": "How the normal is estimated.",
+                        }),
+                    ),
+                ],
+            ),
+        },
+        ToolSpec {
             name: "set_bench_track_stage",
             description: "Move a bench track between its two representations. \"track\" \
                           triangulates the in observations, fits a patch to them and localizes \
