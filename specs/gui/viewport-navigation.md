@@ -84,7 +84,10 @@ Two entries, in this order:
 `Edit on Bench` is what ticking Track View's *Edit* box over the selected
 point does, reached from the viewport: `AppState::put_point_on_bench`, which
 focuses the item already there when one came from that point. It raises that
-panel afterwards because this gesture is made somewhere the panel is not. Both entries are drawn and greyed
+panel afterwards because this gesture is made somewhere the panel is not,
+unless Track View is a tab behind the 3D viewer in its own node, where a raise
+would hide the viewport ([panel-layout.md](panel-layout.md) § "A raise from a
+gesture"). Both entries are drawn and greyed
 while an operation is running on the node, carrying the state's own busy
 sentence.
 
@@ -438,7 +441,11 @@ keeps your orientation, rather than snapping to a fixed viewpoint.
 
 ### Algorithm
 
-1. Transform all visible points into **camera space** (right / up / forward axes)
+1. Read all visible points on the camera's **right / up / forward axes**,
+   measured from one of the points rather than from the camera. Only the
+   camera's orientation enters the fit, and measuring from a camera far from
+   the points (one left framing a node drawn at a huge scale) would round away
+   the differences between them
 2. Sort each axis independently and compute a **percentile bounding box**
    using the 20th–80th percentile range, which automatically ignores outliers
 3. Find the center of the percentile box in camera space (cx, cy, cz)

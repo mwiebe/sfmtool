@@ -4568,6 +4568,13 @@ fn a_translation_refuses_a_displacement_that_is_not_one_and_a_bearing_along_its_
             Err(TrackEditError::BadDisplacement(_))
         ));
     }
+    // Finite components whose length is not: the move would carry the patch
+    // past every distance the bench measures. The refusal stays short.
+    let Err(error) = translate_patch(&track, &edited, Vector3::new(1e300, 0.0, 0.0)) else {
+        panic!("a displacement of 1e300 was taken");
+    };
+    assert!(matches!(error, TrackEditError::BadDisplacement(_)));
+    assert_eq!(error.to_string(), "(1e300, 0, 0) is not a displacement");
     assert!(matches!(
         translate_patch(
             &as_bearing(&track, &edited),
@@ -4876,6 +4883,12 @@ fn a_tilt_refuses_a_normal_that_is_not_one_a_bearing_and_a_cluster() {
             "{normal:?} was taken for a direction",
         );
     }
+    // The refusal echoes the numbers in exponent notation where `{}` would
+    // spell out three hundred zeros.
+    let Err(error) = tilt_patch(&track, &edited, Vector3::new(1e-300, 0.0, 0.0)) else {
+        panic!("a normal of length 1e-300 was taken for a direction");
+    };
+    assert_eq!(error.to_string(), "(1e-300, 0, 0) is not a direction");
     assert!(matches!(
         tilt_patch(
             &as_bearing(&track, &edited),

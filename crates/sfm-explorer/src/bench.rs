@@ -43,6 +43,7 @@ use sfmtool_core::bench::{
     Stage, StageKind, Thresholds, Verdict,
 };
 use sfmtool_core::features::kdforest::ImageKeypoints;
+use sfmtool_core::readable::Readable;
 use sfmtool_core::EditedReconstruction;
 
 use crate::action_log::{version_step_text, Kind};
@@ -741,7 +742,11 @@ impl AppState {
     /// The one exception is an item put on the bench while the node was
     /// `sift_files`, which has no patch frame: once the point has one, the
     /// item is rebuilt from it under its own label, keeping its edits, as one
-    /// version ([`Self::rebuilt_with_frame`]).
+    /// version ([`Self::rebuilt_with_frame`]). A caller that names a label
+    /// other than the one that track has is refused, naming the label it has,
+    /// rather than having the name it asked for dropped without a word: a
+    /// rename is its own step, and the item's label is what every earlier
+    /// version and log row calls it.
     ///
     /// Putting a point on the bench is allowed on a view-only bench
     /// ([`Self::bench_view_only_refusal`]): it is how the bench shows a point.
@@ -757,7 +762,15 @@ impl AppState {
         label: Option<&str>,
     ) -> Result<String, String> {
         let index = self.node_index(point.recon)?;
-        if let Some(label) = self.bench_item_from_point(point) {
+        if let Some(existing) = self.bench_item_from_point(point) {
+            if let Some(asked) = label.filter(|asked| *asked != existing) {
+                return Err(format!(
+                    "Point {} is on the bench already as {existing}, so it cannot go on as \
+                     {asked}; rename {existing} to call it {asked}.",
+                    point.point
+                ));
+            }
+            let label = existing;
             if let Some(track) = self.rebuilt_with_frame(point, &label) {
                 return self.reinstall_rebuilt(point, &label, track);
             }
@@ -1115,17 +1128,34 @@ impl AppState {
                 "Handed {name} back to the thresholds in {label}: {}",
                 next.observations[*observation].verdict
             ),
-            None => format!(
-                "Handed {} {} back to the thresholds in {label}: {} in, {} out",
-                report.unpinned,
-                if report.unpinned == 1 {
-                    "verdict"
-                } else {
-                    "verdicts"
-                },
-                report.turned_in,
-                report.turned_out
-            ),
+            None => {
+                // What moved, and then the track's totals, each said as what
+                // it is: a bare "0 in, 4 out" after a hand-back of every row
+                // reads as the totals while counting only the changes.
+                let moved = match (report.turned_in, report.turned_out) {
+                    (0, 0) => "none moved".to_string(),
+                    (n, 0) => format!("{n} turned in"),
+                    (0, n) => format!("{n} turned out"),
+                    (i, o) => format!("{i} turned in and {o} turned out"),
+                };
+                let total_in = next
+                    .observations
+                    .iter()
+                    .filter(|o| o.verdict == Verdict::In)
+                    .count();
+                format!(
+                    "Handed {} {} back to the thresholds in {label}: {moved}, leaving {} in, \
+                     {} out",
+                    report.unpinned,
+                    if report.unpinned == 1 {
+                        "verdict"
+                    } else {
+                        "verdicts"
+                    },
+                    total_in,
+                    next.observations.len() - total_in
+                )
+            }
         };
         let bench = install(&bench, label, next)?;
         self.push_bench_step(index, bench, text);
@@ -1265,10 +1295,10 @@ impl AppState {
                 let centre = report.center;
                 format!(
                     "Moved {label} by {:.3} units to ({:.3}, {:.3}, {:.3}){}",
-                    report.moved,
-                    centre.x,
-                    centre.y,
-                    centre.z,
+                    Readable(report.moved),
+                    Readable(centre.x),
+                    Readable(centre.y),
+                    Readable(centre.z),
                     clamp_note(report.clamped_from, report.pixel)
                 )
             }
@@ -1284,18 +1314,21 @@ impl AppState {
                 let by = report.by;
                 let across = by.x.hypot(by.y);
                 let how = if across == 0.0 && by.z != 0.0 {
-                    format!("{:.3} units along its normal", by.z)
+                    format!("{:.3} units along its normal", Readable(by.z))
                 } else if by.z == 0.0 {
-                    format!("{:.3} units", report.moved)
+                    format!("{:.3} units", Readable(report.moved))
                 } else {
                     format!(
-                        "{across:.3} units across its plane and {:.3} along its normal",
-                        by.z
+                        "{:.3} units across its plane and {:.3} along its normal",
+                        Readable(across),
+                        Readable(by.z)
                     )
                 };
                 format!(
                     "Moved {label} by {how} to ({:.3}, {:.3}, {:.3})",
-                    centre.x, centre.y, centre.z
+                    Readable(centre.x),
+                    Readable(centre.y),
+                    Readable(centre.z)
                 )
             }
             // The turn actually made, and the observation that cut it short
@@ -1575,6 +1608,8 @@ impl AppState {
     /// to in this image, so it starts at the scale the node already works at
     /// there. Applied by `app.rs` once the dock is back in the state, since the
     /// raise is a layout operation; a refusal is one failed row and no raise.
+    /// Track View is not raised over Image Detail when the two share a node
+    /// ([`Self::show_panel_beside`]).
     pub(crate) fn start_cluster_here(&mut self, image: ImageRef, pixel: [f32; 2]) {
         let radius = self.default_patch_radius(image);
         let seed = Seed::Pixel {
@@ -1582,7 +1617,9 @@ impl AppState {
             radius_px: Some(f64::from(radius)),
         };
         match self.start_bench_cluster(image, &seed, None) {
-            Ok(_) => self.show_panel(crate::dock::Tab::TrackView),
+            Ok(_) => {
+                self.show_panel_beside(crate::dock::Tab::TrackView, crate::dock::Tab::ImageDetail)
+            }
             Err(why) => self.action_log.fail(Kind::Bench, why),
         }
     }
