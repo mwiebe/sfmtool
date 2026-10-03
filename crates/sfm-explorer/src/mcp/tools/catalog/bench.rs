@@ -455,7 +455,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           the turned patch no longer projects into is left with no keypoint. \
                           The turn stops 80 degrees from any observation's camera, which is \
                           where that photograph would be looking along the surface rather than \
-                          at it, and the reply's sentence names the observation that stopped it. \
+                          at it, and the reply's sentence names the observation that stopped it; \
+                          the reply's normal is the unit normal the patch faces after the turn, \
+                          which differs from the one named when the turn was stopped. \
                           Nothing is pinned, and a track at infinity is refused: its normal is \
                           its own bearing. The turn drops the consensus bitmap, and the live \
                           evaluation fuses it again from the photographs as the patch now \

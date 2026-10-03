@@ -815,11 +815,13 @@ fn tilting_a_bench_patch_turns_its_normal_and_says_how_far() {
         json!({ "reconstruction_label": "run_a", "normal": [asked.x, asked.y, asked.z] }),
     );
     assert_eq!(tilted["item"], json!(item), "{tilted}");
-    assert_eq!(
-        tilted["normal"],
-        json!([asked.x, asked.y, asked.z]),
-        "{tilted}"
-    );
+    // The reply's normal is the unit one the patch took, not the length named.
+    let replied = &tilted["normal"];
+    let unit = asked.normalize();
+    for (axis, want) in [unit.x, unit.y, unit.z].into_iter().enumerate() {
+        let got = replied[axis].as_f64().expect("a number");
+        assert!((got - want).abs() < 1e-9, "{tilted}");
+    }
     assert_eq!(tilted["changed"], json!(true), "{tilted}");
     assert_eq!(version_count(&state), before + 1);
     assert_eq!(
@@ -997,6 +999,20 @@ fn a_tilt_past_what_the_observations_can_see_stops_and_names_the_image() {
         now.normal().dot(&across) < 0.9,
         "the turn was not capped at all",
     );
+    // The reply reports the normal the patch stopped at, not the one named.
+    let replied: Vec<f64> = tilted["normal"]
+        .as_array()
+        .expect("a normal")
+        .iter()
+        .map(|c| c.as_f64().expect("a number"))
+        .collect();
+    let replied = nalgebra::Vector3::new(replied[0], replied[1], replied[2]);
+    assert!(
+        (replied - now.normal()).norm() < 1e-9,
+        "the reply says {replied:?}, the patch faces {:?}",
+        now.normal(),
+    );
+    assert!((replied - across).norm() > 0.1, "{tilted}");
 }
 
 /// A track at infinity has no normal standing off it to turn -- a direction
