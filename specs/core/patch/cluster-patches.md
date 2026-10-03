@@ -256,11 +256,13 @@ members unless a caller asks otherwise:
   rule above: by default it also admits the members rejected for a low ZNCC or
   a large shift and the unevaluated ones, and lets the triangulation drop the
   bad ones; its `kept` policy admits only the reference and the kept.
-- [Source clusters](../analysis/source-clusters.md) reads the refine radius from
-  the `cluster_patches/` metadata to band clusters by feature radius.
+- [Source clusters](../analysis/source-clusters.md) takes a cluster selection
+  drawn from the file and bands its clusters by feature radius, read off the
+  members' affine shapes against the refine radius recorded in the
+  `cluster_patches/` metadata.
 - The viewer builds a cluster-patches file beside each reconstruction as one of
-  its [index files](../../gui/index-files.md), and its steps listed above read
-  the file from there.
+  its [index files](../../gui/index-files.md). Resect Image and Create Track
+  Here, which runs the track-at-pixel cascade, read the file from there.
 
 `sfm match --derive-pairs`, `sfm embed-patches` and `sfm solve` do not read the
 patch statuses or warps: the derived pairs come from every member of every
