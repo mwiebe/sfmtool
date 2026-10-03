@@ -434,8 +434,9 @@ each with its message:
 
 - `sfm_explorer_layout`, when present, is a number and equals `2`: `Layout
   version 3 is newer than this viewer reads (2)`, or `Layout version 1 is not one
-  this viewer reads (2)`. There is no upgrade path from version 1: it is the
-  panel-only document, a different shape rather than a different key.
+  this viewer reads (2)`. A tag that is not a non-negative JSON integer (a string,
+  `2.0`, `-1`) is `Not a layout file`. There is no upgrade path from version 1:
+  it is the panel-only document, a different shape rather than a different key.
 - The tag is **optional**, so that a document carrying only what it wants
   changed is a document. A JSON file that carries no tag, no `window` and no
   `layout` and yet has keys of its own is not a layout at all: `Not a layout
