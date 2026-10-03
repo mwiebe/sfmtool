@@ -3936,7 +3936,7 @@ fn a_resize_from_an_edge_holds_the_far_edge_of_a_direction_patch_too() {
     );
 }
 
-// ---- The world-point forms the 3D viewer names ----------------------------
+// ---- The world-unit forms the 3D viewer names -----------------------------
 
 /// The same track with its patch turned into a bearing along its own
 /// direction, and every sighting's keypoint put back on the bearing's own
@@ -3971,9 +3971,8 @@ fn as_bearing(track: &EditableTrack, edited: &EditedReconstruction) -> EditableT
     track
 }
 
-/// The place named is projected onto the plane before anything moves, so a
-/// point off the plane slides the patch to the place directly under it and the
-/// patch never leaves the plane it is in.
+/// A `by` with no normal part moves the centre by exactly that much along `u`
+/// and `v`, keeps the plane it is in, and carries every sighting with it.
 #[test]
 fn a_translation_across_the_plane_moves_the_centre_and_every_sighting() {
     let scene = Scene::new();
