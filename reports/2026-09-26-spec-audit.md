@@ -410,6 +410,7 @@ most of the per-sentence findings.
 **Recommendation:** update spec. Also update code: fix the binding seed docstring and decide on the 60-image cap.
 
 ### specs/cli/colmap-interop/to-colmap-bin-command.md
+> _Status (2026-10-03): **Done** — the spec has the proposed opening, the non-`.sfmr` input usage error, a Feature sources section (`.sift` files needed for `sift_files`, synthetic indices for `embedded_patches`), a Points at infinity section, an Implementation section that credits `_range_options.apply_range_filter` without the residue sentence, and a Testing section naming `tests/test_colmap_interop.py`; the `subset_by_image_indices` row in `xform-command.md` (the Unclear item) says it works for both feature sources, PR #696._
 **Summary:** The options, defaults, range semantics, output files and coordinate conventions all match. Three behaviours are missing, and the Implementation section is stale.
 **Implementing code:** `_commands/to_colmap_bin.py`, `_commands/_range_options.py` (shared with `to-nerfstudio`), `colmap/io.py:754` `save_colmap_binary`, `:116` `materialize_infinity_for_export`, `reconstruction/edit.rs:267` `subset_by_image_indices`.
 **Inconsistencies:**
@@ -874,6 +875,7 @@ and the opening paragraphs listed in check 4.
 - **`specs/cli/image-feature/match-command.md`:** `_run_matching` records `matcher_options["min_size"]` (`feature_match/_run.py:42, 95`), but no flag sets it and the Options table does not mention it. Document it as fixed at 2, or expose it.
   > _Status (2026-10-03): **Done** — `match-command.md` § Options now says `--cluster`'s minimum cluster size is fixed at 2, has no flag, and is recorded as `min_size` in the matcher options, PR #695._
 - **`specs/cli/colmap-interop/from-colmap-bin-command.md`:** does not mention the `UsageError` for a non-`.sfmr` output (`from_colmap_bin.py:84-85`).
+  > _Status (2026-10-03): **Done** — the `--output` row of the Options table says a non-`.sfmr` extension is a usage error, PR #696._
 - **`specs/gui/panel-layout.md`:** :435-438 omit that a non-numeric `sfm_explorer_layout` value produces `Not a layout file` (`layout.rs:620-621`).
 - **`specs/core/patch/cluster-patches.md`:** :228 "## Consumers (future work, out of scope here)" is a future-work list in a standing spec. Move it to a draft.
 
