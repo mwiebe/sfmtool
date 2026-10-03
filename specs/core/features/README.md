@@ -13,6 +13,6 @@ from `src/sfmtool/feature_match/`.
 | [track-cluster-matching.md](track-cluster-matching.md) | Cluster-centric alternative to pair-centric matching: build track clusters directly, verify afterwards. |
 | [cluster-covisibility.md](cluster-covisibility.md) | How many clusters each image pair shares, and the grouping queries consumers build on that. |
 | [covisibility-selection.md](covisibility-selection.md) | Three primitives over that structure: appearance displacement, redundancy thinning, and reach. |
-| [optical-flow.md](optical-flow.md) | Pure-Rust DIS dense optical flow on the CPU, used as a candidate track generator. |
+| [optical-flow.md](optical-flow.md) | Pure-Rust DIS dense optical flow on the CPU, used for flow-based matching, motion analysis of image sequences and `sfm flow`. |
 | [gpu-optical-flow.md](gpu-optical-flow.md) | The wgpu compute-shader implementation of the same DIS pipeline. |
 | [flow-based-matching.md](flow-based-matching.md) | Matching driven by optical flow instead of descriptor search (`sfm match --flow`). Python pipeline. |
