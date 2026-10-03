@@ -1,5 +1,13 @@
 # Cluster Patches: SIFT Clusters → Patch Clusters
 
+A patch cluster is a group of matched keypoints, each a position and a 2×2
+affine shape (for example SIFT detections read from `.sift` files), refined
+against the image pixels: one member is the reference, and every other kept
+member carries a photometrically refined affine warp that maps the reference's
+patch into that member's image. This spec covers how a `.matches` file stores clusters and patch
+clusters, and the `sfm cluster-patches` operation that produces the second from
+the first.
+
 ## The Idea
 
 [Track-cluster matching](../features/track-cluster-matching.md) materializes candidate
@@ -225,20 +233,45 @@ repo's pattern. The kernel itself — Rust signatures, algorithm, bindings,
 numerics and tests — is specified in
 [cluster-patch-refinement.md](cluster-patch-refinement.md).
 
-## Consumers (future work, out of scope here)
+## Consumers
 
-- **Photometric verification as a TVG alternative/complement**: patch-vetted
-  clusters → expanded pairs skip or soften descriptor-distance and geometric
-  gates.
-- **Surfel seeding**: after a solve, patch clusters seed `embed-patches`
-  frames (scale/orientation per view already known) instead of re-deriving
-  everything from detections.
-- **Solver track seeds**: feed clusters (not pairs) to a track-native solver.
+These read a cluster-patches file and count only the `reference` and `kept`
+members unless a caller asks otherwise:
 
-Consumers that admit a subset of clusters (status/image/span predicates) use
-the file-level selection derivation specified in
-[cluster-selection.md](../../formats/cluster-selection.md) (file contract in
-[matches-file-format.md](../../formats/matches-file-format.md#cluster-selection-derived-files)).
+- [Cluster selection](../../formats/cluster-selection.md) derives a smaller
+  cluster file by status, image and span predicates (file contract in
+  [matches-file-format.md](../../formats/matches-file-format.md#cluster-selection-derived-files)).
+  Consumers that admit a subset of clusters use it.
+- [Cluster covisibility](../features/cluster-covisibility.md) counts the
+  clusters each image pair shares, to pick mutually overlapping image groups
+  before a solve.
+- [Resect Image](../../gui/edits/resect-image.md) uses each cluster as a track
+  of its own beside the reconstruction's tracks when it re-estimates an image's
+  pose.
+- The clusters stage of [building a track at a
+  pixel](../bench/track-at-pixel.md#the-members) carries a pixel into the other
+  members' images through their affine shapes.
+- The clusters source of the [matching sources near a
+  pixel](../bench/nearby-sources.md#the-clusters) triangulates the members of
+  the clusters near a pixel into candidate points. It is the exception to the
+  rule above: by default it also admits the members rejected for a low ZNCC or
+  a large shift and the unevaluated ones, and lets the triangulation drop the
+  bad ones; its `kept` policy admits only the reference and the kept.
+- [Source clusters](../analysis/source-clusters.md) takes a cluster selection
+  drawn from the file and bands its clusters by feature radius, read off the
+  members' affine shapes against the refine radius recorded in the
+  `cluster_patches/` metadata.
+- The viewer builds a cluster-patches file beside each reconstruction as one of
+  its [index files](../../gui/index-files.md). Resect Image and Create Track
+  Here, which runs the track-at-pixel cascade, read the file from there.
+
+`sfm match --derive-pairs`, `sfm embed-patches` and `sfm solve` do not read the
+patch statuses or warps: the derived pairs come from every member of every
+cluster in the file it is given, `embed-patches` builds each point's frame
+from the reconstruction's own tracks and their `.sift` keypoints, and `solve`
+refuses a cluster file. Using patch clusters in those three places is proposed
+in
+[../../drafts/cluster-patches-consumers-amendment.md](../../drafts/cluster-patches-consumers-amendment.md).
 
 ## Open questions
 
