@@ -462,7 +462,10 @@ Scene panel's per-node *Zoom to Fit*, the first-show framing and the MCP
 `set_view {fit}`) all read a node through `scene::FitPoints::of`, which splits
 its live points into the finite positions and the bearings of the points at
 infinity, each put through the node's transform (a bearing through its rotation
-alone, as the renderer draws it). `ViewportCamera::compute_fit` then decides:
+alone, as the renderer draws it).
+[`ViewportCamera`](../../crates/sfm-explorer/src/viewer_3d/camera.rs)`::compute_fit`
+([`viewer_3d/framing.rs`](../../crates/sfm-explorer/src/viewer_3d/framing.rs))
+then decides:
 
 - **There are finite points.** They are framed by the algorithm above, and the
   bearings are ignored. A reconstruction that mixes the two is framed on the

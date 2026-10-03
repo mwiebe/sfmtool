@@ -879,6 +879,7 @@ and the opening paragraphs listed in check 4.
 - **`specs/cli/colmap-interop/from-colmap-bin-command.md`:** does not mention the `UsageError` for a non-`.sfmr` output (`from_colmap_bin.py:84-85`).
   > _Status (2026-10-03): **Done** — the `--output` row of the Options table says a non-`.sfmr` extension is a usage error, PR #696._
 - **`specs/gui/panel-layout.md`:** :435-438 omit that a non-numeric `sfm_explorer_layout` value produces `Not a layout file` (`layout.rs:620-621`).
+  > _Status (2026-10-03): **Done** — the version-tag rule in § Validation now says a tag that is not a non-negative integer is `Not a layout file`, PR #698._
 - **`specs/core/patch/cluster-patches.md`:** :228 "## Consumers (future work, out of scope here)" is a future-work list in a standing spec. Move it to a draft.
 
 ### Code doc comments that repeat the spec (shrink to contract + link)
@@ -907,6 +908,7 @@ Fix one spec per PR.
 - `sfmr-file-format.md` § "Conversions happen at the I/O boundary" (:104) does not name `sfmtool-core/src/geometry/convention/`. Put it in the Implementations section that priority 3 asks for.
 - Smaller: `viewport-navigation.md` names `ViewportCamera` (:469) without linking `camera/viewport/`; `solve-command.md` does not name `_global_sfm.py` or `_incremental_sfm.py`; `match-command.md` does not state the geometric filter's model and thresholds (`feature_match/_geometric_filter.py`).
   > _Status (2026-10-03): **Done** for `match-command.md` — `sfm match` does not use `_geometric_filter.py` (only `sfm densify` does); the new § Geometric Verification says every verifying mode, `--derive-pairs` included, uses COLMAP's default `TwoViewGeometryOptions` and names the affine-shape filter's thresholds as belonging to `densify`, PR #695. The `viewport-navigation.md` and `solve-command.md` items are still open._
+  > _Status (2026-10-03): **Done** for `viewport-navigation.md` — it links `ViewportCamera` to `viewer_3d/camera.rs` and `compute_fit` to `viewer_3d/framing.rs` (the type lives in `sfm-explorer`'s `viewer_3d/`; `sfmtool-core/src/camera/viewport.rs` holds the `Camera` it wraps), PR #698. The `solve-command.md` item is still open._
 
 ### Specs the 2026-09-05 audit read
 
