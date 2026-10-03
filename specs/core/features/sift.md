@@ -165,8 +165,8 @@ Two rejections:
 
 ### 5. Orientation assignment
 
-At the Gaussian level nearest the keypoint's scale, precompute gradient magnitude and
-orientation:
+At the Gaussian level nearest the keypoint's scale, compute each pixel's gradient
+magnitude and orientation as the histogram window reads it (no gradient image is stored):
 
     m(x,y) = sqrt((L(x+1,y) − L(x−1,y))² + (L(x,y+1) − L(x,y−1))²)
     θ(x,y) = atan2(L(x,y+1) − L(x,y−1),  L(x+1,y) − L(x−1,y))

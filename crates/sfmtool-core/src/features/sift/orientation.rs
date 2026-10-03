@@ -12,8 +12,8 @@
 //! # Coordinate convention
 //!
 //! [`LocalizedKeypoint`] carries its location in **octave-pixel** coordinates
-//! (see `detect.rs`). The histogram window and the precomputed gradient images
-//! are sampled in those octave pixels; the keypoint's location is converted to
+//! (see `detect.rs`). The histogram window samples the Gaussian level's
+//! gradients in those octave pixels; the keypoint's location is converted to
 //! full-resolution image coordinates (COLMAP pixel-center convention) via
 //! [`ScaleSpace::octave_to_image`] only at the very end, when the
 //! [`SiftKeypoint`] is built.
