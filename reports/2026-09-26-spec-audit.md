@@ -874,6 +874,7 @@ and the opening paragraphs listed in check 4.
 - **`specs/cli/colmap-interop/from-colmap-bin-command.md`:** does not mention the `UsageError` for a non-`.sfmr` output (`from_colmap_bin.py:84-85`).
 - **`specs/gui/panel-layout.md`:** :435-438 omit that a non-numeric `sfm_explorer_layout` value produces `Not a layout file` (`layout.rs:620-621`).
 - **`specs/core/patch/cluster-patches.md`:** :228 "## Consumers (future work, out of scope here)" is a future-work list in a standing spec. Move it to a draft.
+  > _Status (2026-10-03): Done — § "Consumers" now lists the built consumers (cluster selection, cluster covisibility, Resect Image, the track-at-pixel clusters stage, source clusters, the viewer's index files) in the present tense with links, and says in one sentence that `--derive-pairs`, `embed-patches` and `solve` do not use patch clusters; the three unbuilt ideas moved to `specs/drafts/cluster-patches-consumers-amendment.md`, which links back. Branch `finding-bash-23-cluster-patches-future-work`._
 
 ### Code doc comments that repeat the spec (shrink to contract + link)
 
@@ -891,6 +892,7 @@ Fix one spec per PR.
 
 - `core/camera/camera-model-registry.md`. Proposed: *"A camera is represented two ways in sfmtool, a loosely-typed record mirroring the on-disk reconstruction and a closed enum the algorithms compute with; this spec says why the split is kept and how the conversion stays exhaustive and generated in one place."*
 - `core/patch/cluster-patches.md`. Proposed: *"A patch cluster is a group of matched features fitted to the actual image content: one member is the reference, and every other member carries a photometrically refined affine warp mapping the reference's patch into its image."*
+  > _Status (2026-10-03): Done — added an opening paragraph based on the proposal, saying "every other kept member" (rejected members are stored too) and naming what the spec covers. Branch `finding-bash-23-cluster-patches-future-work`._
 - `cli/reconstruction/embed-patches-command.md`. Proposed: *"Rewrites a reconstruction so it no longer depends on the .sift files it was solved from: each observation's pointer into a .sift file becomes an image patch and keypoint stored inline, producing a self-contained .sfmr."*
 - `core/spherical/per-spherical-tile-source-stack.md`. Proposed: *"Panorama work divides the sphere into small tiles and asks, per tile, what each source photograph saw in that direction; this gathers exactly that, each source warped into the tile's frame as an image pyramid."*
 - Lower priority: `flow-based-matching`, `affine-factorization`, `gui/action-log`, `gui/camera-intrinsics`, `gui/mcp-server`, `member-coherence-validation`, `gui/patch-rendering`, `cluster-patches-command`, `localize-keypoints-command`, `motion-command`, and the `specs/drafts/*-amendment.md` files, each of which opens "Amends [link]…".
