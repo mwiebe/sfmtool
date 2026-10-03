@@ -73,6 +73,12 @@ otherwise. The cluster matcher appends `-clusters` to the stem.
 | `--range / -r` | string | | Range expression for file numbers |
 | `--camera-model` | choice | auto | Camera model override (e.g., `SIMPLE_RADIAL`, `OPENCV`). Accepts the same 11 COLMAP model names as `solve` and `camrig create`. |
 
+`--cluster` has one more matcher option with no flag: the minimum cluster
+size, fixed at 2. A cluster is kept only when it spans at least two images,
+which is the smallest cluster that yields a pair match. The value is still
+recorded as `min_size` in the file's matcher options (with `mode`, `d`, `alpha`
+and `preset`), so a reader sees every parameter the clusters were built with.
+
 `--max-features` and `--range` describe an image set being matched, so
 `--derive-pairs` — whose image set is fixed by the clusters file it reads —
 rejects them. `--camera-model` feeds geometric verification, so `--cluster`,
@@ -90,6 +96,28 @@ model the two-view geometries are estimated with.
 `--cluster` is the exception: it opens no database and runs steps 1, 3 and 5
 only, because the clusters it writes carry neither descriptor distances nor
 two-view geometries.
+
+## Geometric Verification
+
+`--exhaustive`, `--sequential`, `--flow` and `--derive-pairs` verify their
+matches with COLMAP's two-view geometry estimation, run with the default
+`pycolmap.TwoViewGeometryOptions()`. `--exhaustive` and `--sequential` get it
+from `pycolmap.match_exhaustive` / `pycolmap.match_sequential`; `--flow` and
+`--derive-pairs` write their candidate matches into the database and call
+`pycolmap.verify_matches` on the matched pairs. sfmtool sets none of the
+verification options, so the models (fundamental, essential and homography
+matrices), the inlier thresholds and the minimum inlier count are COLMAP's
+defaults. The `.matches` file stores the candidate matches and, for each pair,
+the two-view geometry with its inlier matches. `--cluster` verifies nothing.
+
+The affine-shape filter in
+[`feature_match/_geometric_filter.py`](../../../src/sfmtool/feature_match/_geometric_filter.py)
+(by default, feature orientation difference at most 15 degrees, and, for
+matches whose two rays meet at 5 degrees or more, a feature size ratio between
+0.8 and 1.25) is not applied by `sfm match`. It is used by
+[`sfm densify`](../reconstruction/densify-command.md) when
+`--enable-geometric-filtering` is given, with the angle and size-ratio limits
+set by its `--geometric-angle-diff-max` and `--geometric-size-ratio-max` flags.
 
 ## Camera Intrinsics
 
