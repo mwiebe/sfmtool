@@ -216,11 +216,11 @@ list.
 
 ## 7. `tilt_bench_patch` reports the requested normal, not the applied one (low)
 
-> _Status (2026-10-03): Done — the reply's `normal` is now the unit normal
+> _Status (2026-10-03): **Done** — the reply's `normal` is the unit normal
 > read back off the placement after the step, so a capped tilt reports where it
 > stopped; covered by
-> `a_tilt_past_what_the_observations_can_see_stops_and_names_the_image`, branch
-> `finding-bash-24-tilt-bench-patch-normal`._
+> `a_tilt_past_what_the_observations_can_see_stops_and_names_the_image`,
+> PR #700._
 
 On `kerry`, `tilt_bench_patch {track: "k20", normal: [0.8686, 0.4269, -0.2513]}`
 (a normal facing away from the cameras) replied:
