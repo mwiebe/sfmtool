@@ -469,7 +469,7 @@ pub enum NearbyTracksError {
     /// a matching source.
     NotAMatchingSource(NearbySource),
     /// [`NearbyTrackOptions::label`] is not one
-    /// [`check_label`](crate::bench::check_label) accepts.
+    /// [`check_label`] accepts.
     Label(BenchError),
     /// The progress handle was cancelled.
     Cancelled,
