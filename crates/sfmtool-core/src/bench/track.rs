@@ -415,9 +415,11 @@ pub struct TrackMeasurement {
 /// One observation of an editable track: an image, a place in it, what has been
 /// measured about it at each stage, and the verdict.
 ///
-/// Observations are appended and never renumbered, so an index into
-/// [`EditableTrack::observations`] is stable for the life of the track and an
-/// evaluation that finishes late still lands on the observation it measured.
+/// Observations are appended and no step on the track renumbers them, so an
+/// index into [`EditableTrack::observations`] is stable across every step and
+/// an evaluation that finishes late still lands on the observation it
+/// measured. Deleting an image from the reconstruction does renumber them
+/// ([`EditableTrack::delete_image`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
     /// The image, as an index into the node's image table.
@@ -773,7 +775,10 @@ impl Default for Thresholds {
 /// turned `in` until the other is turned `out`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditableTrack {
-    /// The observations, in the order they were added. Never renumbered.
+    /// The observations, in the order they were added. No step on the track
+    /// renumbers them; a split and the deletion of an image from the
+    /// reconstruction ([`Self::delete_image`]) are the two operations that
+    /// do.
     pub observations: Vec<Observation>,
     /// Which representation the track is in, and that representation's data.
     pub stage: Stage,
@@ -927,6 +932,57 @@ impl EditableTrack {
         let mut next = self.clone();
         next.origin = Some(Origin { version, point });
         next
+    }
+
+    /// This track as it reads after image `image` is deleted from its
+    /// reconstruction, which moves every later image down by one.
+    ///
+    /// The observations in `image` are dropped, and every observation in a
+    /// later image is renumbered to the index that photograph holds after the
+    /// delete, so each observation still names the photograph it was sighted
+    /// in. What a dropped observation measured goes with it; every other
+    /// observation keeps its measurements and its verdict.
+    ///
+    /// A cluster's reference follows its observation. When the reference
+    /// itself was dropped, it is pointed at the first observation left and the
+    /// template is dropped, because the template is a cut around the old
+    /// reference.
+    ///
+    /// Returns `None` when the track observes no image at or past `image`,
+    /// since then nothing about it changes. Otherwise returns the new track and
+    /// where each observation went: entry `i` is the new index of observation
+    /// `i`, or `None` for one that was dropped. The new track may have no
+    /// observations left; what to do with it then is the caller's choice
+    /// ([`Bench::delete_image`](super::Bench::delete_image) discards it).
+    pub fn delete_image(&self, image: u32) -> Option<(EditableTrack, Vec<Option<usize>>)> {
+        if self.observations.iter().all(|o| o.image < image) {
+            return None;
+        }
+        let mut next = self.clone();
+        let mut map = Vec::with_capacity(self.observations.len());
+        next.observations.clear();
+        for observation in &self.observations {
+            if observation.image == image {
+                map.push(None);
+                continue;
+            }
+            let mut kept = observation.clone();
+            if kept.image > image {
+                kept.image -= 1;
+            }
+            map.push(Some(next.observations.len()));
+            next.observations.push(kept);
+        }
+        if let Stage::Cluster(payload) = &mut next.stage {
+            match map.get(payload.reference).copied().flatten() {
+                Some(reference) => payload.reference = reference,
+                None => {
+                    payload.reference = 0;
+                    payload.template = None;
+                }
+            }
+        }
+        Some((next, map))
     }
 
     /// The cluster payload, or `None` at the track stage.
