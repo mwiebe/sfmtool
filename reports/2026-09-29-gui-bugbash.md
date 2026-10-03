@@ -296,6 +296,12 @@ transform whose image of the node's bounds is not finite.
 
 ## 14. Bench labels accept control characters (low)
 
+> _Status (2026-10-03): **Done** — core's `bench::check_label` refuses a label
+> that is empty, all whitespace or holds a control character
+> (`BenchError::ControlCharacter`); `Bench::rename`, `create_track`,
+> `create_cluster` and `find_nearby_tracks` check caller labels through it, and
+> the MCP create tools check their `label` argument with it too, PR #702._
+
 `rename_bench_item {label: "line1\nline2\ttab \u0000nul"}` is accepted; only an
 all-whitespace label is refused. The Scene tree then draws the row on two
 lines, and the NUL goes into the Action Log and version labels. Labels are

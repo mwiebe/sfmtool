@@ -67,7 +67,10 @@ pub enum BenchError {
     NoSuchItem(String),
     LabelTaken(String),
     EmptyLabel,
+    ControlCharacter(char),
 }
+
+pub fn check_label(label: &str) -> Result<(), BenchError>;
 
 impl Bench {
     pub fn new() -> Self;
@@ -199,6 +202,22 @@ eight hex digits of the base's own content hash and the point's index there for
 a point that is a row of that base, and `point_<index>` for a point an edit
 added, which is a row of no content at all.
 
+**A label a caller names is checked, and one that is not a label is refused.**
+`check_label` refuses a label that is empty or all whitespace
+(`BenchError::EmptyLabel`) and one that holds a control character, such as a
+newline, a tab or a NUL (`BenchError::ControlCharacter`, by `char::is_control`).
+A label is something a person reads in the Scene tree and an agent types on the
+wire, and it is carried into the Action Log and version labels: a newline draws
+one item on two rows, and a NUL or a tab cannot be typed back. Every step that
+takes a label from its caller checks it in this one function: `rename`, and
+`create_track`, `create_cluster` and `find_nearby_tracks` for a caller-named
+label, which each refuse with a `Label(BenchError)` of their own error type
+before doing any work. `put` stays infallible and checks nothing: a label a
+step mints itself, from an image stem, a portable id or a label already on the
+bench, is not a caller's, and the suffixes it appends hold no control
+character. The viewer's wire tools check a `label` argument with the
+same function before a create call starts.
+
 ## Deleting an image
 
 An item names its reconstruction's images by index, and deleting an image from
@@ -268,7 +287,9 @@ bench = bench.rename("IMG_0042@142,198", "bull-nose")
 
 [bench/tests.rs](../../../crates/sfmtool-core/src/bench/tests.rs) covers the
 labels (each origin's form, the collision suffix, a rename freeing the old
-label), the item IDs (each put minting a distinct one, on the same bench or
+label, `check_label` refusing an empty or whitespace label and one holding a
+control character, and `rename`, `create_track` and `create_cluster` refusing
+such a label), the item IDs (each put minting a distinct one, on the same bench or
 another; `replace` and `rename` keeping it; a put after a discard of the same
 label getting a new one; `duplicate` and `split` giving the new item a new ID
 and leaving the original's; `id` and `label_of` answering each other and giving

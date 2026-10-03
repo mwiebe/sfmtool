@@ -151,7 +151,8 @@ fn new_item_label_schema() -> Value {
             "The label to put the item on the bench under, so it needs no rename_bench_item \
              afterwards. A label another item already holds takes the first free \" (2)\", \
              \" (3)\", ... suffix, and the reply names the label it took. Omit for one minted \
-             from what the item was made from. Something other than whitespace.",
+             from what the item was made from. Something other than whitespace, with no \
+             control character (newline, tab, NUL).",
     })
 }
 

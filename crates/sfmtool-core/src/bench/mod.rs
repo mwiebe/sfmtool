@@ -230,9 +230,12 @@ pub enum BenchError {
     NoSuchItem(String),
     /// A rename was asked for a label another item already holds.
     LabelTaken(String),
-    /// A rename was asked for a label that is not one: empty, or all
-    /// whitespace.
+    /// A label was asked for that is not one: empty, or all whitespace.
     EmptyLabel,
+    /// A label was asked for that holds a control character, such as a
+    /// newline, a tab or a NUL ([`char::is_control`]). The character is
+    /// carried so the message can name it.
+    ControlCharacter(char),
 }
 
 impl std::fmt::Display for BenchError {
@@ -245,11 +248,45 @@ impl std::fmt::Display for BenchError {
                 write!(f, "something on the bench is already called `{label}`")
             }
             BenchError::EmptyLabel => write!(f, "an item needs a label with something in it"),
+            BenchError::ControlCharacter(c) => write!(
+                f,
+                "a label cannot hold a control character, and this one holds {:?}",
+                c
+            ),
         }
     }
 }
 
 impl std::error::Error for BenchError {}
+
+/// Whether `label` may name an item on a bench: refused when it is empty or
+/// all whitespace ([`BenchError::EmptyLabel`]), or when it holds a control
+/// character ([`BenchError::ControlCharacter`]).
+///
+/// A label is a handle a person reads in the Scene tree and an agent types
+/// on the wire, and it is carried into the Action Log and version labels. A
+/// newline would draw one item on two rows, and a NUL or tab cannot be typed
+/// back. Every step that takes a label from its caller checks it here:
+/// [`Bench::rename`], [`create_track`], [`create_cluster`] and
+/// [`find_nearby_tracks`]. [`Bench::put`] checks nothing: a label a step
+/// mints itself, from an image stem or a portable id, is not a caller's, and
+/// the suffixes it appends hold no control character.
+///
+/// ```
+/// use sfmtool_core::bench::{check_label, BenchError};
+/// assert_eq!(check_label("bull-nose"), Ok(()));
+/// assert_eq!(check_label("  "), Err(BenchError::EmptyLabel));
+/// assert_eq!(check_label("a\nb"), Err(BenchError::ControlCharacter('\n')));
+/// ```
+pub fn check_label(label: &str) -> Result<(), BenchError> {
+    if label.trim().is_empty() {
+        return Err(BenchError::EmptyLabel);
+    }
+    match label.chars().find(|c| c.is_control()) {
+        Some(c) => Err(BenchError::ControlCharacter(c)),
+        None => Ok(()),
+    }
+}
 
 /// The things being worked on beside one reconstruction, in the order they were
 /// put there.
@@ -389,14 +426,12 @@ impl Bench {
     /// Rename the item called `label` to `to`.
     ///
     /// The item keeps its [`ItemId`]. The old label then names nothing, and is
-    /// free to be minted again.
+    /// free to be minted again. `to` is refused when [`check_label`] refuses it.
     pub fn rename(&self, label: &str, to: &str) -> Result<Bench, BenchError> {
         let at = self
             .position(label)
             .ok_or_else(|| BenchError::NoSuchItem(label.to_string()))?;
-        if to.trim().is_empty() {
-            return Err(BenchError::EmptyLabel);
-        }
+        check_label(to)?;
         if let Some(other) = self.position(to) {
             if other != at {
                 return Err(BenchError::LabelTaken(to.to_string()));

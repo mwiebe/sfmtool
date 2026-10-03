@@ -17,6 +17,7 @@ use crate::bench::track::{EditableTrack, Thresholds, Verdict};
 use crate::bench::track_at_pixel::{
     seed_cluster_with, upgrade_sightings, MatchesClusters, SiftIndexSource, ViewCamera,
 };
+use crate::bench::{check_label, BenchError};
 use crate::patch::normal_refine::ProjectedImage;
 use crate::progress::Progress;
 use crate::reconstruction::edited::EditedReconstruction;
@@ -467,6 +468,9 @@ pub enum NearbyTracksError {
     /// [`NearbyTrackOptions::sources`] names the far-field sweep, which is not
     /// a matching source.
     NotAMatchingSource(NearbySource),
+    /// [`NearbyTrackOptions::label`] is not one
+    /// [`check_label`] accepts.
+    Label(BenchError),
     /// The progress handle was cancelled.
     Cancelled,
 }
@@ -507,6 +511,7 @@ impl std::fmt::Display for NearbyTracksError {
                 f,
                 "{source} is not a matching source; the far-field sweep runs after them"
             ),
+            Self::Label(e) => e.fmt(f),
             Self::Cancelled => write!(f, "finding the nearby tracks was cancelled"),
         }
     }
@@ -672,6 +677,9 @@ pub fn find_nearby_tracks(
     options: &NearbyTrackOptions,
     progress: &Progress<'_>,
 ) -> Result<NearbyTracks, NearbyTracksError> {
+    if let Some(label) = &options.label {
+        check_label(label).map_err(NearbyTracksError::Label)?;
+    }
     let image_count = edited.image_count();
     for (input, got) in [
         ("views", Some(views.len())),

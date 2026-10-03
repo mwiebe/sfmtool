@@ -523,6 +523,79 @@ fn a_rename_onto_a_taken_label_is_refused() {
 }
 
 #[test]
+fn a_label_with_a_control_character_is_refused() {
+    assert_eq!(check_label("bull-nose (2)"), Ok(()));
+    assert_eq!(check_label("caf\u{e9} \u{2014} left"), Ok(()));
+    assert_eq!(check_label(""), Err(BenchError::EmptyLabel));
+    assert_eq!(check_label(" \t "), Err(BenchError::EmptyLabel));
+    for (label, c) in [
+        ("line1\nline2", '\n'),
+        ("a\tb", '\t'),
+        ("nul\u{0}", '\u{0}'),
+        ("cr\r", '\r'),
+        ("del\u{7f}", '\u{7f}'),
+        ("c1\u{85}", '\u{85}'),
+    ] {
+        assert_eq!(
+            check_label(label),
+            Err(BenchError::ControlCharacter(c)),
+            "{label:?}"
+        );
+    }
+    assert_eq!(
+        BenchError::ControlCharacter('\n').to_string(),
+        "a label cannot hold a control character, and this one holds '\\n'"
+    );
+}
+
+#[test]
+fn a_rename_to_a_label_with_a_control_character_is_refused() {
+    let (bench, report) =
+        create_cluster(&Bench::new(), &pixel_seed(1, [10.0, 10.0])).expect("a usable seed");
+    let err = bench
+        .rename(&report.label, "line1\nline2\ttab \u{0}nul")
+        .expect_err("a newline is not part of a label");
+    assert_eq!(err, BenchError::ControlCharacter('\n'));
+    let err = bench
+        .rename(&report.label, "   ")
+        .expect_err("whitespace is not a label");
+    assert_eq!(err, BenchError::EmptyLabel);
+}
+
+#[test]
+fn a_create_step_refuses_a_caller_label_with_a_control_character() {
+    let seed = ClusterSeed {
+        label: Some("bull\tnose".to_string()),
+        ..pixel_seed(42, [142.0, 197.5])
+    };
+    let err = create_cluster(&Bench::new(), &seed).expect_err("a tab is not part of a label");
+    assert_eq!(
+        err,
+        CreateClusterError::Label(BenchError::ControlCharacter('\t'))
+    );
+
+    let scene = Scene::new();
+    let edited = edited_fixture(&scene, WORLD);
+    let options = CreateTrackOptions {
+        label: Some("bull\nnose".to_string()),
+        ..CreateTrackOptions::default()
+    };
+    let err = create_track(&Bench::new(), &edited, 0, &options)
+        .expect_err("a newline is not part of a label");
+    assert_eq!(
+        err,
+        CreateTrackError::Label(BenchError::ControlCharacter('\n'))
+    );
+    let options = CreateTrackOptions {
+        label: Some(" ".to_string()),
+        ..CreateTrackOptions::default()
+    };
+    let err =
+        create_track(&Bench::new(), &edited, 0, &options).expect_err("whitespace is not a label");
+    assert_eq!(err, CreateTrackError::Label(BenchError::EmptyLabel));
+}
+
+#[test]
 fn a_label_that_names_nothing_is_refused_by_name() {
     let err = Bench::new()
         .discard("bull-nose")
