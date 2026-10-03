@@ -19,11 +19,12 @@
 //! onto that matrix as a scaled rotation
 //! `[[s·cosθ, -s·sinθ], [s·sinθ, s·cosθ]]`.
 //!
-//! The full pipeline is implemented here: the scale space (Gaussian + DoG
-//! pyramids) and image-to-gray conversion, keypoint detection and sub-pixel
-//! localization, orientation assignment, and the 128-D descriptor, with the
-//! orientation/descriptor sampling and the Gaussian blur SIMD-accelerated (see
-//! `simd` and the parallelism/SIMD section of `specs/core/features/sift.md`).
+//! The full pipeline is implemented here: the scale space (a Gaussian pyramid;
+//! detection computes the DoG per row stripe) and image-to-gray conversion,
+//! keypoint detection and sub-pixel localization, orientation assignment, and
+//! the 128-D descriptor, with the orientation/descriptor sampling and the
+//! Gaussian blur SIMD-accelerated (see `simd` and the parallelism/SIMD section
+//! of `specs/core/features/sift.md`).
 
 mod descriptor;
 mod detect;
