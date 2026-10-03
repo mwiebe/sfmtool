@@ -647,9 +647,10 @@ Why split:
 - **Independent parallelism.** Detection parallelizes over image tiles/levels;
   description parallelizes over keypoints. Splitting lets each use its natural grain.
 
-A `ScaleSpace` (Gaussian + DoG pyramids) type is the natural shared handle, analogous
-to `ImagePyramid` in optical flow. `extract_sift` constructs it, calls both stages, and
-is what the PyO3 binding wraps.
+`ScaleSpace` (the Gaussian pyramid; the DoG is never stored) is the shared handle,
+analogous to `ImagePyramid` in optical flow. `extract_sift_partial` (which
+`extract_sift` calls) builds it through `detect_keypoints` and then describes the
+keypoints from it; the PyO3 binding `extract_sift` wraps `extract_sift_partial`.
 
 ### Lazy descriptors and coarse-to-fine
 
@@ -685,9 +686,9 @@ candidate set** — so the cost follows the candidate count, not the keypoint co
 The same holds for epipolar-guided or covisibility-pruned matching.
 
 **What this costs.** Lazy fill means retaining the `ScaleSpace` (Gaussian pyramid)
-between detection and description — memory, not recompute. The DoG pyramid is only
-needed for detection and can be dropped immediately; descriptors read the Gaussian
-levels (or their precomputed gradient magnitude/orientation). Retention is therefore a
+between detection and description — memory, not recompute. The DoG is needed only for
+detection, which computes it per row stripe and never stores it; descriptors read the
+Gaussian levels. Retention is therefore a
 deliberate trade-off the caller opts into: `extract_sift` builds, uses, and frees the
 pyramid in one shot, while `detect_keypoints` hands the `ScaleSpace` back so the caller
 controls its lifetime (drop it, or keep it — e.g. behind an `Arc` — to lazily describe
@@ -711,7 +712,7 @@ sfmtool-core/src/features/sift/
 ├── mod.rs          # Public API: SiftParams, SiftKeypoint, extract_sift, detect_keypoints, compute_descriptors
 ├── scale_space.rs  # ScaleSpace: Gaussian pyramid (separable blur, octave downsample, lazy octave extension)
 ├── detect.rs       # 26-neighbor extrema + subpixel localization + contrast/edge rejection, DoG fused per stripe
-├── orientation.rs  # gradient precompute + 36-bin histogram + multi-peak assignment
+├── orientation.rs  # 36-bin gradient histogram + multi-peak assignment
 ├── descriptor.rs   # 4x4x8 trilinear-interpolated descriptor + normalize/clamp/quantize
 ├── gray.rs         # GrayFormula: the colour-to-gray conversion and its value domain
 └── simd.rs         # runtime-dispatched AVX2+FMA / SSE2 kernels the stages above share
