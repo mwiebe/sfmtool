@@ -159,6 +159,14 @@ class TestTheBench:
         assert renamed.id("a@1,1") is None
         assert Bench().id("bull-nose") is None
 
+    def test_a_rename_to_a_label_with_a_control_character_is_refused(self):
+        bench, _ = create_cluster(Bench(), 4, "IMG_0042", (1.0, 2.0), radius_px=7.5)
+        with pytest.raises(ValueError, match="control character"):
+            bench.rename("IMG_0042@1,2", "line1\nline2")
+        with pytest.raises(ValueError, match="something in it"):
+            bench.rename("IMG_0042@1,2", "   ")
+        assert bench.labels == ["IMG_0042@1,2"]
+
     def test_a_discard_takes_off_only_that_item(self):
         bench, _ = create_cluster(Bench(), 1, "a", (1.0, 1.0), radius_px=7.5)
         bench, _ = create_cluster(bench, 2, "b", (2.0, 2.0), radius_px=7.5)
@@ -203,6 +211,12 @@ class TestTheEditableTrack:
         )
         assert bench.labels == ["pt3d_a1b2c3d4_1207"]
         assert bench.track("pt3d_a1b2c3d4_1207").origin["version"] == 7
+
+    def test_a_named_label_with_a_control_character_is_refused(
+        self, edited, long_track_point
+    ):
+        with pytest.raises(ValueError, match="control character"):
+            create_track(Bench(), edited, long_track_point, label="bull\tnose")
 
     def test_a_point_that_is_not_live_is_refused(self, edited):
         edited.delete_point(0)
