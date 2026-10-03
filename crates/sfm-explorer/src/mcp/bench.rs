@@ -886,6 +886,10 @@ fn insert_viewpoint(reply: &mut Value, viewpoint: Viewpoint) {
 /// photograph would be looking along the surface rather than at it, and the
 /// sentence says which observation stopped it. A track at infinity is refused:
 /// its normal is its own bearing.
+///
+/// The reply's `normal` is the unit normal the patch faces after the step, read
+/// back off the placement, not the one named: the cap can stop the turn short
+/// of it, and a caller that sends the reply's normal back gets no further turn.
 pub(super) fn tilt_bench_patch(
     state: &mut AppState,
     label: &str,
@@ -895,8 +899,15 @@ pub(super) fn tilt_bench_patch(
     let (id, item) = edit_target(state, label, named)?;
     let edit = PatchEdit::Tilt { normal };
     let (reply, _) = patched(state, id, &item, &edit)?;
+    let applied = state
+        .bench_track(id, &item)
+        .and_then(|track| track.track().and_then(|payload| payload.placement.as_ref()))
+        .map(|placement| {
+            let n = placement.normal();
+            [n.x, n.y, n.z]
+        });
     let mut reply = with_item(reply, &item);
-    insert(&mut reply, "normal", json!(normal));
+    insert(&mut reply, "normal", json!(applied));
     Ok(reply)
 }
 
