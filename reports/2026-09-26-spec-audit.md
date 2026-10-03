@@ -599,6 +599,7 @@ most of the per-sentence findings.
   - **Keypoint bounds:** the writer does not check them (:1572), so it can write a file its own reader rejects.
     > _Status (2026-10-02): **Done** — the writer runs `validate_keypoints`, with tests, commit `b19c676` (#670)._
   - **Usage Examples** (:1812-1897) use `SfmrFileReader`, `write_sfm` and `verify_sfm`, none of which exist.
+    > _Status (2026-10-03): **Done** — the code examples are replaced by an Implementations section naming the Rust and Python read, write and verify functions with links to their source, PR #682._
 **Format independence:** Twelve confirmed findings. The main ones, with who should replace the name:
   - :112-116 `SfmrReconstruction`/`conversion` → "a reader converts on load".
   - :1000-1007 `THUMBNAIL_SIZE` constants → Implementations.
@@ -634,6 +635,7 @@ most of the per-sentence findings.
   - :907-910 give the `source_selection` nesting condition wrongly. `cluster-selection.md:121` states it correctly.
     > _Status (2026-10-03): **Done** — the paragraph now says the key is present whenever the source carries its own `cluster_selection` record, matching `select.rs` and `cluster-selection.md`, PR #681._
   - :1056-1131 Usage Examples use APIs that do not exist.
+    > _Status (2026-10-03): **Done** — the code examples are replaced by an Implementations section naming the Rust and Python read, write and verify functions with links to their source; the verified-file workflow that :677 points at is kept as prose under As part of a Pipeline, PR #682._
   - :660 "Added… without a version bump" and :613 "identity affine" are stale.
     > _Status (2026-10-03): **Done** — the version-3 history note on `member_consistency_residual` is removed (cluster files below version 6 are refused), and status `0 reference` now says its reference→member warp is the identity and its geometry is its detection, PR #681._
 **Format independence:** No Implementations section. Findings, with replacements:
