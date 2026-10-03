@@ -3216,7 +3216,10 @@ one Action Log row. A label another item holds takes the first free ` (2)`,
 taken label is refused instead, because a rename that took a different name
 would leave the caller holding a label that names another item; a create's
 reply always carries the label the item took, in `item`, so there is nothing to
-misread. A label of nothing but whitespace is refused in the call. A `create_bench_track` on a point already on the bench focuses that
+misread. A label of nothing but whitespace, or one holding a control
+character such as a newline, a tab or a NUL, is refused in the call, by core's
+`check_label` (§ "Labels" again); `rename_bench_item` refuses the same labels.
+A `create_bench_track` on a point already on the bench focuses that
 track under the label it has, whatever `label` says, and pushes no version.
 
 **`create_bench_track` on the viewed point carries the read-only bars.** When the

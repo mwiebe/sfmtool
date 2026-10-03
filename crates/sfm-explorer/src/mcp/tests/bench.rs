@@ -1900,6 +1900,23 @@ fn rename_focus_and_discard_answer_with_the_item_they_acted_on() {
         json!({ "reconstruction_label": "run_a", "item": second, "label": "bull-nose" }),
     );
     assert_eq!(renamed["item"], json!("bull-nose"), "{renamed}");
+    let versions = version_count(&state);
+    let control = refused_call(
+        &mut state,
+        &mut viewer,
+        "rename_bench_item",
+        json!({
+            "reconstruction_label": "run_a",
+            "item": "bull-nose",
+            "label": "line1\nline2\ttab \u{0}nul",
+        }),
+    );
+    assert!(control.0.contains("control character"), "{control}");
+    assert_eq!(
+        version_count(&state),
+        versions,
+        "a refusal pushed a version"
+    );
     let gone = refused_call(
         &mut state,
         &mut viewer,
@@ -2018,6 +2035,16 @@ fn a_create_names_its_item_and_a_taken_label_takes_a_suffix() {
         cluster("  "),
     );
     assert!(blank.0.contains("other than whitespace"), "{blank}");
+    let control = refused_call(
+        &mut state,
+        &mut viewer,
+        "create_bench_cluster",
+        cluster("line1\nline2"),
+    );
+    assert!(
+        control.0.contains("without a control character"),
+        "{control}"
+    );
     assert_eq!(
         version_count(&state),
         versions,

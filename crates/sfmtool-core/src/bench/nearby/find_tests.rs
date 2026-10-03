@@ -16,6 +16,7 @@ use crate::bench::tests::scene::{edited as scene_edited, fixture_points, Scene, 
 use crate::bench::track::StageKind;
 use crate::bench::track_at_pixel::tests::matches_file;
 use crate::bench::track_at_pixel::{MatchesClusters, STATUS_KEPT, STATUS_REFERENCE};
+use crate::bench::BenchError;
 use crate::progress::Progress;
 use crate::reconstruction::edited::EditedReconstruction;
 
@@ -460,6 +461,14 @@ fn a_query_that_names_no_place_or_a_far_field_source_is_refused() {
         Err(NearbyTracksError::NotAMatchingSource(
             NearbySource::FarField
         ))
+    );
+    let options = NearbyTrackOptions {
+        label: Some("group\n2".to_string()),
+        ..NearbyTrackOptions::default()
+    };
+    assert_eq!(
+        run(0, [10.0, 10.0], &options),
+        Err(NearbyTracksError::Label(BenchError::ControlCharacter('\n')))
     );
 }
 

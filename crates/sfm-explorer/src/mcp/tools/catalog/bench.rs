@@ -134,7 +134,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                             "type": "string",
                             "description":
                                 "The group label the tracks' labels start with, in place of \
-                                 `<image stem>@<x>,<y>`. Something other than whitespace.",
+                                 `<image stem>@<x>,<y>`. Something other than whitespace, \
+                                 with no control character (newline, tab, NUL).",
                         }),
                     ),
                 ],
@@ -196,7 +197,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                             "type": "string",
                             "description":
                                 "The label the item should take. Unique on this bench, and \
-                                 something other than whitespace.",
+                                 something other than whitespace, with no control character \
+                                 (newline, tab, NUL).",
                         }),
                     ),
                 ],

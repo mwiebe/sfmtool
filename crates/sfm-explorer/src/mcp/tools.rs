@@ -16,6 +16,7 @@
 //! an advertised schema and its parser cannot drift.
 
 use serde_json::{json, Map, Value};
+use sfmtool_core::bench::{check_label, BenchError};
 use sfmtool_core::reconstruction::prune_covered::PruneCoveredOptions;
 
 use super::input::{InputCommand, ModifierKeys, PointerTarget};
@@ -1034,15 +1035,21 @@ impl Args<'_> {
     }
 
     /// The label a create tool is asked to put its item on the bench under,
-    /// or `None` when the call names none. A label of nothing but whitespace
-    /// is refused here, as `rename_bench_item` refuses one, rather than left
-    /// to name an item nobody could read.
+    /// or `None` when the call names none. A label core's `check_label`
+    /// refuses, one of nothing but whitespace or one holding a control
+    /// character, is refused here, as `rename_bench_item` refuses one, so the
+    /// call is turned away before it starts any work.
     fn new_item_label(&self, key: &str) -> Result<Option<String>, ToolError> {
-        match self.optional_string(key)? {
-            Some(label) if label.trim().is_empty() => Err(self.error(format!(
+        let label = self.optional_string(key)?;
+        match label.as_deref().map(check_label) {
+            Some(Err(BenchError::EmptyLabel)) => Err(self.error(format!(
                 "wants {key} to be something other than whitespace."
             ))),
-            label => Ok(label),
+            Some(Err(BenchError::ControlCharacter(c))) => Err(self.error(format!(
+                "wants {key} without a control character — got one holding {c:?}."
+            ))),
+            Some(Err(other)) => Err(self.error(format!("cannot take that {key}: {other}."))),
+            Some(Ok(())) | None => Ok(label),
         }
     }
 

@@ -26,7 +26,7 @@ use super::track::{
     ClusterMeasurement, ClusterPayload, EditableTrack, Observation, Origin, Provenance,
     RepaintMark, Stage, StageKind, Thresholds, TrackMeasurement, TrackPayload, Verdict,
 };
-use super::{Bench, BenchItem, ItemKind};
+use super::{check_label, Bench, BenchError, BenchItem, ItemKind};
 
 /// How many hex digits of a content hash a point id names it by, which is what
 /// a label minted from a point row reads as.
@@ -124,12 +124,15 @@ pub struct CreateTrackOptions {
 pub enum CreateTrackError {
     /// The edited index names no live point: past the end, or deleted.
     NoSuchPoint(u32),
+    /// [`CreateTrackOptions::label`] is not one [`check_label`] accepts.
+    Label(BenchError),
 }
 
 impl std::fmt::Display for CreateTrackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CreateTrackError::NoSuchPoint(i) => write!(f, "no live point at index {i}"),
+            CreateTrackError::Label(e) => e.fmt(f),
         }
     }
 }
@@ -173,6 +176,9 @@ pub fn create_track(
     point: u32,
     options: &CreateTrackOptions,
 ) -> Result<(Bench, CreateReport), CreateTrackError> {
+    if let Some(label) = &options.label {
+        check_label(label).map_err(CreateTrackError::Label)?;
+    }
     let view = edited
         .point(point)
         .ok_or(CreateTrackError::NoSuchPoint(point))?;
@@ -374,6 +380,9 @@ pub enum CreateClusterError {
     /// The seed's affine shape spans no area, so nothing can be warped through
     /// it.
     DegenerateShape([[f64; 2]; 2]),
+    /// The label the seed carries from its caller, its `label` field, is not
+    /// one [`check_label`] accepts.
+    Label(BenchError),
 }
 
 impl std::fmt::Display for CreateClusterError {
@@ -386,6 +395,7 @@ impl std::fmt::Display for CreateClusterError {
                 f,
                 "the seed's affine shape spans no area, so it frames no patch"
             ),
+            CreateClusterError::Label(e) => e.fmt(f),
         }
     }
 }
@@ -419,6 +429,9 @@ pub fn create_cluster(
     let det = seed.shape[0][0] * seed.shape[1][1] - seed.shape[0][1] * seed.shape[1][0];
     if !det.is_finite() || det.abs() < MIN_ABS_DET {
         return Err(CreateClusterError::DegenerateShape(seed.shape));
+    }
+    if let Some(label) = &seed.label {
+        check_label(label).map_err(CreateClusterError::Label)?;
     }
 
     let provenance = match seed.feature {
