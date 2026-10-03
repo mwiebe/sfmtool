@@ -874,7 +874,7 @@ and the opening paragraphs listed in check 4.
 - **`specs/cli/colmap-interop/from-colmap-bin-command.md`:** does not mention the `UsageError` for a non-`.sfmr` output (`from_colmap_bin.py:84-85`).
 - **`specs/gui/panel-layout.md`:** :435-438 omit that a non-numeric `sfm_explorer_layout` value produces `Not a layout file` (`layout.rs:620-621`).
 - **`specs/core/patch/cluster-patches.md`:** :228 "## Consumers (future work, out of scope here)" is a future-work list in a standing spec. Move it to a draft.
-  > _Status (2026-10-03): Done — § "Consumers" now lists the built consumers (cluster selection, cluster covisibility, Resect Image, the track-at-pixel clusters stage, source clusters, the viewer's index files) in the present tense with links, and says in one sentence that `--derive-pairs`, `embed-patches` and `solve` do not use patch clusters; the three unbuilt ideas moved to `specs/drafts/cluster-patches-consumers-amendment.md`, which links back. Branch `finding-bash-23-cluster-patches-future-work`._
+  > _Status (2026-10-03): Done — § "Consumers" now lists the built consumers (cluster selection, cluster covisibility, Resect Image, the track-at-pixel clusters stage, the nearby clusters source, source clusters, the viewer's index files) in the present tense with links, and says in one sentence that `--derive-pairs`, `embed-patches` and `solve` do not use patch clusters; the three unbuilt ideas moved to `specs/drafts/cluster-patches-consumers-amendment.md`, which links back. Branch `finding-bash-23-cluster-patches-future-work`._
 
 ### Code doc comments that repeat the spec (shrink to contract + link)
 

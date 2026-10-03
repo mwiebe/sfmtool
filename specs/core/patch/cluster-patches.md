@@ -250,10 +250,17 @@ members unless a caller asks otherwise:
 - The clusters stage of [building a track at a
   pixel](../bench/track-at-pixel.md#the-members) carries a pixel into the other
   members' images through their affine shapes.
+- The clusters source of the [matching sources near a
+  pixel](../bench/nearby-sources.md#the-clusters) triangulates the members of
+  the clusters near a pixel into candidate points. It is the exception to the
+  rule above: by default it also admits the members rejected for a low ZNCC or
+  a large shift and the unevaluated ones, and lets the triangulation drop the
+  bad ones; its `kept` policy admits only the reference and the kept.
 - [Source clusters](../analysis/source-clusters.md) reads the refine radius from
   the `cluster_patches/` metadata to band clusters by feature radius.
 - The viewer builds a cluster-patches file beside each reconstruction as one of
-  its [index files](../../gui/index-files.md).
+  its [index files](../../gui/index-files.md), and its steps listed above read
+  the file from there.
 
 `sfm match --derive-pairs`, `sfm embed-patches` and `sfm solve` do not read the
 patch statuses or warps: the derived pairs come from every member of every
