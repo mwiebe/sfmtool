@@ -1,21 +1,23 @@
 # SIFT
 
-## Motivation
+`sfmtool-core` carries its own implementation of Lowe's Scale-Invariant
+Feature Transform (SIFT): it finds keypoints in a grayscale image, gives each a
+position, size and orientation, and computes a 128-byte descriptor for each one.
+It lives in
+[features/sift/](../../../crates/sfmtool-core/src/features/sift) and is the
+`sfmtool` feature tool, selected with `sfm sift --extract --tool sfmtool` or
+`sfm ws init --feature-tool sfmtool`; the other two tools, `colmap` and
+`opencv`, call external libraries
+([extract_colmap.py](../../../src/sfmtool/sift/extract_colmap.py),
+[extract_opencv.py](../../../src/sfmtool/sift/extract_opencv.py)). Having SIFT
+in Rust gives sfmtool control over the algorithm (thresholds, deterministic
+ordering, sub-pixel conventions), lets detection and description run as
+separate steps so a caller can describe only the keypoints it needs, and makes
+it possible to describe a keypoint the detector did not find
+(`describe_keypoints`, see
+[§ Describing a keypoint nothing detected](#describing-a-keypoint-nothing-detected)).
 
-sfmtool relies on COLMAP and OpenCV for many of its algorithms; one of those is SIFT
-feature extraction (`src/sfmtool/sift/extract_colmap.py` and `extract_opencv.py`, both
-wrapping external binaries). Adding a Rust implementation directly in sfmtool-core — like
-the native optical-flow implementation — would give us more room for flexibility:
-
-- Use in the Rust-only GUI for interactive feature inspection
-- Control over the algorithm for SfM-specific tuning (e.g. custom contrast/edge
-  thresholds per dataset, deterministic ordering, exact subpixel conventions)
-- Integration with the rayon-parallel matching pipeline and
-  `sfmtool-sift-format` I/O without a Python/OpenCV round-trip
-- A path to GPU acceleration later, reusing the wgpu infrastructure built for
-  optical flow
-
-This spec defines library functions in sfmtool-core, independent of any on-disk layout.
+This spec covers the library functions in sfmtool-core, which are independent of any on-disk layout.
 Their interface follows COLMAP's conventions rather than OpenCV's: keypoint coordinates use
 COLMAP's pixel-center convention (the upper-left pixel's center is `(0.5, 0.5)`), and each
 keypoint's geometry is a 2×2 affine shape matrix `[[a11, a12], [a21, a22]]`, exactly as
@@ -519,7 +521,7 @@ implementation is CPU-only, SIMD and rayon rather than compute shaders, and it
 mirrors the structure of the optical-flow module
 ([optical-flow.md](optical-flow.md)).
 
-**Yes — split keypoint finding from descriptor creation.** The public API:
+Keypoint finding and descriptor creation are separate functions. The public API:
 
 ```rust
 // Stage 1: detect + localize + assign orientation(s). Cheap and small per
@@ -689,9 +691,12 @@ levels (or their precomputed gradient magnitude/orientation). Retention is there
 deliberate trade-off the caller opts into: `extract_sift` builds, uses, and frees the
 pyramid in one shot, while `detect_keypoints` hands the `ScaleSpace` back so the caller
 controls its lifetime (drop it, or keep it — e.g. behind an `Arc` — to lazily describe
-later). For very large images the pyramid can be rebuilt per-octave on demand, or the
-cached representation narrowed to per-level gradients, if the memory cost outweighs the
-recompute savings — an implementation detail to settle with benchmarks.
+later). The pyramid is already built per octave on demand: `detect_keypoints` starts
+from `ScaleSpace::build_chain` (levels `0..=s` of each octave) and calls
+`ScaleSpace::extend_octave` to add an octave's last two levels only when it scans that
+octave (see [§ 7. Feature-count cap](#7-feature-count-cap)), so the retained
+`ScaleSpace` holds full octaves only where detection ran. No gradient images are cached;
+orientation and description sample gradients from the Gaussian levels as they read them.
 
 All of this is in-memory and lives inside one process: a `.sift` file on disk
 always carries a descriptor for every keypoint it holds. Extending the archive
