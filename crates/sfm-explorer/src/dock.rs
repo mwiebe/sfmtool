@@ -208,6 +208,11 @@ impl TabContext<'_> {
             let selected = self.state.selected_bench_observation(id, &label);
             Some((label, track, selected))
         });
+        let bench_refusal = self
+            .state
+            .selected_recon
+            .and_then(|id| self.state.bench_edit_refusal(id))
+            .is_some();
         // Fetched only after `show_hud` has handed back its `&mut
         // AppState`: the node borrows `state.scene`, and the two cannot
         // overlap.
@@ -220,7 +225,8 @@ impl TabContext<'_> {
                     edited: node.edited(),
                     transform: node.transform(),
                     selected: *selected,
-                    busy: busy.is_some(),
+                    // A view-only bench offers no handle, as a busy node does.
+                    busy: bench_refusal,
                 }
             });
             self.viewer_3d.show(
@@ -665,6 +671,7 @@ impl TabContext<'_> {
             // `String`, the track its own `Arc`), because the panel is handed
             // `&mut` into the state further down the same call.
             let bench_busy = self.state.busy_refusal(id);
+            let bench_view_only = self.state.bench_view_only_refusal(id);
             // Why *Create Track Here* and *Find Nearby Tracks* are greyed on the
             // image shown, if they are.
             let create_track_refusal = selected_image
@@ -772,6 +779,7 @@ impl TabContext<'_> {
                 hovered_point,
                 crate::image_detail::BenchMenu {
                     busy: bench_busy.as_deref(),
+                    view_only: bench_view_only.as_deref(),
                     focused_track: bench_track.as_deref(),
                     lock: self.track_view.lock(),
                     create_track: create_track_refusal.as_deref(),
@@ -1121,7 +1129,7 @@ impl TabContext<'_> {
             if let Some(node) = crate::scene::node_by_id(&self.state.scene, id) {
                 // Framed where the node is *drawn*, so zoom-to-fit on an aligned
                 // node lands on it rather than on its native coordinates.
-                let points = crate::scene::world_points(node);
+                let points = crate::scene::FitPoints::of(node);
                 let what = format!("Framed {}", node.label);
                 self.zoom_to_fit(ui, &points, what);
             }
@@ -1131,7 +1139,9 @@ impl TabContext<'_> {
         // single gesture, which nothing else in the viewer does.
         if let Some(camera) = response.zoom_to_camera {
             if let Some(node) = crate::scene::node_by_id(&self.state.scene, camera.recon) {
-                let centres = crate::scene::camera_world_centres(node, camera.index());
+                let centres = crate::scene::FitPoints::positions(
+                    crate::scene::camera_world_centres(node, camera.index()),
+                );
                 let what = format!("Framed camera #{} of {}", camera.index(), node.label);
                 self.zoom_to_fit(ui, &centres, what);
             }
@@ -1320,7 +1330,7 @@ impl TabContext<'_> {
     /// `what` is the Action Log text, recorded only when the framing actually
     /// happened: before the viewport has been laid out once there is no aspect
     /// ratio to fit against, and nothing moved.
-    fn zoom_to_fit(&mut self, ui: &egui::Ui, points: &[nalgebra::Point3<f64>], what: String) {
+    fn zoom_to_fit(&mut self, ui: &egui::Ui, points: &crate::scene::FitPoints, what: String) {
         if let Some(aspect) = self.viewer_3d.panel_aspect() {
             let current_time = ui.input(|i| i.time);
             self.viewer_3d

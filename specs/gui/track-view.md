@@ -706,8 +706,9 @@ evaluation of the track as it stands; a spinner and *Evaluating…* while an
 evaluation of the current inputs is running or waiting to start; and, when core's
 `evaluate_preconditions` refuses the track or the evaluation failed, that
 sentence in the warning colour -- *"Cannot evaluate bull-nose: the track carries
-no patch frame to read against; upgrade it from the cluster stage to build
-one"* -- in place of any state.
+no patch frame to read against, as a point put on the bench from a sift_files
+reconstruction has none; convert the reconstruction to embedded patches and put
+the point on the bench again"* -- in place of any state.
 
 **Commit leaves the point it wrote selected.** The write is
 [`edits/commit-track.md`](edits/commit-track.md)'s; the panel's part is that the
@@ -1314,7 +1315,10 @@ a point arrives with every row pinned `in`, so its verdicts stand until they are
 unpinned. A click sets the other verdict by hand and pins it. The switch's
 part of the cell, the whole height of the row, takes the click, since a
 switch's own few points are a small target. There is no third state: a row
-nobody has ruled on is an unpinned `out`.
+nobody has ruled on is an unpinned `out`. While the node is busy or its bench
+is view-only, the switch and the pin are drawn greyed, at the opacity of a
+disabled widget and with a switch that is on filled grey rather than green, and
+a click on them does nothing.
 
 **The pin beside the switch says whether a hand set the verdict**, and is the
 control for it: a solid pushpin on a pinned verdict, which the thresholds leave
@@ -1422,9 +1426,17 @@ no crop hover view to carry the pixel and the feature index. The header still
 carries the point's summary (its colour, `xyzw`, error, track length, max pair
 angle, depth z and cond), which reads the point and needs no frame. So for such
 a point the panel shows its header and no per-observation readings. Which
-readings a frameless evaluation should produce, what the *Crop* cell would show
-without a frame, and how the cluster stage, which a frameless track is taken
-through to get a frame, fits in are not decided here (§ "Non-goals").
+readings a frameless evaluation should produce and what the *Crop* cell would
+show without a frame are not decided here (§ "Non-goals").
+
+**Such an item is not edited here.** A `sift_files` reconstruction's bench is
+view-only ([`bench.md`](bench.md) § "A view-only bench"): every toolbar button
+but *Discard* and *Rename*, the threshold boxes, the *Keep* switches and pins
+and the row menus' editing entries are greyed and take no click, with the
+sentence that names Convert to Embedded Patches as their hover. After the
+conversion, putting the point on the bench again (*Edit*, *Edit on Bench* or a
+double-click) rebuilds the item with the point's new patch frame, and from
+then on it is edited like any other.
 
 #### The gestures that name a pixel
 

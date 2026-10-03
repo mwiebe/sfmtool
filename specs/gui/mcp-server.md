@@ -1334,11 +1334,15 @@ Neither changes the field of view, so a `fov_short_axis_deg` beside either is
 refused.
 
 `fit` and `look_through` go through the same paths the keyboard and
-double-click use (`ViewportCamera::zoom_to_fit` over `scene::world_points`,
+double-click use (`ViewportCamera::compute_fit` over `scene::FitPoints`,
 `Viewer3D::jump_to_camera_view`), so the agent's framing is the framing a human
 gets. Fitting is over *world* points — the reconstruction's own positions put
 through its transform — so an aligned reconstruction is framed where it is
-drawn. A fit also leaves camera view, exactly as the Z key's fit does at
+drawn. Points at infinity add no position: a reconstruction with finite points
+is framed on those, and one with only points at infinity is looked at from the
+starting position along their direction
+([viewport-navigation.md](viewport-navigation.md) § "Points at Infinity"). A
+fit also leaves camera view, exactly as the Z key's fit does at
 the end of its animated transition: framing is a statement about the free
 camera, and a fit that left the render looking through a camera image would
 frame nothing the caller can see.
@@ -3097,6 +3101,14 @@ means. What this surface adds is the three things every tool family here adds.
 what a gesture in Track View's Edited mode means when it names no item. A label that
 names nothing on the bench is refused naming it.
 
+**A `sift_files` node's bench is view-only.** `create_bench_track` puts a
+point on it and every read works, but every tool that edits an item, and
+`create_bench_cluster`, is refused before it reads anything else, in the one
+sentence that names `convert_to_embedded_patches` as the remedy
+([bench.md](bench.md) § "A view-only bench"). After the conversion,
+`create_bench_track` on a point whose item has no patch frame rebuilds that
+item with the point's frame, under its own label, as one version.
+
 **There is one focused item for the viewer, and a bench can hold items with
 none of them focused.** `focus_bench_item` focuses one item, unfocusing
 whatever was focused on any node, and `unfocus_bench_item`, which takes no
@@ -3376,6 +3388,15 @@ outline, the patch re-anchored on its keypoint, and the pixel is in its image. A
 the patch as it stands seen in that image: Image Detail's ghost outline, and the
 only way to reach an image the track has no sighting in. Both at once is refused
 with a sentence naming the two, and the reply carries whichever was used.
+
+**The schema marks only `reconstruction_label` required on these two tools.**
+Every argument of either form is optional in the schema, because JSON Schema's
+`required` list cannot say "this group or that one", and listing both forms as
+required would make every call the server accepts invalid against the schema.
+The parser enforces the rule instead: a call that gives both forms, neither,
+or an edge argument of the other form (`edge` with `half_length`, or
+`moved_edge` with a pixel) is refused with a sentence that names the two
+spellings, which an agent can act on more readily than a `oneOf` mismatch.
 
 **The cluster stage's own two are tools of their own**, because there is no
 shared geometry there and what is turned or sized is one sighting's
