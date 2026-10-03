@@ -38,10 +38,12 @@ pub(crate) struct VariationalParams {
     /// Inner Jacobi solver iterations per outer fixed-point iteration.
     ///
     /// This is NOT equivalent to the SOR iterations (θ_vi) in Kroeger et al. or
-    /// OpenCV's DIS implementation. Jacobi converges slower per iteration than
-    /// Gauss-Seidel SOR, so this value should be ~1.3-2× the equivalent SOR
-    /// count. The tradeoff is that Jacobi iterations are fully parallelizable
-    /// (SIMD, multi-core) while SOR iterations are sequential.
+    /// OpenCV's DIS implementation: Jacobi converges slower per iteration than
+    /// Gauss-Seidel SOR, but its iterations are fully parallelizable (SIMD,
+    /// multi-core) while SOR iterations are sequential. The iteration count
+    /// that matches a given SOR count is documented on
+    /// [`DisFlowParams::variational_jacobi_iterations`](super::DisFlowParams::variational_jacobi_iterations),
+    /// which sets this value.
     pub jacobi_iterations: u32,
     /// Outer fixed-point iterations for this scale.
     pub outer_iterations: u32,

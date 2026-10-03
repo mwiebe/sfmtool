@@ -1,17 +1,27 @@
 # Optical Flow
 
-A pure-Rust DIS (Dense Inverse Search) optical flow implementation in sfmtool-core,
-with Python bindings via sfmtool-py and GPU acceleration via wgpu compute shaders.
+Optical flow estimates, for every pixel of one image, where that pixel moved to in a
+second image. sfmtool uses dense flow between frames of an image sequence (usually
+video) in three places:
 
-## Motivation
+- **Flow-based matching** (`sfm match --flow`, `sfm solve --flow-match`) moves each SIFT
+  keypoint along the flow field into the next frame and matches it to the keypoints
+  near where it lands, instead of comparing descriptors over every image pair. See
+  [flow-based-matching.md](flow-based-matching.md) and
+  [_flow_matching.py](../../../src/sfmtool/feature_match/_flow_matching.py).
+- **Motion analysis** (`sfm motion` on images) computes frame-to-frame flow and flags
+  frames where the motion changes abruptly. See
+  [motion-command.md](../../cli/reconstruction/motion-command.md) and
+  [image_sequence.py](../../../src/sfmtool/motion/image_sequence.py).
+- **Flow visualization** (`sfm flow`) draws the flow between two images. See
+  [flow-command.md](../../cli/image-processing/flow-command.md).
 
-Dense optical flow is useful as a candidate track generator for video-based SfM. A
-Rust implementation (rather than wrapping OpenCV) gives us:
-
-- Use in the Rust-only GUI for visualization and interactive features
-- Control over the algorithm for SfM-specific optimizations
-- Integration with the existing rayon-parallel matching pipeline
-- GPU acceleration via wgpu compute shaders
+The flow itself is computed in Rust, in `sfmtool-core`, by an implementation of DIS
+(Dense Inverse Search) with variational refinement. It is written in Rust rather than
+wrapped from OpenCV so that sfmtool controls the algorithm, runs it in parallel on the
+CPU with rayon, and can also run it as wgpu compute shaders on a GPU
+([gpu-optical-flow.md](gpu-optical-flow.md)). Python reaches it through the
+`sfmtool._sfmtool.flow` bindings in `sfmtool-py`.
 
 ## Public Rust Interface
 

@@ -864,6 +864,7 @@ and the opening paragraphs listed in check 4.
   - :279 "Future Work" heading. Turn it into a present-tense sentence plus a draft.
   - In code: `inverse_search.wgsl:1` cites an "Option B from spec" that no spec has, and `gpu/mod.rs:4` titles the module "variational refinement" although it also runs DIS, the pyramid and upsampling.
 - **`specs/core/features/optical-flow.md`:** the opening never says what flow is for, and :6-14 Motivation argues for building it. `variational.rs:41-43` says Jacobi needs "~1.3-2×" the SOR count while `params.rs:26-29` says "roughly 4/3×"; keep the number in one place.
+  > _Status (2026-10-03): Done — the opening now says what flow is for in sfmtool (flow-based matching, `sfm motion` on image sequences, `sfm flow`) and why it is a Rust DIS implementation, replacing § Motivation; the Jacobi-to-SOR ratio now lives only on `DisFlowParams::variational_jacobi_iterations` ("roughly 4/3×"), and `VariationalParams::jacobi_iterations` links to it, branch `finding-bash-26-optical-flow-spec`._
 - **`specs/core/features/sift.md`:**
   - The opening is still a conditional-voice proposal.
   - :522 "**Yes — split keypoint finding…**" answers a question from a decision memo.
