@@ -79,7 +79,7 @@ Five more mismatches came from reading the sampled specs rather than from the ta
 - **viewport-navigation.md:766:** says the indicator opacity runs 50%→10%. The shader and the spec's own table say 20%→5%.
 - **focal-vote.md:167:** says "at most 60" rotation images. The code allows up to 119.
 - **kdf-constellation-query.md:593:** says a length mismatch raises `ValueError`. The code raises `OSError`.
-> _Status (2026-10-02): the focal-vote and constellation items are **Done** in code, commits `f32453d` and `58db6dd`; both specs already described the fixed behaviour. The `--dsp` and indicator items remain open._
+> _Status (2026-10-02): the focal-vote and constellation items are **Done** in code, commit `b19c676` (#670); both specs already described the fixed behaviour. The `--dsp` and indicator items remain open._
 
 ### 2. Prose duplicated between a spec and its code
 
@@ -344,7 +344,7 @@ most of the per-sentence findings.
 **Implementing code:** `features/kdforest/constellation.rs` (`constellation_query` :403, `constellation_at_pixel` :976, `constellation_from_keypoints` :1039, `radius_for_feature_count` :944); `neighbor_index.rs`; `sfmtool-py/src/spatial/{constellation_query,kdf,kdforest}.rs`.
 **Inconsistencies:**
   - **Behavioural.** The spec at :593-596 and the docstring at `kdf.rs:540` say mismatched array lengths raise `ValueError`. In fact `KdfError::ShapeMismatch` (constellation.rs:420, :429) maps to **`OSError`** (`kdf.rs:70`), and no test covers it.
-    > _Status (2026-10-02): **Done** — the length checks return `KdfError::InvalidQuery`, which maps to `ValueError`, with a test, commit `58db6dd`. The spec was already right._
+    > _Status (2026-10-02): **Done** — the length checks return `KdfError::InvalidQuery`, which maps to `ValueError`, with a test, commit `b19c676` (#670). The spec was already right._
   - :459-460 say the origin-table pass is paid "once per `constellation_at_pixel` call". It is also paid on every `constellation_from_keypoints` call, which is the bench's per-gesture path (`bench/search.rs:356`), and nothing caches it.
   - A bad `positions` dtype raises `TypeError` and a missing `sources` key raises `KeyError`, not `ValueError`.
 **Third copies:** These Rust doc comments in `constellation.rs` should each shrink to a contract plus a link:
@@ -380,7 +380,7 @@ most of the per-sentence findings.
 **Implementing code:** `geometry/focal_vote.rs` (`focal_vote*`, `FocalVoteOptions`, `FocalVoteResult`), `focal_vote/column_scan.rs`, `homography_estimation.rs`, `simd.rs`; `sfmtool-py/src/geometry/{focal_vote,homography_estimation}.rs`.
 **Inconsistencies:**
   - :167 says "at most 60" rotation images. `step = (n_img/60).max(1)` (`:1036`) visits up to 119. **This is probably a code bug; use `div_ceil`.**
-    > _Status (2026-10-02): **Done** — the stride is `n_img.div_ceil(60)`, so at most 60 images are visited, with a test, commit `f32453d`. The spec was already right._
+    > _Status (2026-10-02): **Done** — the stride is `n_img.div_ceil(60)`, so at most 60 images are visited, with a test, commit `b19c676` (#670). The spec was already right._
   - :577-584 list "three" environment flags. The code also reads `SFMTOOL_FOCAL_VOTE_F64_EPI` and `SFMTOOL_FOCAL_VOTE_F32_ROT` (simd.rs:67,75). F32_ROT contradicts :75 "stays f64". The code also reads `_F32_AUDIT` and `SFMTOOL_PROFILE`.
   - :56 says "every computation below is `f64`". That contradicts :69, since epipolar residuals are f32 by default. There is no stated parity test for the 8-lane f32 kernel.
   - :469-471 give the wrong `estimate_homography` signature. The real one is keyword-only, with `confidence`, `max_iterations`, `min_inliers` and `local_optimization`.
@@ -431,7 +431,7 @@ most of the per-sentence findings.
   - **Proposed:** *"`sfm sift` detects SIFT keypoints and descriptors in a set of images and writes one `.sift` file per image for `sfm match` and `sfm solve`; with `--draw` it draws those keypoints onto copies of the images."*
 **Recommendation:** update spec. **Also update code** for the bug below.
 **Unclear / incorrect / suspicious:** **Bug.** `sfm sift --draw DIR --tool opencv` inside a workspace draws the *workspace* tool's features. `get_sift_path_for_image` (`file.py:488-493`) ignores `feature_tool`, while `--extract --tool` writes to `features/sift-opencv-*`. So `--draw --tool` either draws the wrong features or raises FileNotFound, and no test covers it.
-> _Status (2026-10-02): **Done** for the bug — `--draw --tool` now ignores the workspace and reads the `--tool` features, with a test, commit `db00e2d`. The spec-side items above remain open._
+> _Status (2026-10-02): **Done** for the bug — `--draw --tool` now ignores the workspace and reads the `--tool` features, with a test, commit `b19c676` (#670). The spec-side items above remain open._
 
 ### specs/cli/reconstruction/inspect-command.md
 **Summary:** Accurate on file dispatch, the default and verbose fields, point-ID resolution and `--strips`. The main error is the stale claim that verbose point inspection needs `.sift` files.
@@ -590,7 +590,7 @@ most of the per-sentence findings.
     - `embedded_patches` ⇒ patch frame (:1690)
   - **Rigs and frames:** they must appear together (:698), but only `rigs/` is checked, so a `frames/` without `rigs/` passes.
   - **Keypoint bounds:** the writer does not check them (:1572), so it can write a file its own reader rejects.
-    > _Status (2026-10-02): **Done** — the writer runs `validate_keypoints`, with tests, commit `a197947`._
+    > _Status (2026-10-02): **Done** — the writer runs `validate_keypoints`, with tests, commit `b19c676` (#670)._
   - **Usage Examples** (:1812-1897) use `SfmrFileReader`, `write_sfm` and `verify_sfm`, none of which exist.
 **Format independence:** Twelve confirmed findings. The main ones, with who should replace the name:
   - :112-116 `SfmrReconstruction`/`conversion` → "a reader converts on load".
@@ -617,11 +617,12 @@ most of the per-sentence findings.
 **Implementing code:** `sfmtool-matches-format/src/{entries,types,write,read,verify}.rs`; `sfmtool-py/src/io/{matches,matches_file}.rs`.
 **Inconsistencies:**
   - :496, :530, :550 and :851 say member geometry is NaN-free. The writer and verifier do not check this.
-    > _Status (2026-10-02): **Done** — the writer refuses NaN member geometry and the verifier reports it, with tests, commit `05dc87f`._
+    > _Status (2026-10-02): **Done** — the writer refuses NaN member geometry and the verifier reports it, with tests, commit `b19c676` (#670)._
   - :214-220 list `matching_method` values `vocab_tree`, `spatial`, `transitive` and `custom`. The writers emit `flow`, `cluster` and `merged`, none of which is listed.
   - :577-593 leave out `refine_options.max_keypoint_uncertainty`, which is the threshold behind status 6.
+    > _Status (2026-10-03): **Superseded** — the member gate now uses the ZNCC self-similarity radius. The metadata paragraph (:590-597) lists `max_member_zncc_self_similarity_radius` and notes that older files carry `max_keypoint_uncertainty`, commits `086f8e1` (#651) and `c4a9db8` (#654)._
   - :727 says a verifier checks config indices. `verify.rs` does not bound-check them.
-    > _Status (2026-10-02): **Done** — the verifier reports out-of-range config indices, with a test, commit `05dc87f`._
+    > _Status (2026-10-02): **Done** — the verifier reports out-of-range config indices, with a test, commit `b19c676` (#670)._
   - :907-910 give the `source_selection` nesting condition wrongly. `cluster-selection.md:121` states it correctly.
   - :1056-1131 Usage Examples use APIs that do not exist.
   - :660 "Added… without a version bump" and :613 "identity affine" are stale.
@@ -632,6 +633,7 @@ most of the per-sentence findings.
   - :418-422 describe expansion as the CLI command → keep the rule and move the CLI sentence to background.
   - **Definitions carried by links:**
     - Status 6 (:620-624) → restate as "uncertainty above `refine_options.max_keypoint_uncertainty`".
+      > _Status (2026-10-03): **Done** — status 6 is now defined inline as a ZNCC self-similarity radius above the member gate's bar (:625-627), and the link is kept only for details, commits `086f8e1` (#651) and `c4a9db8` (#654)._
     - :650-653 `M_k`, `T_c`, `J` are defined only in `core/patch/cluster-warp-consistency.md`.
     - :901 provenance keys are undefined here.
   - **Opening**, proposed: *"A `.matches` file records feature correspondences among a set of images — pairwise per image pair, or clusters across images — with optional verification or vetting results, and names the `.sift` files whose indexes it uses."*
@@ -769,6 +771,141 @@ most of the per-sentence findings.
 
 ---
 
+## Carried forward from the 2026-09-05 audit
+
+The 2026-09-05 audit (at `077a83d`) is retired in favour of this report. These
+are its findings that were still open on 2026-10-03, each checked against the
+current files; line numbers are current. 09-05 findings that this report already
+tracks are not repeated: the `track-cluster-matching.md` drifts and its
+Production Implementation rewrite, `cluster-census.md` `flag_threshold`, the
+duplicate-prose leads, the `sfmtool-py` binding surface, the uncited flow specs,
+and the opening paragraphs listed in check 4.
+
+### Spec text that disagrees with the code (code is right unless noted)
+
+- **`specs/core/geometry/estimate-intrinsics.md`:**
+  - :237-238 say "42 captures … 6 of them fisheye"; `estimate_intrinsics.rs:107-108` says 40 captures, 4 fisheye. Settle the count where it was measured, then cut the code doc to the four cut points plus a link.
+  - :224 says the ratio 1.153 is "2.2 grid steps". At step 1.0566 it is 2.58.
+  - :216 says "the consensus came from the rotation family". `escalation_reasons` gates on the majority family (`vote.family`).
+  - :268-271 do not say that the binding's `columns=None` means `Fixed` with both columns, not `"auto"`.
+  - Command side: the `--json` payload (`_commands/estimate_intrinsics.py:459-477`) never includes `screening_vote`, so the pinhole numbers the spec tells callers to read from it cannot be reached from `sfm estimate-intrinsics`. Expose it, or say so in `estimate-intrinsics-command.md`.
+- **`specs/cli/reconstruction/motion-command.md`:**
+  - :592-628 § Tests describes a 10-frame fixture and a "NaN round-trips as `null`" test that do not exist; the tests are in `tests/test_motion_report.py`.
+  - :630-641 "Code and patterns to build on" is a build plan, and two of its rows name helpers the motion code does not use.
+  - :645-647 open question "Extrapolation order" is settled by the shipped linear+quadratic minimum.
+  - :336 cites "KerryPark 831→832"; kerry_park has 24 frames.
+  - :461 does not say that `shared_points` passes through the 90° angle filter in `_image_pair_graph.py:46`, so a 0 can mean "filtered".
+  - :62 omits that `--max-stride` is `IntRange(min=2)` (`motion.py:44`).
+- **`specs/core/patch/candidate-track-spawning.md`:**
+  - :128-140 is a change order ("predates the parameter", "As part of this change"). Write it in the present tense inside § API.
+  - :134 says "same shape as `refine_keypoints`'s"; `localize_keypoints` takes `Vec<Option<[f64;2]>>`.
+  - :72-73 do not say that a projection failure forces `sum_sq = INFINITY` (`spawn.rs:367`), so it reports `high_reproj`, not `bad_triangulation`.
+  - The parent-at-infinity `ValueError` (:125) has no test.
+- **`specs/gui/mcp-server.md`:**
+  - :51-56 say `cli.rs` "treats everything else as a path". `cli.rs:97` refuses any `-`-prefixed argument, and `--mcp=<non-number>` is an error (`:92`).
+  - :1294-1307 say each piece of an explicit `set_view` call "is preserved". With `orientation_wxyz`, `tools.rs:885-887` require `position` and `target_distance`.
+  - The screenshot text block states the size twice: `server.rs:321` prefixes `{w}×{h} px.` to a caption that already ends `…, {w}×{h}` (`mcp/mod.rs:1926-1931`), and the two can disagree for a panel. Drop one and say which in the spec.
+  - :4770 does not mention the schema's `"minimum": 16` on `max_dimension` (`tools/catalog/background.rs:68`).
+  - :1054-1058 describe the prior state ("Before this pair existed…").
+- **`specs/gui/camera-intrinsics.md`:**
+  - Code doc wrong: `sfmtool-core/src/camera/report.rs:130-132` says the arrow runs from `reference` to `pixel`; the spec and `field.rs` draw it with the tail at `pixel`.
+  - :824-828 list the hover `distortion` line's states without `outside the model's domain` (`hover.rs:89`).
+  - Change and phase residue at :10, :48, :58 (Before/After table), :84, :464, :478, :882, :1032, :1037, :1231 (§ Testing as a to-build list) and :1461-1463.
+  - `intrinsics_detail/derived.rs:18` says "will default to" about a default that has shipped.
+- **`specs/core/camera/sfmtool-pinhole-kernels.md`:**
+  - :178 defines `bspline_is_inactive` without the `len() < MIN_BSPLINE_COEFFS` case (`bspline.rs:47-48`).
+  - The Inverse section (:70-99) omits the `r_d < PINHOLE_AXIS_EPS` short-circuit (`sfmtool_pinhole.rs:72`), which makes :74 "`r_d ≤ 0` is `ρ = 0`" unreachable.
+  - :80-82 and `sfmtool_pinhole.rs:60` say the identity fallback is "the policy `sfmtool_fisheye_to_ray` applies"; the fisheye falls back to `equidistant_to_ray` (`sfmtool_fisheye.rs:195-197`).
+  - :84-99 repeat `sfmtool-fisheye-kernels.md:73-85`. Link to it instead.
+- **`specs/core/geometry/affine-factorization.md`:**
+  - :150-151 and `affine_factorization.rs:414-415` say `metric_upgrade` fails only on degenerate systems. It also returns `None` when `Q` is not positive-definite (`:466`).
+  - :56 does not say that `rounds == 0` is legal (`:263`).
+  - Discuss: the module has no caller outside its tests. Keep it or retire it.
+- **`specs/core/geometry/rotation-locked-resection.md`:**
+  - :113-114 do not state the up-front `None` when `uv.len() != n` or `n < min_inliers.max(1)` (`resect_translation.rs:159`).
+  - The spec does not say that rays with a non-finite or near-zero `pixel_to_ray` are excluded (`:172-181`).
+  - :11-12 present "a rig calibration, an external attitude" as callers; the only caller is `rotation_init.rs`.
+- **`specs/core/features/gpu-optical-flow.md`:**
+  - :131 says "64 pixels (8×8 patch)". The shader loops `params.patch_size²`, which is 12×12 under `high_quality`.
+  - :56-61 place routing only in `refine_flow_at_level`; `optical_flow/mod.rs:177` also picks a `gpu_start_scale`.
+  - :279 "Future Work" heading. Turn it into a present-tense sentence plus a draft.
+  - In code: `inverse_search.wgsl:1` cites an "Option B from spec" that no spec has, and `gpu/mod.rs:4` titles the module "variational refinement" although it also runs DIS, the pyramid and upsampling.
+- **`specs/core/features/optical-flow.md`:** the opening never says what flow is for, and :6-14 Motivation argues for building it. `variational.rs:41-43` says Jacobi needs "~1.3-2×" the SOR count while `params.rs:26-29` says "roughly 4/3×"; keep the number in one place.
+- **`specs/core/features/sift.md`:**
+  - The opening is still a conditional-voice proposal.
+  - :522 "**Yes — split keypoint finding…**" answers a question from a decision memo.
+  - :692-694 say the pyramid "can be rebuilt per-octave on demand … to settle with benchmarks"; `ScaleSpace::build_chain` and `extend_octave` already do this.
+  - Discuss: § Extraction-orchestration pipelining (:398-510) is Python CLI content and could move to `sift-command.md`.
+- **`specs/core/features/track-cluster-matching.md`** (two items not covered above): :474-480 present the `d = 28` prototype counts as what the production run reproduces, while the tables at :119-124 and :137-144 do not say they were measured at `d = 28`; § Location (:509-512) does not mention `covisibility.rs` and `covisibility/`.
+- **`specs/cli/image-feature/match-command.md`:** `_run_matching` records `matcher_options["min_size"]` (`feature_match/_run.py:42, 95`), but no flag sets it and the Options table does not mention it. Document it as fixed at 2, or expose it.
+- **`specs/cli/colmap-interop/from-colmap-bin-command.md`:** does not mention the `UsageError` for a non-`.sfmr` output (`from_colmap_bin.py:84-85`).
+- **`specs/gui/panel-layout.md`:** :435-438 omit that a non-numeric `sfm_explorer_layout` value produces `Not a layout file` (`layout.rs:620-621`).
+- **`specs/core/patch/cluster-patches.md`:** :228 "## Consumers (future work, out of scope here)" is a future-work list in a standing spec. Move it to a draft.
+
+### Code doc comments that repeat the spec (shrink to contract + link)
+
+- `sift/extract_sfmtool.py:238-256`, the `_extract_workers` docstring.
+- `sift/mod.rs:310-329`, the proof of the cap-aware walk.
+- `geometry/resect_translation.rs:95-116`, the `residual_norm` chirality argument.
+- `motion/recon_discontinuity.py:689-700`, the threshold rationale, which is already in `constants.py`.
+- `optical_flow/gpu/mod.rs:98-103`.
+- `kernels/sfmtool_pinhole.rs:87-110`.
+- `image_detail/intrinsics/field.rs:4-65`, a 62-line module doc.
+
+### Opening paragraphs not covered by check 4
+
+Fix one spec per PR.
+
+- `core/camera/camera-model-registry.md`. Proposed: *"A camera is represented two ways in sfmtool, a loosely-typed record mirroring the on-disk reconstruction and a closed enum the algorithms compute with; this spec says why the split is kept and how the conversion stays exhaustive and generated in one place."*
+- `core/patch/cluster-patches.md`. Proposed: *"A patch cluster is a group of matched features fitted to the actual image content: one member is the reference, and every other member carries a photometrically refined affine warp mapping the reference's patch into its image."*
+- `cli/reconstruction/embed-patches-command.md`. Proposed: *"Rewrites a reconstruction so it no longer depends on the .sift files it was solved from: each observation's pointer into a .sift file becomes an image patch and keypoint stored inline, producing a self-contained .sfmr."*
+- `core/spherical/per-spherical-tile-source-stack.md`. Proposed: *"Panorama work divides the sphere into small tiles and asks, per tile, what each source photograph saw in that direction; this gathers exactly that, each source warped into the tile's frame as an image pyramid."*
+- Lower priority: `flow-based-matching`, `affine-factorization`, `gui/action-log`, `gui/camera-intrinsics`, `gui/mcp-server`, `member-coherence-validation`, `gui/patch-rendering`, `cluster-patches-command`, `localize-keypoints-command`, `motion-command`, and the `specs/drafts/*-amendment.md` files, each of which opens "Amends [link]…".
+
+### Surfaces without a spec
+
+- `sfmtool-core/src/features/feature_match/` (descriptor distance, best match, ratio test, `geometric_filter.rs`). Write `specs/core/features/descriptor-matching.md` and link it from `match-command.md`.
+- `sfmr-file-format.md` § "Conversions happen at the I/O boundary" (:104) does not name `sfmtool-core/src/geometry/convention/`. Put it in the Implementations section that priority 3 asks for.
+- Smaller: `viewport-navigation.md` names `ViewportCamera` (:469) without linking `camera/viewport/`; `solve-command.md` does not name `_global_sfm.py` or `_incremental_sfm.py`; `match-command.md` does not state the geometric filter's model and thresholds (`feature_match/_geometric_filter.py`).
+
+### Specs the 2026-09-05 audit read
+
+The 2026-09-05 audit read the specs below against their code; their open items
+are in the sections above. Each is kept as a heading so the `audit-specs`
+sampler, which counts `### specs/…` headings in `reports/*-spec-audit.md`, still
+treats them as audited. (`gui/point-track-detail.md`, also read then, has been
+replaced by `gui/track-view.md`.)
+
+### specs/cli/colmap-interop/from-colmap-bin-command.md
+
+### specs/cli/image-feature/match-command.md
+
+### specs/cli/reconstruction/motion-command.md
+
+### specs/core/camera/epipolar-curves.md
+
+### specs/core/camera/sfmtool-pinhole-kernels.md
+
+### specs/core/features/gpu-optical-flow.md
+
+### specs/core/features/optical-flow.md
+
+### specs/core/features/sift.md
+
+### specs/core/geometry/affine-factorization.md
+
+### specs/core/geometry/estimate-intrinsics.md
+
+### specs/core/geometry/rotation-locked-resection.md
+
+### specs/core/patch/candidate-track-spawning.md
+
+### specs/gui/camera-intrinsics.md
+
+### specs/gui/mcp-server.md
+
+### specs/gui/panel-layout.md
+
 ## Top priorities
 
 1. **Code bugs and behavioural divergences found by the deep reads.** Fix each in the code and add a test:
@@ -778,16 +915,15 @@ most of the per-sentence findings.
    - The matches verifier does not bounds-check config indices, and no layer enforces NaN-free member geometry.
    - The sfmr writer can write out-of-bounds keypoints that its own reader rejects.
 
-   > _Status (2026-10-01): **Done**, each with a test. The `--draw --tool` bug
-   > is fixed by a keyword-only `ignore_workspace` on `get_sift_path_for_image`
-   > and `draw_sift_features`, commit `db00e2d`. The constellation length checks
-   > return `KdfError::InvalidQuery`, so they raise `ValueError`, commit
-   > `58db6dd`. The rotation-scan stride rounds up, commit `f32453d`. The
-   > matches writer refuses NaN member geometry, and the verifier reports it and
-   > out-of-range config indexes, commit `05dc87f`. The sfmr writer runs
-   > `validate_keypoints`, commit `a197947`. The specs already described
-   > the fixed behaviour; each finding above is marked. The other spec-side
-   > items in those sections, and priorities 2–5, remain open._
+   > _Status (2026-10-01): **Done**, each with a test, in commit `b19c676`
+   > (#670). The `--draw --tool` bug is fixed by a keyword-only
+   > `ignore_workspace` on `get_sift_path_for_image` and `draw_sift_features`.
+   > The constellation length checks return `KdfError::InvalidQuery`, so they
+   > raise `ValueError`. The rotation-scan stride rounds up. The matches writer
+   > refuses NaN member geometry, and the verifier reports it and out-of-range
+   > config indexes. The sfmr writer runs `validate_keypoints`. The specs
+   > already described the fixed behaviour; each finding above is marked. The
+   > other spec-side items in those sections, and priorities 2–5, remain open._
 2. **Format specs that define a field wrongly:**
    - `sift-file-format.md` defines `feature_tool_xxh128` as a workspace-propagated value with no fixed algorithm. It is the XXH128 of the stored metadata bytes, and verifiers enforce that.
    - `sfmr-file-format.md` says versions are "1 to 9" (the current version is 11), has no v10 entry, and calls `derived_xxh128` optional when the verifier requires it.
