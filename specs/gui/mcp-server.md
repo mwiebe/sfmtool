@@ -3442,10 +3442,11 @@ would be a smear of a few pixels stretched over the square. The allowed normals
 are the intersection of one spherical cap per observation, so the step walks the
 arc toward what was asked and stops at the last allowed normal on it; the
 sentence then ends *"stopped 80.0 degrees from IMG_0042.jpg"*, naming the
-observation's image. The reply's `normal` is the unit normal the patch faces
-after the step, read back off its placement, so a stopped tilt reports where it
-stopped rather than the normal that was named. An observation already past the cap constrains nothing, or
-a track that starts outside the region could never be turned back into it.
+observation's image. An observation already past the cap constrains nothing, or
+a track that starts outside the region could never be turned back into it. The
+reply's `normal` is the unit normal the patch faces after the step, read back
+off its placement, so a stopped tilt reports where it stopped rather than the
+normal that was named.
 
 **At the track stage the patch is the thing every sighting is a view of**, so
 the two tools that move its centre -- the translation and a resize that names a
