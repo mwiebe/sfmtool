@@ -228,6 +228,7 @@ Eight specs open with "This document describes/specifies…":
 - gui/architecture
   > _Status (2026-10-04): **Done** — the opening now says SfM Explorer is a native Rust app in `sfm-explorer` (winit window, wgpu scene, egui panels, its own event loop), that `pixi run gui` and `sfm explorer` reach `sfm_explorer::run` through the `sfm-explorer` and `launch-sfm-explorer` binaries, names the main modules, and says what the spec covers, branch `finding-fix-15-gui-architecture-opening`._
 - gui/camera-views
+  > _Status (2026-10-04): **Done** — the opening now says what camera views are (frustums with photograph thumbnails, click to select, camera view through a selected camera) and what they are for, branch `finding-fix-16-camera-views-opening`._
 - gui/point-cloud-rendering
   > _Status (2026-10-04): **Done** — the opening now says what the viewer draws (round camera-facing splats), what the EDL pass does and why, and what the target indicator and its nearby-point brightening (the code's "supernova" effect) show, checked against `shaders/points.wgsl`, `shaders/edl.wgsl` and `viewer_3d/mod.rs`, branch `finding-fix-14-point-cloud-rendering-opening`._
 - gui/user-experience
