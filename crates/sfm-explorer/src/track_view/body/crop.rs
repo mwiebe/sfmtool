@@ -42,7 +42,9 @@ pub(super) const CROP_MARGIN_PX: f64 = 1.0;
 /// The most texels the longer side of a row's crop is sampled at. A crop wider
 /// than this many photograph pixels is read from the pyramid level whose
 /// pixels are nearest the step, rather than uploaded whole, so a patch that
-/// spans half a photograph costs a small texture like any other.
+/// spans half a photograph costs a small texture like any other. For display
+/// only: the crop's caption reads the patch's axes from the geometry in the
+/// photograph's own pixels, not from these texels.
 const CROP_MAX_TEXELS: f64 = 128.0;
 
 /// Where a patch lands in one photograph: its outline, how long its two axes
@@ -129,7 +131,7 @@ pub(super) fn outline(
                 for i in 0..=n {
                     let (s, t) = along(2.0 * i as f64 / n as f64 - 1.0);
                     let (xyz, w) = frame.corner_homogeneous(s, t);
-                    points.push(geometry::project(&camera, &pose, xyz, w)?);
+                    points.push(camera.project_homogeneous(&pose, xyz, w)?);
                 }
                 Some(polyline_length(&points))
             };
@@ -140,7 +142,7 @@ pub(super) fn outline(
                 samples,
                 axes_px: [axis(|a| (a, 0.0)), axis(|a| (0.0, a))],
                 keypoint,
-                projection: geometry::project(&camera, &pose, target.coords, patch.w),
+                projection: camera.project_homogeneous(&pose, target.coords, patch.w),
                 projection_of: Some(match payload.position {
                     Some(_) => ProjectionOf::Point,
                     None => ProjectionOf::PatchCentre,

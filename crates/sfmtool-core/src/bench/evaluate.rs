@@ -32,6 +32,7 @@ use nalgebra::{Point3, Vector3};
 use ndarray::{Array2, Array3};
 
 use crate::camera::remap::{remap_bilinear_mip, ImageU8Pyramid};
+use crate::camera::warp_map::patch_grid_jacobian;
 use crate::camera::WarpMap;
 use crate::patch::cloud::OrientedPatch;
 use crate::patch::cluster_refine::{
@@ -43,10 +44,13 @@ use crate::patch::keypoint_localize::{
     KeypointLocalizeParams, LocalizeError,
 };
 use crate::patch::normal_refine::ProjectedImage;
-use crate::patch::self_similarity::{zncc_self_similarity_parts, PatchTile, SelfSimilarityParams};
+use crate::patch::self_similarity::{
+    zncc_self_similarity_parts, PatchTile, SelfSimilarityParams, SelfSimilarityReach,
+};
 use crate::progress::{Cancelled, Progress};
 use crate::progress_note;
 use crate::reconstruction::edited::EditedReconstruction;
+use crate::SfmrReconstruction;
 
 use super::steps::apply_thresholds;
 use super::track::{
@@ -108,6 +112,12 @@ pub struct EvaluateOptions {
     /// round: a reading registers nothing, so the congealing loop that would
     /// walk every view towards a shared optimum is run once, over the
     /// observations where they already sit.
+    ///
+    /// Its [`resolution`](KeypointLocalizeParams::resolution) applies only to
+    /// a reconstruction that stores no patch bitmaps. Otherwise the track
+    /// stage reads at the reconstruction's own patch resolution
+    /// ([`Self::patch_resolution`]), so every patch-grid px it reports is a
+    /// px of the patch the reconstruction holds.
     pub localize: KeypointLocalizeParams,
     /// How far from the projection a seed may sit and still be read, in
     /// **patch-grid px**.
@@ -164,6 +174,49 @@ impl Default for EvaluateOptions {
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
         }
     }
+}
+
+impl EvaluateOptions {
+    /// The patch-grid resolution `R`, in grid px a side, that a track-stage
+    /// reading of a track on `recon` is stated in: the edge of `recon`'s patch
+    /// bitmaps where it stores them ([`stored_patch_resolution`]), else
+    /// [`Self::localize`]'s resolution.
+    ///
+    /// Every patch-grid px the track stage reports is one `R`-th of the
+    /// patch's side: the shift, the self-similarity radius and its reach. A
+    /// caller that states a patch's zoom in grid px per photograph pixel uses
+    /// the same `R`, so the zoom and the reach are in one unit.
+    ///
+    /// ```no_run
+    /// # use sfmtool_core::bench::EvaluateOptions;
+    /// # fn run(recon: &sfmtool_core::SfmrReconstruction) {
+    /// let r = EvaluateOptions::default().patch_resolution(recon); // 24 unless the file says otherwise
+    /// # let _ = r;
+    /// # }
+    /// ```
+    pub fn patch_resolution(&self, recon: &SfmrReconstruction) -> u32 {
+        stored_patch_resolution(recon)
+            .unwrap_or(self.localize.resolution)
+            .max(2)
+    }
+
+    /// These options with the track stage's localizer at `resolution`.
+    pub(super) fn at_resolution(&self, resolution: u32) -> Self {
+        let mut options = self.clone();
+        options.localize.resolution = resolution;
+        options
+    }
+}
+
+/// The edge `R` of `recon`'s `(P, R, R, 4)` patch bitmaps, which an `.sfmr`
+/// declares as `patch_bitmap_resolution`, or `None` where it stores none.
+///
+/// A column the viewer rendered for display because the file had none counts
+/// as well, as it does for the fit's fuse: the bench reads it as it would the
+/// file's own.
+pub fn stored_patch_resolution(recon: &SfmrReconstruction) -> Option<u32> {
+    let bitmaps = recon.point_set.patch_bitmaps_y_x_rgba.as_deref()?;
+    u32::try_from(bitmaps.shape()[1]).ok().filter(|&r| r > 0)
 }
 
 /// Why an evaluation was refused. Every variant names what did not hold,
@@ -445,7 +498,10 @@ pub fn evaluate(
     evaluate_preconditions(track)?;
     let (read, mut report) = match &track.stage {
         Stage::Cluster(payload) => evaluate_cluster(track, payload, images, options, progress)?,
-        Stage::Track(payload) => evaluate_track(track, images, payload, options, progress)?,
+        Stage::Track(payload) => {
+            let options = options.at_resolution(options.patch_resolution(&edited.base));
+            evaluate_track(track, images, payload, &options, progress)?
+        }
     };
     if track.repainted() {
         return Ok((read, report));
@@ -718,6 +774,8 @@ pub(super) fn evaluate_cluster(
             next_measurement.zncc_self_similarity_slide_grid = similarity.slide;
             next_measurement.zncc_self_similarity_surface = similarity.surface;
             next_measurement.zncc_self_similarity_tolerance = similarity.tolerance;
+            next_measurement.zncc_self_similarity_reach = similarity.reach;
+            next_measurement.zncc_self_similarity_reach_middle = similarity.reach_middle;
         }
         progress_note!(phase, "{} observations", members.len());
     }
@@ -774,6 +832,19 @@ struct TileSelfSimilarity {
     slide: Option<[[[f64; 2]; 3]; 3]>,
     surface: Option<Vec<f64>>,
     tolerance: Option<f64>,
+    /// How far the whole core's contour reaches, in grid px, image px and
+    /// along the patch's axes, as far as each can be computed.
+    reach: Option<SelfSimilarityReach>,
+    /// The same for the middle square's contour.
+    reach_middle: Option<SelfSimilarityReach>,
+}
+
+/// What a tile's grid is, for converting its self-similarity readings out of
+/// grid px: the image px per grid px at the tile's centre, and the placement
+/// whose `R×R` core the tile is, where there is one.
+struct TileGeometry<'a> {
+    jacobian: Option<[[f64; 2]; 2]>,
+    placement: Option<&'a OrientedPatch>,
 }
 
 /// The pixels of tile the self-similarity readings need around the `R×R`
@@ -783,12 +854,14 @@ fn self_similarity_margin() -> usize {
 }
 
 /// Read an interleaved `(R + 2r) × (R + 2r) × C` tile's self-similarity over
-/// its `R×R` core, with the default parameters.
+/// its `R×R` core, with the default parameters, and measure the whole core's
+/// and the middle's contours through `geometry`.
 fn score_self_similarity(
     samples: &[f32],
     size: usize,
     channels: usize,
     resolution: usize,
+    geometry: &TileGeometry<'_>,
 ) -> TileSelfSimilarity {
     if channels == 0 || samples.len() != size * size * channels {
         return TileSelfSimilarity::default();
@@ -801,7 +874,12 @@ fn score_self_similarity(
         height: size,
     };
     let parts = zncc_self_similarity_parts(&tile, resolution, &SelfSimilarityParams::default());
+    let reach = |reading| {
+        SelfSimilarityReach::read(reading, geometry.jacobian, geometry.placement, resolution)
+    };
     TileSelfSimilarity {
+        reach: reach(&parts.whole),
+        reach_middle: reach(&parts.middle),
         radius: Some(parts.whole.radius),
         middle: Some(parts.middle.radius),
         grid: Some(
@@ -839,7 +917,15 @@ fn tile_self_similarity(
     };
     let resolution = params.resolution.max(2) as usize;
     let channels = tile.len() / (size * size);
-    score_self_similarity(&tile, size, channels, resolution)
+    // The grid is the seed shape's affine map: one grid px is
+    // `2 · radius / R` keypoint-frame units, which the shape carries to image
+    // px, columns along the shape's first column.
+    let step = 2.0 * params.radius / resolution as f64;
+    let geometry = TileGeometry {
+        jacobian: Some(shape.map(|row| row.map(|v| v * step))),
+        placement: None,
+    };
+    score_self_similarity(&tile, size, channels, resolution, &geometry)
 }
 
 // ---- The track stage -------------------------------------------------------
@@ -1094,6 +1180,8 @@ fn evaluate_track(
             measurement.zncc_self_similarity_slide_grid = None;
             measurement.zncc_self_similarity_surface = None;
             measurement.zncc_self_similarity_tolerance = None;
+            measurement.zncc_self_similarity_reach = None;
+            measurement.zncc_self_similarity_reach_middle = None;
             if let Some(pixel) = seed_of(observation) {
                 // The offset is measured from the **patch's** projection,
                 // because that is the anchor the localizer renders its tile
@@ -1116,6 +1204,8 @@ fn evaluate_track(
                 measurement.zncc_self_similarity_slide_grid = similarity.slide;
                 measurement.zncc_self_similarity_surface = similarity.surface;
                 measurement.zncc_self_similarity_tolerance = similarity.tolerance;
+                measurement.zncc_self_similarity_reach = similarity.reach;
+                measurement.zncc_self_similarity_reach_middle = similarity.reach_middle;
             }
             if measurement.zncc.is_some() {
                 measured += 1;
@@ -1391,7 +1481,9 @@ pub(super) fn observation_metrics(
 /// It reads the patch through the keypoint-anchored frame, rendered with its
 /// half-extent grown by `(R + 2r) / R` at resolution `R + 2r`, so its core is
 /// the same `R×R` patch and the ring around it is what the shifted windows
-/// read.
+/// read. The contours are measured through the same anchored placement at
+/// resolution `R`, whose grid step is the rendered tile's: the image px per
+/// grid px at its centre ([`patch_grid_jacobian`]) and its half-extents.
 fn patch_tile_readings(
     patch: &OrientedPatch,
     view: &ProjectedImage<'_>,
@@ -1407,7 +1499,11 @@ fn patch_tile_readings(
     let mut wide = frame.clone();
     wide.half_extent = [frame.half_extent[0] * grow, frame.half_extent[1] * grow];
     let samples = to_f32(render_bitmap(&wide, view, size, channels));
-    score_self_similarity(&samples, size, channels, resolution)
+    let geometry = TileGeometry {
+        jacobian: patch_grid_jacobian(frame, view.camera, view.cam_from_world, resolution),
+        placement: Some(frame),
+    };
+    score_self_similarity(&samples, size, channels, resolution, &geometry)
 }
 
 /// The `(R, R, C)` patch bitmap: `view` resampled through `patch`'s frame, the

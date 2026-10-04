@@ -34,7 +34,7 @@
 //! summary, and the judgement the boxes produce. These are cached against the
 //! track's own `Arc` rather than recomputed per frame, because the judgement is
 //! `verdicts_if_unpinned` run over a copy (and a copy of a track carries its
-//! consensus bitmap) and a tile is a warp of a full-resolution photograph.
+//! consensus bitmap) and a tile is a warp of a photograph's mip pyramid.
 //! The row selection is not the panel's: it is the bench's, in
 //! `AppState::bench_rows`, and a row click in Edited mode reports through
 //! [`TrackBodyResponse::pick_row`].
@@ -46,6 +46,7 @@ use sfmtool_core::bench::{
     bar_checks, verdicts_if_unpinned, BarChecks, EditableTrack, Observation, Provenance, Stage,
     StageKind, Thresholds, Verdict,
 };
+use sfmtool_core::patch::self_similarity::{BoundedLength, PatchAxisReach, SelfSimilarityReach};
 use sfmtool_core::{EditedReconstruction, Point3D, SfmrReconstruction};
 
 use crate::bench::live::Evaluation;
@@ -66,6 +67,7 @@ mod tests;
 
 pub(crate) use patch::track_patch_image;
 pub(crate) use table::RowSummary;
+pub(crate) use tile::patch_jacobian;
 
 /// Display size of the track's own patch, left of the toolbar.
 const STORED_PATCH_SIZE: f32 = 64.0;
@@ -261,10 +263,19 @@ pub struct TrackBody {
     ///
     /// Keyed by the row rather than by the image, because two observations can
     /// name one image and they are two pictures: at the cluster stage each has
-    /// its own position and shape. A tile is a warp of a full-resolution
-    /// photograph, so it is rendered once and kept; what says it is stale is
+    /// its own position and shape. A tile is a warp of a photograph's mip
+    /// pyramid, so it is rendered once and kept; what says it is stale is
     /// [`TrackBody::tiles_for`].
     tiles: HashMap<usize, Option<egui::TextureHandle>>,
+    /// The Jacobian at the centre of each observation's tile, by observation
+    /// index, that the *Zoom* cell prints its zoom from and the *Zoom* column
+    /// orders by ([`tile::patch_jacobian`]). Kept and dropped with
+    /// [`TrackBody::tiles`], since it is the Jacobian of the warp the tile is
+    /// drawn through, but filled without the photograph: a row whose photograph is
+    /// still decoding, or cannot be read, has its numbers all the same, and
+    /// they are the numbers `get_bench_track` reports. `None` is cached as the
+    /// tile's is.
+    jacobians: HashMap<usize, Option<patch::PatchJacobian>>,
     /// The track and the exact track value [`TrackBody::tiles`] was rendered
     /// from: the label, and the address of the track's `Arc`. Any step on the
     /// track gives it a new `Arc`, and every step that moves a tile is one.
@@ -355,6 +366,7 @@ impl TrackBody {
             summary: None,
             renaming: None,
             tiles: HashMap::new(),
+            jacobians: HashMap::new(),
             tiles_for: None,
             contexts: HashMap::new(),
             crops: HashMap::new(),
@@ -412,6 +424,7 @@ impl TrackBody {
     /// Drop everything cached for a reconstruction that has left the scene.
     pub fn forget_recon(&mut self, id: ReconId) {
         self.tiles.clear();
+        self.jacobians.clear();
         self.tiles_for = None;
         self.contexts.clear();
         self.crops.clear();
@@ -959,6 +972,22 @@ impl TrackBody {
         texture_id
     }
 
+    /// The Jacobian at the centre of one row's tile, computing it if this is
+    /// the first frame that has asked for it since the track moved. Geometry
+    /// alone, so unlike [`Self::ensure_tile`] it never waits on a photograph,
+    /// and `None` is always a real answer.
+    fn ensure_jacobian(
+        &mut self,
+        recon: &SfmrReconstruction,
+        track: &EditableTrack,
+        observation: usize,
+    ) -> Option<patch::PatchJacobian> {
+        *self
+            .jacobians
+            .entry(observation)
+            .or_insert_with(|| tile::patch_jacobian(recon, track, observation))
+    }
+
     /// The hover view of one row's tile, rendering it if this is the first
     /// frame that has asked for it since the track moved.
     ///
@@ -1142,6 +1171,7 @@ impl TrackBody {
             return;
         }
         self.tiles.clear();
+        self.jacobians.clear();
         self.contexts.clear();
         self.crops.clear();
         self.crop_contexts.clear();
@@ -1187,6 +1217,261 @@ fn self_similarity_text(whole: Option<f64>, middle: Option<f64>) -> String {
     stacked(whole, middle, |value| {
         format!("{} px", radius_number(value))
     })
+}
+
+/// The *Self-similarity* cell's hover text: how far the contour the whole and
+/// middle radii are read from reaches, in three units, as a small table with a
+/// column for each part. `None` where neither part has a reach.
+///
+/// ```text
+///            whole                mid
+/// grid px    0.42                 3+
+///   along    u 0.31  v 0.40       u 3+  v 0.80
+/// image px   0.85                 5.6+
+/// world      u 3.1 mm  v 4.0 mm   u 29+ mm  v 7.8 mm
+/// ```
+///
+/// The grid row is the radius, which the cell prints, and the row under it the
+/// reach along the grid's `x` and `y`, labelled with the patch axes they run
+/// along, `u` and `v` (the grid's `y` runs down `v`). The image row is the
+/// radius in the photograph's pixels. The last row is the reach along `u` and
+/// `v` in world space, with the unit after each value: the reconstruction's
+/// `world_space_unit` scaled to one unit for every length in the hover
+/// (`LengthDisplay`, so `0.0031 m` prints `3.1 mm`), or bare and labelled
+/// *scene units* where the file names none (in scientific form, `5.4e-4`,
+/// where the largest is under 0.001), or as an angle in degrees for a patch at
+/// infinity. A `+` marks a
+/// lower bound, as the cell's `3+` does: the region at the level ran off the
+/// square the reading searched along that axis, ran off along the other axis
+/// without holding its width, borders a gap (a neighbour with no reading), or
+/// reached the largest radius searched, so the true reach may be larger.
+/// Numbers carry two significant digits; a grid value at the largest radius
+/// prints `3+` as the cell does. `-` stands for a value that cannot be
+/// computed, as at the cluster stage, which has no patch.
+fn self_similarity_reach_text(
+    whole: Option<&SelfSimilarityReach>,
+    middle: Option<&SelfSimilarityReach>,
+    world_unit: Option<&str>,
+) -> Option<String> {
+    if whole.is_none() && middle.is_none() {
+        return None;
+    }
+    let max = max_self_similarity_radius();
+    let grid = |r: BoundedLength| {
+        if r.value >= max {
+            format!("{max:.0}+")
+        } else {
+            reach_number(r)
+        }
+    };
+    let pair = |[u, v]: [String; 2]| format!("u {u}  v {v}");
+    let parts = [whole, middle];
+    let degrees = parts
+        .iter()
+        .flatten()
+        .any(|reach| matches!(reach.patch_axes, Some(PatchAxisReach::Angle(_))));
+    let cells = |f: &dyn Fn(&SelfSimilarityReach) -> Option<String>| {
+        parts.map(|part| part.and_then(f).unwrap_or_else(|| "-".to_string()))
+    };
+    let world_label = match (degrees, world_unit) {
+        (true, _) => "angle".to_string(),
+        (false, Some(_)) => "world".to_string(),
+        (false, None) => "scene units".to_string(),
+    };
+    let largest_length = parts
+        .iter()
+        .flatten()
+        .filter_map(|reach| match reach.patch_axes {
+            Some(PatchAxisReach::Length(values)) => Some(values),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| r.value)
+        .filter(|value| value.is_finite())
+        .fold(None, |most: Option<f64>, value| {
+            Some(most.map_or(value, |most| most.max(value)))
+        });
+    let length_display = LengthDisplay::for_largest(world_unit, largest_length);
+    let rows: [(String, [String; 2]); 4] = [
+        (
+            "grid px".to_string(),
+            cells(&|reach| Some(grid(reach.grid_radius))),
+        ),
+        (
+            "  along".to_string(),
+            cells(&|reach| Some(pair(reach.grid_axes.map(grid)))),
+        ),
+        (
+            "image px".to_string(),
+            cells(&|reach| reach.image_radius.map(reach_number)),
+        ),
+        (
+            world_label,
+            cells(&|reach| {
+                Some(pair(match reach.patch_axes? {
+                    PatchAxisReach::Length(values) => values.map(|r| length_display.text(r)),
+                    PatchAxisReach::Angle(values) => {
+                        values.map(|r| format!("{}\u{b0}", reach_number(r)))
+                    }
+                }))
+            }),
+        ),
+    ];
+    let width = |k: usize| {
+        rows.iter()
+            .map(|(_, cells)| cells[k].chars().count())
+            .chain(std::iter::once(5))
+            .max()
+            .unwrap_or(0)
+            + 3
+    };
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let line = |label: &str, cells: [&str; 2]| {
+        let pad =
+            |s: &str, n: usize| format!("{s}{}", " ".repeat(n.saturating_sub(s.chars().count())));
+        format!(
+            "{}{}{}",
+            pad(label, label_width),
+            pad(cells[0], width(0)),
+            cells[1]
+        )
+        .trim_end()
+        .to_string()
+    };
+    let mut out = vec![line("", ["whole", "mid"])];
+    for (label, cells) in &rows {
+        out.push(line(label, [&cells[0], &cells[1]]));
+    }
+    Some(out.join("\n"))
+}
+
+/// One length to two significant digits, with a `+` where it is a lower bound.
+fn reach_number(r: BoundedLength) -> String {
+    let number = finite_or_nan(r.value, significant);
+    if r.at_least {
+        format!("{number}+")
+    } else {
+        number
+    }
+}
+
+/// How the self-similarity hover prints the lengths in its world row: the unit
+/// it prints them in, the factor that takes a length in the scene's
+/// `world_space_unit` to that unit, and whether the numbers are in scientific
+/// form. One display serves every length in the hover, so they compare
+/// directly.
+#[derive(Clone, Debug, PartialEq)]
+struct LengthDisplay {
+    /// What the scene's lengths are multiplied by.
+    factor: f64,
+    /// The unit printed after each number, `None` for bare scene units.
+    unit: Option<String>,
+    /// Print `5.4e-4` rather than `0.00054`.
+    scientific: bool,
+}
+
+impl LengthDisplay {
+    /// The display for lengths whose largest finite value is `largest`, in a
+    /// scene whose `world_space_unit` is `unit`.
+    ///
+    /// - A metric scene (`mm`, `cm`, `m`) keeps its own unit where that puts
+    ///   `largest` in [1, 1000), and otherwise takes whichever of `µm`, `mm`
+    ///   and `m` does, so `cm` appears only in a scene in `cm`. A length over
+    ///   1000 m or under 1 µm takes the nearer end, `m` or `µm`.
+    /// - A scene in `ft` prints in `in` where `largest` is under 1 ft; a scene
+    ///   in `in` stays in `in`.
+    /// - Bare scene units are not converted, and print in scientific form
+    ///   where `largest` is under 0.001.
+    ///
+    /// With no finite positive length, or a unit outside the list above, the
+    /// lengths print as they are, after the scene's own unit.
+    fn for_largest(unit: Option<&str>, largest: Option<f64>) -> Self {
+        let as_is = Self {
+            factor: 1.0,
+            unit: unit.map(str::to_string),
+            scientific: false,
+        };
+        let Some(largest) = largest.filter(|value| *value > 0.0) else {
+            return as_is;
+        };
+        // A factor of 1000 apart, so exactly one of them puts a length from
+        // 1 µm to 1000 m in [1, 1000).
+        const STEPS: [(&str, f64); 3] = [("m", 1.0), ("mm", 1e-3), ("\u{b5}m", 1e-6)];
+        let fits = |value: f64| (1.0..1000.0).contains(&value);
+        match unit {
+            None => Self {
+                scientific: largest < 1e-3,
+                ..as_is
+            },
+            Some(scene @ ("mm" | "cm" | "m")) => {
+                let metres = match scene {
+                    "mm" => 1e-3,
+                    "cm" => 1e-2,
+                    _ => 1.0,
+                };
+                let in_metres = largest * metres;
+                let (name, size) = if fits(largest) {
+                    (scene, metres)
+                } else if let Some(&step) = STEPS.iter().find(|(_, size)| fits(in_metres / size)) {
+                    step
+                } else if in_metres >= 1000.0 {
+                    STEPS[0]
+                } else {
+                    STEPS[STEPS.len() - 1]
+                };
+                Self {
+                    factor: metres / size,
+                    unit: Some(name.to_string()),
+                    scientific: false,
+                }
+            }
+            Some("ft") if largest < 1.0 => Self {
+                factor: 12.0,
+                unit: Some("in".to_string()),
+                scientific: false,
+            },
+            Some(_) => as_is,
+        }
+    }
+
+    /// One length in this display: two significant digits, a `+` on a lower
+    /// bound, and the unit after it.
+    fn text(&self, r: BoundedLength) -> String {
+        let value = r.value * self.factor;
+        let mut number = finite_or_nan(value, |v| {
+            if self.scientific {
+                format!("{v:.1e}")
+            } else {
+                significant(v)
+            }
+        });
+        if r.at_least {
+            number.push('+');
+        }
+        match &self.unit {
+            Some(unit) => format!("{number} {unit}"),
+            None => number,
+        }
+    }
+}
+
+/// A non-negative number to two significant digits, judged after rounding so
+/// that `9.96` prints `10` rather than `10.0`. From 10 up it prints whole,
+/// which keeps every whole digit from 100 up: `123.4` prints `123`.
+fn significant(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let digits = |v: f64| (1 - v.abs().log10().floor() as i32).max(0) as usize;
+    let decimals = digits(value);
+    let scale = 10f64.powi(decimals as i32);
+    let rounded = (value * scale).round() / scale;
+    format!("{:.*}", digits(rounded).min(decimals), rounded)
 }
 
 /// A whole-patch reading over its middle's, as a two-reading cell prints them:
@@ -1266,6 +1551,33 @@ fn row_radius(observation: &Observation, stage: StageKind) -> Option<f64> {
     match stage {
         StageKind::Cluster => observation.cluster.as_ref()?.zncc_self_similarity_radius,
         StageKind::Track => observation.track.as_ref()?.zncc_self_similarity_radius,
+    }
+}
+
+/// The whole core's and the middle's self-similarity reach of `observation` at
+/// `stage`, or none while the evaluation is refused or failed, when the row's
+/// cells print `-` too.
+fn row_reach(
+    observation: &Observation,
+    stage: StageKind,
+    evaluation: &Evaluation,
+) -> [Option<SelfSimilarityReach>; 2] {
+    if matches!(evaluation, Evaluation::Refused(_) | Evaluation::Failed(_)) {
+        return [None, None];
+    }
+    match stage {
+        StageKind::Cluster => observation.cluster.as_ref().map_or([None, None], |m| {
+            [
+                m.zncc_self_similarity_reach,
+                m.zncc_self_similarity_reach_middle,
+            ]
+        }),
+        StageKind::Track => observation.track.as_ref().map_or([None, None], |m| {
+            [
+                m.zncc_self_similarity_reach,
+                m.zncc_self_similarity_reach_middle,
+            ]
+        }),
     }
 }
 

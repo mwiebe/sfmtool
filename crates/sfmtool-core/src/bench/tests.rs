@@ -20,13 +20,17 @@ use std::sync::Arc;
 use nalgebra::{Point3, Vector3};
 use ndarray::Array3;
 
+use crate::camera::warp_map::patch_grid_jacobian;
 use crate::camera::CameraIntrinsics;
 use crate::geometry::RigidTransform;
 
 use crate::patch::cloud::OrientedPatch;
 use crate::patch::cluster_refine::{sample_member_grid, ClusterRefineParams, MemberStatus};
-use crate::patch::keypoint_localize::{localize_patch_keypoints, KeypointLocalization};
+use crate::patch::keypoint_localize::{
+    localize_patch_keypoints, KeypointLocalization, KeypointLocalizeParams,
+};
 use crate::patch::keypoint_subpixel::{refine_patch_keypoints, KeypointRefinement};
+use crate::patch::self_similarity::{PatchAxisReach, SelfSimilarity, SelfSimilarityReach};
 use crate::progress::Progress;
 use crate::reconstruction::data::Point3D;
 use crate::reconstruction::edited::{EditedReconstruction, PointMap, PointRecord};
@@ -39,8 +43,11 @@ use scene::{
 
 use super::*;
 
-/// The bitmap edge the column fixture is built with.
-const BITMAP_R: usize = 8;
+/// The bitmap edge the column fixture is built with. A track-stage reading
+/// runs at the reconstruction's patch resolution, so this is the grid the
+/// tests' readings and bars are in: the default 24, the resolution every
+/// threshold default is chosen for.
+const BITMAP_R: usize = 24;
 
 /// The half-width, in source-image px, the hand-placed cluster tests ask for.
 /// Around the size the fixture's own patch projects to (`0.12` world at depth
@@ -2377,6 +2384,58 @@ fn a_track_from_a_point_fits_to_the_kernels_own_numbers() {
             m.zncc_self_similarity_slide_grid,
             m.zncc_self_similarity_surface.as_ref(),
         );
+        // And its contour's reach, in each unit, read through the placement
+        // the tile was rendered through: the patch anchored on this sighting's
+        // keypoint, at the localizer's resolution.
+        let view = &scene.views()[image as usize];
+        let fitted = placement_of(&measured);
+        let keypoint = m.keypoint.map(|p| [f64::from(p[0]), f64::from(p[1])]);
+        let anchored = keypoint
+            .and_then(|kp| fitted.anchored_at_keypoint(view.camera, view.cam_from_world, kp))
+            .unwrap_or_else(|| fitted.clone());
+        let resolution = test_fit_options().localize.resolution.max(2) as usize;
+        let jacobian = patch_grid_jacobian(&anchored, view.camera, view.cam_from_world, resolution)
+            .expect("the tile's centre projects");
+        for (reach, radius) in [
+            (m.zncc_self_similarity_reach, m.zncc_self_similarity_radius),
+            (
+                m.zncc_self_similarity_reach_middle,
+                m.zncc_self_similarity_radius_middle,
+            ),
+        ] {
+            let reach = reach.expect("a reach beside the radius");
+            assert_eq!(Some(reach.grid_radius.value), radius);
+            // One grid px along x is 2·half_extent[0] / R along u, and along y
+            // is 2·half_extent[1] / R along v.
+            let Some(PatchAxisReach::Length(along)) = reach.patch_axes else {
+                panic!("a finite patch reads lengths: {:?}", reach.patch_axes);
+            };
+            for (k, (got, grid)) in along.iter().zip(reach.grid_axes).enumerate() {
+                let want = grid.value * 2.0 * anchored.half_extent[k] / resolution as f64;
+                assert_eq!(got.value, want, "axis {k}");
+                assert_eq!(got.at_least, grid.at_least);
+            }
+        }
+        // The whole core's surface is stored, so its contour can be read
+        // again here, and its image radius is the one through the anchored
+        // placement's Jacobian.
+        let whole = SelfSimilarity {
+            radius: m.zncc_self_similarity_radius.expect("a radius"),
+            slide: [0.0; 2],
+            tolerance: m.zncc_self_similarity_tolerance.expect("a textured core"),
+            surface: m.zncc_self_similarity_surface.clone().expect("a surface"),
+        };
+        let contour = whole.contour().expect("a contour");
+        assert_eq!(
+            m.zncc_self_similarity_reach.and_then(|r| r.image_radius),
+            contour.image_radius(jacobian),
+            "image {image}"
+        );
+        assert_eq!(
+            m.zncc_self_similarity_reach,
+            SelfSimilarityReach::read(&whole, Some(jacobian), Some(&anchored), resolution),
+            "image {image}"
+        );
     }
 
     // The track's own point is where its sightings say it is, and the frame
@@ -3036,6 +3095,36 @@ fn a_cluster_from_a_pixel_refines_upgrades_and_commits_onto_the_plane() {
             m.zncc_self_similarity_slide_grid,
             m.zncc_self_similarity_surface.as_ref(),
         );
+        // A member has a grid and a photograph but no patch, so its contour
+        // reads in grid px and image px only. The grid is the seed shape's
+        // affine map: one grid px is `2·radius / R` keypoint-frame units,
+        // which the shape carries to image px.
+        let reach = m
+            .zncc_self_similarity_reach
+            .expect("a reach beside the radius");
+        assert_eq!(Some(reach.grid_radius.value), m.zncc_self_similarity_radius);
+        assert_eq!(reach.patch_axes, None);
+        let resolution = EvaluateOptions::default().cluster.resolution.max(2) as usize;
+        let step = 2.0 * payload.radius / resolution as f64;
+        let jacobian = m.seed_shape.map(|row| row.map(|v| v * step));
+        let whole = SelfSimilarity {
+            radius: m.zncc_self_similarity_radius.expect("a radius"),
+            slide: [0.0; 2],
+            tolerance: m.zncc_self_similarity_tolerance.expect("a textured core"),
+            surface: m.zncc_self_similarity_surface.clone().expect("a surface"),
+        };
+        assert_eq!(
+            Some(reach),
+            SelfSimilarityReach::read(&whole, Some(jacobian), None, resolution)
+        );
+        let image = reach.image_radius.expect("the seed shape maps the grid");
+        assert_eq!(
+            Some(image),
+            whole.contour().expect("a contour").image_radius(jacobian)
+        );
+        let middle = m.zncc_self_similarity_reach_middle.expect("a middle reach");
+        assert_eq!(middle.patch_axes, None);
+        assert!(middle.image_radius.is_some());
     }
     assert_eq!(
         refined.observations[reference]
@@ -3332,6 +3421,91 @@ fn a_round_past_the_cache_budget_is_refused_rather_than_attempted() {
     // The same track reads at the default budget, so what was refused is the
     // budget and not the track.
     assert!(evaluate_over(&scene, &edited, &track).is_ok());
+}
+
+/// The patch resolution is the reconstruction's where it stores patch
+/// bitmaps, and the localizer's otherwise.
+#[test]
+fn the_patch_resolution_is_the_stored_bitmaps_edge_else_the_localizers() {
+    let scene = Scene::new();
+    let options = EvaluateOptions::default();
+    assert_eq!(options.localize.resolution, 24);
+
+    let bare = edited_fixture(&scene, WORLD);
+    assert_eq!(stored_patch_resolution(&bare.base), None);
+    assert_eq!(options.patch_resolution(&bare.base), 24);
+    let other = EvaluateOptions {
+        localize: KeypointLocalizeParams {
+            resolution: 20,
+            ..options.localize.clone()
+        },
+        ..options.clone()
+    };
+    assert_eq!(other.patch_resolution(&bare.base), 20);
+
+    let at_16 = fixture_with_columns(&scene, WORLD, 16);
+    assert_eq!(stored_patch_resolution(&at_16), Some(16));
+    assert_eq!(options.patch_resolution(&at_16), 16);
+    assert_eq!(other.patch_resolution(&at_16), 16, "the file's own wins");
+}
+
+/// A track-stage reading of a reconstruction whose patch bitmaps are 16 px a
+/// side is stated in a 16 px grid: the shift, the self-similarity radius and
+/// its reach are exactly the reading of the same track with the localizer
+/// asked for 16 on a reconstruction that stores no bitmaps, and not the
+/// reading at the default 24.
+#[test]
+fn a_track_stage_reading_is_in_the_grid_of_the_stored_patch_bitmaps() {
+    let scene = Scene::new();
+    let at_16 = EditedReconstruction::new(Arc::new(fixture_with_columns(&scene, WORLD, 16)));
+    let bare = edited_fixture(&scene, WORLD);
+    let (bench, label) = bench_with_point(&at_16, 0);
+    let track = track_of(&bench, &label);
+
+    let (stored, _) = evaluate_over(&scene, &at_16, &track).expect("two observations in");
+    let asked_16 = EvaluateOptions {
+        localize: KeypointLocalizeParams {
+            resolution: 16,
+            ..EvaluateOptions::default().localize
+        },
+        ..EvaluateOptions::default()
+    };
+    let (asked, _) = evaluate(&track, &bare, &scene.views(), &asked_16, &Progress::none())
+        .expect("two observations in");
+    let (at_24, _) = evaluate_over(&scene, &bare, &track).expect("two observations in");
+
+    let mut differs = false;
+    for (i, observation) in stored.observations.iter().enumerate() {
+        let got = observation.track.as_ref().expect("a row");
+        assert!(got.zncc_self_similarity_reach.is_some(), "row {i}");
+        assert_eq!(Some(got), asked.observations[i].track.as_ref(), "row {i}");
+        let default = at_24.observations[i].track.as_ref().expect("a row");
+        differs |= got.zncc_self_similarity_reach != default.zncc_self_similarity_reach;
+    }
+    assert!(differs, "16 and 24 read the same, so this proves less");
+}
+
+/// A fit runs its kernels in the same grid as the reading it ends with: on a
+/// reconstruction whose patch bitmaps are 16 px a side it places every
+/// sighting where a fit asked for 16 on a bare reconstruction does.
+#[test]
+fn a_fit_runs_in_the_grid_of_the_stored_patch_bitmaps() {
+    let scene = Scene::new();
+    let at_16 = EditedReconstruction::new(Arc::new(fixture_with_columns(&scene, WORLD, 16)));
+    let bare = edited_fixture(&scene, WORLD);
+    let (bench, label) = bench_with_point(&at_16, 0);
+    let track = track_of(&bench, &label);
+
+    let (stored, _) = fit_over(&scene, &at_16, &track).expect("a fit");
+    let mut asked_16 = test_fit_options();
+    asked_16.localize.resolution = 16;
+    asked_16.refine.resolution = 16;
+    asked_16.evaluate.localize.resolution = 16;
+    let (asked, _) =
+        fit(&track, &bare, &scene.views(), &asked_16, &Progress::none()).expect("a fit");
+    for (i, observation) in stored.observations.iter().enumerate() {
+        assert_eq!(observation.track, asked.observations[i].track, "row {i}");
+    }
 }
 
 #[test]
@@ -5736,7 +5910,6 @@ fn a_sighting_the_fit_would_walk_past_the_bar_keeps_its_seed_and_says_so() {
 
 #[test]
 fn the_bench_s_shift_bar_defaults_to_the_localizer_s_search_radius() {
-    use crate::patch::keypoint_localize::KeypointLocalizeParams;
     assert_eq!(Thresholds::default().max_shift_px, 6.0);
     assert_eq!(Thresholds::default().max_projection_error_px, 3.0);
     assert_eq!(Thresholds::default().max_shift_px, BENCH_MAX_SHIFT_PX);

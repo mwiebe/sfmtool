@@ -305,9 +305,41 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           (dx, dy) = (-3, -3), 1 at the centre and null where the core is flat, \
                           and \
                           zncc_self_similarity_tolerance the ZNCC deficit the core was judged \
-                          by, so the radius is read on the surface at 1 - tolerance. The \
+                          by, so the radius is read on the surface at 1 - tolerance. \
+                          zncc_self_similarity_reach and zncc_self_similarity_reach_middle say \
+                          how far the contour the radius is read from reaches, each length as \
+                          {value, at_least} with at_least true where the true length may be \
+                          larger, because the region at the level runs off the square searched \
+                          along that axis, runs off along the other axis without holding its \
+                          width, borders a gap (a neighbour with no reading), or reaches the \
+                          largest radius searched (the cap): grid_radius (the \
+                          radius) and grid_axes ([x, y], along the grid's x and y) in \
+                          patch-grid px: at the track stage the grid of the reconstruction's \
+                          patch resolution R, which stage_data reports as patch_resolution, \
+                          and at the cluster stage the refinement kernel's grid; image_radius in the photograph's px (null where the \
+                          tile's centre does not project); and patch_axes, the reach along the \
+                          patch's u and v, its along holding [u, v], with kind length and unit \
+                          the reconstruction's world_space_unit (null for scene units, where \
+                          the file names none), or kind angle and unit degrees for a patch at \
+                          infinity; patch_axes is null at the cluster stage. The \
                           self-similarity fields are \
-                          null where the tile could not be read. A track-stage \
+                          null where the tile could not be read. Each observation also carries \
+                          patch_jacobian and patch_zoom, the geometry of the patch in its \
+                          photograph, which needs no photograph and is reported whatever the \
+                          evaluation says. patch_jacobian is [[dx/dcol, dx/drow], [dy/dcol, \
+                          dy/drow]] at the patch's centre, in photograph px per patch-grid px \
+                          at R, the grid the shift and the reach's grid px are in. patch_zoom \
+                          is [least, most], patch-grid px per photograph px over the warp's \
+                          two singular directions, the numbers the Zoom column prints; neither \
+                          depends on the resolution Track View draws its tiles at. Both are \
+                          read from the patch re-anchored where the observation sits, the \
+                          placement the tile is rendered through. Both are null at the \
+                          cluster stage, on a track with no patch yet, for an observation with \
+                          nothing saying where it sits, and for a patch whose centre is behind \
+                          the camera or outside the camera model's domain; a tile whose middle \
+                          is off the photograph still has both. patch_zoom is null as well for \
+                          a patch seen edge on, whose smaller singular value is at most 1e-9 of \
+                          the larger. A track-stage \
                           observation the last \
                           fit kept at its seed carries walked_px (how far the fit wanted to move \
                           it), walked_to (the pixel it would have reached), walked_zncc (the \
