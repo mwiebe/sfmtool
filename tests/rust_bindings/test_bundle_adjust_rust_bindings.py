@@ -1110,7 +1110,6 @@ def test_constraint_kwargs_at_their_off_position_change_nothing():
             "distance": None,
             "distance_from": None,
             "free_points_cross": False,
-            "noise_floor_scale": 2.0,
         },
         {
             "held": np.zeros(30, dtype=bool),
@@ -1128,6 +1127,7 @@ def test_constraint_kwargs_at_their_off_position_change_nothing():
         npt.assert_array_equal(out["points"], ref["points"])
         npt.assert_array_equal(out["residual_norms"], ref["residual_norms"])
         npt.assert_array_equal(out["point_at_infinity"], ref["point_at_infinity"])
+        assert out["free_point_decision"] is None
 
 
 def test_point_at_infinity_is_reported_and_echoes_the_input_mask():
@@ -1221,18 +1221,30 @@ def test_infinite_distance_is_reported_as_a_direction():
 
 def test_crossing_promotes_a_direction_whose_rays_carry_parallax():
     # A near point handed in marked as a direction: with the crossing off the
-    # mark stands for the whole solve, and with it on the re-estimation reads
-    # the parallax its own rays carry and makes it finite.
+    # mark stands for the whole solve, and with it on the solve carries the
+    # point in inverse depth and the storage decision reads the parallax its
+    # own rays carry and stores it finite.
     s = _scene(n_img=8, n_pt=40)
     mask = np.zeros(len(s["points"]), dtype=bool)
     mask[7] = True
 
     kept = _run(s, point_at_infinity=mask)
     assert kept["point_at_infinity"][7]
+    assert kept["free_point_decision"] is None
 
     crossed = _run(s, point_at_infinity=mask, free_points_cross=True)
     assert not crossed["point_at_infinity"][7]
     npt.assert_allclose(crossed["points"][7], s["points"][7], atol=1e-3)
+    # One storage decision at the end of the solve, at the noise level the
+    # final round's residuals of finite points measure.
+    decision = crossed["free_point_decision"]
+    assert decision["decided"]
+    assert decision["converged"]
+    assert decision["to_finite"] == 1
+    assert decision["to_direction"] == 0
+    assert decision["sigma_px"] is not None and decision["sigma_px"] > 0.0
+    assert decision["observation_count"] > 0
+    assert decision["outlier_count"] == 0
 
 
 def test_held_and_ranged_on_one_point_is_rejected():
@@ -1280,13 +1292,6 @@ def test_constraint_shape_validation():
         _run(s, distance=np.full(3, np.nan))
     with pytest.raises(ValueError, match="one entry per point"):
         _run(s, distance_from=np.full(3, -1, dtype=np.int64))
-
-
-@pytest.mark.parametrize("bad_scale", [0.0, -1.0, np.inf, np.nan])
-def test_noise_floor_scale_validation(bad_scale):
-    s = _perturbed_scene()
-    with pytest.raises(ValueError, match="noise_floor_scale"):
-        _run(s, noise_floor_scale=bad_scale)
 
 
 # ── Several cameras ──────────────────────────────────────────────────────────

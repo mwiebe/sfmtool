@@ -83,6 +83,16 @@ def test_triangulate_batch_rejects_bad_offsets():
         triangulate_batch(dirs, centers, np.array([0, 2, 1], dtype=np.int64))
 
 
+def test_triangulate_batch_rejects_rays_without_three_columns():
+    """A (T, 2) or (T, 4) array is refused rather than read three values at a time."""
+    offsets = np.array([0, 2], dtype=np.int64)
+    good = np.array([[0.0, 0, 1], [0, 0, 1]])
+    with pytest.raises(ValueError, match="dirs"):
+        triangulate_batch(good[:, :2].copy(), good, offsets)
+    with pytest.raises(ValueError, match="centers"):
+        triangulate_batch(good, np.zeros((2, 4)), offsets)
+
+
 def test_triangulation_diagnostics_shapes_and_nan(
     seoul_bull_sfmr_only,
 ):
@@ -137,16 +147,16 @@ def test_triangulation_diagnostics_shapes_and_nan(
 
 
 def test_triangulation_diagnostics_flags_distant_as_low_z(
-    seoul_bull_sfmr_only,
+    seoul_bull_workspace,
 ):
-    """Points the classifier moves to infinity carry the lowest z-scores."""
-    recon = SfmrReconstruction.load(seoul_bull_sfmr_only)
+    """Points the point-or-bearing test moves to infinity carry the lowest z-scores."""
+    recon = SfmrReconstruction.load(seoul_bull_workspace)
     diag = recon.triangulation_diagnostics(noise_px=1.0)
     z = diag["inverse_depth_z"]
 
-    # Reclassify with a high noise floor to surface near-infinity points, then
+    # Reclassify at a high noise level to surface near-infinity points, then
     # check those points sat at low z in the original diagnostics.
-    classified = recon.classify_points_at_infinity(50.0)
+    classified, _ = recon.classify_points_at_infinity(50.0)
     newly_infinite = np.asarray(classified.point_is_at_infinity) & ~np.asarray(
         recon.point_is_at_infinity
     )

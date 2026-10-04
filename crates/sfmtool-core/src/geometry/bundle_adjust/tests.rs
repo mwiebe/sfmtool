@@ -3901,12 +3901,7 @@ fn constraints_off_reproduce_the_unconstrained_kernel() {
         &mut b,
         Some(&mask_b),
         Some(&cons),
-        // The noise-floor constant is read only under `cross`, so a wild one
-        // must change nothing here.
-        FreePointPolicy {
-            cross: false,
-            noise_floor_scale: 7.0,
-        },
+        FreePointPolicy { cross: false },
         Some(&prot_b),
         true,
         &DEFAULT_SCHEDULE,
@@ -3922,6 +3917,7 @@ fn constraints_off_reproduce_the_unconstrained_kernel() {
     );
     assert_eq!(out_a.point_at_infinity, mask_a);
     assert_eq!(out_a.point_at_infinity, out_b.point_at_infinity);
+    assert!(out_a.free_point_decision.is_none() && out_b.free_point_decision.is_none());
 }
 
 /// Three cameras on a short arc, for the ranged-point Jacobian check.
@@ -4033,6 +4029,8 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
         cp_dir: &[false],
         cp_held: &[false],
         cp_origin: &[Some(origin)],
+        cp_inverse: &[],
+        inv_depth: &[],
         uv: &uv,
         n_shared: 2,
     };
@@ -4084,15 +4082,24 @@ fn ranged_jacobian_matches_a_difference_of_the_residual() {
     check_ranged_jacobian(&[0, 1], &[0, 1, 2], "mean of two references");
 }
 
-/// A free track started as a direction whose rays open past the floor comes
-/// back finite, and one whose rays close below it comes back a direction; the
-/// reported representation is the one the returned row carries.
+/// The crossing switch on.
+const CROSS: FreePointPolicy = FreePointPolicy { cross: true };
+
+/// Add deterministic pixel noise of amplitude `amp` (uniform on `[-amp, amp]`
+/// per axis, so a per-axis RMS of `amp / √3`) to every observation.
+fn add_noise(s: &mut Scene, amp: f64, salt: u64) {
+    for (k, px) in s.uv.iter_mut().enumerate() {
+        px[0] += amp * jitter(k, salt);
+        px[1] += amp * jitter(k, salt + 1);
+    }
+}
+
+/// A free track started as a direction whose rays ask for a depth comes back
+/// finite, and one whose rays do not, at the noise the adjustment measures,
+/// comes back a direction; the reported representation is the one the returned
+/// row carries.
 #[test]
 fn free_points_cross_in_both_directions() {
-    let policy = FreePointPolicy {
-        cross: true,
-        noise_floor_scale: DEFAULT_NOISE_FLOOR_SCALE,
-    };
     // A near cloud started at infinity: wide rays, so the re-estimation makes
     // every one of them finite.
     let mut s = make_scene(6, 40);
@@ -4107,7 +4114,7 @@ fn free_points_cross_in_both_directions() {
         &mut s,
         Some(&mask),
         None,
-        policy,
+        CROSS,
         None,
         false,
         &DEFAULT_SCHEDULE,
@@ -4123,14 +4130,18 @@ fn free_points_cross_in_both_directions() {
         assert!(err < 0.05, "point {p} crossed to a wrong position ({err})");
     }
 
-    // A far track started finite, at a distance whose parallax sits inside the
-    // floor: the re-estimation reads it as a bearing.
+    // A far track started finite, in a capture with a third of a pixel of
+    // noise: its parallax across the arc is about a tenth of a pixel, which
+    // that noise explains, so the storage decision reads it as a bearing. (On
+    // exact pixels the measured level is the keypoint resolution, and any
+    // parallax at all is a depth.)
     let mut t = make_scene(6, 40);
     let far = add_far_track(&mut t, 20000.0, 0.0, 909);
-    let out = run_constrained(&mut t, None, None, policy, None, false, &DEFAULT_SCHEDULE);
+    add_noise(&mut t, 0.5, 910);
+    let out = run_constrained(&mut t, None, None, CROSS, None, false, &DEFAULT_SCHEDULE);
     assert!(
         out.point_at_infinity[far],
-        "the far track stayed finite inside the noise floor"
+        "the far track stayed finite inside the measured noise"
     );
     let n = Vector3::new(t.points[far][0], t.points[far][1], t.points[far][2]).norm();
     assert!(
@@ -4143,62 +4154,32 @@ fn free_points_cross_in_both_directions() {
             "near point {p} left the finite set"
         );
     }
+    let decision = out.free_point_decision.expect("a storage decision");
+    assert!(decision.decided && decision.converged);
+    assert_eq!(
+        (decision.to_finite, decision.to_direction),
+        (0, 1),
+        "only the far track crosses"
+    );
 }
 
-/// Six cameras on a straight baseline of 3 world units, all looking along −Z
-/// over a tight cloud: a scene whose far track stays near the optical axis at
-/// any focal, so changing the focal changes the noise floor and not which
-/// observations the frame holds.
-fn make_axial_scene(focal: f64) -> Scene {
-    let cam = simple_pinhole(focal);
-    let mut quats = Vec::new();
-    let mut trans = Vec::new();
-    for i in 0..6 {
-        let center = Vector3::new(0.48 * (i as f64 - 2.5), 0.02 * jitter(i, 11), 8.0);
-        let r = UnitQuaternion::identity();
-        quats.push(r);
-        trans.push(-(r * center));
-    }
-    let mut points = Vec::new();
-    for p in 0..40 {
-        points.push([0.5 * jitter(p, 1), 0.4 * jitter(p, 2), 0.5 * jitter(p, 3)]);
-    }
-    let mut uv = Vec::new();
-    let mut obs_img = Vec::new();
-    let mut obs_pt = Vec::new();
-    for (p, x) in points.iter().enumerate() {
-        for i in 0..quats.len() {
-            let c = quats[i] * Vector3::new(x[0], x[1], x[2]) + trans[i];
-            let (u, v) = cam.ray_to_pixel([c.x, c.y, c.z]).expect("in domain");
-            assert!(
-                (0.0..cam.width as f64).contains(&u) && (0.0..cam.height as f64).contains(&v),
-                "point {p} leaves the frame at f = {focal}"
-            );
-            uv.push([u, v]);
-            obs_img.push(i as u32);
-            obs_pt.push(p as u32);
-        }
-    }
-    Scene {
-        cam,
-        quats,
-        trans,
-        points,
-        uv,
-        obs_img,
-        obs_pt,
-    }
+/// Ten cameras on the arc of [`make_scene`] over 300 points: enough structure
+/// that a single far track cannot bend the poses toward the representation it
+/// carries, so its verdict reads its own rays. (Over the six cameras and forty
+/// points of [`make_scene`], one round's solve bends the poses by up to half a
+/// degree to fit a far track as whichever of a point or a direction it was
+/// given, and the next re-estimation reads that bend back.)
+fn make_dense_scene() -> Scene {
+    make_scene_cam(simple_pinhole(500.0), 10, 300)
 }
 
-/// The crossing boundary is the stage's own noise floor: the same track is
-/// finite at one `noise_floor_scale` and a bearing at twice it, and finite
-/// again when the focal doubles at the wider constant.
+/// The crossing boundary is the measured noise: the same far track is finite
+/// in a quiet capture and a bearing in a noisy one, from either starting
+/// representation.
 #[test]
-fn the_noise_floor_moves_with_its_constant_and_the_focal() {
-    // The cameras span 2.4 world units, so a track 400 away subtends 0.006 rad,
-    // between 2·s/f and 4·s/f at f = 500, s = 1, and past 4·s/f once the focal
-    // doubles. The schedule holds one loss scale across its rounds so the floor
-    // the classification is read at is the one the assertions name.
+fn the_crossing_boundary_moves_with_the_measured_noise() {
+    // A track 3000 units out across this arc scores about 350 at 0.09 px of
+    // noise and about 14 at 0.76 px, either side of the threshold of 25.
     let schedule = [
         BaSchedule {
             trim_px: 50.0,
@@ -4209,32 +4190,631 @@ fn the_noise_floor_moves_with_its_constant_and_the_focal() {
             loss_scale: 1.0,
         },
     ];
-    let crosses = |scale: f64, focal: f64| -> bool {
-        let mut s = make_axial_scene(focal);
-        let far = add_far_track(&mut s, 392.0, 0.0, 313);
-        let out = run_constrained(
-            &mut s,
+    let ends_a_direction = |amp: f64, start_direction: bool| -> (bool, f64) {
+        let mut s = make_dense_scene();
+        let far = add_far_track(&mut s, 3000.0, 0.0, 313);
+        add_noise(&mut s, amp, 314);
+        let mut mask = vec![false; s.points.len()];
+        if start_direction {
+            mask[far] = true;
+            s.points[far] = [0.0, 0.0, -1.0];
+        }
+        let out = run_constrained(&mut s, Some(&mask), None, CROSS, None, false, &schedule);
+        let sigma = out
+            .free_point_decision
+            .and_then(|d| d.sigma_px)
+            .expect("finite observations kept");
+        (out.point_at_infinity[far], sigma)
+    };
+    for start_direction in [false, true] {
+        let (quiet, quiet_sigma) = ends_a_direction(0.17, start_direction);
+        let (noisy, noisy_sigma) = ends_a_direction(1.4, start_direction);
+        // The level is measured from the residuals, so it follows the noise put
+        // in (a per-axis RMS of amp/√3, less what the fit absorbs).
+        assert!(
+            (0.08..0.1).contains(&quiet_sigma) && (0.7..0.81).contains(&noisy_sigma),
+            "measured {quiet_sigma} and {noisy_sigma} px"
+        );
+        assert!(!quiet, "the track should be finite at {quiet_sigma} px");
+        assert!(noisy, "the track should be a bearing at {noisy_sigma} px");
+    }
+}
+
+/// The two cameras of [`two_camera_scene`].
+fn two_cameras() -> [CameraIntrinsics; 2] {
+    [simple_pinhole(500.0), simple_pinhole(650.0)]
+}
+
+/// [`make_scene`] with three far tracks, the second half of its images taken
+/// through a longer lens, and pixel noise: what a crossing round is checked
+/// against by hand.
+fn two_camera_scene(amp: f64) -> (Scene, Vec<u32>, Vec<usize>) {
+    let mut s = make_scene(6, 40);
+    let far = vec![
+        add_far_track(&mut s, 20000.0, 0.0, 51),
+        add_far_track(&mut s, 1500.0, 0.0, 52),
+        add_far_track(&mut s, 150.0, 0.0, 53),
+    ];
+    let cams = two_cameras();
+    let image_camera: Vec<u32> = (0..s.quats.len() as u32).map(|i| i / 3).collect();
+    for k in 0..s.uv.len() {
+        let i = s.obs_img[k] as usize;
+        let x = s.points[s.obs_pt[k] as usize];
+        let c = s.quats[i] * Vector3::new(x[0], x[1], x[2]) + s.trans[i];
+        let (u, v) = cams[image_camera[i] as usize]
+            .ray_to_pixel([c.x, c.y, c.z])
+            .expect("in domain");
+        s.uv[k] = [u, v];
+    }
+    add_noise(&mut s, amp, 77);
+    (s, image_camera, far)
+}
+
+/// The storage decision's noise level is the gated RMS of the final round's
+/// kept residuals of finite points at the state the solve ended at, and its
+/// verdicts are the point-or-bearing test's on each track's rays at that level,
+/// each ray weighted through the camera of its own image.
+#[test]
+fn the_storage_decision_measures_its_noise_and_decides_on_the_test() {
+    let (mut s, image_camera, far) = two_camera_scene(0.6);
+    // One mismatched keypoint, which the gate leaves out of the level.
+    let bad = 17;
+    s.uv[bad][0] += 40.0;
+    let start = s.clone();
+    let cams = two_cameras();
+    // One round with no iterations and no trim: the round solves nothing, so
+    // the state the decision reads is the input state and every observation is
+    // kept.
+    let schedule = [BaSchedule {
+        trim_px: 1e9,
+        loss_scale: 1.0,
+    }];
+    let out = bundle_adjust(
+        &BaCameras {
+            cameras: &cams,
+            image_camera: image_camera.as_slice().into(),
+            releases: None,
+        },
+        &mut s.quats,
+        &mut s.trans,
+        &mut s.points,
+        &s.uv,
+        &s.obs_img,
+        &s.obs_pt,
+        None,
+        None,
+        CROSS,
+        None,
+        DEFAULT_PROTECTED_LOSS_SCALE,
+        false,
+        false,
+        false,
+        &schedule,
+        0,
+        2,
+        12,
+        &Progress::none(),
+    );
+
+    // The level by hand: residual components per camera, each camera's gated
+    // at 30 robust spreads, and the RMS of what passes.
+    let n_obs = start.uv.len();
+    let mut comps: Vec<Vec<f64>> = vec![Vec::new(); 2];
+    let mut res = Vec::with_capacity(n_obs);
+    for k in 0..n_obs {
+        let i = start.obs_img[k] as usize;
+        let j = image_camera[i] as usize;
+        let x = start.points[start.obs_pt[k] as usize];
+        let c = start.quats[i] * Vector3::new(x[0], x[1], x[2]) + start.trans[i];
+        let (u, v) = cams[j].ray_to_pixel([c.x, c.y, c.z]).expect("in domain");
+        let r = [u - start.uv[k][0], v - start.uv[k][1]];
+        comps[j].extend_from_slice(&[r[0].abs(), r[1].abs()]);
+        res.push((j, r));
+    }
+    let limit: Vec<f64> = comps
+        .iter_mut()
+        .map(|c| {
+            c.sort_by(f64::total_cmp);
+            let m = c.len() / 2;
+            let median = if c.len() % 2 == 1 {
+                c[m]
+            } else {
+                0.5 * (c[m - 1] + c[m])
+            };
+            30.0 * 1.482_602_218_505_602 * median
+        })
+        .collect();
+    let (mut sum, mut n, mut outliers) = (0.0, 0usize, 0usize);
+    for (j, r) in &res {
+        let e2 = r[0] * r[0] + r[1] * r[1];
+        if e2 > limit[*j] * limit[*j] {
+            outliers += 1;
+        } else {
+            sum += e2;
+            n += 1;
+        }
+    }
+    let sigma = (sum / (2 * n) as f64).sqrt();
+    let round = out.free_point_decision.expect("a storage decision");
+    assert!(round.decided);
+    assert!(
+        !round.converged,
+        "a round with no iterations has not converged"
+    );
+    assert_eq!(outliers, 1, "the mismatched keypoint is past the gate");
+    assert_eq!(
+        round.outlier_count, 1,
+        "the mismatched keypoint is gated out"
+    );
+    assert_eq!(round.observation_count, n_obs - 1);
+    let got = round.sigma_px.expect("a measured level");
+    assert!(
+        (got - sigma).abs() <= 1e-12 * sigma,
+        "measured {got}, by hand {sigma}"
+    );
+
+    // The verdicts by hand: each track's rays through its own camera, weighted
+    // at that level, scored, and read at the default threshold.
+    use crate::reconstruction::triangulation::{
+        bearing_score, is_finite, observed_ray, DEFAULT_DEPTH_LIKELIHOOD_RATIO_THRESHOLD,
+    };
+    let mut want_dirs = 0;
+    for p in 0..start.points.len() {
+        let (mut dirs, mut centres, mut weights) = (Vec::new(), Vec::new(), Vec::new());
+        for k in (0..n_obs).filter(|&k| start.obs_pt[k] as usize == p) {
+            let i = start.obs_img[k] as usize;
+            let cam = &cams[image_camera[i] as usize];
+            let r = observed_ray(cam, &start.quats[i], start.uv[k], sigma).expect("a ray");
+            dirs.push(r.dir);
+            centres.push(nalgebra::Point3::from(camera_centre(
+                &start.quats[i],
+                &start.trans[i],
+            )));
+            weights.push(r.weight);
+        }
+        let score = bearing_score(&dirs, &centres, &weights).expect("a score");
+        let bearing = !is_finite(&score, DEFAULT_DEPTH_LIKELIHOOD_RATIO_THRESHOLD);
+        assert_eq!(
+            out.point_at_infinity[p], bearing,
+            "point {p}: score {}, bound {}",
+            score.depth_score, score.midpoint_bound
+        );
+        if bearing {
+            want_dirs += 1;
+            let b = score.bearing;
+            let row = Vector3::new(s.points[p][0], s.points[p][1], s.points[p][2]);
+            assert!(
+                (row - b).norm() < 1e-12,
+                "point {p} is not the bearing the test fits"
+            );
+        }
+    }
+    assert_eq!(round.to_direction, want_dirs);
+    assert_eq!(round.to_finite, 0);
+    // The fixture spans both verdicts: the farthest track is a bearing and the
+    // nearest of the three is a point.
+    assert!(out.point_at_infinity[far[0]]);
+    assert!(!out.point_at_infinity[far[2]]);
+}
+
+/// A solve that keeps no observation of a finite point has no noise level to
+/// read the test at and decides nothing: every free point is stored as the
+/// solve left it, and directions without parallax stay directions.
+#[test]
+fn a_solve_with_no_finite_observation_decides_nothing() {
+    let mut s = make_scene(6, 0);
+    let ids = add_direction_tracks(&mut s, 12, 31, 0.0);
+    let mask = dir_mask(&s, &ids);
+    let out = run_constrained(
+        &mut s,
+        Some(&mask),
+        None,
+        CROSS,
+        None,
+        false,
+        &DEFAULT_SCHEDULE,
+    );
+    let decision = out.free_point_decision.expect("a decision record");
+    assert_eq!(decision.sigma_px, None);
+    assert!(!decision.decided);
+    assert_eq!((decision.to_finite, decision.to_direction), (0, 0));
+    assert_eq!(out.point_at_infinity, mask);
+}
+
+/// Point `p` of a solved scene in the frame of its first camera: a position as
+/// that camera sees it, or a direction rotated into it. Two solves of one scene
+/// can end in gauges a small rotation apart, and this is what they agree on.
+fn in_first_camera(s: &Scene, p: usize, out: &BundleAdjustment) -> Vector3<f64> {
+    let x = Vector3::from(s.points[p]);
+    if out.point_at_infinity[p] {
+        s.quats[0] * x
+    } else {
+        s.quats[0] * x + s.trans[0]
+    }
+}
+
+/// A track whose score sits near the threshold ends with the same verdict from
+/// either starting representation: the solve moves it between near and
+/// infinity within a round, so the representation it is handed in with no
+/// longer pulls the poses toward itself.
+#[test]
+fn a_borderline_verdict_does_not_depend_on_the_starting_representation() {
+    let mut verdicts = Vec::new();
+    // Distances whose score at 0.76 px runs from about 60 to about 8.
+    for (n, far_at) in [1000.0, 1300.0, 1500.0, 1600.0, 2000.0, 2500.0, 3200.0]
+        .into_iter()
+        .enumerate()
+    {
+        let run = |start_direction: bool| {
+            let mut s = make_dense_scene();
+            let far = add_far_track(&mut s, far_at, 0.0, 700 + n as u64);
+            add_noise(&mut s, 1.4, 800 + n as u64);
+            let mut mask = vec![false; s.points.len()];
+            if start_direction {
+                mask[far] = true;
+                s.points[far] = [0.0, 0.0, -1.0];
+            }
+            let out = run_constrained(
+                &mut s,
+                Some(&mask),
+                None,
+                CROSS,
+                None,
+                false,
+                &DEFAULT_SCHEDULE,
+            );
+            (out.point_at_infinity[far], in_first_camera(&s, far, &out))
+        };
+        let (from_point, a) = run(false);
+        let (from_direction, b) = run(true);
+        assert_eq!(
+            from_point, from_direction,
+            "the track at {far_at} kept the representation it started with"
+        );
+        if from_point {
+            assert!(
+                angle_between(a.into(), b.into()) < 2e-5,
+                "the track at {far_at} ended at bearings {a} and {b}"
+            );
+        } else {
+            assert!(
+                (a - b).norm() < 1e-4 * a.norm(),
+                "the track at {far_at} ended at {a} and {b}"
+            );
+        }
+        verdicts.push(from_point);
+    }
+    // The sweep spans the threshold.
+    assert!(verdicts.contains(&true) && verdicts.contains(&false));
+}
+
+/// From rough poses the solve settles every near point finite and every far
+/// track a bearing, and decides at the level its final round measures. With
+/// two iterations a round no round converges: the decision is still taken, at
+/// a level the unconverged poses inflate, the near points still end finite and
+/// nothing is left `NaN`, and the decision says the solve did not converge. (At
+/// that state a far track whose rays the poses do not yet bring to one bearing
+/// can read as a depth, which is why the far tracks are asserted only at the
+/// converged end.)
+#[test]
+fn a_rough_start_settles_and_reports_whether_it_converged() {
+    for max_iters in [2, 60] {
+        let mut s = make_scene(8, 60);
+        let far: Vec<usize> = (0..3)
+            .map(|j| add_far_track(&mut s, 20000.0 + 1000.0 * j as f64, 0.0, 60 + j))
+            .collect();
+        add_noise(&mut s, 0.5, 61);
+        for i in 1..s.quats.len() {
+            let d = Vector3::new(
+                0.01 * jitter(i, 62),
+                0.01 * jitter(i, 63),
+                0.01 * jitter(i, 64),
+            );
+            s.quats[i] = UnitQuaternion::from_scaled_axis(d) * s.quats[i];
+            s.trans[i] += Vector3::new(
+                0.05 * jitter(i, 65),
+                0.05 * jitter(i, 66),
+                0.05 * jitter(i, 67),
+            );
+        }
+        let schedule = [
+            DEFAULT_SCHEDULE[0],
+            DEFAULT_SCHEDULE[1],
+            DEFAULT_SCHEDULE[2],
+            DEFAULT_SCHEDULE[2],
+        ];
+        let out = bundle_adjust(
+            &BaCameras::shared(&s.cam, s.quats.len()),
+            &mut s.quats,
+            &mut s.trans,
+            &mut s.points,
+            &s.uv,
+            &s.obs_img,
+            &s.obs_pt,
             None,
             None,
-            FreePointPolicy {
-                cross: true,
-                noise_floor_scale: scale,
-            },
+            CROSS,
             None,
+            DEFAULT_PROTECTED_LOSS_SCALE,
+            false,
+            false,
             false,
             &schedule,
+            max_iters,
+            2,
+            12,
+            &Progress::none(),
         );
-        out.point_at_infinity[far]
+        let decision = out.free_point_decision.expect("a storage decision");
+        assert!(decision.decided);
+        assert_eq!(
+            decision.converged,
+            max_iters == 60,
+            "{max_iters} iterations"
+        );
+        assert!(decision.sigma_px.is_some_and(|s| s.is_finite() && s > 0.0));
+        assert!(s.points.iter().flatten().all(|c| c.is_finite()));
+        for p in 0..60 {
+            assert!(
+                !out.point_at_infinity[p],
+                "{max_iters} iterations: near point {p} became a bearing"
+            );
+        }
+        if max_iters == 60 {
+            for &p in &far {
+                assert!(out.point_at_infinity[p], "far track {p} stayed finite");
+            }
+        }
+    }
+}
+
+/// A far track started at a wrong depth converges to the same verdict, and
+/// the same bearing or point, as the same track started as a direction: a
+/// bearing far inside the measured noise, and a point whose rays carry a depth
+/// well above it.
+#[test]
+fn a_far_point_from_a_wrong_depth_reaches_the_verdict_a_direction_does() {
+    let run = |distance: f64, amp: f64, start: Option<f64>| {
+        let mut s = make_dense_scene();
+        let far = add_far_track(&mut s, distance, 0.0, 31);
+        add_noise(&mut s, amp, 32);
+        let mut mask = vec![false; s.points.len()];
+        match start {
+            // A wrong depth along the right line of sight.
+            Some(depth) => s.points[far] = [0.0, 0.0, -depth],
+            None => {
+                mask[far] = true;
+                s.points[far] = [0.0, 0.0, -1.0];
+            }
+        }
+        let out = run_constrained(
+            &mut s,
+            Some(&mask),
+            None,
+            CROSS,
+            None,
+            false,
+            &DEFAULT_SCHEDULE,
+        );
+        (out.point_at_infinity[far], in_first_camera(&s, far, &out))
     };
-    assert!(!crosses(2.0, 500.0), "the track should clear a 2·s/f floor");
+    // A bearing: 20,000 units out in 0.76 px of noise, started 100 units out
+    // (a near point) and at infinity.
+    let (dir_a, a) = run(20000.0, 1.4, Some(100.0));
+    let (dir_b, b) = run(20000.0, 1.4, None);
+    assert!(dir_a && dir_b, "the far track should end a bearing");
     assert!(
-        crosses(4.0, 500.0),
-        "the track should sit inside a 4·s/f floor"
+        angle_between(a.into(), b.into()) < 2e-5,
+        "bearings {a} and {b} differ"
+    );
+    // A point: 1,000 units out in 0.09 px of noise, started ten times too far
+    // and at infinity.
+    let (dir_a, a) = run(1000.0, 0.17, Some(10000.0));
+    let (dir_b, b) = run(1000.0, 0.17, None);
+    assert!(!dir_a && !dir_b, "the track should end a point");
+    assert!(
+        (a - b).norm() < 1e-4 * a.norm(),
+        "points {a} and {b} differ"
     );
     assert!(
-        !crosses(4.0, 1000.0),
-        "doubling the focal halves the floor, so the same track clears it"
+        (a.norm() - 1000.0).abs() < 100.0,
+        "the point ended {} units out",
+        a.norm()
     );
+}
+
+/// The analytic blocks of an observation of a point in inverse depth, assembled
+/// into a dense Jacobian, match a central difference of the residual vector in
+/// every pose slot and in `(δ₁, δ₂, δρ)`, at a finite inverse depth and at
+/// `ρ = 0`, where the difference reads both sides of the bound.
+#[test]
+fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
+    let cam = simple_pinhole(500.0);
+    let (quats, trans) = fd_poses();
+    let n_im = quats.len();
+    let d_sys = 2 + 6 * n_im;
+    let mut anchor = Vector3::zeros();
+    for i in 0..n_im {
+        anchor += camera_centre(&quats[i], &trans[i]);
+    }
+    anchor /= n_im as f64;
+    let world = Vector3::new(0.35, -0.2, 0.4);
+    let toward = (world - anchor).normalize();
+    for (u0, rho0, what) in [
+        (
+            toward,
+            1.0 / (world - anchor).norm(),
+            "a finite inverse depth",
+        ),
+        (toward, 0.0, "the bound"),
+    ] {
+        let (b1, b2) = tangent_basis(&u0);
+        let project = |q: &[UnitQuaternion<f64>], t: &[Vector3<f64>], u: &Vector3<f64>, rho| {
+            (0..n_im)
+                .map(|i| {
+                    let (_, p) = inverse_depth_ray(&q[i], &t[i], u, rho, &anchor);
+                    cam.ray_to_pixel([p.x, p.y, p.z]).expect("in domain")
+                })
+                .collect::<Vec<_>>()
+        };
+        // Observed pixels, offset so the residual is not identically zero.
+        let uv: Vec<[f64; 2]> = project(&quats, &trans, &u0, rho0)
+            .into_iter()
+            .map(|(u, v)| [u + 1.3, v - 0.7])
+            .collect();
+        let residuals = |delta: &[f64]| -> Vec<f64> {
+            let mut qq = quats.clone();
+            let mut tt = trans.clone();
+            for i in 0..n_im {
+                let o = 2 + 6 * i;
+                let dth = Vector3::new(delta[o], delta[o + 1], delta[o + 2]);
+                qq[i] = UnitQuaternion::from_scaled_axis(dth) * quats[i];
+                tt[i] = trans[i] + Vector3::new(delta[o + 3], delta[o + 4], delta[o + 5]);
+            }
+            let u = (u0 + b1 * delta[d_sys] + b2 * delta[d_sys + 1]).normalize();
+            let rho = rho0 + delta[d_sys + 2];
+            project(&qq, &tt, &u, rho)
+                .into_iter()
+                .zip(&uv)
+                .flat_map(|((u, v), o)| [u - o[0], v - o[1]])
+                .collect()
+        };
+        let (cx, cy) = cam.principal_point();
+        let lens = LinLens {
+            cam: &cam,
+            analytic: cam.model.supports_pixel_jacobian(),
+            cx,
+            cy,
+            f: 500.0,
+            opt_f: false,
+            opt_k1: false,
+            opt_bspline: false,
+            n_coeffs: 0,
+            d_max: 0.0,
+            radial: SplineRadial::IncidenceAngle,
+            slot0: 0,
+        };
+        let st = LinState {
+            lenses: std::slice::from_ref(&lens),
+            ci_cam: &vec![0; n_im],
+            q: &quats,
+            t: &trans,
+            xp: &[u0],
+            bases: &[(b1, b2)],
+            cp_dir: &[false],
+            cp_held: &[false],
+            cp_origin: &[None],
+            cp_inverse: &[Some(anchor)],
+            inv_depth: &[rho0],
+            uv: &uv,
+            n_shared: 2,
+        };
+        let mut jac = vec![vec![0.0f64; d_sys + 3]; 2 * n_im];
+        for i in 0..n_im {
+            let b = observation_blocks::<BASE_CAM_COLS>(&st, i, i, 0, 1e18);
+            for row in 0..2 {
+                for (c, &ic) in b.idx.iter().enumerate() {
+                    jac[2 * i + row][ic] += b.cam_j[(row, c)];
+                }
+                for c in 0..3 {
+                    jac[2 * i + row][d_sys + c] += b.pt_j[(row, c)];
+                }
+            }
+        }
+        let h = 1e-6;
+        for col in 2..d_sys + 3 {
+            let mut plus = vec![0.0; d_sys + 3];
+            let mut minus = vec![0.0; d_sys + 3];
+            plus[col] = h;
+            minus[col] = -h;
+            let rp = residuals(&plus);
+            let rm = residuals(&minus);
+            for row in 0..2 * n_im {
+                let fd = (rp[row] - rm[row]) / (2.0 * h);
+                let got = jac[row][col];
+                assert!(
+                    (got - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
+                    "{what}: J[{row}][{col}] = {got}, difference {fd}"
+                );
+            }
+        }
+        // At the bound the translation columns vanish, as a direction's do.
+        if rho0 == 0.0 {
+            for (row, r) in jac.iter().enumerate() {
+                let i = row / 2;
+                for c in 0..3 {
+                    assert_eq!(r[2 + 6 * i + 3 + c], 0.0, "translation column at ρ = 0");
+                }
+            }
+        }
+    }
+}
+
+/// A track whose rays diverge, so that the inverse depth that fits them best
+/// is negative (a point behind the cameras), comes out of a round's solve at
+/// the bound: a direction in front of every camera that observes it, whether
+/// it went in at a finite depth or at infinity. (The solve also asserts, in a
+/// debug build, that no accepted inverse depth is ever negative.)
+#[test]
+fn an_inverse_depth_stops_at_zero() {
+    let cam = simple_pinhole(500.0);
+    for start_direction in [false, true] {
+        let mut s = make_scene(6, 40);
+        // Rays from each camera away from a point 2,000 units behind the arc:
+        // about 1.5 px of divergence across it.
+        let behind = Vector3::new(0.0, 0.0, 2008.0);
+        let p = s.points.len();
+        for i in 0..s.quats.len() {
+            let c = camera_centre(&s.quats[i], &s.trans[i]);
+            let d = s.quats[i] * (c - behind).normalize();
+            let (u, v) = cam.ray_to_pixel([d.x, d.y, d.z]).expect("in domain");
+            s.uv.push([u, v]);
+            s.obs_img.push(i as u32);
+            s.obs_pt.push(p as u32);
+        }
+        let mut is_dir = vec![false; p + 1];
+        if start_direction {
+            s.points.push([0.0, 0.0, -1.0]);
+            is_dir[p] = true;
+        } else {
+            s.points.push([0.0, 0.0, -500.0]);
+        }
+        let cons = Constraints::all_free(p + 1);
+        let anchors = free_point_anchors(&s.quats, &s.trans, &s.obs_img, &s.obs_pt, &cons, p + 1);
+        let mut lenses = vec![Lens::new(&cam, false, false, false)];
+        let kept: Vec<usize> = (0..s.uv.len()).collect();
+        solve_lm::<BASE_CAM_COLS>(
+            &mut lenses,
+            &[0; 6],
+            &mut s.quats,
+            &mut s.trans,
+            &mut s.points,
+            &mut is_dir,
+            &s.uv,
+            &s.obs_img,
+            &s.obs_pt,
+            &kept,
+            &cons,
+            Some(&anchors),
+            1.0,
+            60,
+            None,
+            DEFAULT_PROTECTED_LOSS_SCALE,
+            &Progress::none(),
+        );
+        assert!(
+            is_dir[p],
+            "the diverging track came back a position (from a direction: {start_direction})"
+        );
+        let d = Vector3::from(s.points[p]);
+        assert!((d.norm() - 1.0).abs() < 1e-12);
+        for i in 0..s.quats.len() {
+            assert!((s.quats[i] * d).z < 0.0, "the bearing is behind camera {i}");
+        }
+        for (q, &dir) in is_dir.iter().enumerate().take(40) {
+            assert!(!dir, "near point {q} reached infinity");
+        }
+    }
 }
 
 /// A held point's coordinate comes back to the bit, and its observations still
@@ -5147,16 +5727,195 @@ fn an_empty_camera_list_panics() {
     );
 }
 
-/// A track seen through two cameras takes the mean of their focals, one term
-/// per observation, in its noise floor; a track seen through one takes that
-/// camera's focal as it is.
+/// One track at `distance` along a direction off the axis, observed exactly by
+/// every image that images it: a point whose rays carry a depth at a fraction
+/// of a pixel of noise and none at a few pixels.
+fn add_mid_track(s: &mut Scene, distance: f64, j: usize) -> usize {
+    let x = [
+        0.25 * distance * jitter(j, 901),
+        0.2 * distance * jitter(j, 902),
+        -distance,
+    ];
+    let p = s.points.len();
+    s.points.push(x);
+    for i in 0..s.quats.len() {
+        let c = s.quats[i] * Vector3::new(x[0], x[1], x[2]) + s.trans[i];
+        if c.z >= -0.5 {
+            continue;
+        }
+        let Some((u, v)) = s.cam.ray_to_pixel([c.x, c.y, c.z]) else {
+            continue;
+        };
+        if !(0.0..s.cam.width as f64).contains(&u) || !(0.0..s.cam.height as f64).contains(&v) {
+            continue;
+        }
+        s.uv.push([u, v]);
+        s.obs_img.push(i as u32);
+        s.obs_pt.push(p as u32);
+    }
+    p
+}
+
+/// A solve whose rounds stop on their iteration budget far from convergence
+/// does not make points with a depth directions: the solve carries them in
+/// inverse depth through every round, and only the end of the solve decides
+/// how they are stored. With the budget to converge the result is the same.
+/// (Under the crossing between rounds that this replaced, the first
+/// re-estimation of the three-iteration solve made at least 25 of the thirty
+/// mid points directions at a level more than five times the converged one.)
 #[test]
-fn the_noise_floor_of_a_track_reads_the_focals_it_was_seen_through() {
-    let cams = [simple_pinhole(400.0), pinhole_xy(600.0, 620.0)];
-    // Point 0 through camera 0 twice and camera 1 once; point 1 through camera
-    // 1 alone; point 2 unobserved.
-    let floors = track_noise_floors(&cams, &[0, 0, 1, 1], &[0, 0, 0, 1], 3, 2.0);
-    assert_eq!(floors[0], 2.0 / ((400.0 + 400.0 + 610.0) / 3.0));
-    assert_eq!(floors[1], 2.0 / 610.0);
-    assert_eq!(floors[2], 2.0 / 400.0);
+fn an_unconverged_round_keeps_points_with_depth() {
+    let run = |max_iters: usize| {
+        let mut s = make_scene(8, 60);
+        // Thirty points 250 to 395 units out: a depth score in the hundreds
+        // at a quarter of a pixel, and about one at three pixels.
+        let mid: Vec<usize> = (0..30)
+            .map(|j| add_mid_track(&mut s, 250.0 + 5.0 * j as f64, j))
+            .collect();
+        add_noise(&mut s, 0.5, 61);
+        for i in 1..s.quats.len() {
+            let d = Vector3::new(
+                0.1 * jitter(i, 62),
+                0.1 * jitter(i, 63),
+                0.1 * jitter(i, 64),
+            );
+            s.quats[i] = UnitQuaternion::from_scaled_axis(d) * s.quats[i];
+            s.trans[i] += Vector3::new(
+                0.2 * jitter(i, 65),
+                0.2 * jitter(i, 66),
+                0.2 * jitter(i, 67),
+            );
+        }
+        let schedule = [
+            DEFAULT_SCHEDULE[0],
+            DEFAULT_SCHEDULE[1],
+            DEFAULT_SCHEDULE[2],
+            DEFAULT_SCHEDULE[2],
+            DEFAULT_SCHEDULE[2],
+            DEFAULT_SCHEDULE[2],
+        ];
+        let out = bundle_adjust(
+            &BaCameras::shared(&s.cam, s.quats.len()),
+            &mut s.quats,
+            &mut s.trans,
+            &mut s.points,
+            &s.uv,
+            &s.obs_img,
+            &s.obs_pt,
+            None,
+            None,
+            CROSS,
+            None,
+            DEFAULT_PROTECTED_LOSS_SCALE,
+            false,
+            false,
+            false,
+            &schedule,
+            max_iters,
+            2,
+            12,
+            &Progress::none(),
+        );
+        (out, mid)
+    };
+    for max_iters in [3, 60] {
+        let (out, mid) = run(max_iters);
+        let decision = out.free_point_decision.expect("a storage decision");
+        assert!(decision.decided);
+        assert_eq!(
+            decision.to_direction, 0,
+            "{max_iters} iterations: {decision:?}"
+        );
+        for &p in &mid {
+            assert!(
+                !out.point_at_infinity[p],
+                "{max_iters} iterations: mid point {p} ended a direction"
+            );
+        }
+        for p in 0..60 {
+            assert!(
+                !out.point_at_infinity[p],
+                "{max_iters} iterations: near point {p} ended a direction"
+            );
+        }
+    }
+}
+
+/// The fixture of [`crossing_off_matches_the_kernel_before_inverse_depth`]:
+/// finite points, directions, a far track, pixel noise, perturbed poses,
+/// protected observations, a held point and a ranged one.
+fn crossing_off_fixture() -> (Scene, Vec<bool>, Vec<bool>, PointConstraints) {
+    let mut s = make_scene(6, 40);
+    let ids = add_direction_tracks(&mut s, 8, 77, 0.2);
+    add_far_track(&mut s, 1500.0, 0.0, 78);
+    add_noise(&mut s, 0.3, 79);
+    let mask = dir_mask(&s, &ids);
+    for i in 1..s.quats.len() {
+        let d = Vector3::new(
+            0.02 * jitter(i, 401),
+            0.02 * jitter(i, 402),
+            0.02 * jitter(i, 403),
+        );
+        s.quats[i] = UnitQuaternion::from_scaled_axis(d) * s.quats[i];
+        s.trans[i] += Vector3::new(
+            0.04 * jitter(i, 404),
+            0.04 * jitter(i, 405),
+            0.04 * jitter(i, 406),
+        );
+    }
+    let mut prot = vec![false; s.uv.len()];
+    for k in (0..s.uv.len()).step_by(37) {
+        prot[k] = true;
+    }
+    let mut cons = PointConstraints::all_free(s.points.len());
+    cons.hold(3);
+    let c0 = camera_centre(&s.quats[0], &s.trans[0]);
+    let x5 = Vector3::new(s.points[5][0], s.points[5][1], s.points[5][2]);
+    cons.constrain_distance(5, (x5 - c0).norm(), Some(DistanceReference::Image(0)));
+    (s, mask, prot, cons)
+}
+
+/// With the crossing off, the solve is the kernel as it stood before free
+/// points could be solved in inverse depth. The sums below are that kernel's
+/// output on [`crossing_off_fixture`] (released focal, directions, protected,
+/// held and ranged points), recorded from it; they are compared to a relative
+/// `1e-12` rather than to the bit so that a platform's `libm` rounding a
+/// transcendental differently in its last place does not fail the test, which
+/// a change to the solve would do by many orders more.
+#[test]
+fn crossing_off_matches_the_kernel_before_inverse_depth() {
+    let (mut s, mask, prot, cons) = crossing_off_fixture();
+    let out = run_constrained(
+        &mut s,
+        Some(&mask),
+        Some(&cons),
+        FreePointPolicy::default(),
+        Some(&prot),
+        true,
+        &DEFAULT_SCHEDULE,
+    );
+    let points: f64 = s.points.iter().flatten().filter(|v| v.is_finite()).sum();
+    let quats: f64 = s
+        .quats
+        .iter()
+        .map(|q| q.w + 2.0 * q.i + 3.0 * q.j + 4.0 * q.k)
+        .sum();
+    let trans: f64 = s.trans.iter().map(|t| t.x + 2.0 * t.y + 3.0 * t.z).sum();
+    let res: f64 = out.residual_norms.iter().filter(|r| r.is_finite()).sum();
+    let got = [points, quats, trans, res, ba_focal(&out)];
+    let want = [
+        -1.950_920_904_268_133_7e3,
+        5.906_731_099_411_885,
+        -1.440_915_308_952_721e2,
+        5.669_449_675_644_007e1,
+        4.999_239_097_721_946_3e2,
+    ];
+    for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-12 * w.abs(),
+            "sum {k}: {g:e} against {w:e}"
+        );
+    }
+    assert_eq!(out.point_at_infinity, mask);
+    assert!(out.free_point_decision.is_none());
 }

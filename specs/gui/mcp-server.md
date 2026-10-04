@@ -3066,7 +3066,8 @@ it meant and no cache is dropped for it until the version lands. It polls the
 cancel flag between its stages, so `cancel_background_task` stops it and a
 cancelled retriangulation pushes no version. Its `report` counts the per-point
 statuses: points moved, crossed to or from infinity, turned into directions by
-each rule, placed on the observations that agree, kept for too few
+each rule (too thin, no depth at the noise level, behind a camera, past the
+reprojection bar), placed on the observations that agree, kept for too few
 observations, and held ([edits/retriangulate-point.md](edits/retriangulate-point.md)
 § "The version").
 
@@ -3347,19 +3348,24 @@ evaluates the track again; there is no separate search radius.
 `fit_bench_track` is the step that moves a track, and it ends by evaluating its
 own result. A fit of a track-stage track
 with fewer than two `in` observations is refused where an evaluation of the
-same track is not.
+same track is not. `fit_bench_track` and `set_bench_track_stage` take an optional
+`sigma_px` (a positive number of pixels), the per-axis noise the point-or-bearing
+test weights the sightings at in place of the reconstruction's measured
+reprojection noise; a reconstruction holding no finite point measures none, and
+a fit or upgrade there without it fails, saying so.
 
 **A fit's sentence names the representation the rays earned.** Finite or at
 infinity is the decision a fit makes over a distant track
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "Finite
 points and bearings"), so the reply carries it in the deciding test's own terms
--- `at infinity along (0.553, -0.809, -0.198): finite point would have 15.1 px
-rms against the bearing's 5.2 px rms` -- along with how many sightings the walk
-bound left at their seeds. Those two residuals are how an agent tells a depth the
-photographs support from one an ill-conditioned midpoint invented, so they are in
-every fit's sentence and not only in the ones they settled. A candidate that
-reprojects into **none** of the sightings has no residual, and the sentence says
-that in words rather than printing `NaN` where a number of pixels belongs. `get_bench_track`'s `stage_data` then says which the track
+-- `at infinity along (0.553, -0.809, -0.198): depth score 4.2 and midpoint
+bound 0.0 under the 25 threshold, at 0.216 px noise over 8 rays up to 0.312 deg
+apart` -- along with how many sightings the walk bound left at their seeds. The
+reason, the numbers it was judged on and the noise level are how an agent tells
+a depth the photographs support from one they do not, so every fit's sentence
+carries them. A number that means nothing for the outcome (a bearing's
+distance, the likelihood ratio of a point fit that did not run) is left out
+rather than printed as `NaN`. `get_bench_track`'s `stage_data` then says which the track
 is: `at_infinity`, with the coordinate under `direction` for a bearing and
 `position` for a place, the other `null`. That flag is the **track's** and not
 its patch's `w`, so a point put on the bench from a node with no patch frames --

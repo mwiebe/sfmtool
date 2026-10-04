@@ -21,6 +21,12 @@
 //!
 //! See `specs/core/reconstruction/batch-triangulation-api.md` for the design.
 //!
+//! [`point_or_bearing`] sits beside the two batch functions and takes the same
+//! ray layout: it fits a bearing and a point to each track and says whether
+//! the rays ask for a depth, by a likelihood-ratio test against a per-ray
+//! noise level. See `specs/core/reconstruction/batch-triangulation-api.md`
+//! § "Point or bearing".
+//!
 //! Two layers sit on top of this one, each in its own submodule and each
 //! re-exported here so a caller's path stays short:
 //!
@@ -39,12 +45,19 @@
 //!
 //! See `specs/core/reconstruction/triangulation-rules.md` for both.
 
+pub mod point_or_bearing;
 pub mod points;
 pub mod retriangulate;
 
+pub use point_or_bearing::{
+    bearing_score, bearing_score_batch, fit_point_and_bearing, fit_point_and_bearing_batch,
+    is_finite, isotropic_ray_weight, isotropic_ray_weights, observed_ray, BearingScore,
+    ObservedRay, PointBearingFit, PointBearingFitOptions, DEFAULT_DEPTH_LIKELIHOOD_RATIO_THRESHOLD,
+    DEFAULT_POINT_FIT_MAX_ITERATIONS, DEFAULT_SOFT_L1_SCALE,
+};
 pub use points::{
     triangulate_points_from_observations, triangulate_points_from_rays, FewObservations,
-    ObservationSet, PointCensus, PointDistance, PointRules, PointVerdict, RaySet,
+    LikelihoodRule, ObservationSet, PointCensus, PointDistance, PointRules, PointVerdict, RaySet,
     TriangulatedPoints, FALLBACK_DIRECTION,
 };
 pub use retriangulate::{
@@ -88,17 +101,18 @@ pub struct DepthUncertainty {
     /// depth is unobservable).
     pub sigma: f64,
     /// Inverse-depth z-score `depth / sigma`. Small (≲ 3-4) ⇒ statistically
-    /// indistinguishable from infinity. Scale-free; the finite-vs-∞ test, but
-    /// reliable only on a non-degenerate solve (it divides by the solved depth,
-    /// which is noise when the rays are near-parallel).
+    /// indistinguishable from infinity. Scale-free; a diagnostic (the Wald form
+    /// of the point-or-bearing test, which is what decides), reliable only on
+    /// a non-degenerate solve (it divides by the solved depth, which is noise
+    /// when the rays are near-parallel).
     pub inverse_depth_z: f64,
     /// Farthest depth this track's geometry can tell from infinity:
     /// `B⊥ / σ_ray`, the perpendicular camera baseline over the RMS per-ray
     /// angular noise — equivalently the depth at which `inverse_depth_z` would
     /// fall to 1. Computed from the camera geometry and noise alone, *not* the
     /// solved point, so it stays meaningful where `inverse_depth_z` goes
-    /// unstable. Gate the finite-vs-∞ decision on this against a policy
-    /// `finite_horizon` (default: the camera extents).
+    /// unstable. Read against the camera extents (`finite_horizon`), it says
+    /// whether the capture can resolve a point at its own scale.
     pub resolvable_distance: f64,
 }
 

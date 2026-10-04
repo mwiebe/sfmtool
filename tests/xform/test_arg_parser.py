@@ -38,7 +38,6 @@ from sfmtool.xform._arg_parser import (
         "--include-by-distribution",
         "--camera-model",
         "--find-points-at-infinity",
-        "--classify-points-at-infinity",
     ],
 )
 def test_required_value_option_reports_missing_argument(option):
@@ -223,3 +222,40 @@ def test_a_disagreement_with_click_is_refused():
         )
     with pytest.raises(click.UsageError, match="arguments"):
         check_against_click(parsed, {"scale": ("2",)}, ["in.sfmr", "out.sfmr"])
+
+
+def test_classify_points_at_infinity_takes_an_optional_noise_level():
+    (bare,) = parse_transform_args(["--classify-points-at-infinity"])
+    assert bare.sigma_px is None
+    (given,) = parse_transform_args(["--classify-points-at-infinity", "0.5"])
+    assert given.sigma_px == 0.5
+    (joined,) = parse_transform_args(["--classify-points-at-infinity=0.25"])
+    assert joined.sigma_px == 0.25
+    # Bare, followed by another option: the option is not its value.
+    first, second = parse_transform_args(
+        ["--classify-points-at-infinity", "--scale", "2"]
+    )
+    assert first.sigma_px is None
+    assert type(second).__name__ == "ScaleTransform"
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1", "nan", "inf"])
+def test_classify_points_at_infinity_rejects_a_bad_noise_level(value):
+    with pytest.raises(click.UsageError, match="--classify-points-at-infinity"):
+        parse_transform_args([f"--classify-points-at-infinity={value}"])
+
+
+def test_find_points_at_infinity_takes_an_optional_noise_level():
+    """The fourth component is a sigma_px override; without it the noise is
+    measured."""
+    (measured,) = parse_transform_args(["--find-points-at-infinity", "0.1,200,2"])
+    assert measured.sigma_px is None
+    (given,) = parse_transform_args(["--find-points-at-infinity", "0.1,200,2,0.5"])
+    assert given.sigma_px == 0.5
+    assert "sigma_px=0.5px" in given.description()
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1", "nan", "inf"])
+def test_find_points_at_infinity_rejects_a_bad_noise_level(value):
+    with pytest.raises(click.UsageError, match="--find-points-at-infinity"):
+        parse_transform_args([f"--find-points-at-infinity=0.1,200,2,{value}"])

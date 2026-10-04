@@ -209,18 +209,14 @@ fn check_releases(
 ///         the adjustment's gauge is free, so a distance from a fixed world
 ///         coordinate would constrain nothing -- while ``+inf`` and ``NaN``
 ///         rows ignore it.
-///     free_points_cross: Re-decide every free point's representation at each
-///         inter-round re-estimation, from its own rays at the current
-///         geometry: a track whose widest ray pair opens past the noise floor
-///         is finite, one that closes below it is a direction, and so is one
-///         that solves behind a camera observing it. ``False`` honours the
-///         caller's ``point_at_infinity`` mask for the whole solve, which
-///         reproduces the standing kernel bit for bit.
-///     noise_floor_scale: The constant ``c`` in the noise-floor angle
-///         ``theta_floor = c * s / f``, with ``s`` the round's loss scale in
-///         pixels and ``f`` the mean current focal of the cameras the track
-///         was seen through, one term per observation (default 2.0; must be
-///         positive and finite). Read only under ``free_points_cross``.
+///     free_points_cross: Solve every free point in inverse depth about the
+///         centroid of its observing cameras, so it can move between near and
+///         infinity within a round, and decide at the end of the solve how it
+///         is stored, on the point-or-bearing test at the noise level the
+///         final round's residuals measure: a track whose rays ask for a depth
+///         is a position, one whose rays do not is a direction. ``False``
+///         honours the caller's ``point_at_infinity`` mask for the whole solve,
+///         which reproduces the standing kernel bit for bit.
 ///     protected: Optional (n_obs,) bool mask marking protected
 ///         observations. A protected observation is never removed by the
 ///         inter-round trim gates — it stays in the solve set every round
@@ -261,16 +257,28 @@ fn check_releases(
 /// Returns:
 ///     A dict ``{"cameras", "quaternions_wxyz" (n_img, 4), "translations"
 ///     (n_img, 3), "points" (n_pt, 3), "residual_norms" (n_obs,),
-///     "point_at_infinity" (n_pt,)}``. ``cameras`` holds one
+///     "point_at_infinity" (n_pt,), "free_point_decision"}``. ``cameras`` holds one
 ///     ``CameraIntrinsics`` per input camera, in order: the input camera with
 ///     its released parameters replaced by the solved ones, and equal to the
 ///     input camera otherwise.
 ///     ``point_at_infinity`` is the representation each point ended with:
 ///     ``True`` where its returned row is a world-frame direction and
 ///     ``False`` where it is a position. A free point's entry is the input
-///     mask unless ``free_points_cross`` let the re-estimation re-decide it, a
-///     held point's is its input value, and a ranged point's is whether its
-///     distance is infinite.
+///     mask unless ``free_points_cross`` solved it in inverse depth, a held
+///     point's is its input value, and a ranged point's is whether its distance
+///     is infinite.
+///     ``free_point_decision`` is ``None`` without ``free_points_cross`` (and
+///     when the solve exits degenerate), and otherwise a dict describing the
+///     end-of-solve storage decision: ``sigma_px`` (the noise level measured
+///     over the final round's kept observations of finite points, or ``None``
+///     where there were none), ``observation_count`` and ``outlier_count``
+///     (what that level was measured over and left out), ``decided`` (whether
+///     the test was read: not without a level, nor after a cancellation),
+///     ``converged`` (whether the final round met its convergence test; the
+///     decision is read either way, and a level read from a round that
+///     stopped on its budget still carries pose error), and ``to_finite`` and
+///     ``to_direction`` (the free points stored in the other representation
+///     than the one they were handed in with).
 ///     ``residual_norms`` are unweighted reprojection norms at the final
 ///     state, ``+inf`` where the point is non-finite / behind the camera /
 ///     outside the model domain.
@@ -289,7 +297,6 @@ fn check_releases(
     distance=None,
     distance_from=None,
     free_points_cross=false,
-    noise_floor_scale=sfmtool_core::geometry::DEFAULT_NOISE_FLOOR_SCALE,
     protected=None,
     protected_loss_scale=3.0,
     opt_f=false,
@@ -316,7 +323,6 @@ pub fn bundle_adjust<'py>(
     distance: Option<PyReadonlyArray1<'py, f64>>,
     distance_from: Option<Bound<'py, PyAny>>,
     free_points_cross: bool,
-    noise_floor_scale: f64,
     protected: Option<PyReadonlyArray1<'py, bool>>,
     protected_loss_scale: f64,
     opt_f: bool,
@@ -415,11 +421,6 @@ pub fn bundle_adjust<'py>(
             "protected_loss_scale must be positive and finite",
         ));
     }
-    if !(noise_floor_scale.is_finite() && noise_floor_scale > 0.0) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "noise_floor_scale must be positive and finite",
-        ));
-    }
     let held_mask: Option<Vec<bool>> = held.map(|m| to_contiguous!(m).into_owned());
     let distance_values: Option<Vec<f64>> = distance.map(|r| to_contiguous!(r).into_owned());
     let origins = match &distance_from {
@@ -435,7 +436,6 @@ pub fn bundle_adjust<'py>(
     )?;
     let free_points = FreePointPolicy {
         cross: free_points_cross,
-        noise_floor_scale,
     };
     let q_in = to_contiguous!(quaternions_wxyz);
     let t_in = to_contiguous!(translations);
@@ -555,6 +555,20 @@ pub fn bundle_adjust<'py>(
         "point_at_infinity",
         PyArray1::from_vec(py, out.point_at_infinity),
     )?;
+    match &out.free_point_decision {
+        Some(c) => {
+            let decision = PyDict::new(py);
+            decision.set_item("sigma_px", c.sigma_px)?;
+            decision.set_item("observation_count", c.observation_count)?;
+            decision.set_item("outlier_count", c.outlier_count)?;
+            decision.set_item("decided", c.decided)?;
+            decision.set_item("converged", c.converged)?;
+            decision.set_item("to_finite", c.to_finite)?;
+            decision.set_item("to_direction", c.to_direction)?;
+            d.set_item("free_point_decision", decision)?;
+        }
+        None => d.set_item("free_point_decision", py.None())?,
+    }
     Ok(d)
 }
 

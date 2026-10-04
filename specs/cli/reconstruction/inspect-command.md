@@ -58,25 +58,30 @@ A missing match, or an index beyond the file's point count, is a clear error.
   (`w = 0`), position/direction, color, reprojection error, observation count.
   Uses only the loaded reconstruction (no `.sift` needed).
 - **Verbose** — the full triangulation analysis from `inspect_point`, which
-  re-derives the point's observation rays from the workspace `.sift` files (so
-  they must be present): the re-derived classification, triangulated point and
+  re-derives the point's observation rays from its observed pixels (the
+  inline keypoints of an `embedded_patches` file, or of a `sift_files` one
+  that carries them; otherwise the workspace `.sift` files, which must then be
+  present): the point-or-bearing verdict at the reconstruction's
+  measured noise level and the default threshold, with the depth score,
+  midpoint bound, bearing cost and the plain least-squares fit's likelihood
+  ratio beside it (`no verdict` when no level can be measured or the point has
+  fewer than two usable rays); then the diagnostics: triangulated point and
   depth, condition number and eigenvalues, in-front flag, inverse-depth z-score
-  (and σ), `resolvable_distance` vs `finite_horizon` (the camera extents) with a
-  sufficient/insufficient verdict, observing-camera baseline span, ray spread,
-  and a per-observation list with each ray's incidence angle off the optical
-  axis (flagging the near-fisheye-edge observations).
+  (and σ), `resolvable_distance` against the camera extents, observing-camera
+  baseline span, ray spread, and a per-observation list with each ray's
+  incidence angle off the optical axis (flagging the near-fisheye-edge
+  observations) and, for a `sift_files` file, its feature index.
 
   The implementing module is
   `crates/sfmtool-core/src/analysis/point_inspect.rs` (bound as
   `SfmrReconstruction.inspect_point`): it un-projects each member keypoint
-  through its camera to rebuild the observation rays, then runs the same
-  `triangulate_batch` / `depth_uncertainty_batch` /
-  `classify_rays_at_infinity` path the points-at-infinity discovery and
-  reclassify operations use (see
-  [`specs/core/reconstruction/batch-triangulation-api.md`](../../core/reconstruction/batch-triangulation-api.md)),
-  so the reported diagnostics match the production gate exactly. It requires
-  a `sift_files` reconstruction (`embedded_patches` is rejected — the rays
-  are re-derived from `.sift` keypoints).
+  through its camera to rebuild the observation rays and runs
+  `triangulate_batch` / `depth_uncertainty_batch` over them for the
+  diagnostics, and `point_or_bearing_scores` (with the plain least-squares
+  fit) on the point for the verdict, the test reclassification, discovery and
+  the bench decide with (see
+  [`specs/core/reconstruction/batch-triangulation-api.md`](../../core/reconstruction/batch-triangulation-api.md)
+  § "Point or bearing").
 
 ## Point Strips (`--strips`)
 
@@ -191,12 +196,38 @@ The default output is a compact label/value block. The fields per type:
   `xform`, solver flags for `solve`, etc.), workspace, per-camera parameter
   tables, rig configuration, 3D point statistics with histograms, reprojection
   error, per-point depth-reliability diagnostics (inverse-depth z-score and
-  condition number), observation statistics, nearest-neighbor distances. The
+  condition number) followed by the point-or-bearing counts described below,
+  observation statistics, nearest-neighbor distances. The
   3D point count carries the same `(N at infinity)` annotation as the default
   summary when any points at infinity are present, and the `Thumbnails` and
   `Patch bitmaps` lines appear under the reconstruction summary. An empty
   absolute workspace path, which means none was recorded (as `sfm xform
   --minimal` writes), prints as `(none recorded)`.
+
+  The point-or-bearing counts are the short form of `sfm analyze
+  --depth-reliability`'s second part (see
+  [analyze-command.md](analyze-command.md) § "Depth Reliability"): the
+  likelihood-ratio test of
+  [batch-triangulation-api.md](../../core/reconstruction/batch-triangulation-api.md)
+  § "Point or bearing" run over every point at the measured reprojection noise
+  and the default threshold, compared with how each point is stored. Nothing
+  is fitted and nothing in the file changes; the disagreements are what
+  `sfm xform --classify-points-at-infinity` would change, less the points it
+  declines to (see [analyze-command.md](analyze-command.md)). On the Kerry
+  Park ground-truth candidate `tk117`:
+
+  ```
+    Point or bearing (likelihood-ratio test, threshold 25):
+      Noise level: 0.2156 px, measured over 3,510 observations of finite points, 0 excluded as outliers
+      Finite points called bearings: 0 of 375 scored
+      Points at infinity called finite: 3 of 12 scored (points 298, 294, 295)
+  ```
+
+  The counts are out of the scored points; a point with fewer than two usable
+  rays is in neither. The promoted points are named by index, highest depth
+  score first, up to five. A reconstruction with no observation of a finite point, or whose
+  `.sift` files cannot be read, prints `Point or bearing: unavailable` and the
+  reason instead. `inspect` takes no override; `analyze` does.
 
 - **`.sift`** — adds image file size and hashes, feature tool and content
   hashes, feature tool options, and the top 5 features by size.
