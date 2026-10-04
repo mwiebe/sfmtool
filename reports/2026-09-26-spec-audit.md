@@ -236,6 +236,7 @@ Eight specs open with "This document describes/specifies…":
 - gui/viewport-navigation
   > _Status (2026-10-04): **Done** — it now opens by saying what viewport navigation is (moving the 3D viewport's camera around a target point: orbit, pan, zoom, fly, roll, Alt to move the target, Z to frame) and what the spec covers, branch `finding-fix-12-viewport-navigation-opening`._
 - xform/scale-by-measurements
+  > _Status (2026-10-04): **Done** — the opening now says what the option does (scales a reconstruction uniformly by the median of real-over-reconstructed distances for Point ID pairs listed in a YAML file, and records the unit) and when to use it, branch `finding-fix-17-scale-by-measurements-opening`._
 - xform/select-by-distribution
 
 ### 5. Coverage both ways
