@@ -920,6 +920,7 @@ and the opening paragraphs listed in check 4.
 - `geometry/resect_translation.rs:95-116`, the `residual_norm` chirality argument.
   > _Status (2026-10-04): **Done** — the `residual_norm` doc comment now states its contract (the two in-front tests and the `INVALID_RESIDUAL` cases) and points at `rotation-locked-resection.md` § Mechanism; the spec already covered everything the old comment said, including the `ray_to_pixel` domain check (§ Mechanism, Output paragraph), and the "bit-identical to before this branch" history note was dropped, branch `finding-fix-22-resect-residual-norm-comment`._
 - `motion/recon_discontinuity.py:689-700`, the threshold rationale, which is already in `constants.py`.
+  > _Status (2026-10-04): **Done** — the full rationale for both pose-extrapolation thresholds now sits beside `POSE_TRANS_FACTOR` and `POSE_ROT_DEG` in `constants.py` (it held only a one-line summary before), and `recon_discontinuity.py` keeps a one-line pointer to it, branch `finding-fix-23-motion-threshold-comment`._
 - `optical_flow/gpu/mod.rs:98-103`.
 - `kernels/sfmtool_pinhole.rs:87-110`.
 - `image_detail/intrinsics/field.rs:4-65`, a 62-line module doc.
