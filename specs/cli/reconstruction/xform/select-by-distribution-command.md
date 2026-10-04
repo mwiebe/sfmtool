@@ -1,7 +1,12 @@
 # Select by Distribution
 
-This document specifies the `--include-by-distribution` option for `sfm xform`, which keeps a
-small, strategically-chosen subset of a reconstruction's cameras instead of decimating blindly.
+`sfm xform --include-by-distribution COUNT` keeps at most COUNT of a reconstruction's cameras and
+drops the rest. A greedy loop picks them: each step goes to the part of the point cloud that is
+least covered so far and takes views of it whose rays are at least 20° apart where it can, so the
+kept views spread over the cloud and see each part they cover from clearly different directions. Use
+it to cut a small sample dataset out of a large capture when the subset still has to solve on its
+own. In a reconstruction with rig frames it keeps or drops each rig frame as a whole, and COUNT
+counts rig frames.
 
 ## Motivation
 
