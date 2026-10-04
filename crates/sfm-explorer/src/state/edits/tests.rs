@@ -1041,11 +1041,33 @@ fn the_log_entry_carries_the_counts_and_the_residuals() {
     );
     assert!(last.contains("median residual "), "{last}");
     assert!(!last.contains("focal"), "the focal was held: {last}");
+    // The default crosses, so the entry says what the storage decision did.
+    assert!(last.contains(", free points decided at "), "{last}");
+    assert!(
+        last.contains(" to finite, ") && last.contains(" to directions"),
+        "{last}"
+    );
     let serials = state.scene[0].history.versions();
     assert!(
         last.ends_with(&format!("({} → {})", serials[0].serial, serials[1].serial)),
         "{last}"
     );
+}
+
+#[test]
+fn the_log_entry_says_nothing_of_free_points_with_the_crossing_off() {
+    let (mut state, id) = adjustable_state();
+    let options = sfmtool_core::BundleAdjustOptions {
+        free_points: sfmtool_core::geometry::FreePointPolicy::KEEP,
+        ..sfmtool_core::BundleAdjustOptions::default()
+    };
+    state.start_bundle_adjust(id, &options).expect("well posed");
+    state.finish_background_task();
+
+    let logged = texts(&state);
+    let last = logged.last().expect("one entry");
+    assert!(last.starts_with("Bundle adjusted run_a: "), "{last}");
+    assert!(!last.contains("free points"), "{last}");
 }
 
 #[test]
@@ -2654,4 +2676,35 @@ fn a_refused_switch_names_the_camera_and_pushes_nothing() {
         .switch_camera_model(id, &request)
         .expect_err("no spline");
     assert!(why.contains("camera 0"), "{why}");
+}
+
+/// The Action Log's free-point clause counts the points the decision could not
+/// score after the other counts, and says nothing of them when there are none.
+#[test]
+fn the_free_point_clause_counts_the_unscored_points() {
+    let mut decision = sfmtool_core::geometry::FreePointDecision {
+        sigma_px: Some(0.412),
+        observation_count: 100,
+        outlier_count: 0,
+        decided: true,
+        converged: true,
+        to_finite: 3,
+        to_direction: 25,
+        unscored: 0,
+    };
+    assert_eq!(
+        super::free_point_clause(Some(&decision)),
+        ", free points decided at 0.412 px: 3 to finite, 25 to directions"
+    );
+    decision.unscored = 2;
+    assert_eq!(
+        super::free_point_clause(Some(&decision)),
+        ", free points decided at 0.412 px: 3 to finite, 25 to directions, 2 not scored"
+    );
+    decision.converged = false;
+    assert_eq!(
+        super::free_point_clause(Some(&decision)),
+        ", free points decided at 0.412 px before the final round converged: 3 to \
+         finite, 25 to directions, 2 not scored"
+    );
 }
