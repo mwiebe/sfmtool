@@ -229,6 +229,7 @@ Eight specs open with "This document describes/specifies…":
 - gui/camera-views
 - gui/point-cloud-rendering
 - gui/user-experience
+  > _Status (2026-10-04): **Done** — the opening now names SfM Explorer as the desktop viewer for `.sfmr` reconstructions, says what a user does with it, and says the spec sets the viewer's design principles, summarizes its controls, overlays and panel layout, and links the detailed viewer specs, branch `finding-fix-13-user-experience-opening`._
 - gui/viewport-navigation
   > _Status (2026-10-04): **Done** — it now opens by saying what viewport navigation is (moving the 3D viewport's camera around a target point: orbit, pan, zoom, fly, roll, Alt to move the target, Z to frame) and what the spec covers, branch `finding-fix-12-viewport-navigation-opening`._
 - xform/scale-by-measurements
