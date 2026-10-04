@@ -918,6 +918,7 @@ and the opening paragraphs listed in check 4.
 - `sift/mod.rs:310-329`, the proof of the cap-aware walk.
   > _Status (2026-10-04): **Done** — the comment above the walk in `detect_keypoints` now states what the walk guarantees and points at `specs/core/features/sift.md` § 7, and the slow-path comment is three lines. § 7 now carries the facts that were only in the comment: the total order and the crossing octave's top `cap − len` admission, that orientation keeps scale, each guard with the no-peak case, the bound's `1e-5` margin, the slow path's two triggers, and that a cap of 0 detects nothing. Branch `finding-fix-21-sift-cap-walk-comment`._
 - `geometry/resect_translation.rs:95-116`, the `residual_norm` chirality argument.
+  > _Status (2026-10-04): **Done** — the `residual_norm` doc comment now states its contract (the two in-front tests and the `INVALID_RESIDUAL` cases) and points at `rotation-locked-resection.md` § Mechanism; the spec already covered everything the old comment said, including the `ray_to_pixel` domain check (§ Mechanism, Output paragraph), and the "bit-identical to before this branch" history note was dropped, branch `finding-fix-22-resect-residual-norm-comment`._
 - `motion/recon_discontinuity.py:689-700`, the threshold rationale, which is already in `constants.py`.
 - `optical_flow/gpu/mod.rs:98-103`.
 - `kernels/sfmtool_pinhole.rs:87-110`.
