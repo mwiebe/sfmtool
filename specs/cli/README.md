@@ -69,6 +69,9 @@ command is registered under in `src/sfmtool/cli.py` — the same grouping
 
 ## COLMAP Interop
 
+The COLMAP file reading and writing these commands share is described in
+[../formats/colmap-interop.md](../formats/colmap-interop.md).
+
 | Command | Spec |
 |---------|------|
 | `sfm to-colmap-bin` | [to-colmap-bin-command.md](colmap-interop/to-colmap-bin-command.md) |
