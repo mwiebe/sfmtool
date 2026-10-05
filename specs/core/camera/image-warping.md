@@ -290,8 +290,9 @@ measured under those rules, so it stays separate rather than calling this one.
 
 `WarpMap::from_patch` builds its grid through `ray_to_pixel_grid`: it forms the
 affine ray basis from the patch plane + pose (model-free, infinity-aware) and the
-camera owns the projection. This is the dominant cost in `sfm embed-patches`; see
-[ray-grid-projection.md](ray-grid-projection.md) for the seam and measured impact.
+camera owns the projection. See
+[ray-grid-projection.md](ray-grid-projection.md) for the seam and the bound on the
+coarse-grid path.
 
 For perspective models, `ray_to_pixel` maps the canonical ray through `S`
 into the optical frame, divides by the (positive) forward component and
@@ -468,13 +469,15 @@ For performance, bilinear interpolation on `u8` data should:
   channels. A per-channel sampler re-derives them 3× per pixel; a channel-batched
   gather (`bilinear_corners` → the four corner base indices + blend weights, then
   `data[idx[k] + ch]` per channel) does the address math once and only varies the
-  fetch. On `dino_dog_toy` this roughly halved `render_remap` (~2.1× on the value
-  path; ~41→21 ns/tap) with **bit-identical** output. The single-source-of-truth
-  geometry helper (`bilinear_geometry`) also backs the value+gradient sampler used
+  fetch. The batched gather keeps the per-channel path's multiply/add order, so
+  its output is **bit-identical** to it (tests
+  `sample_bilinear_u8_all_matches_per_channel` and
+  `sample_bilinear_with_grad_u8_all_matches_per_channel`). The single geometry
+  helper (`bilinear_geometry`) also backs the value+gradient sampler used
   by keypoint-subpixel refinement (`remap_bilinear_with_grad`), so both the value
   and gradient batched gathers stay in lockstep with the per-channel path.
   Opt-in sampler counters live in `camera::remap::prof` (gated on
-  `SFMTOOL_PROFILE`); see `specs/core/camera/ray-grid-projection.md` for the measurements.
+  `SFMTOOL_PROFILE`).
 
 ### Anisotropic Filtering
 
