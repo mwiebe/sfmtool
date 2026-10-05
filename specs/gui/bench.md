@@ -1396,10 +1396,10 @@ beside `zncc` (the same samples read over the middle square of the patch and
 over each ninth of it, § "The middle ZNCC" and § "The ZNCC grid" of
 [`../core/bench/editable-track.md`](../core/bench/editable-track.md)), and the ZNCC
 self-similarity radius `zncc_self_similarity_radius` with its `_middle` and
-`_grid`, `zncc_self_similarity_slide_grid`, `zncc_self_similarity_surface`,
-`zncc_self_similarity_tolerance`, and `zncc_self_similarity_reach` with its
-`_middle`, how far the contour the radius is read from reaches in grid px, image
-px and along the patch's axes
+`_grid`, `zncc_self_similarity_surface`, `zncc_self_similarity_tolerance`,
+`zncc_self_similarity_ellipse` with its `_middle`, the ellipse whose semi-major
+axis is the radius, in grid px, image px and along the patch, and
+`zncc_self_similarity_ellipse_grid`, each ninth's in grid px
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
 ZNCC self-similarity radius"), at the track stage
 the two distances
@@ -1419,7 +1419,7 @@ an `.sfmr` declares as `patch_bitmap_resolution`, and where it stores none the
 evaluation's own 24 (core's `EvaluateOptions::patch_resolution`). The track
 stage's shift and self-similarity are read on the same grid
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md)), so the
-zoom, the shift and the reach's grid px are in one unit; the 64 texels Track
+zoom, the shift and the self-similarity radius are in one unit; the 64 texels Track
 View draws a tile at do not enter any of them. The table does not print the
 Jacobian; it is reported as a diagnostic.
 Both are geometry alone, read from the patch, the camera, the pose and where the
