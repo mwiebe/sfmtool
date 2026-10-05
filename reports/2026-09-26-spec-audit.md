@@ -163,6 +163,7 @@ its Rust entry points. `covisibility-selection` lists names but no signatures.
   - `candidate-track-spawning.md:134` "As part of this change…"
     > _Status (2026-10-03): **Done** — rewritten in the present tense, PR #689._
   - `patch-normal-refine-view-subset.md:228`, which is a draft in shape: § Motivation and a test plan.
+    > _Status (2026-10-04): **Done** — the selection is built (`normal_refine/view_subset.rs`, `--refine-max-views`), so the spec stays in `core/patch/` and is rewritten as a standing spec: a purpose paragraph replaces § Motivation, an Interface section leads with the code pointers and the `NormalRefineParams::max_refine_views` / `select_refine_subset` signatures, the "new field", "currently lines ~147–166" and "would address" wording is gone, and the test plan is replaced by the tests that exist, branch `report-fix-21-patch-normal-refine-view-subset`._
   - `select-by-distribution-command.md:230` "initially".
     > _Status (2026-10-04): **Done** — § Parameters now says the CLI does not expose `H` and names the `_H_RAD` constant, and the implementation notes describe the code as it is (the `UsageError` cases, `description()`, `camera_centers`, the per-step `KdTree3d` rebuild) instead of giving instructions, branch `report-fix-20-select-by-distribution-initially`._
 - **Headings that matched the pattern but are not residue:**
