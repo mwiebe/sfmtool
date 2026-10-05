@@ -126,7 +126,15 @@ def inspect(target, rest, strips, output, strips_views, context, verbose):
         _inspect_strips_cmd(target, list(rest), output, strips_views, context)
         return
 
-    if output is not None or strips_views != 8 or context != 1.0:
+    # Ask Click where each strips option came from, so that a value given on
+    # the command line is rejected even when it equals the default.
+    ctx = click.get_current_context()
+    given = [
+        name
+        for name in ("output", "strips_views", "context")
+        if ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+    ]
+    if given:
         raise click.UsageError(
             "--output / --strips-views / --context are only valid with --strips"
         )
