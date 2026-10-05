@@ -110,7 +110,7 @@ as weight concentrates on one view `Σwᵢ² → 1` and `ρ̄_w → 0/0`. (Don't
 `min_views` for this: `1/Σwᵢ² ≤ V` with equality only for exactly uniform weights,
 so a clean `V == min_views` track would be falsely rejected.) The weights read
 each view's agreement with the consensus alone;
-[sharper-patch-consensus.md](../../drafts/sharper-patch-consensus.md) proposes
+[sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md) proposes
 weighting the views by their zoom and sharpness as well.
 
 **View obliquity priors (opt-in).** Two independent uses of the per-view cosine

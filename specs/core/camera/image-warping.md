@@ -576,7 +576,7 @@ Each patch consumer picks one sampler for every view through its `sampler`
 parameter. Choosing it per view instead, `remap_aniso` where the Jacobian's
 anisotropy makes the single tap over-blur the minor axis and this path
 elsewhere, is proposed in
-[sharper-patch-consensus.md](../../drafts/sharper-patch-consensus.md).
+[sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md).
 
 #### Pyramid Construction
 
