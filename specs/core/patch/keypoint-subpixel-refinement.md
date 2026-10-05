@@ -295,7 +295,7 @@ round). Two properties matter to consumers:
 The fuse weights each view by its IRLS agreement with the mean alone, which
 favours views as blurry as the mean over sharper ones; weighting by each view's
 zoom and self-similarity, and scoring at matched bandwidth, is proposed in
-[sharper-patch-consensus.md](../../drafts/sharper-patch-consensus.md).
+[sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md).
 
 **Fusing without refining.** `fuse_patch_bitmap(patch, views, view_set,
 keypoints, params)` in

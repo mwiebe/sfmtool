@@ -105,7 +105,7 @@ than the round's, and no later step restores it. The bar is 2.5 by default
 2. **Consensus.** Build the robust (IRLS) z-normalized weighted-mean template
    over the stack — the same robust photometric consensus used by [patch-normal
    refinement](patch-normal-refinement.md). Its weights come from each view's
-   agreement with the mean alone; [sharper-patch-consensus.md](../../drafts/sharper-patch-consensus.md)
+   agreement with the mean alone; [sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md)
    proposes weighting the views by their zoom and sharpness as well.
 3. **Per-view shift.** For each view `v`, search the residual in-plane shift that
    maximizes windowed ZNCC against the **leave-one-out** consensus of the *other*
