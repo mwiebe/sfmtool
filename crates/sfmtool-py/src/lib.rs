@@ -102,6 +102,8 @@ macro_rules! to_contiguous {
 
 pub(crate) mod helpers;
 
+pub(crate) mod csr_args;
+
 // ── Geometric types ───────────────────────────────────────────────────────
 
 mod geometry;
