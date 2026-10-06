@@ -1,19 +1,19 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-import subprocess
+import signal
 import sys
+import threading
 
 import click
+
+from sfmtool._sfmtool import run_explorer
 
 # What ``--mcp`` binds when given no number. Kept in step with
 # ``DEFAULT_MCP_PORT`` in ``crates/sfm-explorer/src/cli.rs``; the value is
 # repeated here rather than queried because Click needs it to build ``--help``,
 # before the viewer is launched.
 DEFAULT_MCP_PORT = 8787
-
-# The module `sfm explorer` runs with `python -m` to start the viewer.
-VIEWER_MODULE = "sfmtool._explorer"
 
 
 @click.command()
@@ -24,7 +24,7 @@ VIEWER_MODULE = "sfmtool._explorer"
     flag_value=str(DEFAULT_MCP_PORT),
     default=None,
     # The viewer refuses an out-of-range port as well; checking it here gives
-    # the error as a Click usage error, before any child process is started.
+    # the error as a Click usage error, before the viewer is started.
     type=click.IntRange(0, 65535),
     metavar="PORT",
     help=(
@@ -61,23 +61,39 @@ def explorer(mcp_port, no_default_layout, sfmr_files):
     args = [] if mcp_port is None else ["--mcp", str(mcp_port)]
     if no_default_layout:
         args.append("--no-default-layout")
-    result = subprocess.run(viewer_command([*args, *sfmr_files]))
-    sys.exit(result.returncode)
+    if threading.current_thread() is not threading.main_thread():
+        raise click.ClickException("The viewer must run on the process's main thread.")
+    sys.exit(run_viewer([*args, *sfmr_files]))
 
 
-def viewer_command(viewer_args: list[str]) -> list[str]:
-    """The command line that runs the viewer with ``viewer_args``.
+def run_viewer(viewer_args: list[str]) -> int:
+    """Run the viewer in this process with ``viewer_args``, its own command
+    line, and return its exit status once its window closes.
 
-    The viewer is in the ``sfmtool._sfmtool`` extension, so it runs in a child
-    of this same Python interpreter, through ``python -m sfmtool._explorer``.
-    It needs a process of its own: it takes over the process's main thread for
-    its window event loop, ``winit`` allows only one event loop per process, and
-    the viewer sets process-wide state (the logger, and on Windows the DPI
-    awareness) that should not carry over into this process.
-
-    ``-P`` keeps the current directory off the front of ``sys.path``, where
-    ``python -m`` would otherwise put it, so a ``sfmtool.py`` or ``sfmtool/``
-    in the directory the command is run from cannot shadow the installed
-    package.
+    ``run_explorer`` takes over the main thread for the window's event loop
+    until the window closes, so this is the last thing ``sfm explorer`` does.
+    Call it on the main thread: ``winit`` creates its event loop only there,
+    and Python changes signal handlers only there.
     """
-    return [sys.executable, "-P", "-m", VIEWER_MODULE, *viewer_args]
+    # The viewer writes to the process's stdout and stderr directly, not through
+    # `sys.stdout` and `sys.stderr`, so anything still buffered on the Python
+    # side is written first to keep the two in order. Either is None when the
+    # process has no console (`pythonw`).
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            stream.flush()
+    # Python's own SIGINT handler only sets a flag for the interpreter to act
+    # on, and the interpreter does not run while the viewer holds the main
+    # thread, so Ctrl+C would do nothing. Restore the default, which ends the
+    # process as it does for any other program. Python installs its handler only
+    # over an inherited default, so an inherited "ignore" (a background job of a
+    # non-interactive shell) is left as it is. Python's handler is put back once
+    # the viewer returns, for a caller that goes on running.
+    python_handler = signal.getsignal(signal.SIGINT)
+    if python_handler is signal.default_int_handler:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    try:
+        return run_explorer(viewer_args)
+    finally:
+        if python_handler is signal.default_int_handler:
+            signal.signal(signal.SIGINT, python_handler)
