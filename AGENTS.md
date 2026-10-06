@@ -181,10 +181,13 @@ empty-handed". Name the thing and say what it does.
 - `reports/` — dated snapshots from the audit skills (`audit-hygiene`,
   `audit-specs`, `gui-bug-bash`, `suggest-next-steps`). See "Quality reports"
   below.
-- `skills/` — the five project skills (`audit-hygiene`, `audit-specs`,
-  `gui-bug-bash`, `implement-random-idea`, `suggest-next-steps`), checked in
-  here and symlinked into `.claude/skills/`. `gui-bug-bash` carries scripts
-  that launch a viewer on a random port and call its MCP endpoint over HTTP.
+- `skills/` — the six project skills (`audit-hygiene`, `audit-specs`,
+  `fix-report-findings`, `gui-bug-bash`, `implement-random-idea`,
+  `suggest-next-steps`), checked in here and symlinked into `.claude/skills/`.
+  `gui-bug-bash` carries scripts that launch a viewer on a random port and call
+  its MCP endpoint over HTTP. `fix-report-findings` works through open report
+  findings, one branch per finding, with a fixer agent and an independent
+  auditor agent for each.
 - `.github/workflows/` — `ci.yml` (Linux runs `scripts/coverage.sh` as two
   parallel jobs, `test-linux-rust` and `test-linux-python`, each uploading
   its own lcov to codecov;
@@ -238,10 +241,14 @@ backlog and keep them honest as findings get addressed:
 - **Mark off findings in place.** Whenever you act on a recommendation from a
   report, annotate that finding inline rather than deleting it — add a dated
   status line in the established style, e.g.
-  `> _Status (YYYY-MM-DD): Done — <what changed>, commit <sha>._` (use
-  `Partially done` / `Not done` as appropriate). The body of a finding stays as
-  the original snapshot; status accretes above or below it. This is how the
-  existing reports already track progress.
+  `> _Status (YYYY-MM-DD): **Done** — <what changed>, PR #<n>._` (use
+  `Partially done` / `Not done` / `Superseded` as appropriate, `Declined`
+  with the reason when the finding is wrong or not worth its cost, and
+  `Needs decision` naming the choice when it waits on a maintainer). Name the
+  PR, or the branch when no PR exists yet, rather than a commit SHA: PRs are
+  squash-merged, so a branch commit's SHA is not on `main`. The body of a
+  finding stays as the original snapshot; status accretes above or below it.
+  This is how the existing reports already track progress.
 - **Retire a report once it has outlived its usefulness — use judgement.** The
   bar is "is this still earning its place as a live backlog?", not "is every last
   box ticked". Retire (delete the whole file, git preserves history) when any of
