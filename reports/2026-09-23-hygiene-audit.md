@@ -117,6 +117,7 @@ Read-only whole-tree survey at `25410760`, using `skills/audit-hygiene/SKILL.md`
 > _Status (2026-10-05): **Done** — the epipolar and rotation residual kernels (dispatchers, scalar references and AVX2 kernels, `f64` and `f32`), with `RaysF32` and `consecutive_run`, moved unchanged into the private module `column_scan/residuals.rs`, which now holds all of the column scan's `unsafe` code; their parity tests moved to `column_scan/residuals/tests.rs`. `column_scan.rs` is 1,411 lines. Branch `audit-fix-11-column-scan-simd`._
 
 **Extract the GPU level runner's stages**
+> _Status (2026-10-05): Done — `run_gpu_levels_prebuilt` now reads as the sequence of its stages: `create_level_bind_groups` and `create_final_upsample` (preparation), `encode_levels` and `encode_final_upsample` (dispatch) and `read_back_final_flow` (readback), with `patch_grid` shared by the pool sizing and the per-level uniforms. GPU command order, buffers and the single submit and wait are unchanged; on lavapipe the GPU flow output is bit-identical before and after for final upsample step counts 0 to 3, branch `audit-fix-12-gpu-levels-stages`._
 - Location: `crates/sfmtool-core/src/features/optical_flow/gpu/mod.rs` (741 lines), `run_gpu_levels_prebuilt` from 254.
 - Problem: One method still consumes most of the module and interleaves level orchestration with GPU resource handling.
 - Proposed fix: Name preparation, dispatch, and readback stages as private helpers.
