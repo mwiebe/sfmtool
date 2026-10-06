@@ -173,6 +173,20 @@ What `get_widgets` and the input tools report about the viewer's window, in
 |------|-------|-----|-----|
 | **dialog** / **menu** | what is drawn above the dock and its panels, reported in the `dialogs` and `menus` blocks: a **dialog** is one of the viewer's own egui windows (`Go to Point`, `Bundle Adjust`, …), and a **menu** an egui popup, of kind `menu`, `context_menu`, `submenu` or `dropdown` | `overlay`, `layer` | *overlay* already names the Image Detail panel's drawing layers and the viewport HUD, and *layer* names those and a **depth layer**, so by the wire vocabulary rule neither can name these as well |
 
+## Rendering a view's tile
+
+The words for how a patch kernel resamples a photograph into a patch's grid,
+in `camera::sampler`, every patch kernel's parameters, the bindings, the
+command line and the wire.
+
+| Word | Means | Not | Why |
+|------|-------|-----|-----|
+| **sampler** | how one render resamples the photograph's pyramid: `bilinear`, `bilinear_mip` or `anisotropic` (`Sampler`). The kernels' parameter is named `sampler` whether it holds one sampler or the sampler rule (`SamplerChoice`) | `filter`, `interpolation` | names the whole of what a render does to the pyramid; a filter is one part of it |
+| **sampler rule** | the choice of `anisotropic` or `bilinear_mip` for each observation from its Jacobian: `anisotropic` when `σ_major ≥ √2` and `L ≥ a`. `SamplerChoice::PerView`, spelled `per_view` in the bindings, on the command line and in `tool_options` | `adaptive`, `auto`, `mixed` sampler | a rule names what decides; `adaptive` and `auto` say only that something does, and `mixed` describes a stack rather than one view. `per_view` says which unit the rule decides for, beside the three samplers it chooses among |
+| **minor axis loss** (`L`) | how many times coarser `bilinear_mip` reads a view's less compressed axis than that axis's own compression needs, `2^l / max(σ_minor, 1)` with `l = round(log2 max(σ_major, 1))`, the level it reads before any clamp to the pyramid's depth; `minor_axis_loss`, `sampler_minor_axis_loss` on the wire, and the loss Track View names on a *Zoom* cell's hover | `anisotropy`, `aniso ratio` | it is the quantity the sampler rule compares with `a`, and it is not the ratio of the singular values: a view compressed alike on both axes reads an `L` up to √2 from the level rounding alone |
+| **anisotropic threshold** (`a`) | the bar on `L` at which the rule moves a view, `anisotropic_threshold` in `SamplerChoice::PerView`, `DEFAULT_ANISOTROPIC_THRESHOLD` and `tool_options` | `aniso_ratio`, `switch level` | it is compared with `L`, the minor axis's loss, not with the ratio of the singular values, so a name with *ratio* in it would point at the wrong number |
+| **moved** (a view) | a view the sampler rule renders with `anisotropic`; one it leaves on `bilinear_mip` is **unmoved** | `upgraded`, `switched` | the word the draft and the measurements use for the views whose tile changes; *upgraded* would claim the change is always an improvement, which the ZNCC against the other views does not bear out everywhere |
+
 ## Words with a boundary
 
 

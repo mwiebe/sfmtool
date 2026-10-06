@@ -347,7 +347,7 @@ pub struct NormalRefineParams {
     pub window: PatchWindow,      // per-pixel scoring weight / support (below)
     pub min_valid_fraction: f64,  // per-view valid-pixel floor
     pub min_views: u32,
-    pub sampler: Sampler,         // how to sample the source pyramids
+    pub sampler: SamplerChoice,   // which sampler renders each view
     pub cache: CacheMode,         // source re-render vs. fronto-parallel cache
     pub cache_supersample: f64,   // base density for the cache (ignored when Off)
     pub compute_confidence: bool, // else `confidence` is NaN (an extra pass)
@@ -363,6 +363,15 @@ pub struct NormalRefineParams {
                                   // normal-informative views (`0` = uncapped)
 }
 
+/// Which sampler renders each view: `Fixed(sampler)` for every view, or the
+/// sampler rule per view (`PerView { anisotropic_threshold }`, the default).
+/// Both types live in `camera::sampler`; see
+/// [image-warping.md](../camera/image-warping.md) § "Choosing the sampler per view".
+pub enum SamplerChoice {
+    Fixed(Sampler),
+    PerView { anisotropic_threshold: f64 },
+}
+
 /// How to sample a `ProjectedImage`'s pyramid when rendering a patch.
 pub enum Sampler {
     /// Plain bilinear from the full-resolution level — the cheapest tap, within
@@ -372,15 +381,17 @@ pub enum Sampler {
     Bilinear,
     /// Single bilinear sample from the pyramid level nearest the warp's local
     /// compression (`round(log2(sigma_major))` per pixel, from the Jacobian SVD).
-    /// The default, and the middle point: bounds the aliasing `Bilinear` suffers
-    /// on compressive warps (e.g. cross-scale views with one camera much closer)
-    /// at ≈ bilinear cost, but blurs oblique views whose anisotropic footprint
-    /// only `Anisotropic` resolves, and locates a sub-pixel optimum on the
-    /// selected level's coarser sample grid.
+    /// Bounds the aliasing `Bilinear` suffers on compressive warps (e.g.
+    /// cross-scale views with one camera much closer) at ≈ bilinear cost, but
+    /// blurs oblique views whose anisotropic footprint only `Anisotropic`
+    /// resolves, and locates a sub-pixel optimum on the selected level's coarser
+    /// sample grid. What the sampler rule keeps for a view it does not move.
     BilinearMip,
     /// Anisotropic over the pyramid (the warp's Jacobian SVD picks the level),
-    /// de-aliasing oblique / grazing views. Costs ~1.6–3× more; keeps the reported
-    /// `Φ`/confidence unbiased and helps slightly on distorted/fisheye rigs.
+    /// de-aliasing oblique / grazing views. With the AVX2 kernel a tile costs
+    /// 0.65–1.55× what a `BilinearMip` one does (1.8–4× on the scalar path);
+    /// keeps the reported `Φ`/confidence unbiased and helps slightly on
+    /// distorted/fisheye rigs. What the sampler rule picks for a view it moves.
     Anisotropic,
 }
 
@@ -446,9 +457,12 @@ pub fn refine_patch_normal(
 /// Batch over a PatchCloud (parallel across patches, rayon). Replaces each patch
 /// with the refined one (same `center`/`half_extent`/in-plane convention, new
 /// normal) and returns the per-patch results in order. `patch_views[i]` indexes
-/// `views` for patch `i` (see `view_indices_from_reconstruction`), and
-/// `progress`, when given, is bumped as each patch finishes so a Python poller
-/// can report intra-pass progress with the GIL released.
+/// `views` for patch `i` (see `view_indices_from_reconstruction`). `done`, when
+/// given, is bumped as each patch finishes so a Python poller can report
+/// intra-pass progress with the GIL released; `progress` receives a `patches`
+/// count, is polled for cancellation before each patch (a cancelled batch
+/// returns `Cancelled` and leaves the cloud as it was), and, when detailed,
+/// times each sampler's renders in its own detail phase.
 pub fn refine_patch_cloud_normals(
     cloud: &mut PatchCloud,
     views: &[ProjectedImage<'_>],
@@ -456,8 +470,9 @@ pub fn refine_patch_cloud_normals(
     resolution: u32,
     params: &NormalRefineParams,
     patch_view_keypoints: Option<&[Vec<Option<[f64; 2]>>]>,
-    progress: Option<&std::sync::atomic::AtomicUsize>,
-) -> Vec<NormalRefineResult>;
+    done: Option<&std::sync::atomic::AtomicUsize>,
+    progress: &Progress<'_>,
+) -> Result<Vec<NormalRefineResult>, Cancelled>;
 
 /// For each patch of `cloud` (linked to `recon` by `point_indexes`), the image
 /// indices observing its source 3D point — the default `patch_views` above.
@@ -492,10 +507,16 @@ unnecessary. What remains open:
    off the true normal. `remap_aniso` (the patch warp's Jacobian SVD picks the
    pyramid level) de-aliases grazing views — this is `Sampler::Anisotropic`, at
    no extra storage (the pyramid per source image is already in
-   `ProjectedImage`). It is not the default because it costs 1.6–3× for a normal
-   that differs by ≲ 1° on pinhole views; what stays open is whether the
-   unbiased `Φ` it reports is worth that on distorted / fisheye rigs, where the
-   measured benefit is small but real.
+   `ProjectedImage`). The default sampler rule renders a view with it only where
+   its Jacobian makes the single mip tap read the less compressed axis at least
+   `a` times too coarsely, so a view facing the patch keeps `BilinearMip`.
+   Rendering every view with it (`SamplerChoice::Fixed(Sampler::Anisotropic)`)
+   gives a normal that differs by ≲ 1° on pinhole views. With the AVX2 kernel
+   it costs 0.65–1.55× what `BilinearMip` does, the most on views compressed
+   10 times or more along one axis (1.8–4× on a CPU without AVX2); what stays
+   open is whether the unbiased `Φ` it reports on the views
+   the rule leaves on `BilinearMip` is worth changing those views' renders on
+   distorted / fisheye rigs, where the measured benefit is small but real.
 
 2. **Back-face / grazing culling + good-view iteration.** Cull **back-facing**
    views (`is_front_facing`), past-grazing views, and views where the patch
@@ -625,7 +646,7 @@ cannot drift:
 | `window` | `GaussianDisk { sigma: 0.6 }` | scoring window, `sigma` in `(s, t)` units |
 | `min_valid_fraction` | `0.6` | per-view floor on the window-weighted valid fraction |
 | `min_views` | `3` | minimum kept views (floored at 2 for the outright skip) |
-| `sampler` | `BilinearMip` | mip-nearest bilinear tap |
+| `sampler` | `SamplerChoice::per_view()` | the sampler rule: `Anisotropic` for a view it moves, `BilinearMip` otherwise |
 | `cache` | `FrontoParallel` | score candidates off one base render per view |
 | `cache_supersample` | `2.0` | base density for that cache |
 | `compute_confidence` | `false` | else `confidence` is NaN |
@@ -635,9 +656,22 @@ cannot drift:
 | `render_bitmap` | `false` | no `representative` texture |
 | `max_refine_views` | `0` | refinement basis uncapped |
 
-`BilinearMip` is the sampler default rather than `Anisotropic` because the found
-normal barely moves (≲ 1° on pinhole views) at 1.6–3× the cost; `Anisotropic`
-stays an opt-in for an unbiased `Φ` and confidence. The measurements behind
+The sampler default is the sampler rule for the detail it keeps, not for
+cost: it renders with `Anisotropic` the views whose less compressed axis the
+single mip tap would blur, and leaves every other view's render bit for bit as
+`BilinearMip` makes it, since rendering those with `Anisotropic` moves the
+found normal by ≲ 1° on pinhole views. `Fixed(Sampler::Anisotropic)` stays an
+opt-in for an unbiased `Φ` and confidence. **Each view's sampler is chosen once
+per patch**, from the patch the refinement starts from and the view's keypoint
+(`view_samplers`), and every render of the view from its photograph uses it:
+the rule reads the view's Jacobian, which changes with the candidate normal,
+and a choice made per candidate would let `Φ` jump where a candidate carries a
+view across the threshold. The fronto-parallel cache renders its base with
+plain bilinear at its own supersampled density, so under the default
+`CacheMode` the search ranks its candidates without the sampler, which reaches
+only the final scoring of the starting normal and the survivors, the
+confidence stencil and the representative; with `CacheMode::Off` every
+candidate is rendered from the photographs with it. The measurements behind
 that (a 2026-06-13 performance report, retired and kept in git history) — phase
 breakdown and per-knob perf-vs-benefit — are reproducible with
 `scripts/bench_normal_refine.py` and the `patch_render` criterion bench;

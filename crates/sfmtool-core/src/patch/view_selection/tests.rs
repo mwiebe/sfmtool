@@ -5,7 +5,8 @@ use nalgebra::{Point3, Vector3};
 
 use super::*;
 use crate::camera::image::{ImageU8, ImageU8Pyramid};
-use crate::camera::remap::sample_bilinear_u8_all;
+use crate::camera::remap::{remap_aniso_with_pyramid, sample_bilinear_u8_all};
+use crate::camera::WarpMap;
 use crate::camera::{CameraIntrinsics, CameraModel};
 use crate::geometry::RigidTransform;
 
@@ -430,7 +431,16 @@ fn batch_matches_per_patch() {
     };
     let track_views = vec![vec![0u32, 1], vec![0u32, 1]];
 
-    let batch = select_patch_cloud_views(&cloud, &views, &track_views, None, &params(), None);
+    let batch = select_patch_cloud_views(
+        &cloud,
+        &views,
+        &track_views,
+        None,
+        &params(),
+        None,
+        &crate::progress::Progress::none(),
+    )
+    .expect("Progress::none never cancels");
     assert_eq!(batch.len(), 2);
     for (i, sel) in batch.iter().enumerate() {
         let single = select(&cloud.patches[i], &views, &track_views[i], None, &params());
@@ -782,9 +792,16 @@ fn affine_sampling_matches_exact_render_on_mild_distortion() {
         &mut aff,
     );
 
-    let (exact, channels) =
-        normalized_stack(&patch, &ctx, &[view], resolution, Sampler::Bilinear, None)
-            .expect("patch renders in frame");
+    let (exact, channels) = normalized_stack(
+        &patch,
+        &ctx,
+        &[view],
+        resolution,
+        ViewSamplers::Frozen(&[Sampler::Bilinear]),
+        None,
+        &Progress::none(),
+    )
+    .expect("patch renders in frame");
     assert_eq!(channels, 1);
 
     let mut max_d = 0.0f32;
@@ -845,12 +862,20 @@ fn affine_vs_exact_score(sampler: Sampler) -> usize {
     let views = scene.views();
     let patch = plane_patch();
     let p = ViewSelectParams {
-        sampler,
+        sampler: sampler.into(),
         ..params()
     };
     let w_full = window_weights(p.window, p.resolution);
-    let (reference, _agree) = build_reference(&patch, &views, &[0, 1, 2], None, &w_full, &p)
-        .expect("track builds a reference");
+    let (reference, _agree) = build_reference(
+        &patch,
+        &views,
+        &[0, 1, 2],
+        None,
+        &w_full,
+        &p,
+        &Progress::none(),
+    )
+    .expect("track builds a reference");
     let single_ctx = LevelContext {
         kept: vec![0],
         pixels: reference.ctx.pixels.clone(),
@@ -874,6 +899,14 @@ fn affine_vs_exact_score(sampler: Sampler) -> usize {
         &sqrt_weights,
         &p,
         &mut scratch,
+        p.sampler.for_observation(
+            &patch,
+            views[3].camera,
+            views[3].cam_from_world,
+            None,
+            p.resolution,
+        ),
+        &Progress::none(),
     )
     .expect("candidate scores");
 
@@ -883,8 +916,9 @@ fn affine_vs_exact_score(sampler: Sampler) -> usize {
         &single_ctx,
         &[views[3]],
         p.resolution,
-        p.sampler,
+        ViewSamplers::Each(p.sampler),
         None,
+        &Progress::none(),
     )
     .expect("candidate renders in frame");
     let exact_score =
@@ -931,8 +965,9 @@ fn affine_mip_sampling_matches_exact_mip_render() {
         &ctx,
         &[views[0]],
         resolution,
-        Sampler::BilinearMip,
+        ViewSamplers::Frozen(&[Sampler::BilinearMip]),
         None,
+        &Progress::none(),
     )
     .expect("patch renders in frame");
     assert_eq!(channels, 1);
@@ -983,8 +1018,9 @@ fn affine_mip_selection_matches_exact_selection() {
     // params, so the exact path is driven directly here).
     let p = params();
     let w_full = window_weights(p.window, p.resolution);
-    let (reference, _agree) = build_reference(&patch, &views, &track, None, &w_full, &p)
-        .expect("track builds a reference");
+    let (reference, _agree) =
+        build_reference(&patch, &views, &track, None, &w_full, &p, &Progress::none())
+            .expect("track builds a reference");
     let single_ctx = LevelContext {
         kept: vec![0],
         pixels: reference.ctx.pixels.clone(),
@@ -1002,8 +1038,9 @@ fn affine_mip_selection_matches_exact_selection() {
             &single_ctx,
             &[views[v as usize]],
             p.resolution,
-            p.sampler,
+            ViewSamplers::Each(p.sampler),
             None,
+            &Progress::none(),
         )
         .expect("admitted view renders in frame");
         let exact =
@@ -1093,6 +1130,238 @@ fn affine_sampler_matches_reference() {
             buf[0]
         );
     }
+}
+
+#[test]
+fn affine_aniso_score_matches_exact_aniso_score() {
+    // The anisotropic pair, held to the same parity budget as the bilinear
+    // ones: every view of this fixture shrinks the patch about 3.5 times on
+    // both axes, so the anisotropic sampler reads a blend of two levels.
+    let level = affine_vs_exact_score(Sampler::Anisotropic);
+    assert_eq!(level, 0, "the anisotropic map stays in level-0 px");
+}
+
+/// Exactly affine maps `J = rot(θ) · diag(major, minor) · rot(φ)ᵀ`, compressed
+/// along a turned axis at several scales. The last two have `φ = 0`, so the
+/// Jacobian's columns are perpendicular: a rotation composed with a scale
+/// along one axis.
+fn affine_aniso_maps() -> Vec<AffineCoreMap> {
+    [
+        (4.0f64, 1.2f64, 0.3f64, 0.4f64),
+        (6.5, 1.0, -0.9, 1.1),
+        (5.0, 2.6, 1.2, -0.6),
+        (12.0, 3.1, 2.4, 0.25),
+        (40.0, 2.0, 0.7, -1.3),
+        (6.3, 1.1, 1.0, 0.0),
+        (5.2, 1.5, std::f64::consts::FRAC_PI_2, 0.0),
+    ]
+    .iter()
+    .map(|&(major, minor, theta, phi)| {
+        let (st, ct) = theta.sin_cos();
+        let (sp, cp) = phi.sin_cos();
+        // rot(θ) · diag(major, minor) · rot(φ)ᵀ.
+        let j00 = ct * major * cp + st * minor * sp;
+        let j01 = ct * major * sp - st * minor * cp;
+        let j10 = st * major * cp - ct * minor * sp;
+        let j11 = st * major * sp + ct * minor * cp;
+        AffineCoreMap {
+            a: [j00, j01, 150.0, j10, j11, 110.0],
+        }
+    })
+    .collect()
+}
+
+#[test]
+fn affine_aniso_sampling_matches_the_per_pixel_path() {
+    // On a map that is exactly affine, the fast path samples every pixel as
+    // the per-pixel anisotropic remap of the same map, stored as `f32`, does,
+    // bit for bit. The only difference left is the SVD: the fast path takes
+    // it once from the coefficients, the per-pixel path from finite
+    // differences of the stored positions, which carry the positions' `f32`
+    // rounding. That could move a pixel across a level or sample-count
+    // boundary, or move a tap enough to change a rounded value by one; on
+    // these maps, whose singular values sit away from the boundaries, it does
+    // neither.
+    let img = render_plane_view([0.2, -0.1, 0.0], texture);
+    let pyr = ImageU8Pyramid::build(&img, 6);
+    let resolution = 24usize;
+    let pixels: Vec<usize> = (0..resolution * resolution).collect();
+    for (m, map) in affine_aniso_maps().iter().enumerate() {
+        let a = map.a;
+        let mut data = Vec::with_capacity(2 * pixels.len());
+        for &p in &pixels {
+            let (col, row) = ((p % resolution) as f64, (p / resolution) as f64);
+            data.push((a[0] * col + a[1] * row + a[2]) as f32);
+            data.push((a[3] * col + a[4] * row + a[5]) as f32);
+        }
+        let mut warp = WarpMap::new(resolution as u32, resolution as u32, data);
+        warp.compute_svd();
+        let exact = remap_aniso_with_pyramid(&pyr, &warp, MAX_ANISOTROPY);
+        let mut fast = vec![0f32; pixels.len()];
+        sample_support_affine_aniso(&pyr, map, &pixels, resolution, &mut fast);
+
+        let mut differ = 0;
+        let mut max_d = 0.0f32;
+        for (k, &v) in fast.iter().enumerate() {
+            let d = (v - exact.data()[k] as f32).abs();
+            if d > 0.0 {
+                differ += 1;
+            }
+            max_d = max_d.max(d);
+        }
+        assert_eq!(
+            differ,
+            0,
+            "map {m}: {differ} of {} pixels differ, by up to {max_d}",
+            pixels.len()
+        );
+    }
+}
+
+/// The affine fast path walks along the image direction its map compresses
+/// most, the left singular vector of the Jacobian. Over stripes that run along
+/// that direction every sample of a walk reads the same stripe, so the fast
+/// path's samples match a single bilinear tap at each position to within the
+/// bilinear interpolation; a walk along the grid direction that compresses
+/// most, turned 0.8 to 1.57 rad from it on these maps, averages across the
+/// stripes and differs by 20 or more.
+#[test]
+fn affine_aniso_walks_along_the_image_axis_the_map_compresses() {
+    let size = 240u32;
+    let resolution = 24usize;
+    let pixels: Vec<usize> = (0..resolution * resolution).collect();
+    for (k, &(major, theta, phi)) in [
+        (6.0f64, 1.0f64, 0.2f64),
+        (6.0, 1.0, 0.0),
+        (8.0, -0.6, 0.9),
+        (5.0, std::f64::consts::FRAC_PI_2, 0.0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (st, ct) = theta.sin_cos();
+        let (sp, cp) = phi.sin_cos();
+        // rot(θ) · diag(major, 1) · rot(φ)ᵀ, the grid's middle at (120, 120).
+        let j = [
+            ct * major * cp + st * sp,
+            ct * major * sp - st * cp,
+            st * major * cp - ct * sp,
+            st * major * sp + ct * cp,
+        ];
+        let mid = (resolution as f64 - 1.0) / 2.0;
+        let a = [
+            j[0],
+            j[1],
+            120.0 - mid * (j[0] + j[1]),
+            j[2],
+            j[3],
+            120.0 - mid * (j[2] + j[3]),
+        ];
+        // Stripes along (cos θ, sin θ), 12 px apart across them.
+        let mut data = Vec::with_capacity((size * size) as usize);
+        for y in 0..size {
+            for x in 0..size {
+                let d = -(x as f64 + 0.5) * st + (y as f64 + 0.5) * ct;
+                data.push((128.0 + 100.0 * (std::f64::consts::TAU * d / 12.0).sin()).round() as u8);
+            }
+        }
+        let img = ImageU8::new(size, size, 1, data);
+        let pyr = ImageU8Pyramid::build(&img, 6);
+        let map = AffineCoreMap { a };
+        let mut fast = vec![0f32; pixels.len()];
+        sample_support_affine_aniso(&pyr, &map, &pixels, resolution, &mut fast);
+        let mut max_d = 0.0f32;
+        let mut tap = [0u8; 1];
+        for (i, &p) in pixels.iter().enumerate() {
+            let (col, row) = ((p % resolution) as f64, (p / resolution) as f64);
+            let x = (a[0] * col + a[1] * row + a[2]) as f32;
+            let y = (a[3] * col + a[4] * row + a[5]) as f32;
+            sample_bilinear_u8_all(pyr.level(0), x, y, &mut tap);
+            max_d = max_d.max((fast[i] - tap[0] as f32).abs());
+        }
+        assert!(max_d <= 6.0, "map {k}: the walk blurs by up to {max_d}");
+    }
+}
+
+#[test]
+fn affine_aniso_sampling_matches_exact_render_on_an_oblique_view() {
+    // A long-focus camera far from a square turned 70°: the map over the
+    // square is close to affine, the rule moves the view to the anisotropic
+    // sampler, and the fast path takes it. Its support samples track the
+    // exact per-pixel anisotropic render within the band the bilinear pairs
+    // hold to.
+    let focal = 13_000.0;
+    let cam = CameraIntrinsics {
+        model: CameraModel::Pinhole {
+            focal_length_x: focal,
+            focal_length_y: focal,
+            principal_point_x: IMG_W as f64 / 2.0,
+            principal_point_y: IMG_H as f64 / 2.0,
+        },
+        width: IMG_W,
+        height: IMG_H,
+    };
+    // Looking down world +z from 192 units in front of the plane.
+    let pose = RigidTransform::from_wxyz_translation([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, -192.0]);
+    let img = render_plane_view([0.2, -0.1, 0.0], texture);
+    let pyr = ImageU8Pyramid::build(&img, 6);
+    let view = ProjectedImage {
+        camera: &cam,
+        cam_from_world: &pose,
+        pyramid: &pyr,
+    };
+    // Turned about an axis at 30° to the patch's own, so the patch is turned
+    // relative to the image and the walk's direction in the image differs
+    // from its direction in the grid.
+    let (t, psi) = (70f64.to_radians(), 30f64.to_radians());
+    let patch = OrientedPatch::from_center_normal(
+        Point3::new(0.0, 0.0, PLANE_Z),
+        Vector3::new(t.sin() * psi.cos(), t.sin() * psi.sin(), -t.cos()),
+        Vector3::new(0.0, 1.0, 0.0),
+        [0.4, 0.4],
+    );
+    let resolution = 15u32;
+    assert_eq!(
+        SamplerChoice::per_view().for_observation(
+            &patch,
+            view.camera,
+            view.cam_from_world,
+            None,
+            resolution
+        ),
+        Sampler::Anisotropic,
+        "the fixture must be a view the rule moves"
+    );
+    let (map, level) = affine_core_map(&patch, &view, resolution, Sampler::Anisotropic)
+        .expect("the long-focus view must fit the affine bound");
+    assert_eq!(level, 0);
+    let ctx = full_support_ctx(resolution);
+    let n = ctx.pixels.len();
+    let mut aff = vec![0f32; n];
+    sample_support_affine_aniso(&pyr, &map, &ctx.pixels, resolution as usize, &mut aff);
+    let (exact, channels) = normalized_stack(
+        &patch,
+        &ctx,
+        &[view],
+        resolution,
+        ViewSamplers::Frozen(&[Sampler::Anisotropic]),
+        None,
+        &Progress::none(),
+    )
+    .expect("patch renders in frame");
+    assert_eq!(channels, 1);
+    let mut max_d = 0.0f32;
+    let mut sum_d = 0.0f64;
+    for k in 0..n {
+        let d = (aff[k] - exact[k]).abs();
+        max_d = max_d.max(d);
+        sum_d += d as f64;
+    }
+    let mean_d = sum_d / n as f64;
+    assert!(
+        max_d <= 4.0 && mean_d <= 0.8,
+        "anisotropic affine samples must track the exact warp: max {max_d}, mean {mean_d:.3}"
+    );
 }
 
 /// The pixel `patch`'s centre reprojects to in `view` — where projection
@@ -1206,9 +1475,26 @@ fn batch_with_all_none_keypoints_matches_unanchored() {
     let track_views = vec![vec![0u32, 1], vec![0u32, 1]];
     let kps: Vec<Vec<Option<[f64; 2]>>> = vec![vec![None, None], vec![None, None]];
 
-    let anchored =
-        select_patch_cloud_views(&cloud, &views, &track_views, Some(&kps), &params(), None);
-    let plain = select_patch_cloud_views(&cloud, &views, &track_views, None, &params(), None);
+    let anchored = select_patch_cloud_views(
+        &cloud,
+        &views,
+        &track_views,
+        Some(&kps),
+        &params(),
+        None,
+        &crate::progress::Progress::none(),
+    )
+    .expect("Progress::none never cancels");
+    let plain = select_patch_cloud_views(
+        &cloud,
+        &views,
+        &track_views,
+        None,
+        &params(),
+        None,
+        &crate::progress::Progress::none(),
+    )
+    .expect("Progress::none never cancels");
     assert_eq!(anchored.len(), plain.len());
     for (a, b) in anchored.iter().zip(&plain) {
         assert_eq!(a.admitted, b.admitted);
@@ -1474,7 +1760,7 @@ fn culled_views_as_placeholders_select_identically() {
         Sampler::Anisotropic,
     ] {
         let p = ViewSelectParams {
-            sampler,
+            sampler: sampler.into(),
             ..params()
         };
         let full = select(&patch, &views, &track, None, &p);

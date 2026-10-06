@@ -117,11 +117,29 @@ selection.
 There is one entry point rather than a reporting one beside a plain one,
 because two would be two places for the gates to drift apart. A caller with no
 one watching passes `Progress::none()`, which reports nothing and never
-cancels: that is what `select_patch_cloud_views` hands each patch, since the
-batch's own reporting is its per-patch counter and its rayon fan-out would
-otherwise have dozens of threads writing phases over each other. The PyO3
-binding and the `embed-patches` pipeline go through that batch, so their
-behavior is unchanged.
+cancels. `select_patch_cloud_views` takes a `Progress` of its own, beside the
+`done` counter a Python poller reads: it counts `patches`, polls for
+cancellation before each patch (a cancelled batch returns `Cancelled`), and
+hands each patch's body that `Progress` only for the detail phases that time
+its renders under each sampler. Each patch's own phases and view counts go to
+nothing, since dozens of rayon threads writing them into one bar would
+overwrite each other.
+
+The per-patch kernels of the other batches are different, and each has a plain
+function beside a `_reporting` one that takes a `Progress`:
+`refine_patch_normal`, `refine_patch_keypoints`, `fuse_patch_bitmap` and
+`member_zncc_matrix`. None of them checks for cancellation or reports phases
+or counts of its own; the `Progress` only times its renders under each sampler
+in detail phases. The plain function is a single call of the `_reporting` one
+with `Progress::none()`, so there is one body and no gate that could differ
+between the two. The plain function serves the many callers with no
+`Progress` to pass, most of them tests; the batch functions and the bench's
+fit call the `_reporting` one.
+
+Each view is rendered with the sampler the sampler rule picks for it
+([image-warping.md](../camera/image-warping.md) § "Choosing the sampler per
+view"): a track view at its keypoint, a candidate at its projection, as every
+other kernel picks it for the same observation.
 
 `projected_patch_frame` is the selector consumer's projection companion: it
 returns an admitted view's centre pixel and projected `u`/`v` half-frame under
@@ -171,12 +189,16 @@ hold it to that.
 The candidate gate score exists only to admit/reject — nothing downstream
 reuses the candidate render — so scoring does not need the full per-pixel
 projective warp (previously ~86% of selection CPU, one `WarpMap::from_patch` +
-`remap_bilinear` per candidate). Under either bilinear sampler a candidate is
+`remap_bilinear` per candidate). Under every sampler a candidate is
 scored through an **affine** patch→image map fit on its four exactly-projected
 patch corners, sampling only the reference-support pixels at the affine
 positions (same bilinear taps and `u8` rounding as `remap_bilinear`, so values
 match wherever the positions do). Track-view diagnostic scores share the same
 path.
+
+A view takes this path whatever its sampler, so under the default sampler rule
+both the views the rule leaves on `BilinearMip` and the views it moves to
+`Anisotropic` do.
 
 **Mip levels.** Under `BilinearMip` the affine map is additionally composed
 with the pyramid level it minifies into, so the fast path reads the same level
@@ -192,8 +214,34 @@ does per pixel. One level covers the whole patch where the per-pixel path may
 straddle a boundary; that, and `σ_major` computed from the affine fit rather
 than per-pixel central differences, are the two places the mip fast path can
 differ from the slow one, and both fold into the same accepted
-admission-flip loss below. `Anisotropic` has no affine shortcut (its footprint
-walk is not a single tap) and always takes the exact warp.
+admission-flip loss below.
+
+**The anisotropic footprint.** Under `Anisotropic` the affine map stays in
+level-0 px. Its Jacobian is constant over the patch, so one SVD of it, with the
+same `f32` arithmetic `WarpMap::compute_svd` applies per pixel (`svd_2x2`),
+gives every support pixel the same footprint: the levels from `σ_minor` and
+the samples along one major axis, the direction in the photograph the map
+compresses most (the Jacobian's left singular vector). Each support pixel then takes the per-pixel
+path's anisotropic sample (`remap::aniso_sample`, the body of the scalar
+remap) at its affine position, rounded to `f32` as a warp map stores it
+(`sample_support_affine_aniso`). On a map that is exactly affine the two paths
+give the same bytes wherever the per-pixel SVD, read from finite differences of
+the stored positions, lands on the same side of every level and sample-count
+boundary as the constant one (`affine_aniso_sampling_matches_the_per_pixel_path`
+holds seven such maps to bit identity, two of them a rotation composed with a
+scale along one axis, whose Jacobian has perpendicular columns). Over stripes
+that run along the compressed direction every sample of a walk reads the same
+stripe, which `affine_aniso_walks_along_the_image_axis_the_map_compresses`
+checks on maps where that direction is turned 0.8 to 1.57 rad from the grid
+direction that compresses most. On a real view the affine position
+error adds to that as it does for the bilinear samplers: on a long-focus view
+of a square turned 70° the support samples differ from the exact anisotropic
+render by at most 2 grey levels, 0.39 on average
+(`affine_aniso_sampling_matches_exact_render_on_an_oblique_view`, held to the
+bilinear pairs' bound of 4 and 0.8). The walk along the major axis can read up
+to `σ_major / 2` source px past the quad; those taps are clamped at the frame
+edge exactly as the per-pixel path clamps them, so the border gate is the
+level-0 one.
 
 The **exact warp remains the fallback** — and the sole authority on
 rejection — whenever:
@@ -266,9 +314,9 @@ projection can map behind-camera points in-frame), and the footprint test. The t
 point with two observations in one image does not double-weight that view. The
 self-agreement is the track views' mean ZNCC to the reference; when it is below
 `min_self_agreement` (default 0.3) the track is admitted verbatim with no
-expansion. The affine fast path covers `Sampler::Bilinear` and
-`Sampler::BilinearMip` (the default); `Sampler::Anisotropic` always takes the
-exact warp. A point whose valid track-view count is below `min_track_views`
+expansion. The affine fast path covers every sampler: `Sampler::Bilinear`,
+`Sampler::BilinearMip`, and `Sampler::Anisotropic`, whether the sampler rule
+moved the view or the caller fixed that sampler. A point whose valid track-view count is below `min_track_views`
 (default 2) likewise admits its track views verbatim. The render → z-normalize →
 robust-consensus primitives are shared with `normal_refine` (`pub(super)`), not
 duplicated.

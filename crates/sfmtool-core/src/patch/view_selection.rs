@@ -19,30 +19,36 @@
 //!
 //! **Affine candidate scoring.** The gate score exists only to admit/reject —
 //! nothing downstream reuses the candidate render — so scoring a view does not
-//! need the full per-pixel projective warp. Under either bilinear sampler a
-//! candidate is scored through an **affine** patch→image map fit on its four
+//! need the full per-pixel projective warp. Under every sampler a candidate is
+//! scored through an **affine** patch→image map fit on its four
 //! exactly-projected patch corners (`affine_core_map`), sampling only the
-//! reference-support pixels; under [`Sampler::BilinearMip`] that map is first
+//! reference-support pixels. Under [`Sampler::BilinearMip`] that map is first
 //! composed with the pyramid level the map's own compression selects, so the
-//! samples come from the same level the per-pixel path would read. The exact
-//! warp remains the fallback whenever the 4th-corner residual shows the affine
-//! fit is poor (wide-angle / heavy distortion), a corner fails to project, or
-//! the patch comes close to the frame border (where the exact path owns the
-//! out-of-frame rejection semantics); [`Sampler::Anisotropic`] has no affine
-//! shortcut and always takes the exact warp. See
-//! `specs/core/patch/patch-view-selection.md` for the accepted admission-flip loss
-//! and the measured numbers.
+//! samples come from the same level the per-pixel path would read. Under
+//! [`Sampler::Anisotropic`] the map's Jacobian is constant, so its footprint is
+//! too: one SVD gives the level from `σ_minor` and the samples along one fixed
+//! major axis, and each support pixel takes the anisotropic sample of the
+//! per-pixel path at its affine position (`sample_support_affine_aniso`). The
+//! exact warp remains the fallback whenever the 4th-corner residual shows the
+//! affine fit is poor (wide-angle / heavy distortion), a corner fails to
+//! project, or the patch comes close to the frame border (where the exact path
+//! owns the out-of-frame rejection semantics). See
+//! `specs/core/patch/patch-view-selection.md` for the accepted admission-flip
+//! loss and the measured numbers.
 
-use crate::camera::image::ImageU8;
+use crate::camera::image::{ImageU8, ImageU8Pyramid};
 
-use crate::camera::remap::mip_level_for_sigma;
+use crate::camera::remap::{aniso_sample, mip_level_for_sigma, AnisoTally};
+use crate::camera::sampler::{render_phase, MAX_ANISOTROPY};
+use crate::camera::warp_map::svd_2x2;
 use crate::camera::CameraIntrinsics;
 use crate::patch::cloud::{OrientedPatch, PatchCloud};
 use crate::patch::normal_refine::{
     build_level_context, irls_view_weights, normalized_stack, view_render_patch,
     weighted_moments_pub, window_weights, znormalize_into_kept, ConsensusScratch, LevelContext,
-    PatchWindow, ProjectedImage, Sampler, FLAT_NORM_SQ_EPS,
+    PatchWindow, ProjectedImage, Sampler, SamplerChoice, ViewSamplers, FLAT_NORM_SQ_EPS,
 };
+use crate::patch::PatchCounter;
 use crate::progress::{Cancelled, Progress};
 use crate::reconstruction::SfmrReconstruction;
 use rayon::prelude::*;
@@ -64,8 +70,13 @@ pub struct ViewSelectParams {
     pub resolution: u32,
     /// Per-pixel scoring weight / support.
     pub window: PatchWindow,
-    /// How to sample the source pyramids when rendering patches.
-    pub sampler: Sampler,
+    /// Which sampler renders each view's tile: the sampler rule by default
+    /// ([`SamplerChoice::per_view`]). Under the rule each view's sampler is
+    /// chosen once, from the patch re-anchored on the view's keypoint at the
+    /// patch resolution ([`SamplerChoice::for_observation`]): a track view's
+    /// stored keypoint where one is given, and the projection for a
+    /// candidate, which has none.
+    pub sampler: SamplerChoice,
     /// Per-view floor on the window-weighted valid-pixel fraction; a candidate
     /// (or track view) below it does not cover enough of the patch to be scored.
     pub min_valid_fraction: f64,
@@ -91,7 +102,7 @@ impl Default for ViewSelectParams {
             min_relative_zncc: 0.7,
             resolution: 24,
             window: PatchWindow::GaussianDisk { sigma: 0.6 },
-            sampler: Sampler::BilinearMip,
+            sampler: SamplerChoice::per_view(),
             min_valid_fraction: 0.6,
             min_track_views: 2,
             robust_iters: 3,
@@ -163,6 +174,7 @@ fn build_reference(
     track_keypoints: Option<&[Option<[f64; 2]>]>,
     w_full: &[f64],
     params: &ViewSelectParams,
+    renders: &Progress<'_>,
 ) -> Option<(Reference, f64)> {
     let n_normal = patch.normal();
     // Restrict to the track views, preserving order; build the frozen support at
@@ -192,8 +204,9 @@ fn build_reference(
             &ctx,
             &track_proj,
             params.resolution,
-            params.sampler,
+            ViewSamplers::Each(params.sampler),
             track_keypoints,
+            renders,
         )
     })?;
     let n = ctx.pixels.len();
@@ -391,9 +404,12 @@ impl AffineCoreMap {
 /// curvature, and a source-px bound is the conservative one to apply when the
 /// samples are read from a coarser level.
 ///
-/// Any other sampler resolves to level 0. [`Sampler::Anisotropic`] has no
-/// affine shortcut at all (its footprint walk is not a single tap) and is
-/// gated out by the caller before reaching here.
+/// Any other sampler resolves to level 0: [`Sampler::Bilinear`] reads it, and
+/// [`Sampler::Anisotropic`] takes its levels from the map's own footprint per
+/// sample ([`sample_support_affine_aniso`]), so its map stays in level-0 px.
+/// Its walk along the major axis can read up to `σ_major / 2` source px past
+/// the quad; those taps are clamped at the frame edge exactly as the per-pixel
+/// path clamps them, so the border gate needs no wider margin for it.
 fn affine_core_map(
     patch: &OrientedPatch,
     view: &ProjectedImage<'_>,
@@ -547,6 +563,60 @@ fn sample_support_affine(
     crate::camera::remap::prof::add(&crate::camera::remap::prof::TAPS, (n * ch) as u64);
 }
 
+/// Sample the reference-support pixels of `pyramid` through the affine map
+/// with the anisotropic sampler, into the planar `out` (`[channel · n +
+/// support_index]`, `f32`).
+///
+/// `map` is in level-0 px ([`affine_core_map`] under
+/// [`Sampler::Anisotropic`]). Its Jacobian `[[a0, a1], [a3, a4]]` is the same
+/// at every pixel, so one SVD ([`svd_2x2`], the arithmetic
+/// [`WarpMap::compute_svd`](crate::camera::WarpMap::compute_svd) applies per
+/// pixel) gives the footprint of every sample: the level from `σ_minor` and
+/// the samples along one major axis, the image direction the map compresses
+/// most. Each support pixel then takes [`aniso_sample`] at its affine
+/// position, rounded to `f32` as a warp map stores it, which is the per-pixel
+/// path's sample for that position and SVD. On a map that is exactly affine
+/// the two paths differ only through the per-pixel SVD, read from finite
+/// differences of the stored `f32` positions: where it lands on the other
+/// side of a level or sample-count boundary from the constant one, and by one
+/// where its rounding moves a tap enough to change the rounded value
+/// (`affine_aniso_sampling_matches_the_per_pixel_path`). On a real view the
+/// affine position error adds to that, as it does for the bilinear samplers
+/// (`affine_aniso_sampling_matches_exact_render_on_an_oblique_view`).
+fn sample_support_affine_aniso(
+    pyramid: &ImageU8Pyramid,
+    map: &AffineCoreMap,
+    pixels: &[usize],
+    resolution: usize,
+    out: &mut [f32],
+) {
+    let n = pixels.len();
+    let ch = pyramid.level(0).channels() as usize;
+    let a = &map.a;
+    let svd = svd_2x2(a[0] as f32, a[1] as f32, a[3] as f32, a[4] as f32);
+    let mut tally = AnisoTally::default();
+    let mut sample = vec![0u8; ch];
+    for (k, &p) in pixels.iter().enumerate() {
+        let col = (p % resolution) as f64;
+        let row = (p / resolution) as f64;
+        let x = (a[0] * col + a[1] * row + a[2]) as f32;
+        let y = (a[3] * col + a[4] * row + a[5]) as f32;
+        aniso_sample(pyramid, x, y, svd, MAX_ANISOTROPY, &mut sample, &mut tally);
+        for (c, &v) in sample.iter().enumerate() {
+            out[c * n + k] = v as f32;
+        }
+    }
+    // The shared resample counters, as `remap_aniso_with_pyramid` keeps them.
+    use crate::camera::remap::prof;
+    prof::add(&prof::CALLS, 1);
+    prof::add(&prof::PX_TOTAL, n as u64);
+    prof::add(&prof::PX_SAMPLED, n as u64);
+    prof::add(&prof::TAPS, tally.taps);
+    prof::add(&prof::ANISO_FAST, tally.fast);
+    prof::add(&prof::ANISO_MULTI, tally.multi);
+    prof::add(&prof::ANISO_SUM_N, tally.sum_n);
+}
+
 /// Whether `camera` can see `patch`'s centre from `cam_from_world`.
 ///
 /// **Perspective family** — camera-frame depth `−z > 0` (the canonical camera
@@ -675,6 +745,7 @@ pub fn view_could_see_patch(
 /// `0` rather than a misaligned dot. This anchors the score to the reference's
 /// channel identity, so the reference's channel A is never correlated against a
 /// candidate's channel B.
+#[allow(clippy::too_many_arguments)]
 fn candidate_zncc(
     patch: &OrientedPatch,
     view: &ProjectedImage<'_>,
@@ -683,48 +754,55 @@ fn candidate_zncc(
     sqrt_weights: &[f32],
     params: &ViewSelectParams,
     raw_scratch: &mut Vec<f32>,
+    sampler: Sampler,
+    renders: &Progress<'_>,
 ) -> Option<f64> {
-    // Affine fast path (both bilinear samplers — the anisotropic footprint has
-    // no affine shortcut): project the four patch corners exactly, fit the
-    // affine patch→image map, compose it with the pyramid level that map's own
-    // compression selects (level 0 for `Bilinear`), and sample the reference
-    // support through it — skipping the per-pixel camera projection +
-    // distortion of the full warp. A view the fit declines (corner fails to
-    // project, residual over the curvature bound, or too close to the sampled
-    // level's frame border) is scored by the exact warp below, so the fast
-    // path never decides rejection on its own.
-    if matches!(params.sampler, Sampler::Bilinear | Sampler::BilinearMip) {
-        let fit = prof::AFFINE_MAP
-            .time(|| affine_core_map(patch, view, params.resolution, params.sampler));
-        if let Some((map, level)) = fit {
-            prof::count(&prof::N_AFFINE, 1);
-            if level > 0 {
-                prof::count(&prof::N_AFFINE_MIP, 1);
-            }
-            let img = view.pyramid.level(level);
-            let channels = img.channels() as usize;
-            let n = reference.n;
-            raw_scratch.clear();
-            raw_scratch.resize(channels * n, 0.0);
-            prof::AFFINE_SAMPLE.time(|| {
-                sample_support_affine(
-                    img,
+    // Affine fast path: project the four patch corners exactly, fit the
+    // affine patch→image map, and sample the reference support through it —
+    // skipping the per-pixel camera projection + distortion of the full warp
+    // and, for the samplers that read the Jacobian, its per-pixel SVD. The
+    // bilinear samplers compose the map with the pyramid level its own
+    // compression selects (level 0 for `Bilinear`); the anisotropic sampler
+    // walks the map's constant footprint. A view the fit declines (corner
+    // fails to project, residual over the curvature bound, or too close to the
+    // sampled level's frame border) is scored by the exact warp below, so the
+    // fast path never decides rejection on its own.
+    let fit = prof::AFFINE_MAP.time(|| affine_core_map(patch, view, params.resolution, sampler));
+    if let Some((map, level)) = fit {
+        let _phase = render_phase(renders, sampler, 1);
+        prof::count(&prof::N_AFFINE, 1);
+        if level > 0 {
+            prof::count(&prof::N_AFFINE_MIP, 1);
+        }
+        let img = view.pyramid.level(level);
+        let channels = img.channels() as usize;
+        let n = reference.n;
+        raw_scratch.clear();
+        raw_scratch.resize(channels * n, 0.0);
+        let resolution = params.resolution as usize;
+        prof::AFFINE_SAMPLE.time(|| {
+            if sampler == Sampler::Anisotropic {
+                prof::count(&prof::N_AFFINE_ANISO, 1);
+                sample_support_affine_aniso(
+                    view.pyramid,
                     &map,
                     &single_ctx.pixels,
-                    params.resolution as usize,
+                    resolution,
                     raw_scratch,
                 )
-            });
-            return score_raw_against_reference(
-                raw_scratch,
-                channels,
-                reference,
-                single_ctx,
-                sqrt_weights,
-            );
-        }
-        prof::count(&prof::N_AFFINE_FALLBACK, 1);
+            } else {
+                sample_support_affine(img, &map, &single_ctx.pixels, resolution, raw_scratch)
+            }
+        });
+        return score_raw_against_reference(
+            raw_scratch,
+            channels,
+            reference,
+            single_ctx,
+            sqrt_weights,
+        );
     }
+    prof::count(&prof::N_AFFINE_FALLBACK, 1);
 
     let single = [*view];
     // Render over the reference's frozen support. `normalized_stack` returns the
@@ -737,8 +815,9 @@ fn candidate_zncc(
             single_ctx,
             &single,
             params.resolution,
-            params.sampler,
+            ViewSamplers::Frozen(&[sampler]),
             None,
+            renders,
         )
     })?;
     score_raw_against_reference(&raw, channels, reference, single_ctx, sqrt_weights)
@@ -875,7 +954,15 @@ pub fn select_patch_views(
     progress: &Progress<'_>,
 ) -> Result<ViewSelection, Cancelled> {
     prof::TOTAL.time(|| {
-        select_patch_views_impl(patch, views, track_views, track_keypoints, params, progress)
+        select_patch_views_impl(
+            patch,
+            views,
+            track_views,
+            track_keypoints,
+            params,
+            progress,
+            progress,
+        )
     })
 }
 
@@ -916,6 +1003,12 @@ pub fn projected_patch_frame(
 
 /// Untimed body of [`select_patch_views`] (split so the enclosing
 /// [`prof::TOTAL`] phase is a single wrap).
+///
+/// `progress` takes the phases, the view count and the cancellation;
+/// `renders` takes only the detail phases that time the renders under each
+/// sampler. A single selection passes one `Progress` as both, and the batch
+/// passes its own only as `renders`, since many patches counting views into
+/// one bar would overwrite each other.
 fn select_patch_views_impl(
     patch: &OrientedPatch,
     views: &[ProjectedImage<'_>],
@@ -923,6 +1016,7 @@ fn select_patch_views_impl(
     track_keypoints: Option<&[Option<[f64; 2]>]>,
     params: &ViewSelectParams,
     progress: &Progress<'_>,
+    renders: &Progress<'_>,
 ) -> Result<ViewSelection, Cancelled> {
     progress.check_cancel()?;
     let resolution = params.resolution.max(2);
@@ -964,6 +1058,7 @@ fn select_patch_views_impl(
                 track_kps.as_deref(),
                 &w_full,
                 &params,
+                renders,
             )
         })
     };
@@ -1017,6 +1112,15 @@ fn select_patch_views_impl(
         let view = &views[ti as usize];
         let kp = track_kps.as_ref().and_then(|k| k[t]);
         let rpatch = view_render_patch(patch, view, kp);
+        // The sampler the rule picks for this observation, as every other
+        // kernel rendering it picks it.
+        let sampler = params.sampler.for_observation(
+            patch,
+            view.camera,
+            view.cam_from_world,
+            kp,
+            params.resolution,
+        );
         scores.push(
             prof::TRACK_SCORE
                 .time(|| {
@@ -1028,6 +1132,8 @@ fn select_patch_views_impl(
                         &sqrt_weights,
                         &params,
                         &mut raw_scratch,
+                        sampler,
+                        renders,
                     )
                 })
                 .unwrap_or(f64::NAN),
@@ -1076,6 +1182,15 @@ fn select_patch_views_impl(
         // Photometric vetting (also enforces in-frame coverage: a candidate
         // whose render misses the reference support is unscoreable -> rejected).
         prof::count(&prof::N_CANDIDATES, 1);
+        // A candidate has no keypoint: it is rendered, and its sampler read, at
+        // the patch's projection.
+        let sampler = params.sampler.for_observation(
+            patch,
+            view.camera,
+            view.cam_from_world,
+            None,
+            params.resolution,
+        );
         let zncc = prof::CAND_SCORE.time(|| {
             candidate_zncc(
                 patch,
@@ -1085,6 +1200,8 @@ fn select_patch_views_impl(
                 &sqrt_weights,
                 &params,
                 &mut raw_scratch,
+                sampler,
+                renders,
             )
         });
         scored_views += 1;
@@ -1116,10 +1233,18 @@ fn select_patch_views_impl(
 /// [`view_indices_from_reconstruction`](super::normal_refine::view_indices_from_reconstruction)).
 /// Results are returned in cloud order.
 ///
-/// # Panics
-///
 /// `track_keypoints`, when given, is parallel to `track_views` in both
 /// dimensions and anchors the track views' renders — see [`select_patch_views`].
+///
+/// `done`, when given, is bumped once per patch, for a caller polling progress
+/// from another thread. `progress` receives a `patches` count about every
+/// hundredth of the way through, is polled for cancellation before each patch,
+/// and, when detailed, times the renders of each sampler in its own detail
+/// phase.
+///
+/// # Errors
+///
+/// [`Cancelled`] when `progress` was cancelled before every patch was scored.
 ///
 /// # Panics
 ///
@@ -1131,8 +1256,9 @@ pub fn select_patch_cloud_views(
     track_views: &[Vec<u32>],
     track_keypoints: Option<&[Vec<Option<[f64; 2]>>]>,
     params: &ViewSelectParams,
-    progress: Option<&std::sync::atomic::AtomicUsize>,
-) -> Vec<ViewSelection> {
+    done: Option<&std::sync::atomic::AtomicUsize>,
+    progress: &Progress<'_>,
+) -> Result<Vec<ViewSelection>, Cancelled> {
     assert_eq!(
         track_views.len(),
         cloud.len(),
@@ -1149,30 +1275,46 @@ pub fn select_patch_cloud_views(
         prof::reset();
     }
     let wall_start = std::time::Instant::now();
-    let out: Vec<ViewSelection> = cloud
+    let counter = PatchCounter::new(cloud.len(), done, progress);
+    let out: Vec<Option<ViewSelection>> = cloud
         .patches
         .par_iter()
         .enumerate()
         .zip(track_views.par_iter())
         .map(|((i, patch), tv)| {
+            if progress.is_cancelled() {
+                return None;
+            }
             let kps = track_keypoints.map(|k| k[i].as_slice());
             // The batch's own reporting is the counter below, one tick per
-            // patch: the per-patch phases would be dozens of threads writing
-            // over each other, and nothing here can be cancelled, so the
-            // selector is handed a progress that reports nothing.
-            let out = select_patch_views(patch, views, tv, kps, params, &Progress::none())
+            // patch: the per-patch phases and view counts would be dozens of
+            // threads writing over each other, so the selector reports them to
+            // nothing and only its render detail phases reach `progress`.
+            let out = prof::TOTAL
+                .time(|| {
+                    select_patch_views_impl(
+                        patch,
+                        views,
+                        tv,
+                        kps,
+                        params,
+                        &Progress::none(),
+                        progress,
+                    )
+                })
                 .expect("Progress::none never cancels");
-            // Bump the shared work counter per patch for a Python progress poller.
-            if let Some(c) = progress {
-                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            out
+            counter.finished();
+            Some(out)
         })
         .collect();
     if prof::enabled() {
         prof::report(cloud.len(), wall_start.elapsed().as_secs_f64());
     }
-    out
+    progress.check_cancel()?;
+    Ok(out
+        .into_iter()
+        .map(|o| o.expect("every patch ran when nothing was cancelled"))
+        .collect())
 }
 
 /// For each patch of `cloud` (linked to `recon` via `point_indexes`), the track image

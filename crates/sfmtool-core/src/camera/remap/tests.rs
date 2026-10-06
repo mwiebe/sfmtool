@@ -968,3 +968,395 @@ fn remap_rows_f32x3_serial_and_parallel_paths_are_bit_identical() {
     assert_eq!(par.1, ser.1, "grad_x");
     assert_eq!(par.2, ser.2, "grad_y");
 }
+
+// -----------------------------------------------------------------------
+// The anisotropic remap's scalar and AVX2 paths
+// -----------------------------------------------------------------------
+
+/// The anisotropic remap as it was written channel by channel, each sample's
+/// corner geometry computed per channel: the reference both paths are held to.
+fn aniso_per_channel_reference(pyramid: &ImageU8Pyramid, map: &WarpMap, max_aniso: u32) -> ImageU8 {
+    let (w, h) = (map.width(), map.height());
+    let c = pyramid.level(0).channels();
+    let num_levels = pyramid.num_levels();
+    let mut data = vec![0u8; (w * h * c) as usize];
+    for row in 0..h {
+        for col in 0..w {
+            let (sx, sy) = map.get(col, row);
+            if sx.is_nan() || sy.is_nan() {
+                continue;
+            }
+            let (sigma_major, sigma_minor, major_dx, major_dy) = map.get_svd(col, row);
+            let base = ((row * w + col) * c) as usize;
+            if sigma_major <= 1.0 {
+                for ch in 0..c {
+                    let v = sample_bilinear_u8(pyramid.level(0), sx, sy, ch);
+                    data[base + ch as usize] = (v + 0.5).clamp(0.0, 255.0) as u8;
+                }
+                continue;
+            }
+            let level_f = sigma_minor.max(1.0_f32).log2();
+            let level_lo = (level_f.floor() as usize).min(num_levels - 1);
+            let level_hi = (level_lo + 1).min(num_levels - 1);
+            let frac = if level_lo == level_hi {
+                0.0
+            } else {
+                level_f - level_lo as f32
+            };
+            let ratio = sigma_major / sigma_minor.max(1.0);
+            let n = (ratio.ceil() as u32).clamp(1, max_aniso);
+            let scale_lo = (1u32 << level_lo) as f32;
+            let scale_hi = (1u32 << level_hi) as f32;
+            for ch in 0..c {
+                let mut sum_lo = 0.0f32;
+                let mut sum_hi = 0.0f32;
+                for i in 0..n {
+                    let t = (i as f32 + 0.5) / n as f32 - 0.5;
+                    let x = sx + t * sigma_major * major_dx;
+                    let y = sy + t * sigma_major * major_dy;
+                    sum_lo +=
+                        sample_bilinear_u8(pyramid.level(level_lo), x / scale_lo, y / scale_lo, ch);
+                    if frac > 0.0 {
+                        sum_hi += sample_bilinear_u8(
+                            pyramid.level(level_hi),
+                            x / scale_hi,
+                            y / scale_hi,
+                            ch,
+                        );
+                    }
+                }
+                let val = sum_lo / n as f32 * (1.0 - frac) + sum_hi / n as f32 * frac;
+                data[base + ch as usize] = (val + 0.5).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    ImageU8::new(w, h, c, data)
+}
+
+/// A textured `w × h` image of `channels` channels.
+fn textured_image(w: u32, h: u32, channels: u32) -> ImageU8 {
+    let mut data = Vec::with_capacity((w * h * channels) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            for ch in 0..channels {
+                let v = (x * 7 + y * 13 + ch * 31) ^ (x * y + ch);
+                data.push((v % 253) as u8);
+            }
+        }
+    }
+    ImageU8::new(w, h, channels, data)
+}
+
+/// Warp maps that exercise every branch of the anisotropic walk: a map that
+/// compresses nothing (the single-tap path), maps compressed along a turned
+/// axis at several anisotropies and scales (one level and two blended levels,
+/// the sample count varying across a row), one compressed past the pyramid's
+/// last level, one running off every edge of the image, and NaN entries.
+fn aniso_test_maps() -> Vec<WarpMap> {
+    let mut maps = Vec::new();
+    let (w, h) = (37u32, 21u32);
+    let affine = |a: [f32; 6], nan_every: usize| {
+        let mut data = vec![0.0f32; 2 * (w * h) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let i = (row * w + col) as usize;
+                let (c, r) = (col as f32 + 0.5, row as f32 + 0.5);
+                // A gentle curvature, so the Jacobian varies across the map.
+                let bend = 0.002 * c * c;
+                data[2 * i] = a[0] * c + a[1] * r + a[2] + bend;
+                data[2 * i + 1] = a[3] * c + a[4] * r + a[5] - bend;
+                if nan_every > 0 && i % nan_every == 3 {
+                    data[2 * i] = f32::NAN;
+                    data[2 * i + 1] = f32::NAN;
+                }
+            }
+        }
+        let mut map = WarpMap::new(w, h, data);
+        map.compute_svd();
+        map
+    };
+    // Uncompressed.
+    maps.push(affine([0.8, 0.1, 20.0, -0.1, 0.7, 30.0], 0));
+    // Anisotropic, turned, at several scales.
+    for (major, minor, angle) in [
+        (2.5f32, 1.0f32, 0.3f32),
+        (3.2, 1.6, 1.1),
+        (6.0, 1.3, -0.7),
+        (9.0, 3.5, 0.2),
+        (20.0, 2.2, 2.0),
+        (40.0, 9.0, -1.3),
+    ] {
+        let (s, c) = angle.sin_cos();
+        maps.push(affine(
+            [major * c, -minor * s, 60.0, major * s, minor * c, 70.0],
+            0,
+        ));
+    }
+    // Compressed past the last level, and off every edge.
+    maps.push(affine([300.0, 10.0, -50.0, -20.0, 250.0, -40.0], 0));
+    maps.push(affine([30.0, 5.0, -300.0, 4.0, 25.0, -200.0], 0));
+    // NaN entries among compressed pixels.
+    maps.push(affine([5.0, 1.0, 40.0, -1.0, 2.0, 50.0], 7));
+    maps
+}
+
+/// The scalar anisotropic path computes each sample's corner geometry once
+/// for all channels, and gives the per-channel algorithm's output bit for bit,
+/// for any channel count, including more than the four it sums at once.
+#[test]
+fn aniso_scalar_matches_the_per_channel_reference() {
+    for channels in [1u32, 2, 3, 4, 5, 6, 9] {
+        let pyramid = ImageU8Pyramid::build(&textured_image(160, 120, channels), 8);
+        for (m, map) in aniso_test_maps().iter().enumerate() {
+            let want = aniso_per_channel_reference(&pyramid, map, 16);
+            let (got, _) = remap_aniso_dispatch(&pyramid, map, 16, false);
+            assert_eq!(got.data(), want.data(), "map {m}, {channels} channels");
+        }
+    }
+}
+
+/// The public entry takes an image of more than four channels, which the AVX2
+/// kernel does not, through the scalar path.
+#[test]
+fn aniso_renders_more_than_four_channels() {
+    let pyramid = ImageU8Pyramid::build(&textured_image(160, 120, 6), 8);
+    for (m, map) in aniso_test_maps().iter().enumerate() {
+        let want = aniso_per_channel_reference(&pyramid, map, 16);
+        let got = remap_aniso_with_pyramid(&pyramid, map, 16);
+        assert_eq!(got.data(), want.data(), "map {m}");
+    }
+}
+
+/// The AVX2 kernel gives the scalar path's output bit for bit, on every map,
+/// for every channel count it takes, including a pyramid whose last levels
+/// hold fewer than four bytes. Skipped on a CPU without AVX2.
+///
+/// The kernel takes a group of eight pixels only where all of them qualify,
+/// so the test also counts the groups it rendered: on the large image every
+/// compressed map (maps 1 to 6) sends groups through it, and the scalar
+/// dispatch sends none, so the comparison is between the two paths and not
+/// the scalar path against itself.
+#[test]
+fn aniso_avx2_matches_scalar_bit_for_bit() {
+    if !aniso_avx2::available() {
+        return;
+    }
+    for channels in [1u32, 2, 3, 4] {
+        for (w, h) in [(160u32, 120u32), (9, 7)] {
+            let pyramid = ImageU8Pyramid::build(&textured_image(w, h, channels), 8);
+            let mut groups_on_image = 0;
+            for (m, map) in aniso_test_maps().iter().enumerate() {
+                for max_aniso in [4u32, 16] {
+                    let (scalar, scalar_groups) =
+                        remap_aniso_dispatch(&pyramid, map, max_aniso, false);
+                    let (simd, groups) = remap_aniso_dispatch(&pyramid, map, max_aniso, true);
+                    assert_eq!(scalar_groups, 0, "the scalar dispatch ran the kernel");
+                    assert_eq!(
+                        simd.data(),
+                        scalar.data(),
+                        "map {m}, {w}x{h}, {channels} channels, max {max_aniso}"
+                    );
+                    if w == 160 && (1..=6).contains(&m) {
+                        assert!(
+                            groups > 0,
+                            "map {m}, {channels} channels, max {max_aniso}: \
+                             the AVX2 kernel rendered no group"
+                        );
+                    }
+                    groups_on_image += groups;
+                }
+            }
+            assert!(
+                groups_on_image > 0,
+                "{w}x{h}, {channels} channels: the AVX2 kernel rendered no group"
+            );
+        }
+    }
+}
+
+/// The kernel takes a pyramid level only where its gathers can read it: at
+/// least one 32-bit word, and byte offsets that fit in an `i32`.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn aniso_avx2_gathers_only_levels_that_fit_i32_offsets() {
+    assert!(!aniso_avx2::gatherable(0));
+    assert!(!aniso_avx2::gatherable(3));
+    assert!(aniso_avx2::gatherable(4));
+    assert!(aniso_avx2::gatherable(i32::MAX as usize));
+    assert!(!aniso_avx2::gatherable(i32::MAX as usize + 1));
+}
+
+// -----------------------------------------------------------------------
+// The direction of the anisotropic walk
+// -----------------------------------------------------------------------
+
+/// The Jacobian `rot(θ) · diag(major, minor) · rot(φ)ᵀ`: a destination step
+/// along `(cos φ, sin φ)` moves `major` image px along `(cos θ, sin θ)`, the
+/// image direction the map compresses most.
+fn turned_jacobian(major: f32, minor: f32, theta: f32, phi: f32) -> [[f32; 2]; 2] {
+    let (st, ct) = theta.sin_cos();
+    let (sp, cp) = phi.sin_cos();
+    [
+        [
+            ct * major * cp + st * minor * sp,
+            ct * major * sp - st * minor * cp,
+        ],
+        [
+            st * major * cp - ct * minor * sp,
+            st * major * sp + ct * minor * cp,
+        ],
+    ]
+}
+
+/// A `size × size` warp map with the constant Jacobian `j`, whose middle maps
+/// to `centre`, with its SVD computed.
+fn affine_warp_map(size: u32, j: [[f32; 2]; 2], centre: [f32; 2]) -> WarpMap {
+    let mut data = Vec::with_capacity(2 * (size * size) as usize);
+    let half = size as f32 / 2.0;
+    for row in 0..size {
+        for col in 0..size {
+            let (c, r) = (col as f32 + 0.5 - half, row as f32 + 0.5 - half);
+            data.push(centre[0] + j[0][0] * c + j[0][1] * r);
+            data.push(centre[1] + j[1][0] * c + j[1][1] * r);
+        }
+    }
+    let mut map = WarpMap::new(size, size, data);
+    map.compute_svd();
+    map
+}
+
+/// A one-channel `size × size` image of sinusoidal stripes that run along the
+/// unit direction `along`: constant along it, with a period of `period` px
+/// across it.
+fn stripes_along(size: u32, along: [f32; 2], period: f32) -> ImageU8 {
+    let across = [-along[1], along[0]];
+    let mut data = Vec::with_capacity((size * size) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let d = (x as f32 + 0.5) * across[0] + (y as f32 + 0.5) * across[1];
+            let v = 128.0 + 100.0 * (std::f32::consts::TAU * d / period).sin();
+            data.push(v.round() as u8);
+        }
+    }
+    ImageU8::new(size, size, 1, data)
+}
+
+/// Maps compressed along a turned image axis, `(major, theta, phi)` with
+/// `minor = 1`, so the walk reads level 0 alone. The destination direction
+/// `phi` that compresses most is turned from the image direction `theta` it
+/// compresses, by 0.8 to 1.57 rad; the second and fourth have perpendicular
+/// columns, a pure rotation composed with a scale along one axis.
+const TURNED_WALKS: [(f32, f32, f32); 4] = [
+    (6.0, 1.0, 0.2),
+    (6.0, 1.0, 0.0),
+    (8.0, -0.6, 0.9),
+    (5.0, std::f32::consts::FRAC_PI_2, 0.0),
+];
+
+/// The largest difference between the anisotropic tile `got` and the bilinear
+/// tile of the same map over stripes that run along the axis the map
+/// compresses: every sample of a walk along that axis reads the same stripe,
+/// so the two differ only by bilinear interpolation, while a walk turned off
+/// the axis averages across the stripes.
+fn max_walk_blur(got: &[f32], bilinear: &ImageU8) -> f32 {
+    got.iter()
+        .zip(bilinear.data())
+        .map(|(&a, &b)| (a - b as f32).abs())
+        .fold(0.0, f32::max)
+}
+
+/// The bound on [`max_walk_blur`] for a walk along the compressed axis. A
+/// walk turned 0.8 rad off it, across stripes 12 px apart, differs by 20 or
+/// more.
+const WALK_BLUR_BOUND: f32 = 6.0;
+
+/// Every anisotropic path walks along the image direction the map compresses
+/// most, the left singular vector of the Jacobian, and not along the
+/// destination direction that compresses most, the right one. The two differ
+/// wherever the patch is turned relative to the image.
+#[test]
+fn aniso_walks_along_the_image_axis_the_map_compresses() {
+    let size = 256u32;
+    for (k, &(major, theta, phi)) in TURNED_WALKS.iter().enumerate() {
+        let src = stripes_along(size, [theta.cos(), theta.sin()], 12.0);
+        let pyramid = ImageU8Pyramid::build(&src, 6);
+        // 16 × 16 grid px reach at most 8 · 8 + 8 image px from the middle,
+        // so every walk stays inside the image.
+        let map = affine_warp_map(16, turned_jacobian(major, 1.0, theta, phi), [128.0, 128.0]);
+        let bilinear = remap_bilinear(&src, &map);
+        let as_f32 = |img: &ImageU8| img.data().iter().map(|&v| v as f32).collect::<Vec<_>>();
+
+        let (scalar, _) = remap_aniso_dispatch(&pyramid, &map, 16, false);
+        let blur = max_walk_blur(&as_f32(&scalar), &bilinear);
+        assert!(blur <= WALK_BLUR_BOUND, "map {k}, scalar: {blur}");
+
+        if aniso_avx2::available() {
+            let (simd, groups) = remap_aniso_dispatch(&pyramid, &map, 16, true);
+            assert!(groups > 0, "map {k}: the AVX2 kernel rendered no group");
+            let blur = max_walk_blur(&as_f32(&simd), &bilinear);
+            assert!(blur <= WALK_BLUR_BOUND, "map {k}, AVX2: {blur}");
+        }
+
+        let with_grad = remap_aniso_with_grad(&pyramid, &map, 16);
+        let blur = max_walk_blur(&with_grad.value, &bilinear);
+        assert!(blur <= WALK_BLUR_BOUND, "map {k}, value+gradient: {blur}");
+    }
+}
+
+/// Turning the photograph by 90° and the map with it turns nothing in the
+/// tile: the anisotropic tile of a map compressed along the image's x axis
+/// equals, within a rounding, the tile of the same map turned by 90° over the
+/// photograph turned by 90°. The turned map's Jacobian has perpendicular
+/// columns, the case where the major direction was read from rounding.
+#[test]
+fn aniso_tile_is_unchanged_when_photograph_and_map_turn_together() {
+    let w = 128u32;
+    let src = textured_src(w, w, 3);
+    // `turned(x', y') = src(w − y', x')`: pixel (col i, row j) of the turned
+    // image is pixel (col w − 1 − j, row i) of the photograph.
+    let mut turned = vec![0u8; src.data().len()];
+    for j in 0..w as usize {
+        for i in 0..w as usize {
+            let from = (i * w as usize + (w as usize - 1 - j)) * 3;
+            let to = (j * w as usize + i) * 3;
+            turned[to..to + 3].copy_from_slice(&src.data()[from..from + 3]);
+        }
+    }
+    let turned = ImageU8::new(w, w, 3, turned);
+    let pyr = ImageU8Pyramid::build(&src, 6);
+    let pyr_turned = ImageU8Pyramid::build(&turned, 6);
+    for (major, minor) in [(5.0f32, 1.0f32), (6.0, 1.5), (9.0, 2.5)] {
+        // The photograph's point `(x, y)` is the turned image's `(y, w − x)`.
+        let j = [[major, 0.0], [0.0, minor]];
+        let j_turned = [[0.0, minor], [-major, 0.0]];
+        let map = affine_warp_map(32, j, [61.0, 67.0]);
+        let map_turned = affine_warp_map(32, j_turned, [67.0, w as f32 - 61.0]);
+        for simd in [false, true] {
+            let (want, _) = remap_aniso_dispatch(&pyr, &map, 16, simd);
+            let (got, _) = remap_aniso_dispatch(&pyr_turned, &map_turned, 16, simd);
+            let max_d = got
+                .data()
+                .iter()
+                .zip(want.data())
+                .map(|(&a, &b)| (a as i32 - b as i32).abs())
+                .max()
+                .unwrap();
+            assert!(
+                max_d <= 1,
+                "{major}x{minor}, simd {simd}: differ by {max_d}"
+            );
+        }
+        let want = remap_aniso_with_grad(&pyr, &map, 16);
+        let got = remap_aniso_with_grad(&pyr_turned, &map_turned, 16);
+        let max_d = got
+            .value
+            .iter()
+            .zip(&want.value)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max_d <= 0.01,
+            "{major}x{minor}, value+gradient: differ by {max_d}"
+        );
+    }
+}
