@@ -101,7 +101,9 @@ empty-handed". Name the thing and say what it does.
   - `sfmtool-core` — algorithms: camera, alignment, distortion, epipolar, matching, frustum, optical flow, transforms, spatial indexing
   - `sfm-explorer` — native GUI viewer (winit + wgpu + egui); window title
     "SfM Explorer", or "SfM Explorer - <file>.sfmr" once a file is loaded
-  - `sfmtool-py` — PyO3 bindings, compiled as `sfmtool._sfmtool`
+  - `sfmtool-py` — PyO3 bindings, compiled as `sfmtool._sfmtool`; also carries
+    the viewer entry point `run_explorer`, which `sfm explorer` runs in a
+    child process (`python -m sfmtool._explorer`)
 - `tests/` — pytest (top-level modules + `tests/camrig/`, `tests/matching/`,
   `tests/patch/`, `tests/rig/`, `tests/rust_bindings/`, `tests/sift/` and
   `tests/xform/`). Fixtures in
@@ -282,7 +284,8 @@ backlog and keep them honest as findings get addressed:
   passthrough on a desktop; the `ui-test-linux` job apt-installs `xvfb` for
   it. The viewer also needs a Vulkan ICD (`mesa-vulkan-drivers` for
   lavapipe): Vulkan is the only wgpu backend compiled in for Linux, so without
-  one it panics at surface creation. See `specs/gui/architecture.md` §
+  one it exits with status 1 and an error saying it could not create the
+  window's GPU surface (or find a GPU adapter). See `specs/gui/architecture.md` §
   "Testing".
 - Rustdoc warnings are **errors**, via `[workspace.lints.rustdoc]` in the root
   `Cargo.toml` (each crate opts in with `[lints] workspace = true`). That means
@@ -300,13 +303,15 @@ backlog and keep them honest as findings get addressed:
 - The Python package is editable-installed, but the native extension
   `sfmtool._sfmtool` is not auto-rebuilt — remember `maturin develop` after
   Rust changes.
-- `sfm explorer` does not run the same binary as `pixi run gui`. It runs
-  `launch-sfm-explorer`, a binary target of `sfmtool-py`, as a subprocess
-  found on `PATH`; `pixi run gui` runs the `sfm-explorer` crate's own
-  `sfm-explorer` binary. Both call `sfm_explorer::run`, so the viewer is the
-  same. maturin does not put `launch-sfm-explorer` in the wheel or the editable
-  install: build it with `pixi run cargo build --release -p sfmtool-py` and put
-  `target/release` on `PATH`. See `specs/cli/visualization/explorer-command.md`.
+- `sfm explorer` does not run the same build of the viewer as `pixi run gui`.
+  The viewer is compiled into the `sfmtool._sfmtool` extension
+  (`run_explorer`), and `sfm explorer` runs it in a child process,
+  `python -m sfmtool._explorer`; `pixi run gui` builds and runs the
+  `sfm-explorer` crate's own `sfm-explorer` binary. Both reach
+  `sfm_explorer::run_with_args`, so the viewer is the same code, but after a
+  viewer change `sfm explorer` shows it only once `pixi run maturin develop
+  --release` has rebuilt the extension. See
+  `specs/cli/visualization/explorer-command.md`.
 - **The viewer can be driven over MCP, and an agent may own its lifecycle.**
   `pixi run gui-mcp <file>.sfmr` hosts a Model Context Protocol endpoint on
   `127.0.0.1:8787` for reading the scene graph, moving the selection and the 3D
@@ -343,9 +348,11 @@ backlog and keep them honest as findings get addressed:
   toolchain, and it is deliberately not the same thing as the MSRV: the workspace
   declares `rust-version = "1.97"` in `[workspace.package]` (inherited by every
   crate in the workspace), because the PyPI sdist compiles this workspace on the
-  user's own rustc
-  and we publish wheels for Linux and Windows only. The `msrv` job in `ci.yml`
-  builds against that floor; it reads the version out of `Cargo.toml`, so raise
+  user's own rustc. Wheels are published for x86-64 Linux, x86-64 Windows and
+  Apple-silicon macOS, so everyone else (for example Intel Macs, other Linux
+  architectures and musl Linux) builds from the sdist with the rustc they
+  have. The `msrv` job in `ci.yml` builds against that floor; it reads the
+  version out of `Cargo.toml`, so raise
   the MSRV there and nowhere else. The same job also checks `sfm-explorer`
   with `--no-default-features`, the only build that compiles the viewer
   without its `mcp` feature, since `sfmtool-py` turns it on for every

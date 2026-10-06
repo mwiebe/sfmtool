@@ -5,10 +5,11 @@
 `sfm explorer` opens SfM Explorer, the sfmtool desktop viewer, from the Python
 command line. The viewer shows one or more reconstructions (`.sfmr` files) in a
 3D window with panels for the cameras, images, points and tracks, so a person
-can look at a solve and find where it went wrong. The command does not contain
-the viewer: it finds a separate executable named `launch-sfm-explorer` on the
-`PATH`, runs it as a child process with the arguments given, waits for the
-window to close, and exits with the viewer's exit status. The viewer itself is
+can look at a solve and find where it went wrong. The viewer is compiled into
+the `sfmtool._sfmtool` extension module, so it comes with `pip install
+sfmtool`. The command runs it in a child Python process
+(`python -m sfmtool._explorer`) with the arguments given, waits for the window
+to close, and exits with the child's exit status. The viewer itself is
 specified under [../../gui/](../../gui/README.md); start with
 [architecture.md](../../gui/architecture.md) and
 [user-experience.md](../../gui/user-experience.md).
@@ -28,7 +29,7 @@ the Visualization category in [cli.py](../../../src/sfmtool/cli.py).
 | Argument / option | Type | Default | Meaning |
 |-------------------|------|---------|---------|
 | `FILE ...` | paths, zero or more | none | Files to load. Each must exist, or Click refuses the command before the viewer starts. Each file becomes its own node in the viewer's scene graph, in the order given, so several reconstructions can be compared in one 3D space ([scene-graph.md](../../gui/scene-graph.md)). With no files the viewer opens empty. |
-| `--mcp [PORT]` | int | off; `8787` when given without a number | Host a Model Context Protocol endpoint on `127.0.0.1:PORT`, so an agent can drive the viewer. `0` takes an ephemeral port, which the viewer prints at startup. See [mcp-server.md](../../gui/mcp-server.md). |
+| `--mcp [PORT]` | int, 0 to 65535 | off; `8787` when given without a number | Host a Model Context Protocol endpoint on `127.0.0.1:PORT`, so an agent can drive the viewer. `0` takes an ephemeral port, which the viewer prints at startup. See [mcp-server.md](../../gui/mcp-server.md). |
 | `--no-default-layout` | flag | off | Start with the stock panel grid, ignoring a layout saved at `~/.sfm-explorer-default-layout.json` ([panel-layout.md](../../gui/panel-layout.md) § "The default layout file"). |
 
 The default port is the constant `DEFAULT_MCP_PORT` in `explorer.py`. It
@@ -44,40 +45,89 @@ integer". Put the files first (`sfm explorer scene.sfmr --mcp`), give the port
 (`sfm explorer --mcp -- scene.sfmr`). The viewer's own command line accepts
 `--mcp scene.sfmr` and reads it as the default port and a file.
 
+A port outside 0 to 65535 is refused by Click with a usage error (exit status
+2) before the viewer starts. The viewer refuses it too, with exit status 2, as
+it takes a word of digits after `--mcp` as the port whether or not it fits;
+checking it in the command gives the error in the same form as the command's
+other usage errors and starts no child process for it.
+
 ## How the viewer is launched
 
-The command looks up `launch-sfm-explorer` with `shutil.which`, so only the
-`PATH` is searched. When it is not found, the command stops with a Click error
-that names the missing executable and the build command
-`pixi run cargo build --release -p sfmtool-py`. When it is found, the command
-passes `--mcp PORT` (when `--mcp` was given), then `--no-default-layout` (when
-given), then the files, and calls `sys.exit` with the child's return code.
+The command builds the viewer's command line: `--mcp PORT` (when `--mcp` was
+given), then `--no-default-layout` (when given), then the files. It runs
+`[sys.executable, "-P", "-m", "sfmtool._explorer", *that]` with
+`subprocess.run`, so the child is the same Python interpreter as the command,
+and calls `sys.exit` with the child's return code. `viewer_command` in
+`explorer.py` builds that list, and `VIEWER_MODULE` names the module. `-P`
+stops Python from putting the current directory first on `sys.path`, which
+`python -m` otherwise does; without it a `sfmtool.py` or `sfmtool/` in the
+directory `sfm explorer` is run from would be imported in place of the
+installed package.
 
-`launch-sfm-explorer` is a binary target of the `sfmtool-py` crate,
-[launch-sfm-explorer.rs](../../../crates/sfmtool-py/src/bin/launch-sfm-explorer.rs),
-whose `main` calls `sfm_explorer::run`. `pixi run gui` runs a different binary,
-`sfm-explorer`, built from the `sfm-explorer` crate's
-[main.rs](../../../crates/sfm-explorer/src/main.rs), whose `main` also calls
-`sfm_explorer::run`. The two executables run the same viewer code and accept the
-same command line, which `sfm_explorer::run` parses.
+[_explorer.py](../../../src/sfmtool/_explorer.py) is the child's program. It
+restores the default `SIGINT` handler, so Ctrl+C ends the viewer as it ends any
+other program, and exits with the status that
+`sfmtool._sfmtool.run_explorer(sys.argv[1:])` returns. `run_explorer` is a
+root-level function of the extension, in
+[lib.rs](../../../crates/sfmtool-py/src/lib.rs) of `sfmtool-py`. It releases
+the GIL and calls `sfm_explorer::run_with_args`, which parses the viewer's
+command line, opens the window, and returns when the window closes.
 
-### Where `launch-sfm-explorer` comes from
+`run_with_args` does not end the process. It returns `Result<(), RunError>`,
+and a `RunError` carries the message to show and the exit status to end with:
+status 2 when the command line does not parse (an unknown option, or `--mcp=`
+followed by something that is not a port number) or asks for `--mcp` in a build
+without the `mcp` feature, and status 1 when the MCP endpoint cannot bind its
+port or the event loop, the window or its GPU device cannot be created (for
+example with no display, or no Vulkan driver on Linux). `run_explorer` prints
+the message to stderr and returns the status, or returns 0 when the window
+closed or `--help` printed the usage, so the child exits with the viewer's
+status and `sfm explorer` exits with the child's.
 
-maturin builds only the `_sfmtool` extension module from `sfmtool-py`, not its
-binary targets, so neither a wheel built by `maturin build` nor the editable
-install from `maturin develop` or `pixi install` contains
-`launch-sfm-explorer`. A source checkout gets it from
-`pixi run cargo build --release -p sfmtool-py`, which writes
-`target/release/launch-sfm-explorer`; that directory then has to be on the
-`PATH` for `sfm explorer` to find it. Without that, `pixi run gui` runs the
-viewer directly.
+The viewer runs in a child process rather than in the `sfm` process because it
+needs a process to itself:
+
+- It creates a `winit` event loop, which `winit` creates only on the
+  process's main thread, on every platform, and only once per process. A call
+  from another thread panics. Because of the once-per-process rule, a second
+  `run_explorer` call in one process that gets as far as creating the event
+  loop returns status 1 with a message saying the viewer has already run in
+  this process. No test makes that second call, since the first would have to
+  open a window.
+- It sets process-wide state that outlives the call: it initializes the global
+  `env_logger` logger, unless one is already installed, and on Windows it sets
+  the process's DPI awareness. An MCP endpoint's server thread also keeps
+  running after the window closes, until the process ends.
+
+`pixi run gui` runs the same viewer from a source checkout through a different
+entry point: the `sfm-explorer` crate's own `sfm-explorer` binary,
+[main.rs](../../../crates/sfm-explorer/src/main.rs), whose `main` calls
+`sfm_explorer::run`, which passes `std::env::args()` without the program name
+to `run_with_args`. Both accept the same command line, and the viewer's
+`--help` text and its unknown-option error name neither program: the usage line
+is `[OPTIONS] [FILE.sfmr ...]` under a heading naming SfM Explorer.
+
+A panic in `run_with_args`, which is a bug in the viewer rather than a failure
+to start, reaches Python as an exception: the child prints a Python traceback
+ending in `pyo3_runtime.PanicException` and exits with status 1, which
+`sfm explorer` then exits with.
+
+### What is in the wheel
+
+The viewer, including its `mcp` feature (`sfmtool-py` depends on
+`sfm-explorer` with default features), is part of the `_sfmtool` extension
+module that maturin builds, so a wheel, the editable install from
+`maturin develop` or `pixi install`, and a build from the sdist all contain it.
+After Rust changes to the viewer, `pixi run maturin develop --release` rebuilds
+it for `sfm explorer`, as for any other part of the extension.
 
 ## Options the viewer takes that this command does not
 
 The viewer's command line also takes `--demo` (load generated demo data) and
 `-h` / `--help`. `sfm explorer` does not forward either: `sfm explorer --help`
 prints the Click help for this command, and `--demo` is refused as an unknown
-option. Run the viewer binary directly for those.
+option. Run `python -m sfmtool._explorer --demo` or
+`python -m sfmtool._explorer --help`, or the `sfm-explorer` binary, for those.
 
 ## Usage Examples
 
@@ -97,13 +147,23 @@ sfm explorer --no-default-layout sfmr/solve.sfmr
 
 ## Testing
 
-No automated test runs this command. The viewer it launches is tested in the
-`sfm-explorer` crate: its command-line parser in
-[cli/tests.rs](../../../crates/sfm-explorer/src/cli/tests.rs), and the running
-window in the `ui_basic` integration tests described in
-[architecture.md](../../gui/architecture.md) § "Testing".
+[test_explorer_command.py](../../../tests/test_explorer_command.py) checks,
+without opening a window, that the command passes its options and files to
+`python -m sfmtool._explorer` in the order above and exits with the child's
+status, and that `python -m sfmtool._explorer` reaches the viewer in the built
+extension: `--help` prints the viewer's usage and exits 0, and an unknown option
+exits 2. It also calls `run_explorer` in the test process with those two command
+lines and with `--mcp 70000`, and checks that it returns 0, 2 and 2 without
+ending the process. The
+viewer is tested in the `sfm-explorer` crate: its command-line
+parser in [cli/tests.rs](../../../crates/sfm-explorer/src/cli/tests.rs), the
+errors `run_with_args` returns before it creates an event loop in
+[tests.rs](../../../crates/sfm-explorer/src/tests.rs), and the
+running window in the `ui_basic` integration tests described in
+[architecture.md](../../gui/architecture.md) § "Testing". Those window-opening
+tests run the standalone `sfm-explorer` binary, so no automated test opens the
+window through `python -m sfmtool._explorer`.
 
 ## Non-goals
 
-The command does not build or locate the viewer anywhere other than the `PATH`;
-`pixi run gui` builds and runs it from a source checkout.
+The command does not run the viewer in the `sfm` process.

@@ -4,14 +4,15 @@ SfM Explorer, the sfmtool 3D viewer, is a native Rust application in the
 `sfm-explorer` crate. It opens a `winit` window, draws the 3D scene with `wgpu`,
 and draws its panels with `egui` inside the same frame, running its own event
 loop rather than eframe's. `pixi run gui` runs the crate's `sfm-explorer`
-binary; `sfm explorer` runs `launch-sfm-explorer`, a binary target of the
-`sfmtool-py` crate, as a subprocess found on `PATH`. Both call
-`sfm_explorer::run`. `lib.rs` owns the window and the event loop, `app.rs` runs
-each frame, `dock.rs` routes the panels, `scene_renderer/` owns the GPU passes
-and `state.rs` holds the application state. This spec records why the
-viewer is built on this stack, what each module is responsible for, the order
-of the render passes, how it is built and launched, its performance targets,
-what differs per platform, and how it is tested.
+binary; `sfm explorer` runs `python -m sfmtool._explorer` as a child process,
+which calls the viewer through `run_explorer` in the `sfmtool._sfmtool`
+extension. Both reach `sfm_explorer::run_with_args`. `lib.rs` owns the window
+and the event loop, `app.rs` runs each frame, `dock.rs` routes the panels,
+`scene_renderer/` owns the GPU passes and `state.rs` holds the application
+state. This spec records why the viewer is built on this stack, what each
+module is responsible for, the order of the render passes, how it is built and
+launched, its performance targets, what differs per platform, and how it is
+tested.
 
 For the user experience goals driving these choices, see
 [user-experience.md](user-experience.md).
@@ -389,11 +390,19 @@ pixi run cargo-check
 
 ### Python Integration
 
-The GUI runs as a standalone binary (`sfm-explorer`). It can be launched via
-`pixi run gui` or `sfm explorer` from the CLI. The `sfmtool-py` crate includes
-a `launch-sfm-explorer` binary, and the `sfm explorer` CLI command runs it as a
-subprocess, found on `PATH`. maturin builds only the extension module, so the
-wheel does not contain that binary; see
+The viewer is a library, `sfm_explorer`, with two entry points: `run`, which
+reads the process's command line, and `run_with_args`, which takes it as an
+argument. The crate's `sfm-explorer` binary calls `run`, and `pixi run gui`
+builds and runs that binary. The `sfmtool-py` crate exposes `run_with_args` to
+Python as `sfmtool._sfmtool.run_explorer`, so the viewer is part of the
+extension module in every wheel. `run_with_args` reports a failure as a
+`RunError` carrying a message and an exit status (2 for a command line it
+cannot act on, 1 for a viewer that could not start), and `run` is the only
+function that ends the process with it. `sfm explorer` runs the viewer in a
+child process, `python -m sfmtool._explorer`, because `winit` creates the
+viewer's event loop only on the process's main thread, on every platform, and
+only once per process, and the viewer sets process-wide state (the logger, and
+on Windows the DPI awareness); see
 [explorer-command.md](../cli/visualization/explorer-command.md).
 
 ---
@@ -465,10 +474,18 @@ For 10K+ cameras, async loading and an LRU texture cache are planned.
 - **DPI awareness**: `SetProcessDpiAwarenessContext` for per-monitor DPI
 - **Graphics backend**: DirectX 12 via wgpu
 
-### macOS (Planned)
+### macOS
 
-- Trackpad gestures via native NSEvent / egui's built-in `zoom_delta`
-- Metal backend via wgpu
+- **Graphics backend**: Metal via wgpu.
+- **Trackpad gestures**: no native handling of their own. A two-finger scroll
+  arrives through winit as a scroll, and a pinch through egui's built-in
+  `zoom_delta`, which the 3D viewport and Image Detail read.
+- **Event loop**: `winit` creates its event loop only on the process's main
+  thread on macOS, which is one reason `sfm explorer` runs the viewer in a child
+  process of its own.
+- **Testing**: the windowed `ui_basic` suite runs on macOS in the
+  `ui-test-macos` CI job, the same way as on Windows and Linux; see "Testing"
+  below. It needs no Accessibility (TCC) grant.
 
 ### Linux
 
@@ -476,9 +493,9 @@ For 10K+ cameras, async loading and an LRU texture cache are planned.
   the only backend the crate compiles in for this platform (`wgpu`'s features
   in `crates/sfm-explorer/Cargo.toml` name `dx12`, `vulkan` and `metal`), so
   there is nothing to fall back to: a machine carrying the Vulkan loader with
-  no ICD behind it — a bare CI runner is the usual one — panics on
-  `Failed to create wgpu surface` at startup rather than degrading to software
-  GL. Mesa's lavapipe is enough to run the viewer, and is what the
+  no ICD behind it — a bare CI runner is the usual one — exits with status 1
+  at startup, with "Could not create the window's GPU surface" or "Could not
+  find a GPU adapter for the window", rather than degrading to software GL. Mesa's lavapipe is enough to run the viewer, and is what the
   `ui-test-linux` CI job installs.
 - **Accessibility**: AT-SPI2 over D-Bus, published by AccessKit's Unix adapter,
   which egui-winit sets up. Unlike UI Automation and the AX API, this is not

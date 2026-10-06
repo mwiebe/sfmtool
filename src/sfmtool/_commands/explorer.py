@@ -1,7 +1,6 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-import shutil
 import subprocess
 import sys
 
@@ -13,6 +12,9 @@ import click
 # before the viewer is launched.
 DEFAULT_MCP_PORT = 8787
 
+# The module `sfm explorer` runs with `python -m` to start the viewer.
+VIEWER_MODULE = "sfmtool._explorer"
+
 
 @click.command()
 @click.option(
@@ -21,7 +23,9 @@ DEFAULT_MCP_PORT = 8787
     is_flag=False,
     flag_value=str(DEFAULT_MCP_PORT),
     default=None,
-    type=int,
+    # The viewer refuses an out-of-range port as well; checking it here gives
+    # the error as a Click usage error, before any child process is started.
+    type=click.IntRange(0, 65535),
     metavar="PORT",
     help=(
         "Host a Model Context Protocol endpoint on 127.0.0.1, so an agent can "
@@ -54,16 +58,26 @@ def explorer(mcp_port, no_default_layout, sfmr_files):
     panels, and a screenshot of the viewport. The window says so while it is
     live, in its title bar and in the Scene panel. See specs/gui/mcp-server.md.
     """
-    exe = shutil.which("launch-sfm-explorer")
-    if exe is None:
-        raise click.ClickException(
-            "launch-sfm-explorer executable not found. "
-            "Install sfmtool with binary support or build with: "
-            "pixi run cargo build --release -p sfmtool-py"
-        )
-
     args = [] if mcp_port is None else ["--mcp", str(mcp_port)]
     if no_default_layout:
         args.append("--no-default-layout")
-    result = subprocess.run([exe, *args, *sfmr_files])
+    result = subprocess.run(viewer_command([*args, *sfmr_files]))
     sys.exit(result.returncode)
+
+
+def viewer_command(viewer_args: list[str]) -> list[str]:
+    """The command line that runs the viewer with ``viewer_args``.
+
+    The viewer is in the ``sfmtool._sfmtool`` extension, so it runs in a child
+    of this same Python interpreter, through ``python -m sfmtool._explorer``.
+    It needs a process of its own: it takes over the process's main thread for
+    its window event loop, ``winit`` allows only one event loop per process, and
+    the viewer sets process-wide state (the logger, and on Windows the DPI
+    awareness) that should not carry over into this process.
+
+    ``-P`` keeps the current directory off the front of ``sys.path``, where
+    ``python -m`` would otherwise put it, so a ``sfmtool.py`` or ``sfmtool/``
+    in the directory the command is run from cannot shadow the installed
+    package.
+    """
+    return [sys.executable, "-P", "-m", VIEWER_MODULE, *viewer_args]

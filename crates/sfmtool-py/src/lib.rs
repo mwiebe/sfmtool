@@ -4,7 +4,8 @@
 //! Python bindings for sfmtool core functionality.
 //!
 //! Exposes file I/O (`.sfmr`, `.sift`, and COLMAP formats), geometric types,
-//! feature matching, alignment, optical flow, and GUI viewer to Python via PyO3.
+//! feature matching, alignment, optical flow, and the GUI viewer to Python via
+//! PyO3.
 //!
 //! Every binding lives on a PyO3 submodule (`_sfmtool.geometry`,
 //! `_sfmtool.io`, `_sfmtool.sift`, `_sfmtool.reconstruction`,
@@ -15,10 +16,12 @@
 //! objects report the public location in tracebacks, IPython, and Sphinx.
 //! The only root-level registrations are `build_profile` (build
 //! introspection of this extension), `ProgressCounter` (cross-cutting
-//! progress instrumentation shared by patch and matching kernels) and
+//! progress instrumentation shared by patch and matching kernels),
 //! `THUMBNAIL_SIZE` (the edge both on-disk formats pin, which the Python
-//! extractors resize to); all are re-exported explicitly by
-//! `sfmtool/__init__.py`. That file additionally
+//! extractors resize to) and `run_explorer` (the viewer, which `sfm explorer`
+//! runs in a child process through `sfmtool/_explorer.py`). The first three
+//! are re-exported explicitly by `sfmtool/__init__.py`; `run_explorer` is not.
+//! `sfmtool/__init__.py` additionally
 //! re-exports each submodule wholesale (`from sfmtool._sfmtool.<sub> import
 //! *`), so the flat `sfmtool.*` surface still exists — it is now assembled on
 //! the Python side from named submodules rather than registered flat here.
@@ -170,11 +173,49 @@ fn build_profile() -> &'static str {
     }
 }
 
+/// Run SfM Explorer, the 3D viewer, with the command line `args` (without a
+/// program name), and return its exit status when its window closes: 0 when
+/// the viewer ran and its window was closed, or `--help` printed the usage.
+///
+/// This is how `sfm explorer` runs the viewer: it starts
+/// `python -P -m sfmtool._explorer` as a child process, which calls this
+/// function with its own arguments and exits with the status returned. It does
+/// not end the process. When the viewer cannot run it prints the error to
+/// stderr and returns the error's status: 2 when `args` does not parse (an
+/// unknown option, or `--mcp=` with something that is not a port number) or
+/// asks for `--mcp` in a build without the `mcp` feature, and 1 when its MCP
+/// endpoint cannot bind or its window cannot be created. See
+/// `sfm_explorer::run_with_args`.
+///
+/// Call it on the main thread, and once per process: `winit` creates the
+/// window's event loop only on the main thread, on every platform, and panics
+/// when called from another thread; and only once per process, so a second
+/// call returns 1. The viewer also sets process-wide state, the
+/// `env_logger` logger and on Windows the DPI awareness, which is why
+/// `sfm explorer` runs it in a process of its own.
+///
+/// The GIL is released while the viewer runs.
+#[pyfunction]
+fn run_explorer(py: Python<'_>, args: Vec<String>) -> i32 {
+    match py.detach(|| sfm_explorer::run_with_args(args)) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error}");
+            error.exit_status()
+        }
+    }
+}
+
 /// Python module for sfmtool core functionality.
 #[pymodule]
 fn _sfmtool(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Build introspection
     m.add_function(wrap_pyfunction!(build_profile, m)?)?;
+
+    // The viewer. Root-level because it is not a binding of any one area of
+    // the library; it is the program `sfm explorer` runs in a child process
+    // (see `sfmtool/_explorer.py`). Not re-exported by `sfmtool/__init__.py`.
+    m.add_function(wrap_pyfunction!(run_explorer, m)?)?;
 
     // Geometric value types: camera intrinsics, quaternions, rigid + SE3 transforms.
     helpers::install_submodule(m, "sfmtool.geometry", geometry::register)?;

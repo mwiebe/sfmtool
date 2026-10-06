@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The command line:
-//! `sfm-explorer [--mcp [PORT]] [--no-default-layout] [--demo] [path.sfmr ...]`.
+//! `[--mcp [PORT]] [--no-default-layout] [--demo] [path.sfmr ...]`, after the
+//! program name, which differs between the `sfm-explorer` binary and
+//! `python -m sfmtool._explorer` and so is not named in the help or errors.
 //!
 //! Hand-rolled rather than `clap`, because there are three flags and a list of
-//! paths. A dozen lines keeps the binary's dependency tree as it was; reach for
+//! paths. A dozen lines keeps the viewer's dependency tree as it was; reach for
 //! an argument parser if this grows options that take values, not before.
 
 use std::path::PathBuf;
@@ -39,10 +41,10 @@ pub(crate) struct Args {
 
 /// What `--help` prints.
 pub(crate) const USAGE: &str = "\
-sfm-explorer — the SfM Tool 3D reconstruction viewer
+SfM Explorer — the SfM Tool 3D reconstruction viewer
 
 USAGE:
-    sfm-explorer [OPTIONS] [FILE.sfmr ...]
+    [OPTIONS] [FILE.sfmr ...]
 
 Every file given is loaded as its own node in the scene graph, so several
 reconstructions can be compared side by side in one 3D space.
@@ -51,7 +53,9 @@ OPTIONS:
     --mcp [PORT]    Host a Model Context Protocol endpoint on 127.0.0.1, so an
                     agent can drive this window. Off unless asked for. PORT
                     defaults to 8787; 0 takes an ephemeral port, reported on
-                    stdout at startup.
+                    stdout at startup. PORT is 0 to 65535, and a number after
+                    --mcp is always read as PORT: write ./8080 for a file
+                    named 8080, or put the files first.
     --no-default-layout
                     Start with the stock panel grid, ignoring any layout saved
                     at ~/.sfm-explorer-default-layout.json.
@@ -66,8 +70,9 @@ OPTIONS:
 /// `--mcp` takes its port as either `--mcp=PORT` or a following bare number.
 /// The following-argument form has to look at what comes next, because
 /// `--mcp scene.sfmr` is the common invocation and means the default port and a
-/// file — so a next argument that is not a port is left alone rather than
-/// consumed.
+/// file — so a next argument that is not all digits is left alone rather than
+/// consumed. One that is all digits is the port, and an error if it does not
+/// fit in one, rather than a file named `70000`.
 pub(crate) fn parse(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut args = Args::default();
     let mut argv = argv.into_iter().peekable();
@@ -77,24 +82,22 @@ pub(crate) fn parse(argv: impl IntoIterator<Item = String>) -> Result<Args, Stri
             "--no-default-layout" => args.no_default_layout = true,
             "--demo" => args.demo = true,
             "--mcp" => {
-                let port = match argv.peek().and_then(|next| next.parse::<u16>().ok()) {
-                    Some(port) => {
-                        argv.next();
-                        port
-                    }
+                // A next word of digits is a port, and one too large to be a
+                // port is an error rather than a file name: `--mcp 70000`
+                // means a port, and binding 8787 instead would be wrong.
+                let port = match argv.next_if(|next| is_number(next)) {
+                    Some(value) => value.parse::<u16>().map_err(|_| port_error(&value))?,
                     None => DEFAULT_MCP_PORT,
                 };
                 args.mcp_port = Some(port);
             }
             other => {
                 if let Some(value) = other.strip_prefix("--mcp=") {
-                    let port = value.parse::<u16>().map_err(|_| {
-                        format!("--mcp wants a port number from 0 to 65535, not {value:?}.")
-                    })?;
+                    let port = value.parse::<u16>().map_err(|_| port_error(value))?;
                     args.mcp_port = Some(port);
                 } else if other.starts_with('-') && other != "-" {
                     return Err(format!(
-                        "sfm-explorer has no option {other:?}. Run --help for what it takes."
+                        "SfM Explorer has no option {other:?}. Run --help for what it takes."
                     ));
                 } else {
                     args.paths.push(PathBuf::from(other));
@@ -103,6 +106,20 @@ pub(crate) fn parse(argv: impl IntoIterator<Item = String>) -> Result<Args, Stri
         }
     }
     Ok(args)
+}
+
+/// Whether the word after a bare `--mcp` is meant as its port: one or more
+/// ASCII digits, after an optional `+`, whether or not the number fits in a
+/// port. The `+` is accepted because `u16`'s parser accepts it, so `--mcp +80`
+/// and `--mcp=+80` both mean port 80.
+fn is_number(word: &str) -> bool {
+    let digits = word.strip_prefix('+').unwrap_or(word);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The error for a value given as `--mcp`'s port that is not one.
+fn port_error(value: &str) -> String {
+    format!("--mcp wants a port number from 0 to 65535, not {value:?}.")
 }
 
 #[cfg(test)]
