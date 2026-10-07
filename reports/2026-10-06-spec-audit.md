@@ -497,6 +497,7 @@ for sfmr (11), sift (1), camrig (2) and kdf (3).
   - Code bug: an explicit placement with fov outside 5-160 moves the camera (`view.rs:257-282`), then refuses (`view.rs:283,505`). Spec 1541 is right. Every `set_view` also ends a held Move Camera lock before validating (`mod.rs:2288-2290`); say which is intended.
     > _Status (2026-10-06): **Done** for the field of view — `view::place` checks it before writing anything, so a refused placement leaves the view as it was; **Needs decision** for the lock — code, comment and spec now agree that a leaving form ends a held Move Camera lock before it runs, refused or not, because the commit reads the pose the viewport is still holding; keeping the lock on a refusal would need every form split into a check and an apply (`point` itself refuses under a held lock), branch `spec-fix-1006-07-mcp-setview-fov-range`._
   - Code bug: a background edit ending in `Finished::NoChange` (`background/mod.rs:1043`) replies `changed: true` (`mcp/edit.rs:584-590`), against spec 3073/3276 and `mcp/edit.rs:22-24`.
+    > _Status (2026-10-07): **Done** — a background edit that ends in `Finished::NoChange` now answers `changed: false` at the version the node still stands at: `FinishedTask` records whether the run pushed a version and `background_reply` reads it; test in `mcp/tests/edit.rs`, and `background-tasks.md`, the prune and add-to-tracks sections of `mcp-server.md` and § "The wire" of `bench.md` say so, branch `spec-fix-1006-08-mcp-nochange`._
   - Spec 2725-2726, 2949, 3018, 3064, 3181, 3230 and `catalog/edit.rs:121,145,244,307` say five edits "renumber nothing"; with pending point edits each calls `edited.materialize()`, which closes deleted slots (`edited.rs:1162-1175`; `state/edits.rs:1379-1386`). Code right; after `delete_point` an agent reuses stale indexes.
   - Security item 4 (4435-4436) "No tool in this surface saves an `.sfmr`" is false: `save_reconstruction` (`catalog/edit.rs:50`), as spec 203 and 223 say.
   - Panel counts: `Tab::ALL` has 9 (`layout.rs:191`); `catalog/viewer.rs:509` and `mcp/layout.rs:107` say seven, spec 2470/2486/5138 say eight.
@@ -827,6 +828,7 @@ Read 2026-09-26; open items above.
        > _Status (2026-10-06): **Done** — the field of view is checked before the camera moves, branch `spec-fix-1006-07-mcp-setview-fov-range`._
      - A background edit that changes nothing still replies `changed: true`
        (`mcp/edit.rs:584-590`).
+       > _Status (2026-10-07): **Done** — a background edit that ends in `Finished::NoChange` now answers `changed: false` at the version the node still stands at: `FinishedTask` records whether the run pushed a version and `background_reply` reads it; test in `mcp/tests/edit.rs`, and `background-tasks.md`, the prune and add-to-tracks sections of `mcp-server.md` and § "The wire" of `bench.md` say so, branch `spec-fix-1006-08-mcp-nochange`._
      (mcp-server)
    - **Smaller code-side text:**
      - The refit report labels `fy/fx` as "fx/fy aspect"
