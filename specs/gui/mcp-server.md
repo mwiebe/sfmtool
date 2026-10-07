@@ -1504,7 +1504,15 @@ The absolute forms (everything above but the last three examples) are
 **exclusive**, one per call, and the check is up front. These are
 *intents* rather than representations: a call carrying both `fit` and `position`
 has no answer, and guessing one would move the camera somewhere the agent did
-not ask for. The relative forms are covered in § "The relative forms" below. The look-at form takes `up` as the roll, defaulting to the current
+not ask for. The relative forms are covered in § "The relative forms" below.
+`fov_short_axis_deg` combines only with the explicit camera and the relative
+forms, or is sent alone. Beside `fit`, `look_through`, `exit_camera_view`,
+`point` or `bench_observation` it is refused, naming the form: a fit, an exit
+and a point keep the field of view, and a look-through and a bench observation
+set it to fit the camera image they look through (a fisheye camera image, and a
+bench observation entered from camera view, keep the current one), so a width
+sent with any of them would be dropped.
+The look-at form takes `up` as the roll, defaulting to the current
 `world_up`; a different one re-rolls the view exactly as `tilt` does. The exact
 form restores a view verbatim, which is what `orientation_wxyz` and
 `target_distance` are reported for.
@@ -1552,8 +1560,6 @@ the focused item. Each gesture's own code computes where the view ends: `point`
 starts the gesture's transition and lands it at once
 (`Viewer3D::finish_transition`), and `bench_observation` assigns the same end
 state its animated entry eases toward (`Viewer3D::jump_through_toward_feature`).
-Neither changes the field of view, so a `fov_short_axis_deg` beside either is
-refused.
 
 `fit` and `look_through` go through the same paths the keyboard and
 double-click use (`ViewportCamera::compute_fit` over `scene::FitPoints`,
@@ -4965,9 +4971,12 @@ where a test hands no host over.
   selects the origin, and `unfocus_bench_item` selects it too.
 - **`set_view` aims at a point and at a bench observation**: `point` puts the
   point's world position at the orbit target, leaves camera view and moves no
-  selection, and is refused beside `fov_short_axis_deg` or a second form;
+  selection, and is refused beside a second form;
   `bench_observation` looks through the camera image the observation is in,
-  and an index past the end of the list is refused.
+  and an index past the end of the list is refused. `fov_short_axis_deg` beside
+  `fit`, `look_through`, `exit_camera_view`, `point` or `bench_observation` is
+  refused naming the form, while alone, with a piece of the explicit camera or
+  with a relative form it is accepted.
 - **The relative forms land where their axes and signs say**: `move` goes
   along the level axes from a camera looking down, `turn` with a positive yaw
   faces left and with a negative yaw and a positive pitch faces right and up,
