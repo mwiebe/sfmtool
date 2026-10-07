@@ -8,9 +8,10 @@
 - the sampler is chosen per view from the Jacobian's anisotropy, so an oblique or distorted view keeps the detail along its less compressed axis (Part 3). That step is built, with the threshold `a = 1.5`;
 - the `.sfmr` file stores each observation's self-similarity radius, measured on its own `R×R` render, as a measurement in grid px. It does not store the derived sharpness or the final weight. Every operation that re-renders a point's bitmap reads the stored radii, and recomputes the geometric factors from the file's current geometry (Part 7);
 - the self-similarity reading summarises its region by an ellipse, whose semi-major axis is the radius, in place of the contour's furthest point, the slide and the reach (Part 2). That step is built;
-- the self-similarity radius the weights read is the reading of exactly the `R×R` tile, with no pixels from outside it (Part 1). That prerequisite is built.
+- the self-similarity radius the weights read is the reading of exactly the `R×R` tile, with no pixels from outside it (Part 1). That prerequisite is built;
+- the per-view measurements of Part 4 that the reference view needs are built and reported by the bench for every track it evaluates: each view's coverage, clipped share, viewing angle and tilt direction, its median ZNCC with the other views, and its agreement over each ninth of the tile with the cell deficit read from it. So is the reference-view rule of Part 5, which picks one view from those readings and says, for each other view, which test turned it away. Track View marks the pick and shows the readings, and the wire and the Python bindings carry them, as [core/patch/reference-view.md](../core/patch/reference-view.md) describes. The rule reports a view; it does not change how the patch bitmap is computed (Part 5).
 
-Not decided: the functional forms of the weights, the blur used for matched-bandwidth scoring, and the order the consumers adopt it in. See [Open questions](#open-questions).
+Not decided: whether the patch bitmap is the reference view's tile, a mean of a few of the best views, or a weighted mean (an experiment is measuring the first two against each other); the functional forms of the weights, the blur used for matched-bandwidth scoring, and the order the consumers adopt it in. See [Open questions](#open-questions).
 
 Amends:
 - [core/patch/patch-keypoint-localization.md](../core/patch/patch-keypoint-localization.md): the congealing consensus
@@ -18,6 +19,7 @@ Amends:
 - [core/patch/patch-normal-refinement.md](../core/patch/patch-normal-refinement.md): the weighted consensus
 - [core/bench/editable-track.md](../core/bench/editable-track.md): the ZNCC bars (`min_zncc`, whole and middle), re-measured against the matched-bandwidth score
 - [formats/sfmr-file-format.md](../formats/sfmr-file-format.md): per-observation self-similarity columns in `tracks/`
+- [core/patch/reference-view.md](../core/patch/reference-view.md): the stored bitmap computed from the reference view, or from a few of the best views, in place of the fused mean (Part 5)
 
 ## Purpose
 
@@ -93,6 +95,8 @@ Every kernel that renders a view's tile, the bench's evaluation, the member gate
 
 ## Part 4: what each view can contribute
 
+The measurements the reference view reads are built: coverage, the clipped share, the viewing angle and tilt direction, and the ZNCC between observation bitmaps over the whole tile and per ninth ([core/patch/reference-view.md](../core/patch/reference-view.md)). Storing them (Part 7), and the brightness and colour readings, are not.
+
 A sharper template needs to know, for each view, how much detail its tile carries and how well it lines up with the others. This part takes stock of what we can measure on the views' bitmaps that serves that goal, and notes what else each measurement serves. A measurement is then made once, stored (Part 7), and read by every consumer. The weights (Part 5) are one of those consumers.
 
 ### What we can measure
@@ -128,7 +132,7 @@ The zoom and the footprint it gives (Part 3) also serve:
 
 ### How much the tile depends on the patch model: the viewing angle
 
-`θ_v` is the angle between the view's ray through the observation's keypoint and the patch's outward normal: `cos θ_v = −n · d̂`, with `d̂` the unit ray from the camera centre through the keypoint. Because the render re-anchors the patch so its centre projects onto the keypoint, this is also the ray to the rendered patch's centre. Computing `d̂` unprojects the keypoint through the camera model.
+`θ_v` is the angle between the view's ray through the observation's keypoint and the patch's outward normal: `cos θ_v = −n · d̂`, with `d̂` the unit ray from the camera centre through the keypoint. Because the render re-anchors the patch so its centre projects onto the keypoint, this is also the ray to the rendered patch's centre. Computing `d̂` unprojects the keypoint through the camera model. Where the keypoint's ray does not meet the patch's plane in front of the camera, the render cannot re-anchor the patch, and the built reading is the angle at the patch's centre instead; [core/patch/reference-view.md](../core/patch/reference-view.md) § "A keypoint whose ray misses the patch's plane" describes the case.
 
 **Its two axes.** The **tilt direction** `t̂_v` is `d̂` projected into the patch plane and normalized, with its angle `α_v` in the patch's u, v frame. The view's foreshortening of the patch is an ellipse:
 - along `t̂_v`, its minor axis, the view compresses the patch by `cos θ_v`;
@@ -157,6 +161,10 @@ Obliquity and lens distortion both make the Jacobian anisotropic. For a small pa
 So the weights read obliquity only from the angle, never from the Jacobian's anisotropy, and read resolution only from the footprint and the radius, never from the angle. That keeps an oblique view from being penalised twice.
 
 ## Part 5: computing the patch bitmap
+
+**Built: the reference-view rule.** The rule that picks the single reference view is built and runs in every bench evaluation, as [core/patch/reference-view.md](../core/patch/reference-view.md) describes: candidates with coverage of at least 0.99, a clipped share of at most 0.05, a viewing angle of at most 65° and no ninth of the tile more than 0.3 below the track's typical agreement there; of those within 0.15 of the best candidate's median pairwise ZNCC, the one with the smallest self-similarity radius; the 65° angle limit, the cell check and then coverage and clipping dropped in turn when no view passes, with a view at 90° or more, which sees the patch edge on or from behind, never a candidate. It was tuned against hand picks on 77 tracks. **Still open: how the bitmap is computed.** Nothing yet takes the bitmap from the pick. An experiment is measuring whether a single reference or a mean of a few of the best views makes the better template, and the fuse and the other consumers below keep the weighted consensus until it decides.
+
+The built rule reads neither of two signals the leading candidate below lists. It reads no zoom: it judges sharpness by the self-similarity radius alone, measured on each view's own tile at the patch resolution. And it reads no brightness or colour: a gate on how typical a view's brightness and colour are of the track was tried during tuning and left out, because it turned away views the hand picks chose.
 
 The pipeline computes the patch bitmap today as a weighted mean of the views, a consensus. The measurements in Part 4 rank the views by what they can contribute, which serves other ways to compute it as well.
 
