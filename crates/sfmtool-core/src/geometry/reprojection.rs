@@ -31,6 +31,12 @@ use crate::CameraIntrinsics;
 ///   value (e.g. `1e6`) to keep it finite for a least-squares residual.
 ///
 /// Returns a flat `Vec` of length `n_obs * 2` (`dx, dy` per observation).
+///
+/// # Panics
+///
+/// If `obs_pt.len()` differs from `obs_img.len()`, if `uv.len()` is not
+/// `2 * obs_img.len()`, or if an index in `obs_img` / `obs_pt` is out of range
+/// for `quats_wxyz` or `translations` / `points`.
 #[allow(clippy::too_many_arguments)]
 pub fn reprojection_residuals(
     cam: &CameraIntrinsics,
