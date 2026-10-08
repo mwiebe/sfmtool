@@ -26,7 +26,7 @@ use super::search::Checked;
 use super::KdForestParams;
 use super::{KdForest, Neighbor};
 use crate::features::kdforest::{
-    KdfError, KdfImageTable, KdfIoStats, KdfSiftSources, KdfWriteOptions, LazyKdForestOptions,
+    KdfError, KdfImageTable, KdfIoStats, KdfOpenOptions, KdfSiftSources, KdfWriteOptions,
 };
 use crate::progress::Progress;
 
@@ -183,7 +183,7 @@ where
     /// that chunk landed. The resulting point order is a valid leaf order but not
     /// necessarily the byte-for-byte order the original build produced; leaf
     /// membership, and therefore every query result, is identical either way.
-    pub fn read_kdf(path: &Path, options: LazyKdForestOptions) -> Result<Self, KdfError> {
+    pub fn read_kdf(path: &Path, options: KdfOpenOptions) -> Result<Self, KdfError> {
         let file = KdfFile::<S>::open(path, options)?;
         let n_points = file.len();
         let dim = file.dim();
@@ -348,7 +348,7 @@ impl<S> LazyKdForest<S>
 where
     S: ForestScalar + KdfScalar,
 {
-    pub fn open(path: &Path, options: LazyKdForestOptions) -> Result<Self, KdfError> {
+    pub fn open(path: &Path, options: KdfOpenOptions) -> Result<Self, KdfError> {
         let worker_count = options.query_workers;
         let file = KdfFile::open(path, options)?;
         let workers = rayon::ThreadPoolBuilder::new()

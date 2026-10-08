@@ -18,7 +18,7 @@ use sfmtool_core::camera::image::{ImageU8, ImageU8Pyramid};
 use sfmtool_core::features::cluster_match::{
     background_floor_clusters_from_neighbors, BackgroundFloorParams, NeighborTable,
 };
-use sfmtool_core::features::kdforest::{KdForestParams, LazyKdForestOptions, LazyKdForestU8};
+use sfmtool_core::features::kdforest::{KdForestParams, KdfOpenOptions, LazyKdForestU8};
 use sfmtool_core::patch::cluster_refine::{
     refine_cluster_patches, warp_consistency_residuals, ClusterRefineParams, FeatureGeometry,
     MemberStatus,
@@ -168,7 +168,7 @@ fn the_file_holds_what_the_two_cli_steps_make_from_the_same_index() {
         starts.push(starts.last().unwrap() + count);
     }
     let index_path = state.sift_index(id).expect("built").path.clone();
-    let forest = LazyKdForestU8::open(&index_path, LazyKdForestOptions::default()).unwrap();
+    let forest = LazyKdForestU8::open(&index_path, KdfOpenOptions::default()).unwrap();
     let (indexes, distances_sq) = forest.self_join_with_distances(11, 128, None).unwrap();
     let params = BackgroundFloorParams {
         d: 10,

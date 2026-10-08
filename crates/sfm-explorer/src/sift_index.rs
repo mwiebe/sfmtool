@@ -23,9 +23,8 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 use sfmtool_core::features::kdforest::{
-    FeatureGeometry, FeatureOrigin, KdForestParams, KdForestU8, KdfError, KdfSiftSources,
-    KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestOptions,
-    LazyKdForestU8,
+    FeatureGeometry, FeatureOrigin, KdForestParams, KdForestU8, KdfError, KdfOpenOptions,
+    KdfSiftSources, KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestU8,
 };
 use sfmtool_core::progress::Progress;
 use sfmtool_core::{progress_note, SfmrReconstruction};
@@ -245,7 +244,7 @@ impl AppState {
         let node = self
             .node(id)
             .ok_or_else(|| crate::state::NOT_LOADED.to_string())?;
-        let forest = LazyKdForestU8::open(&path, LazyKdForestOptions::default())
+        let forest = LazyKdForestU8::open(&path, KdfOpenOptions::default())
             .map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         let stale = staleness(&forest, node.recon(), &path);
         let label = node.label.clone();
@@ -504,7 +503,7 @@ pub(crate) fn build_index(plan: BuildPlan, progress: &Progress<'_>) -> Result<Bu
         }
     }
 
-    let opened = LazyKdForestU8::open(&path, LazyKdForestOptions::default()).map_err(|e| {
+    let opened = LazyKdForestU8::open(&path, KdfOpenOptions::default()).map_err(|e| {
         Stopped::Failed(format!(
             "Wrote {} and then could not open it: {e}",
             path.display()

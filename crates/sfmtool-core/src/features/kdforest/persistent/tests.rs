@@ -4,8 +4,8 @@
 use super::*;
 use crate::features::kdforest::KdForestParams;
 
-fn options() -> LazyKdForestOptions {
-    LazyKdForestOptions {
+fn options() -> KdfOpenOptions {
+    KdfOpenOptions {
         cache_bytes: 16 << 10,
         max_in_flight_bytes: 16 << 10,
         max_chunk_bytes: 16 << 10,
@@ -61,7 +61,7 @@ fn shared_reads_preserve_ties_and_reject_invalid_schedules() {
             &Progress::none(),
         )
         .unwrap();
-    let lazy = LazyKdForestU8::open(&path, LazyKdForestOptions::default()).unwrap();
+    let lazy = LazyKdForestU8::open(&path, KdfOpenOptions::default()).unwrap();
     let queries = vec![7u8; 3 * 4];
     let expected = forest.search_batch_with_distances(&queries, 3, 5, 128, None);
     assert_eq!(
@@ -211,7 +211,7 @@ fn a_forest_reloaded_from_a_file_answers_identically() {
                 &Progress::none(),
             )
             .unwrap();
-        let reloaded = KdForest::<u8>::read_kdf(&path, LazyKdForestOptions::default()).unwrap();
+        let reloaded = KdForest::<u8>::read_kdf(&path, KdfOpenOptions::default()).unwrap();
 
         assert_eq!(reloaded.len(), forest.len());
         assert_eq!(reloaded.dim(), forest.dim());
@@ -321,7 +321,7 @@ fn concurrent_small_cache_eviction_completes_with_parity() {
     let lazy = std::sync::Arc::new(
         LazyKdForestU8::open(
             &path,
-            LazyKdForestOptions {
+            KdfOpenOptions {
                 cache_bytes: 700,
                 max_in_flight_bytes: 700,
                 max_chunk_bytes: 700,

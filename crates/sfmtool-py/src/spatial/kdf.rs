@@ -31,8 +31,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use sfmtool_core::features::kdforest::{
-    kdf_summary, FeatureOrigin, KdfError, KdfSiftSources, KdfWorkspaceContents,
-    KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestOptions, LazyKdForestU8,
+    kdf_summary, FeatureOrigin, KdfError, KdfOpenOptions, KdfSiftSources, KdfWorkspaceContents,
+    KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestU8,
 };
 use sfmtool_core::progress::Progress;
 
@@ -241,7 +241,7 @@ impl PyLazyKdForest {
         max_leaf_features: Option<usize>,
         query_workers: Option<usize>,
     ) -> PyResult<Self> {
-        let mut options = LazyKdForestOptions::default();
+        let mut options = KdfOpenOptions::default();
         if let Some(v) = cache_bytes {
             options.cache_bytes = v;
         }
@@ -847,7 +847,7 @@ fn read_kdf(
     max_compressed_bytes: Option<usize>,
     max_metadata_bytes: Option<usize>,
 ) -> PyResult<super::kdforest::PyKdForest> {
-    let mut options = LazyKdForestOptions::default();
+    let mut options = KdfOpenOptions::default();
     if let Some(v) = cache_bytes {
         options.cache_bytes = v;
         options.max_in_flight_bytes = v;
@@ -896,8 +896,7 @@ fn kdf_file_summary<'py>(
     path: PathBuf,
     max_metadata_bytes: Option<usize>,
 ) -> PyResult<Py<PyDict>> {
-    let limit =
-        max_metadata_bytes.unwrap_or_else(|| LazyKdForestOptions::default().max_metadata_bytes);
+    let limit = max_metadata_bytes.unwrap_or_else(|| KdfOpenOptions::default().max_metadata_bytes);
     let summary = py.detach(|| kdf_summary(&path, limit)).map_err(to_py_err)?;
 
     let d = PyDict::new(py);
@@ -949,10 +948,7 @@ fn kdf_file_summary<'py>(
 fn verify_kdf<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Py<PyDict>> {
     let verified = py
         .detach(|| {
-            sfmtool_core::features::kdforest::verify_kdf::<u8>(
-                &path,
-                LazyKdForestOptions::default(),
-            )
+            sfmtool_core::features::kdforest::verify_kdf::<u8>(&path, KdfOpenOptions::default())
         })
         .map_err(to_py_err)?;
     verification_dict(py, verified)
@@ -979,10 +975,7 @@ fn verify_kdf<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Py<PyDict>> {
 fn verify_sift_sources<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Py<PyDict>> {
     let verified = py
         .detach(|| {
-            sfmtool_core::features::kdforest::verify_sift_sources(
-                &path,
-                LazyKdForestOptions::default(),
-            )
+            sfmtool_core::features::kdforest::verify_sift_sources(&path, KdfOpenOptions::default())
         })
         .map_err(to_py_err)?;
     verification_dict(py, verified)

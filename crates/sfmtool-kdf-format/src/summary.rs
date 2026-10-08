@@ -192,7 +192,7 @@ fn section_of(name: &str) -> &'static str {
 /// defeat one of the uses — finding out what an unfamiliar file contains.
 ///
 /// `max_metadata_bytes` bounds the one payload it does decode, matching the
-/// limit [`crate::LazyKdForestOptions`] applies at open.
+/// limit [`crate::KdfOpenOptions`] applies at open.
 ///
 /// # Example
 ///

@@ -9,8 +9,8 @@ use rand::{RngExt, SeedableRng};
 
 use super::*;
 use crate::features::kdforest::{
-    KdForestParams, KdForestU8, KdfSiftSources, KdfWorkspaceContents, KdfWorkspaceMetadata,
-    KdfWriteOptions, LazyKdForestOptions, LazyKdForestU8,
+    KdForestParams, KdForestU8, KdfOpenOptions, KdfSiftSources, KdfWorkspaceContents,
+    KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestU8,
 };
 use crate::progress::Progress;
 
@@ -910,7 +910,7 @@ fn the_two_forests_answer_identically() {
             &Progress::none(),
         )
         .unwrap();
-    let lazy = LazyKdForestU8::open(&path, LazyKdForestOptions::default()).unwrap();
+    let lazy = LazyKdForestU8::open(&path, KdfOpenOptions::default()).unwrap();
 
     let eager = constellation_query(
         &forest,

@@ -40,7 +40,7 @@ pub struct KdfWriteOptions {
     pub origin_block_rows: usize,     // default: 131072 (two u32 columns = 1 MiB)
     pub replace_existing: bool,       // default: false, so a destination that exists is refused
 }
-pub struct LazyKdForestOptions {
+pub struct KdfOpenOptions {
     pub max_address_map_bytes: usize, // default: 768 MiB, 5 bytes a feature
     pub max_leaf_features: usize,     // default: 1,048,576
     pub cache_bytes: usize,           // default: 256 MiB decoded cache
@@ -63,11 +63,11 @@ impl<S: KdfScalar> KdForest<S> {
                              descriptor_order: Option<&[u32]>,
                              progress: &Progress<'_>)
         -> Result<(), KdfError>;
-    pub fn read_kdf(path: &Path, options: LazyKdForestOptions)
+    pub fn read_kdf(path: &Path, options: KdfOpenOptions)
         -> Result<Self, KdfError>;
 }
 impl<S: KdfScalar> LazyKdForest<S> {
-    pub fn open(path: &Path, options: LazyKdForestOptions)
+    pub fn open(path: &Path, options: KdfOpenOptions)
         -> Result<Self, KdfError>;
     pub fn search(&self, query: &[S], k: usize, max_leaf_checks: usize,
                   max_dist: Option<f32>) -> Result<Vec<Neighbor>, KdfError>;
@@ -161,7 +161,7 @@ Illustrative usage, with a file built from the same in-memory index:
 ```rust
 use sfmtool_core::features::kdforest::{
     KdForestU8, KdForestParams, KdfWriteOptions,
-    LazyKdForestU8, LazyKdForestOptions,
+    LazyKdForestU8, KdfOpenOptions,
 };
 use sfmtool_core::progress::Progress;
 let features = vec![0u8, 0, 10, 10, 1, 1];
@@ -178,9 +178,9 @@ they accept neutral trees/chunks and expose no ANN algorithm. Those APIs stay
 storage-specific rather than forming a general plugin surface.
 
 ```rust
-pub fn verify_kdf<S: KdfScalar>(path: &Path, options: LazyKdForestOptions)
+pub fn verify_kdf<S: KdfScalar>(path: &Path, options: KdfOpenOptions)
     -> Result<Verification, KdfError>;
-pub fn verify_sift_sources(path: &Path, options: LazyKdForestOptions)
+pub fn verify_sift_sources(path: &Path, options: KdfOpenOptions)
     -> Result<Verification, KdfError>;
 pub fn kdf_summary(path: &Path, max_metadata_bytes: usize)
     -> Result<KdfSummary, KdfError>;

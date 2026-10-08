@@ -50,12 +50,12 @@ fn chunk_shapes_cannot_understate_admission_bytes() {
         &Progress::none(),
     )
     .unwrap();
-    let file = KdfFile::<u8>::open(&path, LazyKdForestOptions::default()).unwrap();
+    let file = KdfFile::<u8>::open(&path, KdfOpenOptions::default()).unwrap();
     let mut metadata: Metadata =
         serde_json::from_value(serde_json::to_value(&file.metadata).unwrap()).unwrap();
     metadata.trees[0].chunks[0].decoded_bytes -= 1;
-    let error = validate_metadata::<u8>(&metadata, &file.hashes, &LazyKdForestOptions::default())
-        .unwrap_err();
+    let error =
+        validate_metadata::<u8>(&metadata, &file.hashes, &KdfOpenOptions::default()).unwrap_err();
     assert!(
         matches!(error, KdfError::InvalidFormat(ref message) if message.contains("disagree with its shape"))
     );
@@ -97,7 +97,7 @@ fn concurrent_positional_reads_and_truncation() {
 #[ignore = "set KDF_PROFILE_PATH to a u8 file; run in release mode"]
 fn profile_corpus_misses() {
     let path = std::env::var("KDF_PROFILE_PATH").expect("KDF_PROFILE_PATH");
-    let file = KdfFile::<u8>::open(Path::new(&path), LazyKdForestOptions::default()).unwrap();
+    let file = KdfFile::<u8>::open(Path::new(&path), KdfOpenOptions::default()).unwrap();
     let corpus = &file.corpus;
     let (rows, blocks) = file.descriptor_block_shape();
     let mut totals = [std::time::Duration::ZERO; 5];
@@ -140,7 +140,7 @@ fn profile_corpus_misses() {
     for mode in [0, 1, 2] {
         let reader = KdfFile::<u8>::open(
             Path::new(&path),
-            LazyKdForestOptions {
+            KdfOpenOptions {
                 cache_bytes: 16 << 20,
                 query_workers: if mode == 0 { 1 } else { 4 },
                 ..Default::default()
