@@ -244,6 +244,7 @@ should read it as a claim.
    - Current: "This document details how Blender implements precision trackpad/touchpad navigation in the viewport on Windows."
    - Problem: says what, not why it is in this repository.
    - Proposed: *"This note records how Blender reads precision-touchpad gestures on Windows through DirectManipulation, as background for SfM Explorer's own touchpad handling in [windows-precision-touchpad.md](../gui/windows-precision-touchpad.md)."*
+   > _Status (2026-10-07): **Done** — the opening now says the note records how Blender reads precision-touchpad gestures through DirectManipulation and turns them into viewport pan and zoom, as background for SfM Explorer's touchpad handling, and links `gui/windows-precision-touchpad.md`; that spec already linked back to the note, branch `spec-fix-1006-36-opening-blender`._
 5. **`docs/index.md:5`** (landing page, lower weight)
    - Current: "The goal of this project is to make creating and exploring Structure from Motion (SfM) fun."
    - Problem: the page never says what the tool is before the personal note.
@@ -977,4 +978,4 @@ Read 2026-09-26; open items above.
    `reprojection-residuals.md` and `track-view.md`. Land them **one spec per
    PR**: each proposed sentence is a claim about the code, and a reviewer
    checks it properly only when reading it alone.
-   > _Status (2026-10-07): **Partially done** — `flow-command.md` has its opening, PR #838; `spherical-tiles-rig.md` has its opening, PR #846; `gui/edits/move-camera.md` has its opening, PR #847; `keypoint-reach.md` has its opening, PR #848; the other five are open._
+   > _Status (2026-10-07): **Partially done** — `flow-command.md` has its opening, PR #838; `spherical-tiles-rig.md` has its opening, PR #846; `gui/edits/move-camera.md` has its opening, PR #847; `keypoint-reach.md` has its opening, PR #848; `research/blender-…` has its opening, PR #849; the other four are open._
