@@ -20,11 +20,9 @@
 
 use std::collections::HashMap;
 
-use super::descriptor::find_best_match_contiguous;
 use super::gather::gather_rows;
-use super::geometric_filter::{
-    two_stage_geometric_filter, GeometricFilterConfig, StereoPairGeometry,
-};
+use super::geometric_filter::{GeometricFilterConfig, StereoPairGeometry};
+use super::window::{affine_row, mutual_matches, WindowFilter, WindowMatcher};
 
 /// Result of a one-way sweep match: maps query index to (target index, distance).
 pub type SweepMatches = HashMap<usize, (usize, f64)>;
@@ -72,11 +70,7 @@ fn match_one_way_sweep_inner(
     }
 
     let mut win_start: usize = 0;
-
-    // Reused across iterations on the geometric path: the descriptors that
-    // survived the filter, and their offsets within the current window.
-    let mut passing_descs: Vec<u8> = Vec::new();
-    let mut passing_offsets: Vec<usize> = Vec::new();
+    let mut window_matcher = WindowMatcher::default();
 
     for idx1 in 0..n1 {
         let query_y = sorted_kpts1[idx1 * 2 + 1];
@@ -100,63 +94,22 @@ fn match_one_way_sweep_inner(
         }
 
         let query_desc = &sorted_descs1[idx1 * desc_len..(idx1 + 1) * desc_len];
+        let filter = geometric.map(|g| WindowFilter {
+            x1: [sorted_kpts1[idx1 * 2], sorted_kpts1[idx1 * 2 + 1]],
+            affine1: affine_row(g.affines1, idx1),
+            positions2: &sorted_kpts2[win_start * 2..win_end * 2],
+            affines2: &g.affines2[win_start * 4..win_end * 4],
+            geom: g.geom,
+            config: g.config,
+        });
 
-        // The candidate set is either the whole window or the part of it the
-        // geometric filter admits. `window_offsets` is `Some` exactly on the
-        // geometric path — whether or not the filter actually dropped anything
-        // — and maps a candidate back to its offset within the
-        // window; deciding it here, in the arm that knows, keeps it from
-        // drifting out of step with the descriptors it indexes.
-        let (candidate_descs, window_offsets): (&[u8], Option<&[usize]>) = match geometric {
-            Some(g) => {
-                let x1 = [sorted_kpts1[idx1 * 2], sorted_kpts1[idx1 * 2 + 1]];
-                let affine1 = [
-                    g.affines1[idx1 * 4],
-                    g.affines1[idx1 * 4 + 1],
-                    g.affines1[idx1 * 4 + 2],
-                    g.affines1[idx1 * 4 + 3],
-                ];
-
-                let mask = two_stage_geometric_filter(
-                    x1,
-                    &affine1,
-                    &sorted_kpts2[win_start * 2..win_end * 2],
-                    &g.affines2[win_start * 4..win_end * 4],
-                    window_len,
-                    g.geom,
-                    g.config,
-                );
-
-                passing_descs.clear();
-                passing_offsets.clear();
-                for (offset, &passes) in mask.iter().enumerate() {
-                    if passes {
-                        passing_offsets.push(offset);
-                        let start = (win_start + offset) * desc_len;
-                        passing_descs.extend_from_slice(&sorted_descs2[start..start + desc_len]);
-                    }
-                }
-
-                if passing_offsets.is_empty() {
-                    continue;
-                }
-                (&passing_descs, Some(passing_offsets.as_slice()))
-            }
-            None => (
-                &sorted_descs2[win_start * desc_len..win_end * desc_len],
-                None,
-            ),
-        };
-
-        if let Some((rel_idx, dist)) =
-            find_best_match_contiguous(query_desc, candidate_descs, desc_len, threshold)
-        {
-            // `rel_idx` indexes the candidate set, which is the window itself
-            // unless the filter narrowed it.
-            let offset = match window_offsets {
-                Some(offsets) => offsets[rel_idx],
-                None => rel_idx,
-            };
+        if let Some((offset, dist)) = window_matcher.best_in_window(
+            query_desc,
+            &sorted_descs2[win_start * desc_len..win_end * desc_len],
+            desc_len,
+            threshold,
+            filter,
+        ) {
             matches.insert(idx1, (win_start + offset, dist));
         }
     }
@@ -269,19 +222,7 @@ fn mutual_best_match_sweep_inner(
             .as_ref(),
     );
 
-    // Find mutual matches and map back to original indices
-    let mut mutual = Vec::new();
-    for (&s_idx1, &(s_idx2, dist)) in &forward {
-        if let Some(&(back_idx1, _)) = backward.get(&s_idx2) {
-            if back_idx1 == s_idx1 {
-                let orig_idx1 = sort_idx1[s_idx1];
-                let orig_idx2 = sort_idx2[s_idx2];
-                mutual.push((orig_idx1, orig_idx2, dist));
-            }
-        }
-    }
-
-    mutual
+    mutual_matches(&forward, &backward, |s| sort_idx1[s], |s| sort_idx2[s])
 }
 
 /// One-way Y-sweep nearest-neighbor match on pre-sorted features.
