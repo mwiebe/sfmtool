@@ -127,7 +127,7 @@ fn locate_corpus(
     container: &str,
     offsets_name: &str,
     blocks: usize,
-    options: &LazyKdForestOptions,
+    options: &KdfOpenOptions,
 ) -> Result<Corpus, KdfError> {
     let label = if container.starts_with("features/geometry.") {
         "geometry"
@@ -198,7 +198,7 @@ pub struct KdfFile<S: KdfScalar> {
 
 impl<S: KdfScalar> KdfFile<S> {
     /// Open a local seekable archive without decoding tree or descriptor chunks.
-    pub fn open(path: &Path, options: LazyKdForestOptions) -> Result<Self, KdfError> {
+    pub fn open(path: &Path, options: KdfOpenOptions) -> Result<Self, KdfError> {
         if options.query_workers == 0 {
             return Err(KdfError::ResourceLimit(
                 "query_workers must be positive".into(),
@@ -1254,7 +1254,7 @@ fn check_format_and_version(m: &Metadata) -> Result<(), KdfError> {
 fn validate_metadata<S: KdfScalar>(
     m: &Metadata,
     h: &ContentHash,
-    o: &LazyKdForestOptions,
+    o: &KdfOpenOptions,
 ) -> Result<usize, KdfError> {
     if m.scalar_type != S::TYPE_NAME {
         return Err(KdfError::ScalarType {

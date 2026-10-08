@@ -68,8 +68,8 @@ pub use persistent::{LazyKdForest, LazyKdForestF32, LazyKdForestU8, LazyQuerySta
 pub use search::Neighbor;
 pub use sfmtool_kdf_format::{
     kdf_summary, verify_kdf, verify_sift_sources, FeatureGeometry, FeatureOrigin, KdfError,
-    KdfImageTable, KdfIoStats, KdfSection, KdfSiftSources, KdfSummary, KdfWorkspaceContents,
-    KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestOptions, Verification,
+    KdfImageTable, KdfIoStats, KdfOpenOptions, KdfSection, KdfSiftSources, KdfSummary,
+    KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, Verification,
 };
 
 use build::{build_tree, BuildProgress, Node, Tree};

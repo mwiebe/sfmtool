@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::{DecodedNode, KdfError, KdfFile, KdfScalar, LazyKdForestOptions, Verification};
+use crate::{DecodedNode, KdfError, KdfFile, KdfOpenOptions, KdfScalar, Verification};
 
 /// Read and verify every tree, descriptor, and origin block.
 ///
@@ -19,7 +19,7 @@ use crate::{DecodedNode, KdfError, KdfFile, KdfScalar, LazyKdForestOptions, Veri
 /// is a file whose blocks have only ever been checked for shape.
 pub fn verify_kdf<S: KdfScalar>(
     path: &Path,
-    options: LazyKdForestOptions,
+    options: KdfOpenOptions,
 ) -> Result<Verification, KdfError> {
     let file = KdfFile::<S>::open(path, options)?;
     file.verify_content()?;
@@ -161,10 +161,7 @@ struct Constraint<S> {
 }
 
 /// Verify all referenced SIFT identities, bounds, and descriptor bytes.
-pub fn verify_sift_sources(
-    path: &Path,
-    options: LazyKdForestOptions,
-) -> Result<Verification, KdfError> {
+pub fn verify_sift_sources(path: &Path, options: KdfOpenOptions) -> Result<Verification, KdfError> {
     let file = KdfFile::<u8>::open(path, options)?;
     let Some(table) = file.image_table()? else {
         return Err(KdfError::InvalidFormat("forest has no SIFT sources".into()));

@@ -23,9 +23,8 @@ use crate::bench::track_at_pixel::{
     STATUS_REJECTED_LOW_ZNCC, STATUS_REJECTED_SHIFT,
 };
 use crate::features::kdforest::{
-    FeatureGeometry, FeatureOrigin, ImageKeypoints, KdForestParams, KdForestU8, KdfSiftSources,
-    KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestOptions,
-    LazyKdForestU8,
+    FeatureGeometry, FeatureOrigin, ImageKeypoints, KdForestParams, KdForestU8, KdfOpenOptions,
+    KdfSiftSources, KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestU8,
 };
 use crate::progress::Progress;
 use crate::reconstruction::data::{ObservationSource, SfmrReconstruction};
@@ -601,7 +600,7 @@ fn constellation_index(scene: &Scene) -> (tempfile::TempDir, LazyKdForestU8, Vec
             &Progress::none(),
         )
         .expect("the index is written");
-    let lazy = LazyKdForestU8::open(&path, LazyKdForestOptions::default()).expect("it opens");
+    let lazy = LazyKdForestU8::open(&path, KdfOpenOptions::default()).expect("it opens");
     (dir, lazy, keypoints)
 }
 

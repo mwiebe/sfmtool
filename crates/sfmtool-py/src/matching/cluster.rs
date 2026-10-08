@@ -107,7 +107,7 @@ pub fn background_floor_clusters_kdf(
     query_workers: Option<usize>,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
     use sfmtool_core::features::cluster_match::LazyClusterError;
-    use sfmtool_core::features::kdforest::{LazyKdForestOptions, LazyKdForestU8};
+    use sfmtool_core::features::kdforest::{KdfOpenOptions, LazyKdForestU8};
 
     if d == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -117,7 +117,7 @@ pub fn background_floor_clusters_kdf(
     let image_starts = extract_u32_1d(image_starts, "image_starts")?;
     let starts: Cow<'_, [u32]> = to_contiguous!(image_starts);
 
-    let mut options = LazyKdForestOptions::default();
+    let mut options = KdfOpenOptions::default();
     if let Some(v) = cache_bytes {
         options.cache_bytes = v;
         options.max_in_flight_bytes = v;

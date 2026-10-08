@@ -30,8 +30,8 @@ fn tiny_u8<'a>(vectors: &'a [u8]) -> KdfForestData<'a, u8> {
     }
 }
 
-fn roomy() -> LazyKdForestOptions {
-    LazyKdForestOptions {
+fn roomy() -> KdfOpenOptions {
+    KdfOpenOptions {
         cache_bytes: 4096,
         max_in_flight_bytes: 4096,
         max_chunk_bytes: 4096,
@@ -171,7 +171,7 @@ fn rejects_existing_destination_and_invalid_row_map_budget() {
     };
     write_kdf(&path, &tiny_u8(&vectors), None, &options, &Progress::none()).unwrap();
     assert!(write_kdf(&path, &tiny_u8(&vectors), None, &options, &Progress::none()).is_err());
-    let options = LazyKdForestOptions {
+    let options = KdfOpenOptions {
         max_address_map_bytes: 4,
         ..roomy()
     };
@@ -657,7 +657,7 @@ fn the_written_bytes_do_not_depend_on_the_thread_count() {
     // records are the digests of the bytes it holds, and its trees describe the
     // corpus they were built over.
     let path = dir.path().join("threads-1.kdf");
-    let report = verify_kdf::<u8>(&path, LazyKdForestOptions::default()).unwrap();
+    let report = verify_kdf::<u8>(&path, KdfOpenOptions::default()).unwrap();
     assert_eq!(report.features, features);
     assert_eq!(report.descriptor_blocks, features);
     assert_eq!(report.origin_blocks, 8);

@@ -15,7 +15,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use sfmtool_core::features::feature_match::descriptor::descriptor_distance_l2_squared;
 use sfmtool_core::features::kdforest::{
-    KdForestParams, KdForestU8, KdfWriteOptions, LazyKdForestOptions, LazyKdForestU8,
+    KdForestParams, KdForestU8, KdfOpenOptions, KdfWriteOptions, LazyKdForestU8,
 };
 use sfmtool_core::progress::Progress;
 use std::hint::black_box;
@@ -151,7 +151,7 @@ fn bench_persistent(c: &mut Criterion) {
     for (name, path) in &paths {
         let lazy = LazyKdForestU8::open(
             path,
-            LazyKdForestOptions {
+            KdfOpenOptions {
                 cache_bytes: 64 << 20,
                 max_in_flight_bytes: 4 << 20,
                 max_chunk_bytes: 4 << 20,

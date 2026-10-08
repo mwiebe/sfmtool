@@ -157,6 +157,7 @@ Read-only whole-tree survey at `25410760`, using `skills/audit-hygiene/SKILL.md`
 - Problem: `LazyKdForestOptions` still names the algorithm in the crate above the format layer. The earlier crate-name and missing-public-doc findings were completed; this type name is the remaining mismatch.
 - Proposed fix: Choose a format-facing open-options name and migrate callers with an alias where needed.
 - Effort: low. Risk: medium, because the type is public.
+> _Status (2026-10-08): **Done** — renamed `LazyKdForestOptions` to `KdfOpenOptions`, the options `KdfFile::open` takes, named to pair with `KdfWriteOptions`. As the maintainer approved, it is a clean break with no alias, across the format crate, `sfmtool-core`, `sfm-explorer`, the `sfmtool-py` bindings and `specs/core/features/lazy-kdforest-query.md`; no Python-visible name carried the old one. Branch `hygiene-fix-1007-06-kdf-open-options`._
 
 **Unify patch binding view-set keywords**
 - Location: `crates/sfmtool-py/src/patches/{localize_keypoints,refine_keypoints,refine_normals,member_coherence,select_views}.rs`.
