@@ -2,13 +2,14 @@
 
 ## Purpose
 
-The forward reprojection model: given camera poses over a set of images that
-share one camera model, a set of world points, and the observations tying them
-together, report each observation's pixel residual `(projection − observed)`.
-It is a measurement function, not an optimizer — callers threshold it, tally
-inliers, or feed it to a solver.
+A reprojection residual is the pixel offset between where a world point
+projects under an image's camera pose and where that image observed it.
+`reprojection_residuals` computes it, as projection minus observed, for every
+observation at once over a set of images that share one camera model, and
+`inlier_fraction` reports the share of observations whose offset is shorter
+than a pixel threshold. Both only measure: neither changes a pose or a point.
 
-Its one production caller is the
+`reprojection_residuals` has one production caller, the
 [cluster census](../analysis/cluster-census.md), which takes the residual norm
 of every observation of each cluster's triangulated point. Reconstruction
 growth ([reconstruction-growth.md](reconstruction-growth.md)), pose refinement
