@@ -179,6 +179,7 @@ Read-only whole-tree survey at `25410760`, using `skills/audit-hygiene/SKILL.md`
 - Problem: `radii_source` at `cluster_radii.rs:47` still duplicates `vote_source` at `focal_vote.rs:82`, as do numeric array coercers. The three binding docs share 18–20 distinct `///` lines pairwise, so one validation contract is transcribed three times.
 - Proposed fix: One typed CSR/source resolver, one array coercer, and a shared included argument reference block.
 - Effort: medium. Risk: low.
+> _Status (2026-10-07): **Done** — branch `audit-fix-05` merged as PR #778 and cut the `focal_vote` docstring to its contract and a spec pointer, so any two of the three Python docstrings now share at most the `cluster_starts` entry, the `width` line, the "two forms" lead-in and the float64-cast sentence. Those stay in each docstring: each is that function's `help()` text and must read on its own, and an included block would cover little: `cluster_radii` takes shapes and a refine radius rather than positions and an image size, and does not require `cluster_starts` to open at 0, while `focal_vote` and `estimate_intrinsics` take the same observation arguments but `estimate_intrinsics` describes them in more detail. The private Rust prose that was copied between the bindings, why the `.matches` form is handed to the core whole, now lives once on `CsrSource::Matches` in `csr_args.rs`, and `VoteSource` and `RadiiSource` link to it. Branch `hygiene-fix-1007-01-csr-reference-prose`._
 
 ## Python and test layout
 

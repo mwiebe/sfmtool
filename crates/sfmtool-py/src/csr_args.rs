@@ -21,8 +21,10 @@ use crate::io::matches_file::PyMatchesFile;
 
 /// The first positional argument of a CSR-taking binding, resolved.
 pub(crate) enum CsrSource<'a> {
-    /// A `.matches` file (a selection included); the binding hands it to the
-    /// core's own `from_matches` entry.
+    /// A `.matches` file (a selection included). The binding hands the whole
+    /// file to the core's own `from_matches` entry rather than taking it apart
+    /// here, so reading the file has one implementation, shared by the Rust
+    /// and Python callers.
     Matches(&'a MatchesData),
     /// The `cluster_starts` CSR offsets, copied into a contiguous vector. Not
     /// yet validated: each binding checks the index in its own order.
