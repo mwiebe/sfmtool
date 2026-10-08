@@ -18,8 +18,8 @@ use crate::bench::track::{
     ClusterMeasurement, ClusterPayload, Observation, RepaintMark, Stage, Thresholds, Verdict,
 };
 use crate::features::kdforest::{
-    FeatureGeometry, FeatureOrigin, KdForestParams, KdForestU8, KdfSiftSources,
-    KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions, LazyKdForestOptions,
+    FeatureGeometry, FeatureOrigin, KdForestParams, KdForestU8, KdfOpenOptions, KdfSiftSources,
+    KdfWorkspaceContents, KdfWorkspaceMetadata, KdfWriteOptions,
 };
 
 const DIM: usize = 128;
@@ -231,7 +231,7 @@ fn index(corpus: &Corpus) -> (tempfile::TempDir, LazyKdForestU8) {
             &Progress::none(),
         )
         .unwrap();
-    let lazy = LazyKdForestU8::open(&path, LazyKdForestOptions::default()).unwrap();
+    let lazy = LazyKdForestU8::open(&path, KdfOpenOptions::default()).unwrap();
     (dir, lazy)
 }
 

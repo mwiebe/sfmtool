@@ -175,7 +175,7 @@ impl Default for KdfWriteOptions {
 /// [`max_compressed_bytes`](Self::max_compressed_bytes) is 384 MiB, which reach
 /// about 160 M and about 112 M descriptors respectively at 128-D uint8.
 #[derive(Clone, Debug)]
-pub struct LazyKdForestOptions {
+pub struct KdfOpenOptions {
     /// Maximum bytes used by the eagerly loaded feature-ID-to-storage-row map.
     ///
     /// The map is four bytes a feature and is validated with a one-byte-a-feature
@@ -223,7 +223,7 @@ pub struct LazyKdForestOptions {
     pub query_workers: usize,
 }
 
-impl Default for LazyKdForestOptions {
+impl Default for KdfOpenOptions {
     fn default() -> Self {
         Self {
             max_address_map_bytes: 768 << 20,

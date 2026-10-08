@@ -65,8 +65,8 @@ fn tiny_f32<'a>(vectors: &'a [f32]) -> KdfForestData<'a, f32> {
     }
 }
 
-fn roomy() -> LazyKdForestOptions {
-    LazyKdForestOptions {
+fn roomy() -> KdfOpenOptions {
+    KdfOpenOptions {
         cache_bytes: 4096,
         max_in_flight_bytes: 4096,
         max_chunk_bytes: 4096,
