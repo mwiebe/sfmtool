@@ -250,6 +250,8 @@ should read it as a claim.
    - Problem: the page never says what the tool is before the personal note.
    - Proposed: *"SfM Tool is a command-line toolkit (`sfm`) and a desktop viewer (SfM Explorer) for building Structure-from-Motion reconstructions from photographs and inspecting them in 3D."*
 
+   > _Status (2026-10-07): **Done** — the landing page now opens, under its title and before "About this Project", with the proposed sentence (spelled "Structure from Motion" as the rest of the page does); the "goal … fun" sentence stays as the first line of the personal note, branch `spec-fix-1006-37-opening-docs-index`._
+
 Borderline and left alone: `core/bench/bench.md` (says what the bench is in its
 fourth sentence), `core/geometry/translation-averaging.md` (premise first, purpose
 in the second sentence), `gui/multi-panel-image-browser.md` (opens on docking,
@@ -978,4 +980,4 @@ Read 2026-09-26; open items above.
    `reprojection-residuals.md` and `track-view.md`. Land them **one spec per
    PR**: each proposed sentence is a claim about the code, and a reviewer
    checks it properly only when reading it alone.
-   > _Status (2026-10-07): **Partially done** — `flow-command.md` has its opening, PR #838; `spherical-tiles-rig.md` has its opening, PR #846; `gui/edits/move-camera.md` has its opening, PR #847; `keypoint-reach.md` has its opening, PR #848; `research/blender-…` has its opening, PR #849; the other four are open._
+   > _Status (2026-10-07): **Partially done** — `flow-command.md` has its opening, PR #838; `spherical-tiles-rig.md` has its opening, PR #846; `gui/edits/move-camera.md` has its opening, PR #847; `keypoint-reach.md` has its opening, PR #848; `research/blender-…` has its opening, PR #849; `docs/index.md` has its opening, PR #850; the other three are open._
