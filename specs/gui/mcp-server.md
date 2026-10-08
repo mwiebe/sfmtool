@@ -3527,9 +3527,9 @@ split naming what they made, a rename naming the label the item now holds, and
 the commit naming the point it wrote. So `undo`, `redo` and `jump_to_version`
 need no bench variant: the history they walk already holds the bench steps, and
 `get_reconstruction_history` lists them among the rest. The sentence is the
-**step's own**: a step that sets something else off -- putting the first item on a bench opens the
-node's SIFT index, which writes a row after the step's -- writes
-that row as the viewer rather than as the caller, and the reply skips the
+**step's own**: a step that sets something else off -- putting the first item
+on a bench opens the node's SIFT index, which writes a row after the step's --
+writes that row as the viewer rather than as the caller, and the reply skips the
 viewer's rows ([bench.md](bench.md) § "The wire"). It skips `Selection` rows for
 the same reason: a commit selects the point it wrote
 ([edits/commit-track.md](edits/commit-track.md)), which is where the call left
@@ -4837,9 +4837,9 @@ where a test hands no host over.
   within a billionth of a degree and of a scene unit; a refused `undo` leaves a
   free-look offset where the human left it.
 - **`get_reconstruction_history` lists what the panel lists**: every version in
-  order, the cursor and disk flags on the right rows, `dirty`, `can_undo` / `can_redo`, an
-  `at` in the log's own format, and `held: false` on a version whose value the
-  test released, the budget's effect arranged directly, since reaching the real
+  order, the cursor and disk flags on the right rows, `dirty`, `can_undo` /
+  `can_redo`, an `at` in the log's own format, and `held: false` on a version
+  whose value the test released, the budget's effect arranged directly, since reaching the real
   budget would mean a reconstruction of gigabytes. A node from no file reports
   `path`, `disk_serial` and every `is_on_disk` as null or false.
 - **`save_reconstruction` writes and re-points**: a save-as to a temp directory
@@ -5121,9 +5121,9 @@ listing's `rect_px`, and reads the menu it opened with `get_widgets`
 
 **One editing test runs against a real viewer too**, in the same file and by the
 same route: load the demo node, delete a point over the wire, read
-`get_reconstruction_history` back, undo, and read the Action Log. Not because any of that needs a frame,
-since it is all under headless test above, but because the claim the editing family
-makes is that an agent's edit lands in the window the human is looking at, in
+`get_reconstruction_history` back, undo, and read the Action Log. Not because
+any of that needs a frame, since it is all under headless test above, but
+because the claim the editing family makes is that an agent's edit lands in the window the human is looking at, in
 the same history and attributed to the agent, and a real viewer is the only
 place that claim can be checked end to end.
 
@@ -5156,8 +5156,8 @@ that reaches the GPU as a model matrix and is not part of the value.
 Which is also why the wire needs no vocabulary of its own for any of this. The
 tools are the menu's own `AppState` calls (§ "The editing family"), the history
 is the panel's own list (§ "`get_reconstruction_history`"), and the save is the
-File menu's (§ "`save_reconstruction`"). An agent and a human editing the same node take
-turns rather than working in two different worlds.
+File menu's (§ "`save_reconstruction`"). An agent and a human editing the same
+node take turns rather than working in two different worlds.
 
 **A lens changes through a fit or a solve, never through values the caller
 gives.** `switch_camera_model` replaces a camera with another model fitted to it

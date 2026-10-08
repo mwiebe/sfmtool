@@ -1479,8 +1479,9 @@ fn the_cursor_moves_refuse_a_busy_node_on_the_wire() {
     state.finish_background_task();
 }
 
-/// `get_reconstruction_history` is the Edit History panel's reading of the same list: every
-/// version in order, the cursor, the version on disk, and the released rows.
+/// `get_reconstruction_history` is the Edit History panel's reading of the same
+/// list: every version in order, the cursor, the version on disk, and the
+/// released rows.
 #[test]
 fn get_reconstruction_history_lists_the_versions_with_the_cursor_and_the_released_rows() {
     let (mut state, mut viewer) = editable();
