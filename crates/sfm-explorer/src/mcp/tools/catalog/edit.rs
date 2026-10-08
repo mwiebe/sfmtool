@@ -39,8 +39,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                         json!({
                             "type": "string",
                             "description":
-                                "Which version, spelled as get_history and the Action Log spell \
-                                 it: \"v12\".",
+                                "Which version, spelled as get_reconstruction_history and \
+                                 the Action Log spell it: \"v12\".",
                         }),
                     ),
                 ],

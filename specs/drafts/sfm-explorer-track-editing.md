@@ -712,7 +712,7 @@ through the two-level reply that spec defines, with a handle to poll when the
 work is long. Every bench step answers as an edit answers, with the version it
 pushed, because it is one; `undo`, `redo` and `jump_to_version` need no bench
 variant, since the history they walk already holds the bench steps, and
-`get_history` lists them with their labels among the rest.
+`get_reconstruction_history` lists them with their labels among the rest.
 
 ```jsonc
 // The bench. Each create answers with the new item's label and makes it active.

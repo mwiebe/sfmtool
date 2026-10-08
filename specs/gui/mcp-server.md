@@ -134,7 +134,7 @@ viewer's widgets the way a person's eyes, mouse and keyboard do (§ "`get_widget
 | `get_image_detail_display` | read | The Image Detail panel's controls — the feature overlay and its filters, and the intrinsics layer — as one document |
 | `get_image_detail_view` | read | Where that panel is looking: the photograph, the zoom, and the rectangle of it on screen |
 | `get_viewer_3d_display` | read | The 3D viewport's display controls — the HUD's layer toggles, sizes, Maintain Z-up and the rest of its checkboxes and sliders — as one flat document |
-| `get_history` | read | One reconstruction's versions, its cursor, and what a save would find |
+| `get_reconstruction_history` | read | One reconstruction's versions, its cursor, and what a save would find |
 | `get_background_task` | read | What the viewer is busy with, how far along it is and what it has spent its time on, or what the last operation cost |
 | `open_reconstruction` | write | Load an `.sfmr` into the scene as a new node, always appending, filling in the thumbnails and patch bitmaps the file lacks, on a worker thread |
 | `close_reconstruction` | write | Close one reconstruction, or all of them |
@@ -393,14 +393,15 @@ and a human who has just read a serial off the panel can paste it into a call.
 `disk_serial` is the same attribute in the role of "the version the file holds",
 and `cursor` the same attribute in the role of "the version being shown", by the
 `<entity>_<attribute>` rule above. `label` on a version is the sentence the edit
-that made it recorded, which is what the panel draws and what `get_history`
-carries.
+that made it recorded, which is what the panel draws and what
+`get_reconstruction_history` carries.
 
 #### An edit names its reconstruction
 
 `reconstruction_label` is optional on the reads and on the selection tools;
 omitted, they take the selected reconstruction. On every tool in the editing
-family, `get_history` and `save_reconstruction` included, it is **required**.
+family, `get_reconstruction_history` and `save_reconstruction` included, it is
+**required**.
 
 The selection belongs to the human at the window. It moves while the agent
 works, and an edit that landed on whatever was last clicked would be an edit the
@@ -592,9 +593,9 @@ own coordinates are in. What the *view's* coordinates are in is the view
 block's `world_space_unit`, which can differ, because the display transform
 draws the node at its own scale (§ "The view block").
 
-`get_history`'s rows carry no transform. A reframe is a version like any other,
-and its `label` says what it was; the only transform anyone is looking at is the
-one at the cursor, and this block reports it.
+`get_reconstruction_history`'s rows carry no transform. A reframe is a version
+like any other, and its `label` says what it was; the only transform anyone is
+looking at is the one at the cursor, and this block reports it.
 
 ### `list_camera_images` / `get_camera_image` / `get_camera_intrinsics` / `get_point`
 
@@ -2903,13 +2904,13 @@ it lands, as a commit when the camera has been moved and silently otherwise
 the step is the drain's rather than any tool's (§ "Threading"), and it holds for
 every edit in this family rather than for `move_camera_image` alone.
 
-### `get_history`
+### `get_reconstruction_history`
 
 The Edit History panel's reading of the same list, as JSON: the whole of what
 the node has been, in order.
 
 ```jsonc
-// get_history { "reconstruction_label": "seoul_bull" }
+// get_reconstruction_history { "reconstruction_label": "seoul_bull" }
 {
   "reconstruction_label": "seoul_bull",
   "path": "C:/work/seoul_bull.sfmr",   // null for a node that came from no file
@@ -2982,8 +2983,8 @@ not log itself.
 
 A serial the node never minted is the one refusal that is the wire's own. It is
 refused here, before the state is asked, because the wire receives a string the
-state never sees: the reply quotes it as it arrived and names `get_history`,
-which lists the spellings the tool takes.
+state never sees: the reply quotes it as it arrived and names
+`get_reconstruction_history`, which lists the spellings the tool takes.
 
 **A camera view follows the version.** A cursor move can change the pose of the
 very camera the viewport is looking through, so a move that landed re-snaps
@@ -3328,8 +3329,8 @@ one of the operations `background::Operation` declares, and each answers
 through the same two-level reply. Every other edit is synchronous on the GUI
 thread, and a reconstruction large enough to take more than the apply timeout
 will still time out the call while the work goes on and finishes. An agent that gets a
-timeout from one of those should read `get_history` rather than retry, since the
-version may well have been pushed.
+timeout from one of those should read `get_reconstruction_history` rather than
+retry, since the version may well have been pushed.
 
 ### `convert_to_embedded_patches`
 
@@ -3525,10 +3526,10 @@ sentence the Action Log recorded, plus the `item` it acted on -- a create and a
 split naming what they made, a rename naming the label the item now holds, and
 the commit naming the point it wrote. So `undo`, `redo` and `jump_to_version`
 need no bench variant: the history they walk already holds the bench steps, and
-`get_history` lists them among the rest. The sentence is the **step's own**: a
-step that sets something else off -- putting the first item on a bench opens the
-node's SIFT index, which writes a row after the step's -- writes
-that row as the viewer rather than as the caller, and the reply skips the
+`get_reconstruction_history` lists them among the rest. The sentence is the
+**step's own**: a step that sets something else off -- putting the first item
+on a bench opens the node's SIFT index, which writes a row after the step's --
+writes that row as the viewer rather than as the caller, and the reply skips the
 viewer's rows ([bench.md](bench.md) § "The wire"). It skips `Selection` rows for
 the same reason: a commit selects the point it wrote
 ([edits/commit-track.md](edits/commit-track.md)), which is where the call left
@@ -4824,7 +4825,7 @@ where a test hands no host over.
 - **The cursor moves answer with the version now showing**, undo then redo then
   a jump by serial, with no `report` on any of them; the ends refuse in the
   state's words (*"Nothing to undo in `run_a`."*), and a serial the node never
-  minted is refused naming `get_history`.
+  minted is refused naming `get_reconstruction_history`.
 - **Every refusal of a cursor move is pinned word for word**, on the wire and in
   the failed row it leaves: both ends, the cursor's own version, a serial the
   node never minted, and a jump past a released value; a busy node refuses
@@ -4835,10 +4836,10 @@ where a test hands no host over.
   jump by serial each leave it standing at the pose that version holds, to
   within a billionth of a degree and of a scene unit; a refused `undo` leaves a
   free-look offset where the human left it.
-- **`get_history` lists what the panel lists**: every version in order, the
-  cursor and disk flags on the right rows, `dirty`, `can_undo` / `can_redo`, an
-  `at` in the log's own format, and `held: false` on a version whose value the
-  test released, the budget's effect arranged directly, since reaching the real
+- **`get_reconstruction_history` lists what the panel lists**: every version in
+  order, the cursor and disk flags on the right rows, `dirty`, `can_undo` /
+  `can_redo`, an `at` in the log's own format, and `held: false` on a version
+  whose value the test released, the budget's effect arranged directly, since reaching the real
   budget would mean a reconstruction of gigabytes. A node from no file reports
   `path`, `disk_serial` and every `is_on_disk` as null or false.
 - **`save_reconstruction` writes and re-points**: a save-as to a temp directory
@@ -5119,10 +5120,10 @@ listing's `rect_px`, and reads the menu it opened with `get_widgets`
 ([architecture.md](architecture.md) § "Testing").
 
 **One editing test runs against a real viewer too**, in the same file and by the
-same route: load the demo node, delete a point over the wire, read `get_history`
-back, undo, and read the Action Log. Not because any of that needs a frame,
-since it is all under headless test above, but because the claim the editing family
-makes is that an agent's edit lands in the window the human is looking at, in
+same route: load the demo node, delete a point over the wire, read
+`get_reconstruction_history` back, undo, and read the Action Log. Not because
+any of that needs a frame, since it is all under headless test above, but
+because the claim the editing family makes is that an agent's edit lands in the window the human is looking at, in
 the same history and attributed to the agent, and a real viewer is the only
 place that claim can be checked end to end.
 
@@ -5154,9 +5155,9 @@ that reaches the GPU as a model matrix and is not part of the value.
 
 Which is also why the wire needs no vocabulary of its own for any of this. The
 tools are the menu's own `AppState` calls (§ "The editing family"), the history
-is the panel's own list (§ "`get_history`"), and the save is the File menu's
-(§ "`save_reconstruction`"). An agent and a human editing the same node take
-turns rather than working in two different worlds.
+is the panel's own list (§ "`get_reconstruction_history`"), and the save is the
+File menu's (§ "`save_reconstruction`"). An agent and a human editing the same
+node take turns rather than working in two different worlds.
 
 **A lens changes through a fit or a solve, never through values the caller
 gives.** `switch_camera_model` replaces a camera with another model fitted to it

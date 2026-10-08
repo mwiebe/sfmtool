@@ -1896,7 +1896,10 @@ fn a_point_can_be_deleted_over_the_wire_and_undone() {
         .expect("a version serial")
         .to_string();
 
-    let history = viewer.ok("get_history", json!({ "reconstruction_label": label }));
+    let history = viewer.ok(
+        "get_reconstruction_history",
+        json!({ "reconstruction_label": label }),
+    );
     let versions = history["versions"].as_array().expect("a version list");
     assert_eq!(versions.len(), 2, "{history}");
     assert_eq!(history["cursor"], Value::String(serial.clone()));

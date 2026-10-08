@@ -3108,12 +3108,12 @@ fn bench_items(state: &mut AppState, viewer: &mut Viewer3D) -> Vec<String> {
         .collect()
 }
 
-/// How many versions `get_history` lists for `run_a`.
+/// How many versions `get_reconstruction_history` lists for `run_a`.
 fn history_len(state: &mut AppState, viewer: &mut Viewer3D) -> usize {
     let history = call(
         state,
         viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "run_a" }),
     );
     history["versions"]
