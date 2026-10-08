@@ -208,7 +208,7 @@ def estimate_points_verdicts(
     dropped and the survivors are solved again.  The rows it dropped are the
     ones flagged in ``pruned``, and the caller removes them from its own
     arrays."""
-    from sfmtool._sfmtool.reconstruction import estimate_points as kernel
+    from sfmtool._sfmtool.reconstruction import triangulate_points as kernel
 
     slot_c = np.ascontiguousarray(np.asarray(slot_c, np.uint32))
     out = kernel(

@@ -59,7 +59,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from sfmtool._sfmtool.geometry import (
-    bundle_adjust as _bundle_adjust,
     estimate_absolute_pose,
     factorize_affine,
     inlier_fraction as _inlier_fraction,
@@ -813,7 +812,7 @@ def spline_release(obs_c, obs_i, u, rvec, tvec, pts, f0, n_img, n_cl, live):
 
     def arm(opt_bspline):
         q = Rotation.from_rotvec(rvec).as_quat()[:, [3, 0, 1, 2]]
-        return _bundle_adjust(
+        return seed_camera.bundle_adjust_one_camera(
             B.make_cam_bspline(f0, zero, d_max),
             np.ascontiguousarray(q),
             np.ascontiguousarray(tvec, dtype=np.float64),
@@ -1459,6 +1458,8 @@ def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
     tv_arr = np.zeros((nw, 3))
     rvec[posed_idx] = Rotation.from_quat(quats[:, [1, 2, 3, 0]]).as_rotvec()
     tv_arr[posed_idx] = trans
+    # Every finite row is read as a point, the rows `point_at_infinity` marks
+    # (unit world-frame directions) included, as this wrapper always has.
     pts = np.asarray(res["points"], dtype=np.float64)
     if len(pts) < n_cl:
         pad = np.full((n_cl - len(pts), 3), np.nan)
@@ -2766,7 +2767,7 @@ def bundle_adjust(
     scipy original it replaced, including the < 12-survivors degenerate exit
     with all-inf residuals)."""
     q = Rotation.from_rotvec(rvec).as_quat()[:, [3, 0, 1, 2]]
-    out = _bundle_adjust(
+    out = seed_camera.bundle_adjust_one_camera(
         make_cam(f0),
         np.ascontiguousarray(q),
         np.ascontiguousarray(tvec, dtype=np.float64),
@@ -3180,6 +3181,11 @@ def localize_anchors(names, sub, rvec, tvec, f0, pts_a, tr_a, tr_img, tr_feat):
         max_shift_px=60.0,
         search=12.0,
         min_relative_zncc=0.6,
+        # The member gate off and one sampler for every view, which is what
+        # these anchors were localized with before the binding's defaults
+        # moved to a 2.5 grid px self-similarity bar and a per-view sampler.
+        max_member_zncc_self_similarity_radius=0.0,
+        sampler="bilinear_mip",
     )
     a_idx, i_idx, uv = [], [], []
     for r in results:
