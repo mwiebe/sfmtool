@@ -281,8 +281,8 @@ Files into: `specs/gui/edits/<family>.md`, one each, in the
 ## Part 6: the wire
 
 Done, and standing in [`../gui/mcp-server.md`](../gui/mcp-server.md)
-§ "The editing family": `get_history`, `undo`, `redo`, `jump_to_version`,
-`save_reconstruction`, and one tool per built edit family, each applied on the
+§ "The editing family": `get_reconstruction_history`, `undo`, `redo`,
+`jump_to_version`, `save_reconstruction`, and one tool per built edit family, each applied on the
 GUI thread at the same point in the frame as every other tool. An agent's edit
 is a version like any other, attributed in the Action Log's actor column, and
 either of the two can undo the other's.

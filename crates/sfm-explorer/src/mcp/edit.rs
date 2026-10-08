@@ -49,13 +49,13 @@ use crate::state::AppState;
 
 // ── The history ─────────────────────────────────────────────────────────
 
-/// `get_history`: the node's versions in order, with the cursor, the version on
-/// disk, and what undo and redo would do.
+/// `get_reconstruction_history`: the node's versions in order, with the
+/// cursor, the version on disk, and what undo and redo would do.
 ///
 /// The Edit History panel's own reading of [`crate::document::History`], as
 /// JSON: a released row is listed and marked rather than dropped, because the
 /// history still knows what happened there while having nothing to show.
-pub(super) fn get_history(state: &AppState, label: &str) -> JsonReply {
+pub(super) fn get_reconstruction_history(state: &AppState, label: &str) -> JsonReply {
     let id = resolve_reconstruction(state, Some(label))?;
     let node = state.node(id).expect("just resolved");
     let history = &node.history;
@@ -774,8 +774,8 @@ fn resolve_serial(node: &SceneNode, serial: &str) -> Result<VersionSerial, ToolE
         .find(|candidate| candidate.to_string() == serial)
         .ok_or_else(|| {
             ToolError::new(format!(
-                "{serial:?} is not a version of {}; get_history lists its versions, spelled as \
-                 \"v12\".",
+                "{serial:?} is not a version of {}; get_reconstruction_history lists its \
+                 versions, spelled as \"v12\".",
                 node.label
             ))
         })

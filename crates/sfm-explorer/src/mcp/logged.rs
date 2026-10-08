@@ -59,7 +59,7 @@ impl Command {
             Command::SetWindowLayout { .. } => "set_window_layout",
             Command::ShowPanel { .. } => "show_panel",
             Command::HidePanel { .. } => "hide_panel",
-            Command::GetHistory { .. } => "get_history",
+            Command::GetReconstructionHistory { .. } => "get_reconstruction_history",
             Command::Undo { .. } => "undo",
             Command::Redo { .. } => "redo",
             Command::JumpToVersion { .. } => "jump_to_version",
@@ -287,7 +287,7 @@ impl Command {
             | Command::GetImageDetailView
             | Command::GetViewer3dDisplay
             | Command::GetTimingDetail
-            | Command::GetHistory { .. }
+            | Command::GetReconstructionHistory { .. }
             | Command::GetBackgroundTask
             | Command::GetBench { .. }
             | Command::GetBenchTrack { .. }
@@ -451,9 +451,9 @@ pub(crate) fn query_text(state: &AppState, viewer: &Viewer3D, command: &Command)
         Command::GetImageDetailView => "get_image_detail_view".to_string(),
         Command::GetViewer3dDisplay => "get_viewer_3d_display".to_string(),
         Command::GetTimingDetail => "get_timing_detail".to_string(),
-        Command::GetHistory {
+        Command::GetReconstructionHistory {
             reconstruction_label,
-        } => format!("get_history {reconstruction_label}"),
+        } => format!("get_reconstruction_history {reconstruction_label}"),
         Command::GetBench {
             reconstruction_label,
         } => format!("get_bench {reconstruction_label}"),

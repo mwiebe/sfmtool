@@ -979,7 +979,7 @@ fn a_history_move_keeps_the_photograph_and_the_point_selected() {
     let history = call(
         &mut state,
         &mut viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "run_a" }),
     );
     let first = history["versions"][0]["serial"]
@@ -1717,7 +1717,7 @@ fn a_bench_step_with_no_effect_pushes_nothing_and_says_so() {
     let cursor = call(
         &mut state,
         &mut viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "run_a" }),
     )["cursor"]
         .as_str()

@@ -308,7 +308,7 @@ pub(crate) fn parse(
         "hide_panel" => Command::HidePanel {
             panel: args.panel("panel_name")?,
         },
-        "get_history" => Command::GetHistory {
+        "get_reconstruction_history" => Command::GetReconstructionHistory {
             reconstruction_label: args.required_string("reconstruction_label")?,
         },
         "undo" => Command::Undo {

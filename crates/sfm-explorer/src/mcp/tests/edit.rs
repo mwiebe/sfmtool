@@ -1387,7 +1387,7 @@ fn a_serial_that_is_not_a_version_of_the_node_is_refused() {
         json!({ "reconstruction_label": "run_a", "serial": "v99999" }),
     );
     assert!(error.0.contains("v99999"), "{error}");
-    assert!(error.0.contains("get_history"), "{error}");
+    assert!(error.0.contains("get_reconstruction_history"), "{error}");
 }
 
 /// Every refusal of a cursor move, on the wire and in the log: the error is the
@@ -1422,8 +1422,8 @@ fn the_cursor_moves_refuse_on_the_wire_in_the_states_words() {
     let unknown = refused_call(&mut state, &mut viewer, "jump_to_version", jump("v99999"));
     assert_eq!(
         unknown.0,
-        "\"v99999\" is not a version of run_a; get_history lists its versions, spelled as \
-         \"v12\"."
+        "\"v99999\" is not a version of run_a; get_reconstruction_history lists its \
+         versions, spelled as \"v12\"."
     );
     state.scene[0].history.versions_mut_for_test()[1].value = None;
     let released = refused_call(&mut state, &mut viewer, "jump_to_version", jump(&first));
@@ -1479,10 +1479,10 @@ fn the_cursor_moves_refuse_a_busy_node_on_the_wire() {
     state.finish_background_task();
 }
 
-/// `get_history` is the Edit History panel's reading of the same list: every
+/// `get_reconstruction_history` is the Edit History panel's reading of the same list: every
 /// version in order, the cursor, the version on disk, and the released rows.
 #[test]
-fn get_history_lists_the_versions_with_the_cursor_and_the_released_rows() {
+fn get_reconstruction_history_lists_the_versions_with_the_cursor_and_the_released_rows() {
     let (mut state, mut viewer) = editable();
     for point in [3, 4] {
         call(
@@ -1501,7 +1501,7 @@ fn get_history_lists_the_versions_with_the_cursor_and_the_released_rows() {
     let history = call(
         &mut state,
         &mut viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "run_a" }),
     );
     let versions = history["versions"].as_array().expect("a version list");
@@ -1539,7 +1539,7 @@ fn a_node_from_no_file_reports_no_version_on_disk() {
     let history = call(
         &mut state,
         &mut viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "demo" }),
     );
     assert_eq!(history["path"], Value::Null);
@@ -1722,7 +1722,7 @@ fn save_reconstruction_states_the_workspace_path_and_needs_a_path() {
 fn every_editing_tool_requires_its_reconstruction_label() {
     let (mut state, mut viewer) = editable();
     for (name, arguments) in [
-        ("get_history", json!({})),
+        ("get_reconstruction_history", json!({})),
         ("undo", json!({})),
         ("redo", json!({})),
         ("jump_to_version", json!({ "serial": "v0" })),
@@ -1746,7 +1746,7 @@ fn every_editing_tool_requires_its_reconstruction_label() {
     let error = refused_call(
         &mut state,
         &mut viewer,
-        "get_history",
+        "get_reconstruction_history",
         json!({ "reconstruction_label": "run_b" }),
     );
     assert!(error.0.contains("run_a"), "{error}");

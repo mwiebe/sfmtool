@@ -237,7 +237,7 @@ pub(crate) enum Command {
         panel: crate::dock::Tab,
     },
     /// One node's version list, its cursor, and what a save would find.
-    GetHistory {
+    GetReconstructionHistory {
         reconstruction_label: String,
     },
     Undo {
@@ -1371,9 +1371,12 @@ pub(crate) fn apply_with_window(
         }
         Command::ShowPanel { panel } => done(layout::show_panel(state, host, panel)),
         Command::HidePanel { panel } => done(layout::hide_panel(state, host, panel)),
-        Command::GetHistory {
+        Command::GetReconstructionHistory {
             reconstruction_label,
-        } => done(edit::get_history(state, &reconstruction_label)),
+        } => done(edit::get_reconstruction_history(
+            state,
+            &reconstruction_label,
+        )),
         Command::Undo {
             reconstruction_label,
         } => {

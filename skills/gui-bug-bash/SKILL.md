@@ -181,7 +181,7 @@ Each of these cost the first run a wrong conclusion or a repeated step.
   synchronously.
 - **Version serials are global across nodes**, so a node's history can jump
   from v13 to v18. An edit after an undo discards the versions ahead of the
-  cursor. Read `get_history` rather than remembering serials.
+  cursor. Read `get_reconstruction_history` rather than remembering serials.
 - **Bench steps do not make a node dirty**; only document edits do (specified
   in `specs/gui/bench.md`).
 - **`get_action_log` returns the oldest entries first.** Pass

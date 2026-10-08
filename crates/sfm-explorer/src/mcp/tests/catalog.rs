@@ -60,7 +60,10 @@ fn representative_tool_calls() -> Vec<(&'static str, Value)> {
             "set_image_detail_view",
             json!({ "reconstruction_label": "alpha", "pixel": [142.0, 197.5], "zoom": 4.0 }),
         ),
-        ("get_history", json!({ "reconstruction_label": "alpha" })),
+        (
+            "get_reconstruction_history",
+            json!({ "reconstruction_label": "alpha" }),
+        ),
         ("open_reconstruction", json!({ "path": "scene.sfmr" })),
         (
             "close_reconstruction",
@@ -867,7 +870,7 @@ fn only_the_reads_are_annotated_read_only() {
             "get_image_detail_display",
             "get_image_detail_view",
             "get_viewer_3d_display",
-            "get_history",
+            "get_reconstruction_history",
             "get_bench",
             "get_bench_track",
             "get_background_task",
