@@ -40,7 +40,10 @@ holds the distance and best-match search,
 [`sweep.rs`](../../../crates/sfmtool-core/src/features/feature_match/sweep.rs)
 the rectified (Y) sweep,
 [`polar.rs`](../../../crates/sfmtool-core/src/features/feature_match/polar.rs)
-the polar sweep, and
+the polar sweep,
+[`window.rs`](../../../crates/sfmtool-core/src/features/feature_match/window.rs)
+the steps both sweeps share once a window is placed (the filtered nearest
+descriptor in the window, and the mutual check), and
 [`geometric_filter.rs`](../../../crates/sfmtool-core/src/features/feature_match/geometric_filter.rs)
 the orientation and size filter. The stereo rectification itself is in
 [`camera/rectification.rs`](../../../crates/sfmtool-core/src/camera/rectification.rs)
