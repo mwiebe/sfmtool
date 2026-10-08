@@ -11,6 +11,7 @@ mod gather;
 pub mod geometric_filter;
 pub mod polar;
 pub mod sweep;
+mod window;
 
 use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
