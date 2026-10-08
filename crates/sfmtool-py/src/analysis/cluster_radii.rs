@@ -24,10 +24,9 @@ use crate::csr_args::{
 /// What a radius-shaped binding was called with: a parsed `.matches` handle,
 /// or the CSR index and the shapes spelled out.
 ///
-/// Both forms reach the same kernel; the object form hands the whole file to
-/// the core's own `from_matches` entry rather than taking the file apart here,
-/// so the reading (the shapes, the refine radius the file records them
-/// against) has exactly one implementation and both languages get it.
+/// Both forms reach the same kernel. The core reads the `.matches` form,
+/// including its shapes and the refine radius the file records them against;
+/// [`CsrSource::Matches`] says why.
 enum RadiiSource<'a> {
     /// A `.matches` file, read by the core entry point.
     Matches(&'a MatchesData),

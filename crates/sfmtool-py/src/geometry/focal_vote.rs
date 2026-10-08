@@ -66,10 +66,9 @@ pub(crate) struct VoteArrays {
 /// What a vote-shaped binding was called with: a parsed `.matches` handle, or
 /// the CSR arrays spelled out.
 ///
-/// Both forms reach the same kernel; the object form hands the whole file to
-/// the core's own `from_matches` entry rather than taking the file apart here,
-/// so the reading (the member arrays, the shared-dimensions rule) has exactly
-/// one implementation and both languages get it.
+/// Both forms reach the same kernel. The core reads the `.matches` form,
+/// including its member arrays and the shared-dimensions rule;
+/// [`CsrSource::Matches`] says why.
 pub(crate) enum VoteSource<'a> {
     /// A `.matches` file, read by the core entry point.
     Matches(&'a MatchesData),
