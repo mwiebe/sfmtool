@@ -57,8 +57,9 @@ def bundle_adjust(*args, **kwargs):
 
     Imported by every module in the package that adjusts, in place of the
     kernel itself, so the adjustment's own wall time is one bucket wherever in
-    the chain it was paid."""
-    from sfmtool._sfmtool.geometry import bundle_adjust as _bundle_adjust
+    the chain it was paid.  It is the one-camera form
+    (`seed_camera.bundle_adjust_one_camera`), with the free-point crossing off."""
+    from seed_camera import bundle_adjust_one_camera
 
     with stage("relax.bundle_adjust"):
-        return _bundle_adjust(*args, **kwargs)
+        return bundle_adjust_one_camera(*args, **kwargs)

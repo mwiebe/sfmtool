@@ -48,12 +48,13 @@ from scipy.spatial.transform import Rotation
 
 from sfmtool._sfmtool.analysis import triangulate_batch
 from sfmtool._sfmtool.geometry import (
-    bundle_adjust,
     estimate_absolute_pose,
     estimate_essential_rays,
     refine_absolute_pose,
     reprojection_residuals,
 )
+
+from seed_camera import bundle_adjust_one_camera
 
 # ── Constants ───────────────────────────────────────────────────────────────
 #
@@ -1364,7 +1365,7 @@ def settling_channels(m):
     fin_b = before[np.isfinite(before)]
     out["residual_med_before"] = float(np.median(fin_b)) if len(fin_b) else None
     try:
-        ba = bundle_adjust(
+        ba = bundle_adjust_one_camera(
             m.camera,
             q0,
             t0,
