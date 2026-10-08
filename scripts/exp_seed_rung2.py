@@ -3414,9 +3414,10 @@ def resect_group(state, group, cut, ctx, hyp, row):
     from the non-target frames alone before it estimates anything, which is
     what makes the estimate independent of the group rather than of one frame
     at a time.  No bundle adjustment runs, and the primitive's own defaults are
-    the acceptance criteria.  The capture's match graph is passed where the run
-    knows it, which admits correspondences the member never assigned to the
-    frame; without it the pairs are the frame's own stored observations.
+    the acceptance criteria.  The capture's cluster-patches file is passed
+    where the run knows it, and its clusters give correspondences the member
+    never assigned to the frame; without it the pairs are the frame's own
+    stored observations.
 
     The state is DENSIFIED first where the walk carries a sufficiency bar and
     a target reads under it (`densify_for_resect`): the scaffold is structure
@@ -3459,8 +3460,13 @@ def resect_group(state, group, cut, ctx, hyp, row):
         recon, dense, keys = densify_for_resect(
             recon, targets, int(state["bar"]), matches
         )
+    # The primitive reads the run's cluster-patches file as a cluster source:
+    # each cluster with members in the target and in two or more other posed
+    # frames gives a correspondence, at its default member residual bound.
     out, report = resect_images(
-        recon, targets, matches_path=None if matches is None else str(matches)
+        recon,
+        targets,
+        cluster_patches_path=None if matches is None else str(matches),
     )
     if dense is not None:
         report["densify"] = dense

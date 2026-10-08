@@ -27,6 +27,7 @@ from scipy.spatial.transform import Rotation
 
 from sfmtool._sfmtool.geometry import (
     CameraIntrinsics,
+    bundle_adjust as _bundle_adjust,
     refine_absolute_pose as _refine_absolute_pose,
     reprojection_residuals as _reprojection_residuals,
 )
@@ -292,6 +293,52 @@ def make_cam_bspline(f, coeffs, d_max):
     express, with ``f`` staying the central scale under the model's
     center-anchored gauge."""
     return make_cam(f, coeffs=coeffs, d_max=d_max)
+
+
+def bundle_adjust_one_camera(
+    camera,
+    quaternions_wxyz,
+    translations,
+    points,
+    uv,
+    obs_image,
+    obs_point,
+    *,
+    free_points_cross=False,
+    **kwargs,
+):
+    """The native bundle adjustment with every image taken through ``camera``.
+
+    The seed adjusts under one camera.  The binding takes a camera list and the
+    index of each image's camera, and returns the solved cameras; this passes
+    the one camera for every image and also returns the solved camera's
+    ``focal`` and ``bspline_coefficients`` (empty for a model with no spline),
+    which is what the seed reads off an adjustment.
+
+    ``free_points_cross`` is off here, where the binding's own default is on:
+    the seed hands its at-infinity marks in as the representation each point
+    keeps for the whole solve (a direction stays a direction, a position a
+    position).  Every other keyword passes through unchanged."""
+    n_img = np.asarray(quaternions_wxyz).shape[0]
+    out = _bundle_adjust(
+        [camera],
+        np.zeros(n_img, dtype=np.uint32),
+        quaternions_wxyz,
+        translations,
+        points,
+        uv,
+        obs_image,
+        obs_point,
+        free_points_cross=free_points_cross,
+        **kwargs,
+    )
+    params = out["cameras"][0].parameters
+    n_coeffs = int(params.get("bspline_coeff_count", 0.0))
+    out["focal"] = float(params["focal_length"])
+    out["bspline_coefficients"] = np.array(
+        [params[f"bspline_c{i}"] for i in range(n_coeffs)], dtype=np.float64
+    )
+    return out
 
 
 def _cam_depth(p_cam):
