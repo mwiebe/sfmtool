@@ -247,7 +247,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             schema: object(&[], &[]),
         },
         ToolSpec {
-            name: "get_history",
+            name: "get_reconstruction_history",
             description: "One reconstruction's versions, oldest first: every edit anyone has \
                           made to it this session, with the sentence the edit recorded as each \
                           version's label and the time it was made. cursor names the version the \

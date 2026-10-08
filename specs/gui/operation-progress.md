@@ -474,7 +474,7 @@ The Action Log row gains a leading column one glyph wide, before the time:
 ```
   14:09:19  User      6.2 ms  Deleted point 29429 in guard (v2 → v3)
 + 14:09:22  MCP        2.4 s  Undo: Resected dino_dog_toy_09.jpg (v3 → v2)
-  14:09:24  MCP      <1 ms    get_history guard
+  14:09:24  MCP      <1 ms    get_reconstruction_history guard
 ```
 
 `+` marks an entry that carries detail, `-` one that is expanded, and a blank
