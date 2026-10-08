@@ -81,7 +81,10 @@ impl WindowMatcher {
             return find_best_match_contiguous(query_desc, window_descs, desc_len, threshold);
         };
 
-        let window_len = window_descs.len() / desc_len;
+        // Counted from the positions rather than the descriptors, so a zero
+        // `desc_len` reaches the search below (which returns `None`) instead
+        // of dividing by zero.
+        let window_len = f.positions2.len() / 2;
         let mask = two_stage_geometric_filter(
             f.x1,
             &f.affine1,
