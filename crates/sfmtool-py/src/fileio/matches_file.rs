@@ -16,7 +16,7 @@ use std::str::FromStr;
 use numpy::{PyReadonlyArray1, ToPyArray};
 use pyo3::prelude::*;
 
-use sfmtool_matches_format::{ClusterMemberStatus, ClusterSelect, MatchesData};
+use sfmtool_matches_format::{ClusterCellStatus, ClusterMemberStatus, ClusterSelect, MatchesData};
 
 use crate::helpers::serde_to_py;
 
@@ -69,13 +69,13 @@ fn parse_status(item: &Bound<'_, PyAny>) -> PyResult<ClusterMemberStatus> {
     if let Ok(v) = item.extract::<u8>() {
         return ClusterMemberStatus::from_u8(v).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid ClusterMemberStatus discriminant {v} (valid: 0..=6)"
+                "invalid ClusterMemberStatus discriminant {v} (valid: 0..=8)"
             ))
         });
     }
     let s: String = item.extract().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(
-            "accepted_statuses items must be status ints (0..=6) or names (e.g. 'kept')",
+            "accepted_statuses items must be status ints (0..=8) or names (e.g. 'kept')",
         )
     })?;
     ClusterMemberStatus::from_str(&s)
@@ -296,6 +296,97 @@ impl PyMatchesFile {
             .to_pyarray(py)
             .into_any()
             .unbind())
+    }
+
+    /// Whether the file carries the piecewise refinement's per-cell columns
+    /// (format version 8). False for a file without a cluster_patches/
+    /// section, for a file below version 8, and for one whose refinement did
+    /// not run the piecewise stage.
+    #[getter]
+    fn has_member_cells(&self) -> bool {
+        self.inner
+            .cluster_patches
+            .as_ref()
+            .is_some_and(|cp| cp.member_cells.is_some())
+    }
+
+    /// `(M, 3, 3, 2)` float32 each cell's displacement `[x, y]` from where the
+    /// member's affine shape places it, in patch grid px, cells `[m, row,
+    /// col]` from the top-left; NaN where no shift was measured.
+    ///
+    /// None when the cluster_patches/ section carries no cells; raises
+    /// `ValueError`, like the section's other getters, when the file has no
+    /// cluster_patches/ section.
+    #[getter]
+    fn member_cell_shift_px<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        Ok(self
+            .cluster_patches()?
+            .member_cells
+            .as_ref()
+            .map(|cells| cells.shift_px.to_pyarray(py).into_any().unbind()))
+    }
+
+    /// `(M, 3, 3)` float32 each cell's ZNCC against the reference at its best
+    /// shift, averaged over the template's textured colour channels; NaN
+    /// where nothing was read.
+    ///
+    /// None when the cluster_patches/ section carries no cells; raises
+    /// `ValueError`, like the section's other getters, when the file has no
+    /// cluster_patches/ section.
+    #[getter]
+    fn member_cell_zncc<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        Ok(self
+            .cluster_patches()?
+            .member_cells
+            .as_ref()
+            .map(|cells| cells.zncc.to_pyarray(py).into_any().unbind()))
+    }
+
+    /// `(M, 3, 3)` uint8 cell statuses in the canonical numbering, whatever
+    /// legend the file stated: 0 fitted, 1 refused_curvature, 2 refused_zncc,
+    /// 3 not_attempted, 4 refused_bound, 5 refused_outlier
+    /// (`member_cell_status_names`).
+    ///
+    /// None when the cluster_patches/ section carries no cells; raises
+    /// `ValueError`, like the section's other getters, when the file has no
+    /// cluster_patches/ section.
+    #[getter]
+    fn member_cell_status<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        Ok(self
+            .cluster_patches()?
+            .member_cells
+            .as_ref()
+            .map(|cells| cells.status.to_pyarray(py).into_any().unbind()))
+    }
+
+    /// The canonical names of the `member_cell_status` codes, one per code in
+    /// code order.
+    ///
+    /// None when the cluster_patches/ section carries no cells; raises
+    /// `ValueError`, like the section's other getters, when the file has no
+    /// cluster_patches/ section.
+    #[getter]
+    fn member_cell_status_names(&self) -> PyResult<Option<Vec<&'static str>>> {
+        Ok(self
+            .cluster_patches()?
+            .member_cells
+            .as_ref()
+            .map(|_| ClusterCellStatus::NAMES.to_vec()))
+    }
+
+    /// `(M,)` uint8 renders the piecewise refinement made per member; 0 for a
+    /// member it did not run on.
+    ///
+    /// None when the cluster_patches/ section carries no cells; raises
+    /// `ValueError`, like the section's other getters, when the file has no
+    /// cluster_patches/ section.
+    #[getter]
+    fn member_cell_iterations<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        Ok(self
+            .cluster_patches()?
+            .member_cells
+            .as_ref()
+            .map(|cells| cells.iterations.to_pyarray(py).into_any().unbind()))
     }
 
     /// Refinement options recorded in `cluster_patches/metadata.json.zst`.

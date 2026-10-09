@@ -14,9 +14,11 @@
 //! reference detection, refines an affine warp to every other member by a
 //! shift → similarity → affine Nelder-Mead cascade on the windowed ZNCC
 //! (seeded from the SIFT affine shapes, `M₀ = A_mem · A_ref⁻¹`), vets by
-//! achieved ZNCC and translation drift, dedupes to one kept member per image,
-//! and emits member-parallel arrays that map 1:1 onto the `.matches`
-//! `cluster_patches/` section.
+//! achieved ZNCC and translation drift, reads each surviving member's own
+//! patch again at its refined shape (the whole patch's self-similarity radius
+//! and how many of its nine cells read the largest), dedupes to one kept
+//! member per image, and emits member-parallel arrays that map 1:1 onto the
+//! `.matches` `cluster_patches/` section.
 //!
 //! The refinement's working unknown is the relative warp `W`, but what the
 //! member arrays STORE is the absolute affine shape `S = W · A_ref` — the map
@@ -37,6 +39,7 @@
 mod consistency;
 mod kernels;
 mod params;
+mod piecewise;
 pub mod prof;
 
 #[cfg(test)]
@@ -52,7 +55,10 @@ use crate::camera::image::ImageU8Pyramid;
 use crate::patch::normal_refine::{
     build_support, weighted_moments_pub, znorm_write, PartZncc, Support, FLAT_NORM_SQ_EPS,
 };
-use crate::patch::self_similarity::{zncc_self_similarity_radius, PatchTile, SelfSimilarityParams};
+use crate::patch::self_similarity::{
+    zncc_self_similarity_parts, zncc_self_similarity_radius, PatchTile, SelfSimilarityParams,
+    SelfSimilarityParts,
+};
 use crate::patch::view_selection::AffineCoreMap;
 
 use kernels::{
@@ -61,7 +67,12 @@ use kernels::{
 
 pub use consistency::warp_consistency_residuals;
 pub use params::{
-    ClusterRefineParams, ClusterRefineResult, FeatureGeometry, MemberStatus, REFERENCE_UNREFINABLE,
+    capped_cell_count, ClusterRefineParams, ClusterRefineResult, FeatureGeometry, MemberStatus,
+    CELL_COUNT, DEFAULT_MAX_CAPPED_CELLS, DEFAULT_REGATE_AT_REFINED_SHAPE, REFERENCE_UNREFINABLE,
+};
+pub use piecewise::{
+    member_cell_data, CellRefinement, CellStatus, LoopStop, PiecewiseParams, ACCEPT_ZNCC_TOLERANCE,
+    DEFAULT_MIN_CELL_CURVATURE, DEFAULT_MIN_CELL_ZNCC,
 };
 
 /// A member's SIFT affine shape is usable when `|det A|` clears this floor.
@@ -233,6 +244,14 @@ struct MemberOutcome {
     /// The ZNCC grid at the same final map.
     zncc_grid: [[f32; 3]; 3],
     shift: f32,
+    /// The piecewise refinement's cells, for a kept member when the stage
+    /// runs.
+    cells: Option<CellRefinement>,
+    /// The ZNCC self-similarity radius of the member's own grid at its
+    /// refined shape, and its nine cells' radii, when the gates at the
+    /// refined shape read it.
+    refined_radius: f32,
+    refined_radius_grid: [[f32; 3]; 3],
 }
 
 impl Default for MemberOutcome {
@@ -244,6 +263,9 @@ impl Default for MemberOutcome {
             zncc_middle: f32::NAN,
             zncc_grid: [[f32::NAN; 3]; 3],
             shift: f32::NAN,
+            cells: None,
+            refined_radius: f32::NAN,
+            refined_radius_grid: [[f32::NAN; 3]; 3],
         }
     }
 }
@@ -253,6 +275,42 @@ impl MemberOutcome {
     fn set_parts(&mut self, parts: PartZncc) {
         self.zncc_middle = parts.middle as f32;
         self.zncc_grid = parts.grid.map(|row| row.map(|z| z as f32));
+    }
+
+    /// The member's refined shape and position, from the stored affine.
+    fn shape_and_position(&self) -> (Mat2, [f64; 2]) {
+        let a = &self.affine;
+        ([[a[0][0], a[0][1]], [a[1][0], a[1][1]]], [a[0][2], a[1][2]])
+    }
+
+    /// Read the member's own grid at its refined shape and position, store
+    /// the readings, and return the verdict of the two gates at the refined
+    /// shape ([`ClusterRefineParams::refined_shape_verdict`]): `None` when it
+    /// passes, or when the grid cannot be sampled there, which skips the
+    /// gates as non-finite geometry skips the up-front gate.
+    ///
+    /// The whole grid is read by the up-front gate's own reading
+    /// ([`grid_self_similarity_radius`]), so a grid gives the same radius
+    /// before and after refinement; the cells come from the parts reading of
+    /// the same grid ([`grid_self_similarity_parts`]).
+    fn read_refined_shape(
+        &mut self,
+        pyramid: &ImageU8Pyramid,
+        params: &ClusterRefineParams,
+    ) -> Option<MemberStatus> {
+        let (shape, position) = self.shape_and_position();
+        let samples = sample_member_grid(pyramid, position, shape, params)?;
+        let resolution = params.resolution.max(2) as usize;
+        let parts = grid_self_similarity_parts(&samples, resolution)?;
+        let radius = grid_self_similarity_radius(&samples, resolution);
+        prof::count(&prof::N_REFINED_GATED, 1);
+        let cells = parts
+            .grid
+            .each_ref()
+            .map(|row| row.each_ref().map(|c| c.radius));
+        self.refined_radius = radius as f32;
+        self.refined_radius_grid = cells.map(|row| row.map(|r| r as f32));
+        params.refined_shape_verdict(radius, &cells)
     }
 }
 
@@ -328,6 +386,48 @@ pub fn member_zncc_self_similarity_radius(
     ))
 }
 
+/// The overlap reading of one member's own `R×R` grid
+/// ([`sample_member_grid`]) at `position` and `affine_shape`, as a whole, its
+/// middle square and its nine cells, with the default
+/// [`SelfSimilarityParams`]. Its `grid` is what
+/// [`ClusterRefineParams::max_capped_cells`] judges at the refined shape. Its
+/// `whole` is the template [`member_zncc_self_similarity_radius`] reads, read
+/// with the parts' shared sums, so the two can differ in the last bits; the
+/// gates judge the whole grid by [`member_zncc_self_similarity_radius`]'s
+/// reading. `None` where the grid cannot be sampled, or has no channels.
+pub fn member_zncc_self_similarity_parts(
+    pyramid: &ImageU8Pyramid,
+    position: [f64; 2],
+    affine_shape: [[f64; 2]; 2],
+    params: &ClusterRefineParams,
+) -> Option<SelfSimilarityParts> {
+    let samples = sample_member_grid(pyramid, position, affine_shape, params)?;
+    grid_self_similarity_parts(&samples, params.resolution.max(2) as usize)
+}
+
+/// The overlap reading of an interleaved `R×R×C` grid from
+/// [`sample_member_grid`] as a whole, its middle and its nine cells; `None`
+/// for a grid with no channels.
+fn grid_self_similarity_parts(samples: &[f32], resolution: usize) -> Option<SelfSimilarityParts> {
+    let channels = samples.len() / (resolution * resolution);
+    if channels == 0 {
+        return None;
+    }
+    let (planes, colour) =
+        PatchTile::planes_from_interleaved(samples, resolution, resolution, channels);
+    let tile = PatchTile {
+        values: &planes,
+        channels: colour,
+        width: resolution,
+        height: resolution,
+    };
+    Some(zncc_self_similarity_parts(
+        &tile,
+        None,
+        &SelfSimilarityParams::default(),
+    ))
+}
+
 /// The overlap reading's ZNCC self-similarity radius of an interleaved
 /// `R×R×C` grid from [`sample_member_grid`]; `NaN` for a grid with no
 /// channels.
@@ -369,11 +469,52 @@ fn sample_patch_grid(
     step: f64,
     off: f64,
 ) -> Option<Vec<f32>> {
+    sample_grid_window(
+        pyramid,
+        pos,
+        a,
+        step,
+        off,
+        0,
+        resolution as usize,
+        GridEdge::Clamp,
+    )
+}
+
+/// What [`sample_grid_window`] does with a sample whose taps leave the image.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GridEdge {
+    /// Clamp to the nearest valid pixel (border replicate), and refuse the
+    /// whole window on a non-finite coordinate.
+    Clamp,
+    /// Write `NaN` in every channel of that sample, non-finite coordinates
+    /// included.
+    Missing,
+}
+
+/// Sample a `size × size` window of the template grid's positions, starting at
+/// grid index `first` on both axes, at position `pos` and shape `a`, into an
+/// interleaved `size × size × C` f32 patch. The map, the pyramid level and the
+/// bilinear convention are those of the `R×R` grid whose spacing is `step`
+/// and whose first sample is at `off` (keypoint-frame units), so a
+/// window with `first = 0` and `size = R` is that grid, and a window reaching
+/// past it continues the same map. `None` for a level too small to
+/// bilinear-sample, or, under [`GridEdge::Clamp`], a non-finite coordinate.
+#[allow(clippy::too_many_arguments)]
+fn sample_grid_window(
+    pyramid: &ImageU8Pyramid,
+    pos: [f64; 2],
+    a: &Mat2,
+    step: f64,
+    off: f64,
+    first: i64,
+    size: usize,
+    edge: GridEdge,
+) -> Option<Vec<f32>> {
     let map = warp_map(pos, [0.0, 0.0], a, step, off);
     let level = level_for_map(&map, pyramid.num_levels());
     let lmap = map_at_level(&map, level);
     let img = pyramid.level(level);
-    let r = resolution as usize;
     let ch = img.channels() as usize;
     let stride = img.width() as usize * ch;
     let data = img.data();
@@ -382,27 +523,45 @@ fn sample_patch_grid(
         return None;
     }
     let (max_gx, max_gy) = ((w_img - 1) as f64, (h_img - 1) as f64);
-    let mut out = vec![0f32; r * r * ch];
-    for px in 0..r * r {
-        let col = (px % r) as f64;
-        let row = (px / r) as f64;
+    let mut out = vec![0f32; size * size * ch];
+    for px in 0..size * size {
+        let col = (first + (px % size) as i64) as f64;
+        let row = (first + (px / size) as i64) as f64;
         let x = lmap.a[0] * col + lmap.a[1] * row + lmap.a[2];
         let y = lmap.a[3] * col + lmap.a[4] * row + lmap.a[5];
         // `bilinear_geometry`'s pixel-center convention.
         let gx = x - 0.5;
         let gy = y - 0.5;
-        if !gx.is_finite() || !gy.is_finite() {
-            return None;
-        }
-        // Nearest-valid-pixel clamp (border replicate): the coordinate
-        // clamps to the outermost pixel center and the tap base to the last
-        // valid 2x2 cell, so fx/fy saturate and the blend reads the edge
-        // pixel.
-        let gx = gx.clamp(0.0, max_gx);
-        let gy = gy.clamp(0.0, max_gy);
-        let ix = (gx.floor() as i64).min(w_img - 2);
-        let iy = (gy.floor() as i64).min(h_img - 2);
-        let (fx, fy) = ((gx - ix as f64) as f32, (gy - iy as f64) as f32);
+        let (ix, iy, fx, fy) = match edge {
+            GridEdge::Clamp => {
+                if !gx.is_finite() || !gy.is_finite() {
+                    return None;
+                }
+                // Nearest-valid-pixel clamp (border replicate): the coordinate
+                // clamps to the outermost pixel center and the tap base to the
+                // last valid 2x2 cell, so fx/fy saturate and the blend reads
+                // the edge pixel.
+                let gx = gx.clamp(0.0, max_gx);
+                let gy = gy.clamp(0.0, max_gy);
+                let ix = (gx.floor() as i64).min(w_img - 2);
+                let iy = (gy.floor() as i64).min(h_img - 2);
+                (ix, iy, (gx - ix as f64) as f32, (gy - iy as f64) as f32)
+            }
+            GridEdge::Missing => {
+                let in_frame = gx.is_finite()
+                    && gy.is_finite()
+                    && gx >= 0.0
+                    && gy >= 0.0
+                    && (gx.floor() as i64) + 1 < w_img
+                    && (gy.floor() as i64) + 1 < h_img;
+                if !in_frame {
+                    out[px * ch..][..ch].fill(f32::NAN);
+                    continue;
+                }
+                let (x0, y0) = (gx.floor(), gy.floor());
+                (x0 as i64, y0 as i64, (gx - x0) as f32, (gy - y0) as f32)
+            }
+        };
         let base = iy as usize * stride + ix as usize * ch;
         for c in 0..ch {
             let v00 = data[base + c] as f32;
@@ -882,6 +1041,18 @@ fn refine_cluster(
                 ..MemberOutcome::default()
             };
             members[j].set_parts(parts);
+            // The member gate again, at the shape the cascade returned:
+            // before the per-image dedupe, so a refused member cannot cost
+            // its image a member that would have passed.
+            if status == MemberStatus::Kept && params.reads_refined_shape() {
+                let member = &mut members[j];
+                if let Some(refused) =
+                    prof::REFINED_GATE.time(|| member.read_refined_shape(pyramids[g.image], params))
+                {
+                    prof::count(&prof::N_REFINED_GATE_REJECTED, 1);
+                    member.status = refused;
+                }
+            }
         }
     }
 
@@ -909,10 +1080,185 @@ fn refine_cluster(
         }
     }
 
+    // 7. The piecewise refinement of every kept member, from its cascade
+    // shape.
+    if let Some(pp) = params.piecewise.as_ref() {
+        let kept: Vec<usize> = (0..size)
+            .filter(|&j| members[j].status == MemberStatus::Kept)
+            .collect();
+        if !kept.is_empty() {
+            let layout = piecewise::CellLayout::new(resolution, pp.cell_shift_bound_px);
+            let templates = piecewise::CellTemplates::new(&tmpl, &layout);
+            for j in kept {
+                let g = geo[j].as_ref().unwrap();
+                prof::count(&prof::N_PIECEWISE, 1);
+                prof::PIECEWISE.time(|| {
+                    refine_kept_member_cells(
+                        &mut members[j],
+                        pyramids[g.image],
+                        g.pos,
+                        &tmpl,
+                        &templates,
+                        &layout,
+                        tables,
+                        resolution,
+                        step,
+                        off,
+                        params,
+                        pp,
+                    )
+                });
+            }
+        }
+    }
+
     ClusterOutcome {
         reference: ref_geo.k_global,
         members,
     }
+}
+
+/// Run the piecewise refinement on one kept member and store its outcome:
+/// the cells always, and, when the loop moved the shape, the new shape and
+/// position with the whole-patch ZNCC, its parts and the shift from the seed
+/// read again at the new map. Without [`PiecewiseParams::move_shape`] the
+/// shape never moves, so only the cells are stored and every other reading of
+/// the member is left untouched.
+///
+/// The member was kept on the cascade's readings, so the stage's shape must
+/// pass the same gates to replace it: the ZNCC read again at the new map must
+/// be at least [`ClusterRefineParams::min_zncc`] and at least the cascade's own
+/// stored ZNCC, the new position's shift from the seed at most
+/// [`ClusterRefineParams::max_shift_px`], and, when either gate at the refined
+/// shape is on ([`ClusterRefineParams::reads_refined_shape`]), the member's
+/// own grid read at the new shape must pass both. When any fails, or when the
+/// new map's support leaves the frame so nothing can be read, the member
+/// keeps its cascade shape, position and readings, the readings at the
+/// refined shape included, and every cell is stored as
+/// [`CellStatus::NotAttempted`] with the loop's iteration count.
+///
+/// The stage never changes a member's status. The member passed every gate
+/// at its cascade shape, and the per-image dedupe has already run, so a
+/// refusal here could leave its image with no member, where reverting keeps
+/// the member that passed.
+#[allow(clippy::too_many_arguments)]
+fn refine_kept_member_cells(
+    member: &mut MemberOutcome,
+    pyramid: &ImageU8Pyramid,
+    seed_pos: [f64; 2],
+    tmpl: &TemplateKernel,
+    templates: &piecewise::CellTemplates,
+    layout: &piecewise::CellLayout,
+    tables: &SupportTables,
+    resolution: u32,
+    step: f64,
+    off: f64,
+    params: &ClusterRefineParams,
+    pp: &PiecewiseParams,
+) {
+    let s = [
+        [member.affine[0][0], member.affine[0][1]],
+        [member.affine[1][0], member.affine[1][1]],
+    ];
+    let p = [member.affine[0][2], member.affine[1][2]];
+    // The cascade's own objective, which an update must not lower.
+    let score = |shape: &Mat2, position: [f64; 2]| {
+        member_zncc_at(
+            pyramid, position, shape, tmpl, tables, resolution, step, off,
+        )
+    };
+    let out = piecewise::refine_member_cells(
+        pyramid,
+        &tmpl.src_channels,
+        templates,
+        layout,
+        s,
+        p,
+        step,
+        off,
+        pp,
+        score,
+    );
+    if !out.updated {
+        member.cells = Some(out.cells);
+        return;
+    }
+    let (sh, ps) = (out.shape, out.position);
+    let shift = (ps[0] - seed_pos[0]).hypot(ps[1] - seed_pos[1]);
+    // The stored ZNCC must not fall below the cascade's: the loop's floor is
+    // its own reading of the starting shape, which can differ from the
+    // cascade's stored value in the last bits, so the stored value is the bar.
+    let cascade_zncc = member.zncc;
+    let reread = read_member_at(pyramid, ps, &sh, tmpl, tables, resolution, step, off).filter(
+        |&(zncc, _)| {
+            zncc >= params.min_zncc && zncc as f32 >= cascade_zncc && shift <= params.max_shift_px
+        },
+    );
+    let Some((zncc, parts)) = reread else {
+        member.cells = Some(CellRefinement::not_attempted(out.cells.iterations));
+        return;
+    };
+    let cascade = member.clone();
+    member.affine = [[sh[0][0], sh[0][1], ps[0]], [sh[1][0], sh[1][1], ps[1]]];
+    member.zncc = zncc as f32;
+    member.set_parts(parts);
+    member.shift = shift as f32;
+    if params.reads_refined_shape() && member.read_refined_shape(pyramid, params).is_some() {
+        // The moved shape fails a gate the cascade shape passed: keep the
+        // cascade shape and its readings.
+        prof::count(&prof::N_REFINED_GATE_REVERTED, 1);
+        *member = cascade;
+        member.cells = Some(CellRefinement::not_attempted(out.cells.iterations));
+        return;
+    }
+    member.cells = Some(out.cells);
+}
+
+/// The whole-patch windowed ZNCC and its part readings of a member at
+/// absolute position `p` and shape `s`; `None` when the support leaves the
+/// frame.
+#[allow(clippy::too_many_arguments)]
+fn read_member_at(
+    pyramid: &ImageU8Pyramid,
+    p: [f64; 2],
+    s: &Mat2,
+    tmpl: &TemplateKernel,
+    tables: &SupportTables,
+    resolution: u32,
+    step: f64,
+    off: f64,
+) -> Option<(f64, PartZncc)> {
+    let map = warp_map(p, [0.0, 0.0], s, step, off);
+    let level = level_for_map(&map, pyramid.num_levels());
+    let lmap = map_at_level(&map, level);
+    let bbox = grid_bbox(&lmap, resolution);
+    let mut tiles = TileCache::default();
+    let tile = tiles.get_or_build(pyramid, level, bbox)?;
+    let zncc = eval_zncc(&lmap, tile, tables, tmpl)?;
+    Some((zncc, eval_zncc_parts(&lmap, tile, tables, tmpl)))
+}
+
+/// The whole-patch windowed ZNCC of a member at absolute position `p` and
+/// shape `s`, the objective the cascade maximises; `None` when the support
+/// leaves the frame.
+#[allow(clippy::too_many_arguments)]
+fn member_zncc_at(
+    pyramid: &ImageU8Pyramid,
+    p: [f64; 2],
+    s: &Mat2,
+    tmpl: &TemplateKernel,
+    tables: &SupportTables,
+    resolution: u32,
+    step: f64,
+    off: f64,
+) -> Option<f64> {
+    let map = warp_map(p, [0.0, 0.0], s, step, off);
+    let level = level_for_map(&map, pyramid.num_levels());
+    let lmap = map_at_level(&map, level);
+    let bbox = grid_bbox(&lmap, resolution);
+    let mut tiles = TileCache::default();
+    let tile = tiles.get_or_build(pyramid, level, bbox)?;
+    eval_zncc(&lmap, tile, tables, tmpl)
 }
 
 /// Refine every cluster into a patch cluster: per cluster, a reference member
@@ -1049,6 +1395,9 @@ pub fn refine_cluster_patches_borrowed(
         member_zncc_middle: vec![f32::NAN; m],
         member_zncc_grid: vec![[[f32::NAN; 3]; 3]; m],
         member_shift_px: vec![f32::NAN; m],
+        cells: vec![None; m],
+        refined_zncc_self_similarity_radius: vec![f32::NAN; m],
+        refined_zncc_self_similarity_radius_grid: vec![[[f32::NAN; 3]; 3]; m],
     };
     for (c, out) in outcomes.into_iter().enumerate() {
         result.reference_members[c] = out.reference;
@@ -1060,6 +1409,11 @@ pub fn refine_cluster_patches_borrowed(
             result.member_zncc_middle[k] = mo.zncc_middle;
             result.member_zncc_grid[k] = mo.zncc_grid;
             result.member_shift_px[k] = mo.shift;
+            result.refined_zncc_self_similarity_radius[k] = mo.refined_radius;
+            result.refined_zncc_self_similarity_radius_grid[k] = mo.refined_radius_grid;
+            if mo.status == MemberStatus::Kept {
+                result.cells[k] = mo.cells;
+            }
             // The 2×3 the cascade carries splits into the two arrays the
             // format stores: leading 2×2 the absolute shape, last column the
             // absolute position.

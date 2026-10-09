@@ -185,6 +185,21 @@ relative warp `W = S·S_ref⁻¹` (unavailable in a derived file whose reference
 member is absent, where the absolute shapes and positions stay valid
 regardless). Top-level metadata gains `"has_cluster_patches": true`.
 
+A member carries one shape for its whole patch. A file written with
+`--piecewise` also holds, for each kept member, a displacement, a ZNCC and a
+status for each of the nine cells of its patch, the displacement measured from
+where the member's stored shape places the cell (format version 8's per-cell
+entries, [matches-file-format.md](../../formats/matches-file-format.md#per-cell-entries-optional-version-8)).
+In such a file the kept members' shapes and positions are also the
+piecewise refinement's: an affine map fitted to the cells' shifts moves a
+member's shape wherever the whole-patch ZNCC does not fall, so a member's
+stored shape can differ from the affine cascade's optimum. The piecewise
+refinement is specified in
+[cluster-patch-refinement.md](cluster-patch-refinement.md#piecewise-refinement);
+once poses exist, [cell-plane-normals.md](cell-plane-normals.md) turns them into
+a patch normal. A file written without `--piecewise` holds no per-cell
+displacement.
+
 ## The operation
 
 ```
@@ -255,9 +270,10 @@ members unless a caller asks otherwise:
 - The clusters source of the [matching sources near a
   pixel](../bench/nearby-sources.md#the-clusters) triangulates the members of
   the clusters near a pixel into candidate points. It is the exception to the
-  rule above: by default it also admits the members rejected for a low ZNCC or
-  a large shift and the unevaluated ones, and lets the triangulation drop the
-  bad ones; its `kept` policy admits only the reference and the kept.
+  rule above: by default it also admits the members rejected after they were
+  measured (for a low ZNCC, a large shift, or by either gate at the refined
+  shape) and the unevaluated ones, and lets the triangulation drop the bad
+  ones; its `kept` policy admits only the reference and the kept.
 - [Source clusters](../analysis/source-clusters.md) takes a cluster selection
   drawn from the file and bands its clusters by feature radius, read off the
   members' affine shapes against the refine radius recorded in the

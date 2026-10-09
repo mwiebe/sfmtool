@@ -132,12 +132,16 @@ match-output-file.matches (ZIP archive)
 │   ├── member_positions.{K}.2.float32.zst         # Keypoint position per member, at this file's stage
 │   └── member_affine_shapes.{K}.2.2.float32.zst   # Affine shape per member, at this file's stage
 ├── cluster_patches/                               # (Optional section, requires clusters/)
-│   ├── metadata.json.zst                          # Refinement options, summary counts, status legend
+│   ├── metadata.json.zst                          # Refinement options, summary counts, status legends
 │   ├── reference_members.{C}.uint32.zst           # Global member index of each cluster's reference
 │   ├── member_status.{K}.uint8.zst                # Status code per member, an index into the legend
 │   ├── member_consistency_residual.{K}.float32.zst # Warp-consistency residual (NaN if not fitted)
 │   ├── member_shift_px.{K}.float32.zst            # Translation drift from the SIFT seed (NaN if n/a)
-│   └── member_zncc.{K}.float32.zst                # Achieved windowed ZNCC vs reference (NaN if n/a)
+│   ├── member_zncc.{K}.float32.zst                # Achieved windowed ZNCC vs reference (NaN if n/a)
+│   ├── member_cell_shift_px.{K}.3.3.2.float32.zst # (Optional, v8+) Per-cell displacement (NaN if not measured)
+│   ├── member_cell_zncc.{K}.3.3.float32.zst       # (Optional, v8+) Per-cell ZNCC (NaN if not read)
+│   ├── member_cell_status.{K}.3.3.uint8.zst       # (Optional, v8+) Per-cell status, an index into its legend
+│   └── member_cell_iterations.{K}.uint8.zst       # (Optional, v8+) Piecewise refinement passes per member
 └── two_view_geometries/                           # (Optional section, requires image_pairs/)
     ├── metadata.json.zst                          # TVG metadata
     ├── config_types.json.zst                        # Unique TwoViewGeometryConfig type strings
@@ -171,7 +175,7 @@ always store the pairwise backbone.
 
 ```json
 {
-  "version": 7,
+  "version": 9,
   "matching_method": "sequential",
   "matching_tool": "colmap",
   "matching_tool_version": "4.02",
@@ -220,7 +224,7 @@ A cluster-bearing file replaces the pairwise summary fields with cluster counts:
 ```
 
 **Field descriptions:**
-- `version`: Format version number. `1` through `7`; writers emit `7` (see
+- `version`: Format version number. `1` through `9`; writers emit `9` (see
   [Versioning and Migration](#versioning-and-migration))
 - `matching_method`: Type of matching used to produce these matches. The
   format does not restrict the string; these values have a defined meaning:
@@ -513,7 +517,8 @@ apart:
   `member_images[k]`. See the [.sift file format](sift-file-format.md).
 - A file **with** `cluster_patches/` is at the refinement stage: for every
   member the refinement **measured** (status `reference`, `kept`,
-  `rejected_low_zncc` or `rejected_shift`, below) the arrays hold
+  `rejected_low_zncc`, `rejected_shift`, `rejected_unlocalizable_refined` or
+  `rejected_unlocalizable_cells`, below) the arrays hold
   its answer, and for every member it never fitted they hold the detection the
   input carried, untouched. The refinement writes a **new** file (the
   write-once workflow), so the detection-stage file it read is kept beside
@@ -528,9 +533,10 @@ row holds a real position and a real shape, so a consumer that only wants
 geometry needs no join; a consumer that wants to know which reading a row
 carries, or which members the vet admitted, reads
 `cluster_patches/member_status`. The members whose rows the cascade measured
-are those with status `reference`, `kept`, `rejected_low_zncc` or
-`rejected_shift` — the two rejected ones keep their measurement so a consumer
-can re-gate without re-running. `duplicate_image`, `not_evaluated` and
+are those with status `reference`, `kept`, `rejected_low_zncc`,
+`rejected_shift`, `rejected_unlocalizable_refined` or
+`rejected_unlocalizable_cells` — the four rejected ones keep their measurement
+so a consumer can re-gate without re-running. `duplicate_image`, `not_evaluated` and
 `rejected_unlocalizable` were never fitted, and their rows are the detections.
 
 The refinement's geometry lives **only** here: `cluster_patches/` carries the
@@ -605,7 +611,12 @@ refinement measured and which members stand.
   "member_count": 14100,
   "member_status_names": [
     "reference", "kept", "rejected_low_zncc", "rejected_shift",
-    "duplicate_image", "not_evaluated", "rejected_unlocalizable"
+    "duplicate_image", "not_evaluated", "rejected_unlocalizable",
+    "rejected_unlocalizable_refined", "rejected_unlocalizable_cells"
+  ],
+  "member_cell_status_names": [
+    "fitted", "refused_curvature", "refused_zncc", "not_attempted",
+    "refused_bound", "refused_outlier"
   ],
   "refine_options": {
     "patch_size": 8.0,
@@ -624,16 +635,37 @@ refinement measured and which members stand.
   version 6 file, which is read through the canonical legend (see
   [`member_status`](#cluster_patchesmember_statuskuint8zst)). A writer always
   states the whole list in the canonical order; a reader accepts any legend and
-  normalises the column onto that order
+  normalises the column onto that order. A version 7 to 9 file's legend never
+  names `rejected_unlocalizable_refined` or `rejected_unlocalizable_cells`,
+  which version 10 added
+- `member_cell_status_names`: (version 8+, optional) The legend
+  `member_cell_status` indexes, one name per code in code order. Present
+  exactly when the section carries the
+  [per-cell entries](#per-cell-entries-optional-version-8), and absent
+  otherwise. A writer states the whole list in the canonical order; a reader
+  accepts any legend and normalises the column onto that order. A version 8
+  file's legend never names `refused_outlier`, which version 9 added
 - `refine_options`: The refinement parameters used, present since the section
   was introduced in version 3. The patch extent appears
   under one of two keys: `patch_size` (the full
   patch edge in pixels, current) or the legacy `radius` (a half-width).
   A consumer that needs the half-width uses `patch_size / 2`, or `radius`
   as-is. The other keys record the settings for a reader to see and are not
-  read back: current files also carry `resolution`, `min_zncc`, `max_shift_px` and
+  read back: current files also carry `resolution`, `min_zncc`, `max_shift_px`,
   `max_member_zncc_self_similarity_radius` (older files carry
-  `max_keypoint_uncertainty`, the bar of an earlier member gate, in its place)
+  `max_keypoint_uncertainty`, the bar of an earlier member gate, in its place),
+  `regate_at_refined_shape` and `max_capped_cells`, the settings of the two
+  gates read at the refined shape (absent from a file written before them;
+  `regate_at_refined_shape` is false whenever the whole-patch gate did not
+  run, including when `max_member_zncc_self_similarity_radius` is `0`, the bar
+  that gate shares),
+  and `piecewise`, whether the per-cell refinement ran. When it ran, the
+  piecewise refinement's settings sit beside it as flat keys: `move_shape`
+  (whether the refinement was allowed to change the member's shape),
+  `cell_shift_bound_px`, `min_cell_zncc`, `min_cell_curvature`,
+  `update_tolerance_px` and `max_iterations`. A file written before
+  `move_shape` was recorded lacks the key; its refinement could change the
+  shape
 
   Which keys `refine_options` holds is not tied to the format version, since
   the object is a record of settings rather than a stored layout. `radius` was
@@ -644,7 +676,7 @@ refinement measured and which members stand.
   `max_keypoint_uncertainty` is in files refined before that change and
   `max_member_zncc_self_similarity_radius` in files refined after it. A file
   rewritten at a later version, or a selection of it, keeps the keys of the
-  refinement it holds, so a version 7 file can carry either. A reader treats
+  refinement it holds, so a version 7 or later file can carry either. A reader treats
   a missing `refine_options`, or one with neither extent key, as recording no
   patch extent.
 
@@ -695,21 +727,40 @@ refinement measured and which members stand.
     edge reads the maximum, 3. A bar of `0` means the gate was off. Files that
     carry `max_keypoint_uncertainty` in place of that key hold members refused
     by an earlier score of the same patch with the same status
+  - `rejected_unlocalizable_refined` — (version 10+) the member passed the ZNCC
+    and shift gates, but its own patch, sampled again at its refined position
+    and affine shape (the ones the file stores for it), does not pin a
+    position: its ZNCC self-similarity radius there, read as for
+    `rejected_unlocalizable`, is above the same bar,
+    `refine_options.max_member_zncc_self_similarity_radius`. Its measurement is
+    kept
+  - `rejected_unlocalizable_cells` — (version 10+) the member passed the ZNCC
+    and shift gates, but of the nine cells of a three-by-three split of its own
+    patch at its refined position and affine shape (rows and columns cut at a
+    third and two thirds of the side), more than
+    `refine_options.max_capped_cells` read the largest ZNCC self-similarity
+    radius, 3, each cell read as a template against the rest of the patch.
+    Its measurement is kept. A member that fails this and the previous rule is
+    stored as `rejected_unlocalizable_refined`
 - **Canonical order**: a writer always states the whole legend in the order
   listed above, so a conforming writer stores `0` reference, `1` kept, `2`
   rejected_low_zncc, `3` rejected_shift, `4` duplicate_image, `5`
-  not_evaluated, `6` rejected_unlocalizable. A reader accepts any legend, in any
+  not_evaluated, `6` rejected_unlocalizable, `7`
+  rejected_unlocalizable_refined, `8` rejected_unlocalizable_cells. A reader
+  accepts any legend, in any
   order and naming any subset of the defined names, and **normalises the column
   onto the canonical order as it loads**, so a file's own numbering stops at the
-  I/O boundary. A version 6 file carries no legend: its codes are that fixed
-  canonical numbering, so it is read through the canonical legend.
+  I/O boundary. A version 6 file carries no legend: its codes are the fixed
+  numbering `0` reference through `6` rejected_unlocalizable, the first seven
+  names of the canonical legend, so it is read through those.
 - A patch cluster = the reference plus its `kept` members; statuses preserve the
   rejected members so consumers can re-gate without re-running (the ZNCC/shift arrays
   are the signals, mirroring how `match_descriptor_distances` enables descriptor
   re-filtering)
 - **Constraint**: The legend is present (version 7+), is a non-empty list of
   names, names only statuses this format defines, and names none twice — a
-  repeat would give one status two codes
+  repeat would give one status two codes. A file below version 10 names
+  neither `rejected_unlocalizable_refined` nor `rejected_unlocalizable_cells`
 - **Constraint**: Every value is below the legend's length, and so names one of
   its entries
 - **Constraint**: At most one member with status `reference` or `kept` per
@@ -753,6 +804,145 @@ refinement measured and which members stand.
 - A **stored signal, not a gate** — consumers choose their own threshold
   (e.g. ~0.3 as a RANSAC prefilter, ~0.1 for purity-first harvesting),
   mirroring how `member_zncc` enables re-vetting without re-running
+
+The section records one patch extent and one sampling `resolution` for the
+whole file. A second, finer resolution is proposed in
+[two-tier-patch-density.md](../drafts/two-tier-patch-density.md).
+
+#### Per-cell entries (optional, version 8+)
+
+A member's affine shape describes its whole patch. The four entries below
+describe the parts of the patch: the reference's `R × R` sampling grid
+(`R` = `refine_options.resolution`) is cut into a three-by-three split of
+**cells**, rows and columns cut at `⌊R/3⌋` and `R − ⌊R/3⌋`, and each cell of
+the reference is registered separately against the member's image, as seen
+through the member's affine shape. A cell's displacement is where its content
+lies in the member's patch relative to where the member's stored shape places
+it. No affine map fitted to the cells is removed from the displacements, so
+they carry three things: the part one affine map over the nine cells can
+express, which is how far the cells' own best fits disagree with the shape
+fitted to the whole patch (in full only when the refinement left the shape
+alone; see
+[`member_cell_shift_px`](#cluster_patchesmember_cell_shift_pxk332float32zst));
+for a planar surface, the perspective term a
+surface normal is derived from once camera poses are known, the part no
+affine map matches; and for a patch that spans two surfaces, the parallax of
+the cells off the one the shape follows. A consumer that wants only the part
+no affine map matches fits an affine map to the member's `fitted` cells'
+displacements and removes it.
+
+The four entries are present together or absent together, and present exactly
+when `cluster_patches/metadata.json` carries `member_cell_status_names`. A
+file without them carries no per-cell reading; a version 7 file never does.
+Cells are indexed `[k, row, col]`, from the top-left cell of the grid in the
+orientation the grid is sampled in (columns along the grid's first axis, rows
+along its second). Only a member whose status is `kept` carries readings:
+every other member's row is `NaN` displacements, `NaN` ZNCCs,
+`not_attempted` throughout and `0` passes.
+
+##### `cluster_patches/member_cell_shift_px.{K}.3.3.2.float32.zst`
+
+- **Shape**: `(K, 3, 3, 2)` where K = cluster_member_count
+- **Data type**: `float32` (little-endian)
+- Each cell's displacement `[x, y]`, along the grid's columns and rows, from
+  where the member's stored affine shape (`clusters/member_affine_shapes`,
+  with its position `clusters/member_positions`) places the cell's centre, in
+  pixels of the sampling grid. A displacement of `d` means the cell's content
+  lies at `c + d` of the member's grid, where `c` is the cell's centre. It is
+  the measured displacement, with no affine map fitted to the cells removed
+- The part of the displacements one affine map over the cells can express is
+  present in full only when `refine_options.move_shape` is `false`: the
+  refinement then sampled the image once, through the stored shape, and left
+  that shape as the whole-patch fit found it. When `move_shape` is `true`, or
+  the key is absent (every version 8 file, and a version 9 file written before
+  the key was recorded), the refinement may have moved the shape by the affine
+  map the cells agreed on, so the stored shape may have absorbed that part and
+  the displacements hold what remained. The definition above holds either
+  way. When the refinement did move the shape, the cell's ZNCC and status were
+  read at the sampling made before the last update that moved it, not through
+  the stored shape
+- `NaN` where no displacement was measured: a cell whose status is
+  `refused_curvature`, `refused_bound` or `not_attempted`. A `fitted`,
+  `refused_zncc` or `refused_outlier` cell carries its displacement
+- The reference member's own cells would displace by zero by construction, so
+  it is not attempted and carries none
+
+##### `cluster_patches/member_cell_zncc.{K}.3.3.float32.zst`
+
+- **Shape**: `(K, 3, 3)` where K = cluster_member_count
+- **Data type**: `float32` (little-endian)
+- Each cell's ZNCC against the reference's cell at its best displacement,
+  every sample of the cell weighted equally and averaged over the template's
+  textured colour channels; `NaN` where nothing was read
+- Read through the stored shape when `refine_options.move_shape` is `false`;
+  otherwise possibly through the shape before the last update, as
+  [`member_cell_shift_px`](#cluster_patchesmember_cell_shift_pxk332float32zst)
+  describes. The same holds for `member_cell_status`
+
+##### `cluster_patches/member_cell_status.{K}.3.3.uint8.zst`
+
+- **Shape**: `(K, 3, 3)` where K = cluster_member_count
+- **Data type**: `uint8`
+- **Format**: an index into `cluster_patches/metadata.json`'s
+  `member_cell_status_names`, the file's own legend for this column, read the
+  same way `member_status` reads its legend: a code past the end of the list
+  is invalid, and nothing else about the numbering is fixed by this format
+- **Names**: the only names this format defines, each saying what became of
+  the cell:
+  - `fitted` — the displacement was measured, and it agrees with the affine
+    map that best explains the displacements of the member's fitted cells
+    together (a refinement allowed to change the shape may also have moved
+    the shape by that map)
+  - `refused_curvature` — the cell does not pin a displacement: the reference
+    is flat over it, or its ZNCC over the displacements searched is too flat
+    at the best one
+  - `refused_zncc` — its ZNCC at the best displacement is below the bar, so it
+    lies over a different surface in this view; its displacement is measured
+    but the affine map was not fitted to it
+  - `not_attempted` — the cell was not registered, or its registration was
+    not used: the member is not `kept`, a sample the search needs lies outside
+    the image, no cell of the member survived, the image could not be sampled
+    through the shape, the fitted affine map was not finite or reflected the
+    patch, or, in a refinement allowed to change the shape, the refined shape
+    could not be accepted — the whole-patch ZNCC or the shift from the seed
+    read again at it failed the bars the member was kept on, or its support
+    left the image. In every case but the first, every cell of the member is
+    `not_attempted` and the member keeps the shape its whole-patch fit found
+  - `refused_bound` — the best displacement lies on the edge of the range
+    searched, so the optimum is at or past it and no sub-pixel displacement
+    can be read
+  - `refused_outlier` — (version 9+) the displacement was measured and the
+    cell passed the bars above, but it disagrees with the affine map the
+    member's other fitted cells agree on by so much that the fit of that map
+    gave it no weight
+- **Canonical order**: a writer always states the whole legend in the order
+  listed above, `0` fitted, `1` refused_curvature, `2` refused_zncc, `3`
+  not_attempted, `4` refused_bound, `5` refused_outlier. A reader accepts any
+  legend, in any order and naming any subset of the defined names, and
+  normalises the column onto the canonical order as it loads
+- **Constraint**: The legend is a non-empty list of names, names only cell
+  statuses this format defines, and names none twice. A version 8 file's
+  legend does not name `refused_outlier`
+- **Constraint**: Every value is below the legend's length
+
+##### `cluster_patches/member_cell_iterations.{K}.uint8.zst`
+
+- **Shape**: `(K,)` where K = cluster_member_count
+- **Data type**: `uint8`
+- How many times the member's image was sampled through a shape of the
+  member; `0` for a member the refinement did not run on. A refinement that
+  does not change the shape (`refine_options.move_shape` false) samples once.
+  One that may change it samples once per pass, until the shape stops
+  changing by more than the refinement's tolerance, a change is refused, or
+  the refinement's cap on passes is reached; a member that reached the cap is
+  one whose shape had not settled, and its displacements are less
+  trustworthy. A member whose cells are all `not_attempted` after a failed
+  pass counts the passes made, including the one that failed
+
+**Integrity.** The four entries are files of the `cluster_patches/` section,
+hashed into `cluster_patches_xxh128` in the section's lexicographic order (they
+sort before `member_consistency_residual`), and the legend rides inside
+`metadata.json`, which the same digest covers.
 
 ### 7. Two-View Geometries (Optional Section)
 
@@ -955,6 +1145,12 @@ the backbone — a file never carries both sets.
    member's `member_affine_shapes` entry is non-singular — its value is that
    feature's own detector affine shape `S_ref`, which every reference-relative
    warp is recovered through
+8. **Per-cell entries paired with their legend**: The four
+   `cluster_patches/member_cell_*` entries are present exactly when
+   `member_cell_status_names` is, each sized by `K` as its name states; every
+   `member_cell_status` value is below the legend's length; and a member
+   whose status is not `kept` has every cell `not_attempted`, every
+   displacement and ZNCC `NaN`, and `0` passes
 
 ### No required ordering within a pair
 
@@ -1196,7 +1392,19 @@ are the canonical codes and whose `NAMES` is the canonical
 `CLUSTER_REFERENCE_UNREFINABLE`, both in
 [`types.rs`](../../crates/sfmtool-matches-format/src/types.rs). The Rust and
 Python readers hand back `member_status` in the canonical numbering, whatever
-legend the file stated.
+legend the file stated. The per-cell entries are
+`ClusterPatchData::member_cells`, a `MemberCellData`, `None` when the file
+carries none, and the cell statuses are the `ClusterCellStatus` enum, whose
+`NAMES` is the canonical `member_cell_status_names` legend, both in
+[`cells.rs`](../../crates/sfmtool-matches-format/src/cells.rs); readers hand
+back the cell statuses in the canonical numbering too. In Python,
+`read_matches` carries them as `member_cell_shift_px`, `member_cell_zncc`,
+`member_cell_status` and `member_cell_iterations` when the file has them,
+`write_matches` writes the four keys together, and `MatchesFile` exposes them
+under the same names beside `member_cell_status_names` and
+`has_member_cells`: each is `None` when the `cluster_patches/` section carries
+no cells, and raises, like the section's other getters, when the file has no
+`cluster_patches/` section.
 `ClusterPatchData::refine_radius` (and `MatchesFile.refine_radius` in Python)
 returns the patch half-width from either `refine_options` key. The expansion of
 clusters into pairs is `clusters_to_pair_matches` in
@@ -1279,11 +1487,64 @@ the pairs that pass verification, their matches and the
 
 ## Versioning and Migration
 
-The format has seven released versions (`1` through `7`). The format is versioned
+The format has ten released versions (`1` through `10`). The format is versioned
 (`metadata.json` `version`) precisely so that changes like the ones below can upgrade
 on load instead of breaking old files. Writers always emit the current version;
 readers accept any version up to it, with one exception — a cluster-backbone
 file below version 6, which is refused.
+
+### Version 9 → Version 10
+
+| Change | Detail |
+|---|---|
+| `cluster_patches/metadata.json` `member_status_names` | The legend may name two more member statuses, `rejected_unlocalizable_refined` and `rejected_unlocalizable_cells`, codes `7` and `8` in the canonical order. A writer states the whole legend, so every version 10 file with `cluster_patches/` names them. |
+| `cluster_patches/metadata.json` `refine_options` | A file may record `regate_at_refined_shape` and `max_capped_cells`, the settings of the two gates those statuses come from. They are recorded settings like the others and are not read back. |
+| `clusters/member_positions`, `clusters/member_affine_shapes` | A member with either new status was measured, so its rows hold the refinement's answer, as a `rejected_low_zncc` or `rejected_shift` member's do. |
+
+No entry a version 9 file stores changes its definition or layout, and a
+version 9 file reads unchanged. A version 9 file whose legend names either new
+status is refused, since no version 9 writer wrote those names. The bump exists
+because a version 9 reader refuses a legend name it does not define: without
+it, a version 9 reader would meet the new names in a file that claims a version
+it reads. Integrity verification follows the same rule. A re-written file is a
+new version 10 file, with new hashes. Pairwise files have no
+`cluster_patches/` section, so only their metadata `version` moves.
+
+### Version 8 → Version 9
+
+| Change | Detail |
+|---|---|
+| `cluster_patches/metadata.json` `member_cell_status_names` | The legend may name a sixth cell status, `refused_outlier`, code `5` in the canonical order. A writer states the whole legend, so every version 9 file with per-cell entries names it. |
+| `cluster_patches/metadata.json` `refine_options` | A file with per-cell entries may record `move_shape`, whether the refinement was allowed to change the member's shape. It is a recorded setting like the others and is not read back. |
+
+No entry a version 8 file stores changes its definition or layout, and a
+version 8 file reads unchanged. A version 8 file never records `move_shape`,
+so its cells are read as those of a refinement that may have moved the shape
+(see
+[`member_cell_shift_px`](#cluster_patchesmember_cell_shift_pxk332float32zst)).
+A version 8 file whose legend names `refused_outlier` is refused, since no
+version 8 writer wrote that name. The bump exists because
+a version 8 reader refuses a legend name it does not define: without it, a
+version 8 reader would meet `refused_outlier` in a file that claims a version
+it reads. Integrity verification follows the same rule. A re-written file is a
+new version 9 file, with new hashes.
+
+### Version 7 → Version 8
+
+| Change | Detail |
+|---|---|
+| `cluster_patches/member_cell_shift_px`, `member_cell_zncc`, `member_cell_status`, `member_cell_iterations` | Four new optional entries, present together or absent together: each member's per-cell displacement, ZNCC, status and refinement passes. See [Per-cell entries](#per-cell-entries-optional-version-8). They are files of the `cluster_patches/` section and are hashed into `cluster_patches_xxh128` with it. |
+| `cluster_patches/metadata.json` `member_cell_status_names` | New key, present exactly when the per-cell entries are: the legend `member_cell_status` indexes. |
+
+Nothing that a version 7 file stores changes meaning or layout. **A version 7
+file reads unchanged** and has no per-cell entries, so a reader reports that it
+carries no cells. A version 7 file that carries `member_cell_status_names` or
+any `member_cell_*` entry is refused, since no version 7 writer wrote one; a
+version 8 file with the entries but no legend, or the legend but not all four
+entries, is refused, since it would leave the column unexplained or the cells
+incomplete. Integrity verification follows the same rule. A re-written file is
+a new version 8 file, with new hashes. Pairwise files have no
+`cluster_patches/` section, so only their metadata `version` moves.
 
 ### Version 6 → Version 7
 
@@ -1402,6 +1663,20 @@ for the invariant and the `S`/`W` conversion math.
 
 ## Version History
 
+- **Version 10**: The member statuses `rejected_unlocalizable_refined` and
+  `rejected_unlocalizable_cells` — `member_status_names` may name them, and a
+  writer always does — and the `refine_options` keys `regate_at_refined_shape`
+  and `max_capped_cells`. Version 9 files read unchanged.
+- **Version 9**: The cell status `refused_outlier` — `member_cell_status_names`
+  may name it, and a writer always does — and the `refine_options` key
+  `move_shape`, whether the refinement was allowed to change the member's
+  shape. Version 8 files read unchanged.
+- **Version 8**: Per-cell entries — `cluster_patches/` may carry
+  `member_cell_shift_px`, `member_cell_zncc`, `member_cell_status` and
+  `member_cell_iterations`, present together with a `member_cell_status_names`
+  legend in its metadata: each member's displacement, ZNCC and status per cell
+  of a three-by-three split of its patch, and its refinement passes. Version 7
+  files read unchanged and carry no cells.
 - **Version 7**: Status legend — `cluster_patches/metadata.json` carries
   `member_status_names`, and a `member_status` code is an index into it. A
   writer states the canonical legend; a reader accepts any legend and

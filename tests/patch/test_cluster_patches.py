@@ -22,7 +22,7 @@ from sfmtool.cli import main
 STATUS_REFERENCE = 0
 STATUS_KEPT = 1
 STATUS_REJECTED_UNLOCALIZABLE = 6
-VALID_STATUSES = {0, 1, 2, 3, 4, 5, 6}
+VALID_STATUSES = {0, 1, 2, 3, 4, 5, 6, 7, 8}
 
 
 @pytest.fixture
@@ -76,6 +76,12 @@ def test_cluster_patches_end_to_end(cluster_matches_file: Path):
     assert data["refine_options"]["patch_size"] == 12.0
     assert data["refine_options"]["min_zncc"] == 0.85
     assert data["refine_options"]["max_member_zncc_self_similarity_radius"] == 2.5
+    assert data["refine_options"]["regate_at_refined_shape"] is True
+    assert data["refine_options"]["max_capped_cells"] == 8
+    # Without --piecewise the file carries no per-cell columns.
+    assert data["refine_options"]["piecewise"] is False
+    assert "min_cell_zncc" not in data["refine_options"]
+    assert "member_cell_status" not in data
 
     statuses = data["member_status"]
     starts = data["cluster_starts"]
@@ -138,7 +144,7 @@ def test_matcher_output_states_the_detections(cluster_matches_file: Path):
     from sfmtool.fileio import read_matches, read_sift_partial
 
     data = read_matches(cluster_matches_file)
-    assert data["metadata"]["version"] == 7
+    assert data["metadata"]["version"] == 10
     positions = data["member_positions"]
     shapes = data["member_affine_shapes"]
     assert positions.dtype == np.float32 and shapes.dtype == np.float32
@@ -165,9 +171,11 @@ def test_matcher_output_states_the_detections(cluster_matches_file: Path):
         assert sift["affine_shapes"][feats].tobytes() == shapes[on_image].tobytes()
 
 
-#: The statuses whose rows the refinement cascade measured. Everything else
-#: (duplicate_image, not_evaluated, rejected_unlocalizable) it never fitted.
-MEASURED_STATUSES = (0, 1, 2, 3)
+#: The statuses whose rows the refinement cascade measured: reference, kept,
+#: rejected_low_zncc, rejected_shift, rejected_unlocalizable_refined and
+#: rejected_unlocalizable_cells. Everything else (duplicate_image,
+#: not_evaluated, rejected_unlocalizable) it never fitted.
+MEASURED_STATUSES = (0, 1, 2, 3, 7, 8)
 
 
 def test_enriched_output_states_the_refinement(cluster_matches_file: Path):
@@ -251,6 +259,106 @@ def test_enriched_output_states_the_refinement(cluster_matches_file: Path):
     assert len(refs) > 0
     np.testing.assert_array_equal(shapes[refs], src["member_affine_shapes"][refs])
     np.testing.assert_array_equal(positions[refs], src["member_positions"][refs])
+
+
+#: sfmtool_matches_format::ClusterCellStatus discriminants and legend.
+CELL_FITTED = 0
+CELL_NOT_ATTEMPTED = 3
+CELL_STATUS_NAMES = [
+    "fitted",
+    "refused_curvature",
+    "refused_zncc",
+    "not_attempted",
+    "refused_bound",
+    "refused_outlier",
+]
+
+
+def test_cluster_patches_piecewise_writes_the_cells(cluster_matches_file: Path):
+    """`--piecewise` stores every member's cells, which read back through both
+    readers, with the canonical legend stated beside the status column."""
+    import json
+    import zipfile
+    from compression import zstd
+
+    from sfmtool.fileio import MatchesFile, read_matches, verify_matches
+
+    out_path = cluster_matches_file.with_name("clusters-piecewise.matches")
+    result = CliRunner().invoke(
+        main,
+        [
+            "cluster-patches",
+            "-i",
+            str(cluster_matches_file),
+            "-o",
+            str(out_path),
+            "--resolution",
+            "16",
+            "--piecewise",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Piecewise refinement:" in result.output
+    valid, errors = verify_matches(out_path)
+    assert valid, errors
+
+    with zipfile.ZipFile(out_path) as archive:
+        cp_meta = json.loads(
+            zstd.decompress(archive.read("cluster_patches/metadata.json.zst"))
+        )
+    assert cp_meta["member_cell_status_names"] == CELL_STATUS_NAMES
+    assert cp_meta["refine_options"]["piecewise"] is True
+    # The piecewise settings sit beside `piecewise` as flat keys, at the
+    # kernel's defaults since the command exposes none of them.
+    assert {
+        key: cp_meta["refine_options"][key]
+        for key in (
+            "move_shape",
+            "cell_shift_bound_px",
+            "min_cell_zncc",
+            "min_cell_curvature",
+            "update_tolerance_px",
+            "max_iterations",
+        )
+    } == {
+        "move_shape": True,
+        "cell_shift_bound_px": 2.0,
+        "min_cell_zncc": 0.8,
+        "min_cell_curvature": 0.02,
+        "update_tolerance_px": 0.05,
+        "max_iterations": 5,
+    }
+
+    data = read_matches(out_path)
+    m = data["metadata"]["cluster_member_count"]
+    assert data["member_cell_shift_px"].shape == (m, 3, 3, 2)
+    assert data["member_cell_zncc"].shape == (m, 3, 3)
+    assert data["member_cell_status"].shape == (m, 3, 3)
+    assert data["member_cell_iterations"].shape == (m,)
+
+    mf = MatchesFile(out_path)
+    assert mf.has_member_cells
+    assert mf.member_cell_status_names == CELL_STATUS_NAMES
+    np.testing.assert_array_equal(mf.member_cell_status, data["member_cell_status"])
+    np.testing.assert_array_equal(
+        mf.member_cell_iterations, data["member_cell_iterations"]
+    )
+
+    status = mf.member_cell_status
+    kept = mf.member_status == STATUS_KEPT
+    assert kept.any()
+    # Only kept members carry readings; a member that is not kept is not
+    # attempted throughout, with no iterations.
+    assert (status[~kept] == CELL_NOT_ATTEMPTED).all()
+    assert (mf.member_cell_iterations[~kept] == 0).all()
+    assert np.isnan(mf.member_cell_shift_px[~kept]).all()
+    # The stage fits cells on the kept members of a real capture, and a
+    # fitted cell has a measured shift and ZNCC.
+    fitted = status == CELL_FITTED
+    assert fitted[kept].any()
+    assert np.isfinite(mf.member_cell_shift_px[fitted]).all()
+    assert np.isfinite(mf.member_cell_zncc[fitted]).all()
+    assert (mf.member_cell_iterations[kept] >= 1).any()
 
 
 def test_cluster_patches_rejects_existing_output_and_enriched_input(

@@ -949,13 +949,7 @@ fn matches_data(
     let mut positions = detected_positions;
     let mut shapes = detected_shapes;
     for (k, status) in refined.member_status.iter().enumerate() {
-        let measured = matches!(
-            status,
-            MemberStatus::Reference
-                | MemberStatus::Kept
-                | MemberStatus::RejectedLowZncc
-                | MemberStatus::RejectedShift
-        );
+        let measured = status.is_measured();
         if !measured {
             continue;
         }
@@ -1028,12 +1022,15 @@ fn matches_data(
             member_zncc: Array1::from(refined.member_zncc),
             member_shift_px: Array1::from(refined.member_shift_px),
             member_consistency_residual: Array1::from(refined.member_consistency_residual),
+            member_cells: None,
             refine_options: serde_json::json!({
                 "patch_size": PATCH_SIZE,
                 "resolution": refine_defaults.resolution,
                 "min_zncc": refine_defaults.min_zncc,
                 "max_shift_px": refine_defaults.max_shift_px,
                 "max_member_zncc_self_similarity_radius": refine_defaults.max_member_zncc_self_similarity_radius,
+                "regate_at_refined_shape": refine_defaults.regate_at_refined_shape,
+                "max_capped_cells": refine_defaults.max_capped_cells,
             }),
         }),
         two_view_geometries: None,

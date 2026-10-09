@@ -17,8 +17,8 @@ use pyo3::types::PyDict;
 
 use sfmtool_core::features::cluster_match::{self, BackgroundFloorParams, Clusters};
 use sfmtool_core::patch::cluster_refine::{
-    refine_cluster_patches as core_refine_cluster_patches, warp_consistency_residuals,
-    ClusterRefineParams, FeatureGeometry,
+    member_cell_data, refine_cluster_patches as core_refine_cluster_patches,
+    warp_consistency_residuals, ClusterRefineParams, FeatureGeometry, LoopStop, PiecewiseParams,
 };
 
 use crate::patches::args::parse_patch_window;
@@ -407,7 +407,46 @@ pub fn clusters_to_pair_matches(
 ///         disables the gate exactly. Default 2.5, the same bar as the
 ///         keypoint localizer's member gate
 ///         (specs/core/patch/zncc-self-similarity-radius.md).
+///     regate_at_refined_shape: Read the member gate again, with the same
+///         bar, on the member's own grid at its refined shape and position,
+///         for every member that passes the ZNCC and shift gates. A member
+///         over the bar there is marked rejected_unlocalizable_refined. Where
+///         the piecewise stage moves a kept member, both gates are read again
+///         at the moved shape, and a moved shape that fails either is reverted
+///         to the cascade's; the member stays kept. None takes the Rust
+///         default (True); off when the bar is 0.
+///     max_capped_cells: The most of the nine cells of that same reading
+///         that may read the largest radius, 3 ("3 or further"); a member with
+///         more is marked rejected_unlocalizable_cells. 9 or more turns
+///         nothing out. None takes the Rust default (8).
 ///     max_iters: Nelder-Mead iterations per cascade stage (default 120).
+///     piecewise: Run the piecewise refinement after the cascade for every
+///         kept member: the nine cells of the reference's patch are
+///         registered separately against the member's photograph, and a
+///         robust affine map is fitted to their shifts (default False, which
+///         carries no cells). See
+///         specs/core/patch/cluster-patch-refinement.md.
+///     move_shape: Piecewise setting: let the fitted map move the member's
+///         shape and position, by a loop that applies it as an update while
+///         the whole-member ZNCC does not fall (default True). False measures
+///         the cells once at the cascade's shape and leaves every member
+///         output exactly the cascade's.
+///     cell_shift_bound_px: Piecewise setting: the search bound for a cell's
+///         shift from its affine placement, template grid px (default 2.0).
+///     min_cell_zncc: Piecewise setting: a cell whose ZNCC at its optimum is
+///         below this is refused as refused_zncc (default 0.8).
+///     min_cell_curvature: Piecewise setting: a cell whose ZNCC peak is
+///         flatter than this along its flattest direction, ZNCC per grid
+///         px squared, is refused as refused_curvature (default 0.02).
+///     update_tolerance_px: Piecewise setting, read only with
+///         ``move_shape``: the loop stops when the affine update moves every
+///         cell centre by less than this, grid px (default 0.05).
+///     max_iterations: Piecewise setting, read only with ``move_shape``: the
+///         most renders the loop makes for one member (default 5); without
+///         ``move_shape`` the stage renders once. Each piecewise setting
+///         left as None takes the Rust default of ``PiecewiseParams``, the
+///         value given above; the settings are ignored without
+///         ``piecewise``.
 ///     progress: Optional ProgressCounter, bumped once per finished cluster.
 ///
 /// Returns:
@@ -430,7 +469,39 @@ pub fn clusters_to_pair_matches(
 ///     weak-perspective factorization of all cluster warps (lower = more
 ///     consistent; NaN where not fitted; see
 ///     specs/core/patch/cluster-warp-consistency.md). A stored signal, not a
-///     gate.
+///     gate. ``member_refined_zncc_self_similarity_radius`` (M,) float32 and
+///     ``member_refined_zncc_self_similarity_radius_grid`` (M, 3, 3) float32
+///     are the readings the two gates at the refined shape judge, the whole
+///     grid's radius and each cell's, template-grid px, for every member that
+///     passed the ZNCC and shift gates whether or not they refused it, NaN
+///     for every other member and throughout when both gates are off; not
+///     stored in the ``.matches`` section. ``regate_at_refined_shape`` (bool)
+///     and ``max_capped_cells`` (int) are the two gates' settings the run
+///     used, the Rust defaults where the arguments were None;
+///     ``regate_at_refined_shape`` is False when the member gate's bar is 0,
+///     since the whole grid's gate shares that bar and does not run. With
+///     ``piecewise`` the dict also
+///     carries the per-cell columns of
+///     the ``cluster_patches/`` section, cells ``[m, row, col]`` from the
+///     top-left, with readings only for kept members:
+///     ``member_cell_shift_px`` (M, 3, 3, 2) float32 (each cell's displacement
+///     from where the member's returned affine shape places it, template grid
+///     px, with no fitted affine map removed; NaN where not measured),
+///     ``member_cell_zncc`` (M, 3, 3) float32,
+///     ``member_cell_status`` (M, 3, 3) uint8 (0 fitted, 1 refused_curvature,
+///     2 refused_zncc, 3 not_attempted, 4 refused_bound, 5 refused_outlier)
+///     and ``member_cell_iterations`` (M,) uint8, and ``piecewise_options``, a
+///     dict of the six piecewise settings the run used, keyed by their
+///     argument names. It also carries two per-member readings of the loop
+///     that the ``.matches`` file does not store:
+///     ``member_cell_loop_stop`` (M,) uint8, why the loop stopped (0 not run,
+///     which every member that is not kept also reads, 1 converged, 2
+///     reached the cap, 3 an update that would lower the whole-member ZNCC
+///     was rejected, 4 the update stopped shrinking, 5 measured without
+///     ``move_shape``), and
+///     ``member_cell_update_accepted`` (M,) bool, whether the last fitted
+///     update was applied to the returned shape, always False without
+///     ``move_shape``. Without ``piecewise`` those seven keys are None.
 #[pyfunction]
 #[pyo3(signature = (images, positions, affine_shapes,
                     cluster_starts, member_images, member_features, *,
@@ -438,7 +509,11 @@ pub fn clusters_to_pair_matches(
                     window = "gaussian_disk", window_sigma = None,
                     min_zncc = 0.85, max_shift_px = 3.0,
                     max_member_zncc_self_similarity_radius = 2.5,
-                    max_iters = 120, progress = None))]
+                    regate_at_refined_shape = None, max_capped_cells = None,
+                    max_iters = 120, piecewise = false, move_shape = None,
+                    cell_shift_bound_px = None, min_cell_zncc = None,
+                    min_cell_curvature = None, update_tolerance_px = None,
+                    max_iterations = None, progress = None))]
 #[allow(clippy::too_many_arguments)]
 pub fn refine_cluster_patches<'py>(
     py: Python<'py>,
@@ -455,7 +530,16 @@ pub fn refine_cluster_patches<'py>(
     min_zncc: f64,
     max_shift_px: f64,
     max_member_zncc_self_similarity_radius: f64,
+    regate_at_refined_shape: Option<bool>,
+    max_capped_cells: Option<u8>,
     max_iters: u32,
+    piecewise: bool,
+    move_shape: Option<bool>,
+    cell_shift_bound_px: Option<f32>,
+    min_cell_zncc: Option<f32>,
+    min_cell_curvature: Option<f32>,
+    update_tolerance_px: Option<f32>,
+    max_iterations: Option<u8>,
     progress: Option<ProgressCounter>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let n_images = images.len();
@@ -516,6 +600,7 @@ pub fn refine_cluster_patches<'py>(
         )));
     }
 
+    let defaults = ClusterRefineParams::default();
     let params = ClusterRefineParams {
         radius,
         resolution,
@@ -523,7 +608,21 @@ pub fn refine_cluster_patches<'py>(
         min_zncc,
         max_shift_px,
         max_member_zncc_self_similarity_radius,
+        regate_at_refined_shape: regate_at_refined_shape
+            .unwrap_or(defaults.regate_at_refined_shape),
+        max_capped_cells: max_capped_cells.unwrap_or(defaults.max_capped_cells),
         max_iters,
+        piecewise: piecewise.then(|| {
+            let default = PiecewiseParams::default();
+            PiecewiseParams {
+                move_shape: move_shape.unwrap_or(default.move_shape),
+                cell_shift_bound_px: cell_shift_bound_px.unwrap_or(default.cell_shift_bound_px),
+                min_cell_zncc: min_cell_zncc.unwrap_or(default.min_cell_zncc),
+                min_cell_curvature: min_cell_curvature.unwrap_or(default.min_cell_curvature),
+                update_tolerance_px: update_tolerance_px.unwrap_or(default.update_tolerance_px),
+                max_iterations: max_iterations.unwrap_or(default.max_iterations),
+            }
+        }),
         ..ClusterRefineParams::default()
     };
 
@@ -593,8 +692,72 @@ pub fn refine_cluster_patches<'py>(
     )
     .expect("nine values per member");
     dict.set_item("member_zncc_grid", grid.into_pyarray(py))?;
+    dict.set_item(
+        "member_refined_zncc_self_similarity_radius",
+        result.refined_zncc_self_similarity_radius.into_pyarray(py),
+    )?;
+    let refined_grid = ndarray::Array3::from_shape_vec(
+        (m, 3, 3),
+        result
+            .refined_zncc_self_similarity_radius_grid
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect(),
+    )
+    .expect("nine values per member");
+    dict.set_item(
+        "member_refined_zncc_self_similarity_radius_grid",
+        refined_grid.into_pyarray(py),
+    )?;
+    // Whether the whole grid's gate ran, so a bar of 0 records it off.
+    dict.set_item("regate_at_refined_shape", params.refined_shape_gate_is_on())?;
+    dict.set_item("max_capped_cells", params.max_capped_cells)?;
     dict.set_item("member_shift_px", result.member_shift_px.into_pyarray(py))?;
     dict.set_item("member_consistency_residual", consistency.into_pyarray(py))?;
+    let cell_keys = [
+        "member_cell_shift_px",
+        "member_cell_zncc",
+        "member_cell_status",
+        "member_cell_iterations",
+        "member_cell_loop_stop",
+        "member_cell_update_accepted",
+    ];
+    if let Some(pp) = params.piecewise.as_ref() {
+        // The settings as the decimal values they were written as (0.8, not
+        // the f32's 0.800000011920929), so a recorded value reads as given.
+        let decimal = |v: f32| -> f64 { v.to_string().parse().expect("an f32 prints as a float") };
+        let options = PyDict::new(py);
+        options.set_item("move_shape", pp.move_shape)?;
+        options.set_item("cell_shift_bound_px", decimal(pp.cell_shift_bound_px))?;
+        options.set_item("min_cell_zncc", decimal(pp.min_cell_zncc))?;
+        options.set_item("min_cell_curvature", decimal(pp.min_cell_curvature))?;
+        options.set_item("update_tolerance_px", decimal(pp.update_tolerance_px))?;
+        options.set_item("max_iterations", pp.max_iterations)?;
+        dict.set_item("piecewise_options", options)?;
+        let cells = member_cell_data(&result.cells);
+        dict.set_item(cell_keys[0], cells.shift_px.into_pyarray(py))?;
+        dict.set_item(cell_keys[1], cells.zncc.into_pyarray(py))?;
+        dict.set_item(cell_keys[2], cells.status.into_pyarray(py))?;
+        dict.set_item(cell_keys[3], cells.iterations.into_pyarray(py))?;
+        let stop: Vec<u8> = result
+            .cells
+            .iter()
+            .map(|c| c.map_or(LoopStop::NotRun, |c| c.stop) as u8)
+            .collect();
+        let accepted: Vec<bool> = result
+            .cells
+            .iter()
+            .map(|c| c.is_some_and(|c| c.final_update_accepted))
+            .collect();
+        dict.set_item(cell_keys[4], stop.into_pyarray(py))?;
+        dict.set_item(cell_keys[5], accepted.into_pyarray(py))?;
+    } else {
+        for key in cell_keys.into_iter().chain(["piecewise_options"]) {
+            dict.set_item(key, py.None())?;
+        }
+    }
     Ok(dict)
 }
 
