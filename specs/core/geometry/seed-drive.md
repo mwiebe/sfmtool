@@ -119,7 +119,7 @@ gates in its own right.
    that is only SEATED WRONG answers a different one: what pose it takes
    against structure held out from the whole group. The group goes to
    the resection primitive
-   ([resect-image.md](../../gui/resect-image.md)) against the state the
+   ([resect-image.md](../../gui/edits/resect-image.md)) against the state the
    walk holds, which is the member minus what earlier steps dropped with
    the group STILL IN IT: the primitive holds the target set out itself,
    re-triangulating everything the set observes from the non-target
@@ -206,6 +206,10 @@ Where neither remedy leaves a core that passes, the refusal stands and
 its reason records what was tried. Every refusal reason carries how many
 distinct channels fired and the loudest of them, each reading measured
 against its own bar so channels of different units compare.
+
+For a finite member, no reading behind a verdict or its rank compares the
+member's photographs resampled into its patches. A photometric score that
+enters the rank is proposed in [seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md).
 
 ## Survivor claims
 

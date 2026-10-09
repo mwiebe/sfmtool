@@ -72,7 +72,7 @@ cluster is claimed when more than half of its members fall in claimed
 cells of their images. The complement is expressed as a cluster-id
 restriction of the stage's selection handle (`select_clusters` with
 `restrict_cluster_ids`, see
-[cluster-selection.md](../../formats/cluster-selection.md)), so a
+[cluster-selection.md](../features/cluster-selection.md)), so a
 complement is itself an ordinary derived selection: it carries
 provenance, and every stage downstream reads it exactly like the
 unrestricted one. No stage applies a claim predicate of its own; the
@@ -181,6 +181,19 @@ Ranking, refusal and trimming belong to the selection pass that reads
 the stored evaluation evidence, see
 [seed-candidate-evaluation.md](seed-candidate-evaluation.md).
 
+The pick is sensitive to sub-percent changes in the member shapes of the
+cluster-patches file it reads: on `KerryPark480`, moving under 0.4% of the
+kept members to shapes of higher ZNCC changes which candidates are committed
+and which pass against the ground truth, and two such files that differ in a
+few dozen members give a first qualified candidate that fails and one that
+passes
+([measurements](../patch/cluster-patch-refinement-measurements.md#subset-with-the-loop-as-the-default-2026-10-09)).
+
+None of the signals qualification and the rank read compares a candidate's
+photographs resampled into its patches. A photometric candidate score that
+gates qualification and orders the rank is proposed in
+[seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md).
+
 ## Product
 
 `sfmr/candidate_solves/` is the product: one `h<NN>.sfmr` per committed
@@ -195,6 +208,18 @@ bitmaps and no patch frames. The artifacts are written under the
 capture's own camera model, so a fisheye capture's members densify and
 reproject through the equidistant context, never the pinhole default,
 and a member carrying a released lens stamps that lens.
+
+Because a release carries no patch frames, nothing reads its patches before
+the choice or moves the chosen member's patches to a finer resolution after
+it. A cluster file written with `--piecewise` stores per-cell displacements
+([cluster-patch-refinement.md](../patch/cluster-patch-refinement.md#piecewise-refinement)),
+and [cell-plane-normals.md](../patch/cell-plane-normals.md) turns them into
+patch normals once poses exist, but the seed reads neither. Frames built from
+them behind a precision gate are proposed in
+[cell-plane-normal-precision-gate.md](../../drafts/cell-plane-normal-precision-gate.md), a photometric score that reads them in
+[seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md), and the
+coarse and fine resolutions the score and the chosen member use in
+[two-tier-patch-density.md](../../drafts/two-tier-patch-density.md).
 
 The manifest carries the run's stamp, the coarse admission's population
 figures, the vote block with the admission the referee measured on, the
