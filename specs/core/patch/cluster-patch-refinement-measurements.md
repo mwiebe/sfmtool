@@ -462,7 +462,7 @@ Every finite released candidate was scored against the checked-in ground truth (
 - the median and maximum centre error, as a percentage of the ground truth's camera extent;
 - the focal error, both from the manifest focal and as the equivalent focal recomputed over the ground truth's observed radii.
 
-The pass rule is: median rotation under 1°, median centre error under 5%, and equivalent focal within 5%. The pick is `ladder_first`. A `-spline-refused` file is the same hypothesis released without its spline rung, and the tables list it as the seed releases it.
+The pass rule is the one in [seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md): median rotation under 1°, median centre error under 5%, and equivalent focal within 5%. The pick is `ladder_first`. A `-spline-refused` file is the same hypothesis released without its spline rung, and the tables list it as the seed releases it.
 
 Both `KerryPark480` runs were repeated, and every number of the repeats was identical. The `SeoulBull` cascade run reproduces the earlier run of 2026-10-07 on the same file exactly.
 
@@ -994,7 +994,7 @@ With the acceptance-rule section's file, which moved 55 members of `KerryPark480
 **What this decides.**
 
 - **The loop holds its contract as the default.** The whole-member ZNCC never falls, no member reaches the cap or oscillates, and the CPU cost is 1.11× to 1.25× the refinement's.
-- **The seed's pick on `KerryPark480` passes, and the set of candidates changes.** This is not a regression of the stage: the pick is better than with the cascade file, and the human review says the moved shapes are better. It is a seed-brittleness finding. Sub-percent changes in member shapes change which hypotheses the seed commits and which of them pass, and the pick turns pass or fail on them. A photometric score of the seed's candidates is what would have to make the pick robust to it.
+- **The seed's pick on `KerryPark480` passes, and the set of candidates changes.** This is not a regression of the stage: the pick is better than with the cascade file, and the human review says the moved shapes are better. It is a seed-brittleness finding. Sub-percent changes in member shapes change which hypotheses the seed commits and which of them pass, and the pick turns pass or fail on them. [seed-hypothesis-loop.md](../geometry/seed-hypothesis-loop.md#rank) records it, and [seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md#open-questions) carries it as what the photometric score must make robust.
 
 ## Gates at the refined shape (2026-10-09)
 
