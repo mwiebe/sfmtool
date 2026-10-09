@@ -62,7 +62,7 @@ def test_solve_incremental(isolated_seoul_bull_17_images: list[Path]):
     assert output_path.exists()
 
     # Verify the .sfmr file can be loaded
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.reconstruction import SfmrReconstruction
 
     recon = SfmrReconstruction.load(output_path)
     assert recon.image_count > 0
@@ -213,7 +213,7 @@ def test_solve_from_derived_cluster_matches(
     assert result.exit_code == 0, result.output
     assert output_path.exists()
 
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.reconstruction import SfmrReconstruction
 
     recon = SfmrReconstruction.load(output_path)
     assert recon.image_count > 0
@@ -375,7 +375,7 @@ def _patch_save_reconstructions(monkeypatch, fake_models: dict[str, dict]):
     `track_image_indexes` and `cameras`. Returns the `saved` dict that the
     fake reconstructions record their output paths into.
     """
-    import sfmtool._sfmtool.io as _sfmtool_io
+    import sfmtool._sfmtool.fileio as _sfmtool_fileio
     from sfmtool import _incremental_sfm
 
     def fake_read(recon_dir):
@@ -387,7 +387,7 @@ def _patch_save_reconstructions(monkeypatch, fake_models: dict[str, dict]):
         name = Path(recon_dir).name
         return _FakeRecon(name, len(fake_models[name]["image_names"]), saved)
 
-    monkeypatch.setattr(_sfmtool_io, "read_colmap_binary", fake_read)
+    monkeypatch.setattr(_sfmtool_fileio, "read_colmap_binary", fake_read)
     monkeypatch.setattr(_incremental_sfm, "colmap_binary_to_rust_sfmr", fake_convert)
     monkeypatch.setattr(_incremental_sfm, "build_metadata", lambda **kwargs: {})
     return saved

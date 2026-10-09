@@ -17,8 +17,8 @@ use sfmtool_core::reconstruction::minimal::SaveStamp;
 use sfmtool_core::reconstruction::triangulation::{depth_uncertainty_batch, triangulate_batch};
 use sfmtool_core::SfmrReconstruction;
 
+use crate::fileio::sfmr::parse_sfmr_data_from_dict;
 use crate::helpers::{serde_to_py, u128_bytes_to_py};
-use crate::io::sfmr::parse_sfmr_data_from_dict;
 use crate::PyCameraIntrinsics;
 
 /// Parse a per-view reduce policy name into a [`ViewReduce`].
@@ -575,7 +575,7 @@ impl PySfmrReconstruction {
     /// ``0`` is free (the solve owns the point outright), ``1`` is ranged (the
     /// caller owns the distance in :attr:`constraint_distances`, the solve owns the
     /// direction) and ``2`` is held (the caller owns the whole coordinate) --
-    /// the numbering ``sfmtool._sfmtool.io.POINT_CONSTRAINT_NAMES`` labels,
+    /// the numbering ``sfmtool.fileio.POINT_CONSTRAINT_NAMES`` labels,
     /// whichever legend the file this was loaded from stored its own column on.
     /// The three constraint columns travel as a set: set them with
     /// ``clone_with_changes(point_constraints=..., constraint_distances=...,
@@ -1158,7 +1158,7 @@ impl PySfmrReconstruction {
     /// The point-or-bearing test on points of this reconstruction.
     ///
     /// Each observation of each point becomes a ray and its 2x3 noise weight
-    /// (see ``sfmtool._sfmtool.analysis.observed_rays``), from the
+    /// (see ``sfmtool.analysis.observed_rays``), from the
     /// observation's pixel and its image's camera and pose, and each track is
     /// scored with ``bearing_score_batch``. Points at infinity are scored like
     /// finite points.

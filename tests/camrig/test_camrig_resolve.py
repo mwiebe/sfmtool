@@ -14,7 +14,7 @@ from sfmtool.camrig.resolver import (
     CamrigSolveError,
     resolve_camrig_for_solve,
 )
-from sfmtool._sfmtool.io import (
+from sfmtool.fileio import (
     camrig_pattern_matches,
     write_camrig,
 )
