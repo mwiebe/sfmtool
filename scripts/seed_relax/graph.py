@@ -127,7 +127,7 @@ def baseline_directions(pairs, tol_rad, rounds=None, keep=None):
     with the unit direction (sign fixed by cheirality), the conditioning of the
     null space, the parallax census of the rows used and the cheirality
     majority."""
-    from sfmtool._sfmtool.geometry import baseline_directions as kernel
+    from sfmtool.geometry import baseline_directions as kernel
 
     ev = _ev()
     rounds = ev.ROT_TRIM_ROUNDS if rounds is None else int(rounds)

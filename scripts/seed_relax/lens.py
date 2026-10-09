@@ -142,7 +142,7 @@ def promote(base_cam, f, coeffs, d_max):
     model, restated at the given focal, coefficients and domain.  It stays a
     promotion for what rung 2 reads off disk, where a release written before the
     seed carried a spline still stamps its base model."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     fam = family_of(base_cam.model)
     model, d_key = SPLINE_MODEL[fam]

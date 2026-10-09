@@ -13,7 +13,7 @@ The whole graph is one fit of ``log z(edge, frame, cluster) = D(frame, cluster)
 - x(edge)``, where ``x`` is the log baseline length and ``D`` the log world
 depth.  That fit is the core's
 ``sfmtool_core::geometry::translation_averaging`` kernel, reached through
-``sfmtool._sfmtool.geometry.relative_lengths``; what is here is the depth rows
+``sfmtool.geometry.relative_lengths``; what is here is the depth rows
 the pair solve produces and the dict-keyed shape the chain speaks.  See
 ``specs/core/geometry/translation-averaging.md``.
 """
@@ -52,7 +52,7 @@ def relative_lengths(keys, depths, rounds=None, min_tied=None):
     another edge also saw.  An edge without a length reads back as ``nan``.
 
     ``rounds`` and ``min_tied`` of ``None`` take the kernel's own constants."""
-    from sfmtool._sfmtool.geometry import relative_lengths as kernel
+    from sfmtool.geometry import relative_lengths as kernel
 
     n_edge = len(keys)
     ee, ff, cc, zz = [], [], [], []

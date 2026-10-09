@@ -179,7 +179,7 @@ def reprojection(cam, rot, cen, points, at_inf, uv, slot_i, slot_c):
 
 def _verdict_codes():
     """The kernel's verdict table, by name."""
-    from sfmtool._sfmtool.reconstruction import VERDICT_CODES
+    from sfmtool.reconstruction import VERDICT_CODES
 
     return VERDICT_CODES
 
@@ -200,7 +200,7 @@ def estimate_points_verdicts(
 
     Returns ``(points, at_inf, census, verdicts, pruned)``, where ``verdicts``
     carries one code per cluster naming the rule that decided it
-    (``sfmtool._sfmtool.reconstruction.VERDICT_CODES``) and ``pruned`` one flag
+    (``sfmtool.reconstruction.VERDICT_CODES``) and ``pruned`` one flag
     per observation row.
 
     ``prune_behind`` reads the cheirality refusal per observation: where the
@@ -208,7 +208,7 @@ def estimate_points_verdicts(
     dropped and the survivors are solved again.  The rows it dropped are the
     ones flagged in ``pruned``, and the caller removes them from its own
     arrays."""
-    from sfmtool._sfmtool.reconstruction import triangulate_points as kernel
+    from sfmtool.reconstruction import triangulate_points as kernel
 
     slot_c = np.ascontiguousarray(np.asarray(slot_c, np.uint32))
     out = kernel(
@@ -377,7 +377,7 @@ def later_schedule(resid, schedule=None):
 
 def grow_more(m, per_frame, placed, pts, min_pts=None):
     """Place any frame the current structure can resect, rotations locked."""
-    from sfmtool._sfmtool.geometry import resect_translation
+    from sfmtool.geometry import resect_translation
 
     min_pts = _ev().MIN_RESECT_POINTS if min_pts is None else int(min_pts)
     added = 0

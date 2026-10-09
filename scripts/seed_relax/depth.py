@@ -182,7 +182,7 @@ def support_radius(positions, k=K_SUPPORT):
     ``None`` where the set holds fewer than ``k + 1`` points: the neighbourhood
     is then not stated, and a radius read off a smaller one would be a reading
     of how few points there are rather than of how far apart they sit."""
-    from sfmtool._sfmtool.spatial import KdTree3d
+    from sfmtool.spatial import KdTree3d
 
     p = np.ascontiguousarray(np.asarray(positions, np.float64))
     if len(p) < int(k) + 1:

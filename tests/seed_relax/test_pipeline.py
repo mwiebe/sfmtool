@@ -31,7 +31,7 @@ FEATURE_STRIDE = 1000
 
 
 def _camera(focal=F):
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return CameraIntrinsics.from_dict(
         {
