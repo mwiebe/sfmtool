@@ -48,6 +48,38 @@ it. Use `pub(crate)` when sibling modules need it, including methods and fields
 of types declared in private modules. Reserve bare `pub` for an item exposed
 through the crate's public interface.
 
+### Python names and privacy
+
+A leading `_` on a Python module, function, class, constant or attribute name
+means the name is internal to `sfmtool`: it is not public API. Code inside
+`src/sfmtool/` may import an internal name from any other subpackage
+(`_commands/match.py` imports `feature_match._run`, and `analyze/summary.py`
+imports `camera.cameras._CAMERA_PARAM_NAMES`). Code outside the package, such
+as `scripts/`, the docs, spec examples and users' code, does not import
+internal names. A test may import an internal name when that name is what it
+tests, and otherwise uses public names. A name with no `_`, reached by a path
+with no `_`-prefixed component, is public API. The compiled extension
+`sfmtool._sfmtool` is internal by this rule.
+
+- **Re-exporting subpackage.** Its `__init__.py` imports names from its own
+  modules and lists them in `__all__` (`compare/`, `feature_match/`, `strips/`,
+  `visualization/`, `xform/`). Its modules are `_`-named, and its public names
+  are the ones the `__init__.py` re-exports. Import a re-exported name from the
+  subpackage (`from ..visualization import render_heatmap_overlay`), not from
+  the `_`-named module that defines it.
+- **Module-path subpackage.** Its `__init__.py` re-exports nothing from its own
+  modules, and callers import `sfmtool.<subpackage>.<module>` (`align/`,
+  `analyze/`, `camera/`, `camrig/`, `colmap/`, `merge/`, `motion/`, `rig/`,
+  `sift/`). A plain module name there is public; a module that is not meant as
+  API, such as a helper for one sibling, takes `_` (`motion/_recon_console.py`).
+- **The `sfmtool` package root** binds its public names through `_LAZY_NAMES`
+  in `__init__.py`, so its own modules are `_`-named. `cli.py` is the `sfm`
+  entry point named in `pyproject.toml`.
+- **`_commands/`** is internal as a whole, because of its underscore. Inside
+  it, a plain name is a command module, one per row in `cli.COMMANDS`, and a
+  helper shared by several commands takes `_` (`_range_options.py`) so it is
+  not mistaken for a command.
+
 ### Opening a pull request
 
 **Every PR body follows `.github/PULL_REQUEST_TEMPLATE.md`** — read it before

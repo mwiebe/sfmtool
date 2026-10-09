@@ -205,6 +205,17 @@ describe rendering. Inside the bench it is wrong. *If this boundary is ever
 removed it should be removed deliberately and in one pass, not eroded from
 either side.*
 
+**`_name`** (internal) and **`name`** (public). Scope: Python module,
+function, class, constant and attribute names under `src/sfmtool/`. A leading
+`_` means internal to `sfmtool`, not public API: any code inside the package
+may import it, across subpackages, while `scripts/`, the docs, spec examples
+and users' code do not, and a test does only when the internal name is what it
+tests. A name with no `_`, reached by a path with no `_`-prefixed component, is
+public. A re-exporting subpackage (`compare/`, `feature_match/`, `strips/`,
+`visualization/`, `xform/`) has `_`-named modules because its public names are
+the ones its `__init__.py` re-exports. The full rule is in
+[AGENTS.md](../AGENTS.md) § "Python names and privacy".
+
 ## Contrast pairs that are not synonyms
 
 Two words that look interchangeable and are not. Using either for the other
