@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from sfmtool._sfmtool.geometry import (
+from sfmtool.geometry import (
     CameraIntrinsics,
     bundle_adjust as _bundle_adjust,
     refine_absolute_pose as _refine_absolute_pose,
@@ -515,7 +515,7 @@ def load_clusters(matches_data=None, preselected=False):
     if matches_data is not None:
         data = matches_data
     else:
-        from sfmtool._sfmtool.io import MatchesFile
+        from sfmtool.fileio import MatchesFile
 
         override = os.environ.get("SFMTOOL_MATCHES")
         patches = (
@@ -603,7 +603,7 @@ def p3p_resect(uv, x_pts, f0, wh):
     wrong-match-heavy image and anchoring the verification BA on it drags
     the pose).  ``uv`` are full pixels.  Returns (rvec, tvec, inlier mask
     over the given obs) or None."""
-    from sfmtool._sfmtool.geometry import estimate_absolute_pose
+    from sfmtool.geometry import estimate_absolute_pose
 
     ans = estimate_absolute_pose(
         np.ascontiguousarray(uv),
@@ -810,7 +810,7 @@ def triangulate(obs_c, obs_i, u, rot, trans, used, n_cl, f):
     """Ray-midpoint triangulation of every cluster from the posed images,
     via the batch triangulation binding (clusters with < 2 posed
     observations stay NaN)."""
-    from sfmtool._sfmtool.analysis import triangulate_batch
+    from sfmtool.analysis import triangulate_batch
 
     pts = np.full((n_cl, 3), np.nan)
     sel = used[obs_i]
@@ -868,7 +868,7 @@ def save_sfmr(
     what an inspectable side artifact needs and is far cheaper: the surfel
     solve below opens every posed image's `.sift` affine array.
     """
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.reconstruction import SfmrReconstruction
     from sfmtool._workspace import load_workspace_config
     from sfmtool.colmap.convention import world_rotate_w
     from sfmtool.colmap.io import (
@@ -1016,8 +1016,8 @@ def save_sfmr(
     # plane; the reference row contributes J_ref·B = I), then
     # u = B·(r, 0), v = B·(0, r) with r the refinement radius in reference
     # pixels (keypoint-frame radius x the reference feature's scale).
-    from sfmtool._sfmtool.patches import PatchCloud
-    from sfmtool._sfmtool.io import read_sift, read_sift_metadata
+    from sfmtool.patches import PatchCloud
+    from sfmtool.fileio import read_sift, read_sift_metadata
     from sfmtool.colmap.convention import world_rotate_w
     from sfmtool.sift.file import get_sift_path_for_image
 

@@ -82,7 +82,7 @@ def check_model_equivalence():
     pixel Jacobian where the polynomial carrier has none — is a Rust-side
     fact, pinned in ``camera/distortion/tests.rs``; there is no binding for
     ``ray_to_pixel_with_jacobian`` to assert it from here."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     print("\nPhase 3a — representation cross-check")
     w, h = WH
@@ -152,7 +152,7 @@ def check_zero_knot_identity():
     from the bindings, and asks for bit equality in both directions.  The
     model's own zero-spline identity is pinned in Rust; what is pinned here is
     that the seed's camera BUILDER inherits it, domain-end policy included."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     print("\nZero-knot identity — the resting context is its chart's base map")
     w, h = WH
@@ -513,7 +513,7 @@ def run_ray_suite():
         theta_max_deg=105.0,
         poses=rotation_rig(6),
     )
-    from sfmtool._sfmtool.geometry import fit_ray_rotation
+    from sfmtool.geometry import fit_ray_rotation
 
     ra = np.ascontiguousarray(
         cam.pixel_to_ray_batch(np.ascontiguousarray(rig["u"][rig["obs_i"] == 0]))
@@ -821,8 +821,8 @@ def run_finalization_suite():
        which must still reject the antipodal reflection.
     2. ``PatchCloud.from_tracks`` under ``extent="pixel_radius"`` sizes a
        peripheral patch by the ray RANGE, not by ``|z|``."""
-    from sfmtool._sfmtool.geometry import resect_translation
-    from sfmtool._sfmtool.patches import CameraViews, PatchCloud
+    from sfmtool.geometry import resect_translation
+    from sfmtool.patches import CameraViews, PatchCloud
 
     print("\nPhase 5 — finalization chain under fisheye")
     B._CAM_WH = WH
@@ -934,7 +934,7 @@ def run_phase6_suite():
        perspective patch by ``sec(theta)``.
     2. The routing override is tri-state: only ``"0"`` refuses a confirmed
        verdict."""
-    from sfmtool._sfmtool.patches import CameraViews, PatchCloud
+    from sfmtool.patches import CameraViews, PatchCloud
 
     print("\nPhase 6 — fleet integration")
     B._CAM_WH = WH
@@ -1008,7 +1008,7 @@ def run_bspline_context_suite():
     installed lens rather than falling through a default arm.  The model's own
     maps are pinned in Rust (``camera/distortion/tests.rs``); this covers only
     the script layer the lens flows through."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     print("\nSFMTOOL_FISHEYE — a context carrying coefficients")
     w, h = WH

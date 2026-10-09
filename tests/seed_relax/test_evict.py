@@ -281,7 +281,7 @@ N_CL_E2E = 8
 
 def _e2e_member(rows=E2E, n_cl=N_CL_E2E, scale=1.0):
     import seed_candidate_eval as EV
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     cam = CameraIntrinsics.from_dict(
         {

@@ -5,7 +5,7 @@
 
 The arithmetic is the core's
 ``sfmtool_core::geometry::translation_averaging`` kernel, reached through
-``sfmtool._sfmtool.geometry.average_translations``; what is here is the
+``sfmtool.geometry.average_translations``; what is here is the
 dict-keyed shape the chain speaks, converted to the kernel's arrays in sorted
 key order.  See ``specs/core/geometry/translation-averaging.md``.
 
@@ -27,7 +27,7 @@ import numpy as np
 
 def _kernel():
     """The core's averaging entry points, imported on use."""
-    from sfmtool._sfmtool.geometry import average_translations, direction_reading
+    from sfmtool.geometry import average_translations, direction_reading
 
     return average_translations, direction_reading
 

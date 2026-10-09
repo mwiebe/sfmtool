@@ -16,7 +16,7 @@ WIDTH = HEIGHT = 480
 
 
 def _cam(model, focal=F_TRUE, **extra):
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     params = {
         "focal_length": float(focal),

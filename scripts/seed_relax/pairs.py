@@ -9,7 +9,7 @@ they then test, so the enumeration is stated once and the tests stay in the
 stages.
 
 The enumeration is the core's ``spatial::keypoint_reach`` kernel, bound as
-:func:`sfmtool._sfmtool.analysis.keypoint_pairs_within_reach`; this module is
+:func:`sfmtool.analysis.keypoint_pairs_within_reach`; this module is
 the shape the stages read it in, one image at a time.  The kernel orders an
 image's rows by column and takes each disk's candidates off one contiguous run
 of that order, found by binary search at ``x -/+ reach`` and then filtered by
@@ -39,7 +39,7 @@ def image_candidates(x, y, reach):
     positions in these arrays.  The stream is read as a stream because the
     relation is quadratic in a crowded image and the caller consumes it batch
     by batch; nothing about the pairs depends on how many batches arrive."""
-    from sfmtool._sfmtool.analysis import keypoint_pairs_within_reach
+    from sfmtool.analysis import keypoint_pairs_within_reach
 
     reach = np.ascontiguousarray(np.asarray(reach, float))
     xy = np.ascontiguousarray(

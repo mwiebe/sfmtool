@@ -63,7 +63,7 @@ def source_clusters(source, m, frames=None):
 
     Returns a dict, or one carrying ``refused`` where the handle does not
     describe the member's images."""
-    from sfmtool._sfmtool.analysis import source_clusters as kernel
+    from sfmtool.analysis import source_clusters as kernel
 
     names_f = [str(n).replace("\\", "/") for n in source.image_names]
     if names_f != list(m.names):

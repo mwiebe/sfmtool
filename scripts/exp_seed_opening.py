@@ -24,10 +24,10 @@ from pathlib import Path
 
 import numpy as np
 
-from sfmtool._sfmtool.analysis import coarsest_cluster_ids, triangulate_batch
-from sfmtool._sfmtool.geometry import estimate_essential_rays, estimate_intrinsics
-from sfmtool._sfmtool.io import MatchesFile
-from sfmtool._sfmtool.matching import ClusterCovisibility
+from sfmtool.analysis import coarsest_cluster_ids, triangulate_batch
+from sfmtool.geometry import estimate_essential_rays, estimate_intrinsics
+from sfmtool.fileio import MatchesFile
+from sfmtool.matching import ClusterCovisibility
 
 N_COARSE = 3000  # the fleet's seedability floor (see exp_fast_seed.py)
 GROUP_SIZE = 5  # images per covisibility seed group

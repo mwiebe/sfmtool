@@ -55,7 +55,7 @@ def assign_rings(cand_radius, floor, edges):
     ``analysis::source_clusters`` kernel, which the fill-in reaches through
     the join; this is the same rule on a radius array the caller already
     holds."""
-    from sfmtool._sfmtool.analysis import assign_bands
+    from sfmtool.analysis import assign_bands
 
     return np.asarray(
         assign_bands(

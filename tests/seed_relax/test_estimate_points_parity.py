@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from seed_relax.structure import estimate_points_verdicts
-from sfmtool._sfmtool.reconstruction import VERDICT_CODES as CODES
+from sfmtool.reconstruction import VERDICT_CODES as CODES
 
 FOCAL = 500.0
 
@@ -38,7 +38,7 @@ POSITION_RTOL = 1e-9
 
 @pytest.fixture(name="cam")
 def _cam():
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return CameraIntrinsics.from_dict(
         {

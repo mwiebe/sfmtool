@@ -24,7 +24,7 @@ P_FAR = np.array([0.0, 0.0, -20000.0])
 
 
 def _cam(focal=F):
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return CameraIntrinsics.from_dict(
         {

@@ -13,7 +13,7 @@ FOCAL = 500.0
 
 @pytest.fixture(name="cam")
 def _cam():
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return CameraIntrinsics.from_dict(
         {

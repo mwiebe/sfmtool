@@ -80,11 +80,11 @@ from pathlib import Path
 
 import numpy as np
 
-from sfmtool._sfmtool.geometry import (
+from sfmtool.geometry import (
     estimate_fundamental,
     focal_vote as native_focal_vote,
 )
-from sfmtool._sfmtool.io import MatchesFile, read_sift_partial
+from sfmtool.fileio import MatchesFile, read_sift_partial
 
 # ── Datasets ─────────────────────────────────────────────────────────────────
 #

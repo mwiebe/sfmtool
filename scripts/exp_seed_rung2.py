@@ -2662,7 +2662,7 @@ def trim_member(sfmr_path, drop_names, out_path, recon=None, reseated=()):
     written in those cases.
     """
     if recon is None:
-        from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+        from sfmtool.reconstruction import SfmrReconstruction
 
         recon = SfmrReconstruction.load(str(sfmr_path))
     names = [str(n).replace("\\", "/") for n in recon.image_names]
@@ -3013,7 +3013,7 @@ def capture_match_graph(matches_path):
     got = _MATCH_GRAPHS.get(key)
     if got is not None:
         return got
-    from sfmtool._sfmtool.io import MatchesFile
+    from sfmtool.fileio import MatchesFile
 
     mfile = MatchesFile(str(matches_path))
     sel = mfile.select_clusters(min_span=2)
@@ -3430,13 +3430,13 @@ def resect_group(state, group, cut, ctx, hyp, row):
     it refuses whole leaves the walk exactly where a drop leaves it.  Raises
     what the primitive raises.
     """
-    from sfmtool._sfmtool.geometry import resect_images
+    from sfmtool.geometry import resect_images
 
     recon, d = state["recon"], state["arrays"]
     if d is None:
         d = (ctx.get("arrays") or {}).get(int(hyp.get("idx", -1)))
     if recon is None:
-        from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+        from sfmtool.reconstruction import SfmrReconstruction
 
         recon = SfmrReconstruction.load(
             str(ctx["release_dir"] / (row["release_file"] or ""))
@@ -3683,7 +3683,7 @@ def cull_member(sfmr_path, arrays_d, drop_ids, out_path):
     a report dict; `ok` is False when nothing was written, and nothing is
     written in those cases.
     """
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.reconstruction import SfmrReconstruction
 
     recon = SfmrReconstruction.load(str(sfmr_path))
     names = [str(n).replace("\\", "/") for n in recon.image_names]
