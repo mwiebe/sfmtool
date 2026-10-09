@@ -443,7 +443,7 @@ and its observations stand.
 
 The pass, and the per-ring estimation of the fill-in, are the point
 estimation operation with the relaxation's settings
-([point-estimation.md](../reconstruction/point-estimation.md)).
+([triangulation-rules.md](../reconstruction/triangulation-rules.md)).
 
 ## State a depth only where one was measured
 
