@@ -524,12 +524,19 @@ pub(crate) fn parse(
                 verdict,
             }
         }
+        "set_bench_track_reference" => Command::SetBenchTrackReference {
+            reconstruction_label: args.required_string("reconstruction_label")?,
+            track: args.optional_string("track")?,
+            observation: args.required_usize("observation")?,
+        },
         "apply_bench_track_thresholds" => Command::ApplyBenchTrackThresholds {
             reconstruction_label: args.required_string("reconstruction_label")?,
             track: args.optional_string("track")?,
             thresholds: super::ThresholdChange {
                 min_zncc: args.optional_f64("min_zncc")?,
                 min_zncc_middle: args.optional_f64("min_zncc_middle")?,
+                cluster_min_zncc: args.optional_f64("cluster_min_zncc")?,
+                cluster_min_zncc_middle: args.optional_f64("cluster_min_zncc_middle")?,
                 max_shift_px: args.optional_f64("max_shift_px")?,
                 max_zncc_self_similarity_radius: args
                     .optional_f64("max_zncc_self_similarity_radius")?,

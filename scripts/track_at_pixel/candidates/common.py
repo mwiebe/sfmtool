@@ -70,9 +70,9 @@ FINISH_DEFAULTS = {
 
 def median_zncc(track) -> float:
     z = [
-        o["track"]["zncc"]
+        o["track"]["loo_zncc"]
         for o in track.observations
-        if o["verdict"] == "in" and o.get("track", {}).get("zncc") is not None
+        if o["verdict"] == "in" and o.get("track", {}).get("loo_zncc") is not None
     ]
     return float(np.median(z)) if z else float("-inf")
 
@@ -85,11 +85,15 @@ def query_offset(track, q: int, pixel) -> float | None:
 
 
 def anchor(ctx, track, q: int, pixel):
-    """Slide the patch so its centre in observation ``q`` is ``pixel``, then read it."""
+    """Slide the patch so its centre in observation ``q`` is ``pixel``, then read it.
+
+    The move drops the stored bitmap; the reading renders it again where the
+    patch stands, so the rows carry a score against it for the bars to judge.
+    """
     from sfmtool import bench as B
 
     moved, _ = B.translate_patch_to_pixel(track, ctx.edited, q, list(pixel))
-    moved, _ = B.evaluate(moved, ctx.edited, ctx.pyramids)
+    moved, _ = B.evaluate(moved, ctx.edited, ctx.pyramids, render_bitmap=True)
     return moved
 
 
@@ -370,7 +374,7 @@ def ray_consensus(ctx, track, q: int, pixel, opts: dict, diag: dict):
         if i == q or o["verdict"] != "in":
             continue
         tr = o.get("track", {})
-        kp, z = tr.get("keypoint"), tr.get("zncc")
+        kp, z = tr.get("keypoint"), tr.get("loo_zncc")
         if kp is None or z is None or z < opts["ray_min_zncc"]:
             continue
         # A keypoint the correlation peak has left is not a sighting yet.
@@ -484,7 +488,9 @@ def finish(ctx, track, q: int, pixel, opts: dict, diag: dict) -> TrackAtPixelRes
                 "self_agreement": geo["self_agreement"],
             }
             if geo["added"]:
-                grown, _ = B.evaluate(grown, ctx.edited, ctx.pyramids)
+                grown, _ = B.evaluate(
+                    grown, ctx.edited, ctx.pyramids, render_bitmap=True
+                )
                 grown, _ = B.apply_thresholds(grown)
                 if opts["anchor"]:
                     grown = anchored_fit(ctx, grown, q, pixel, opts["anchor_refits"])

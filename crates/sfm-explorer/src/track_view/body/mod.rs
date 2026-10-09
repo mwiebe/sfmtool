@@ -137,77 +137,80 @@ type SummaryKey = (BodyMode, ReconId, String, usize, u64);
 /// made once. In Viewed mode only the selection and hover fields,
 /// `request_goto_point` and `viewed_thresholds` are ever set.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct TrackBodyResponse {
+pub(crate) struct TrackBodyResponse {
     /// The mode the body drew in, or `None` when it drew no track.
-    pub mode: Option<BodyMode>,
+    pub(crate) mode: Option<BodyMode>,
     /// Viewed mode: a threshold box moved, carrying the read-only bars the
     /// boxes now stand at, for `AppState::set_viewed_thresholds`. Set on every
     /// frame of a drag, since the bars change nothing but what is drawn.
-    pub viewed_thresholds: Option<Thresholds>,
+    pub(crate) viewed_thresholds: Option<Thresholds>,
     /// The toolbar's *Discard*.
-    pub discard: Option<String>,
+    pub(crate) discard: Option<String>,
     /// *Rename* was committed: the item, and the label it should take.
-    pub rename: Option<(String, String)>,
+    pub(crate) rename: Option<(String, String)>,
     /// *Fit*.
-    pub fit: bool,
+    pub(crate) fit: bool,
     /// *Fit Normal*, *Finite Diff Normal* or *Grid Plane Normal*, carrying
     /// which, and for the last two the *per axis* and *overlap* settings it
     /// was pressed at.
     pub(crate) normal: Option<NormalStep>,
     /// The *Stage* toggle, carrying the stage it asks for.
-    pub set_stage: Option<StageKind>,
+    pub(crate) set_stage: Option<StageKind>,
     /// A threshold box was released, or a value typed into one was
     /// committed: the bars the six boxes stand at, for the focused item.
     /// Set only when they differ from the track's own.
-    pub apply_thresholds: Option<Thresholds>,
+    pub(crate) apply_thresholds: Option<Thresholds>,
     /// A kept-at-seed row's *Accept walk*, carrying the observation: put its
     /// sighting where the last fit's walk would have taken it.
-    pub accept_walk: Option<usize>,
+    pub(crate) accept_walk: Option<usize>,
+    /// A track-stage row's *Set as reference*, carrying the observation: make
+    /// it the track's reference and pin it.
+    pub(crate) set_reference: Option<usize>,
     /// *Split off selected rows*, carrying the rows.
-    pub split: Option<Vec<usize>>,
+    pub(crate) split: Option<Vec<usize>>,
     /// A row was clicked: the observation, and whether Ctrl or Shift was held
     /// to extend the selection rather than replace it. Applied through
     /// `AppState::pick_bench_observation`.
-    pub pick_row: Option<(usize, bool)>,
+    pub(crate) pick_row: Option<(usize, bool)>,
     /// *Duplicate*: put a copy of the focused item on the bench beside it.
-    pub duplicate: bool,
+    pub(crate) duplicate: bool,
     /// *Commit*.
-    pub commit: bool,
+    pub(crate) commit: bool,
     /// A row's *Build Index Files* / *Rebuild Index Files*: the entry a row
     /// offers where the search would be when the node's index is absent or out
     /// of date.
-    pub build_index_files: bool,
+    pub(crate) build_index_files: bool,
     /// A row's *Find matches by SIFT query*, carrying the observation it was
     /// opened on.
-    pub search_descriptors: Option<usize>,
+    pub(crate) search_descriptors: Option<usize>,
     /// A track-stage row's *Find matches by geometry*, carrying the
     /// observation whose appearance is the explicit reference.
-    pub search_geometry: Option<usize>,
+    pub(crate) search_geometry: Option<usize>,
     /// A row's *Keep* switch was clicked: the observation, and the verdict it
     /// switched to.
-    pub set_verdict: Option<(usize, Verdict)>,
+    pub(crate) set_verdict: Option<(usize, Verdict)>,
     /// Verdicts handed back to the thresholds in one step: a row's pin or
     /// its *Unpin, let the thresholds decide*, the row menu's unpin of a
     /// selection, or the *Keep* heading's pin, which names every pinned row.
-    pub unpin_verdicts: Option<Vec<usize>>,
+    pub(crate) unpin_verdicts: Option<Vec<usize>>,
     /// Verdicts pinned as they stand in one step: the *Keep* heading's pin
     /// when no row is pinned, which names every row.
-    pub pin_verdicts: Option<Vec<usize>>,
+    pub(crate) pin_verdicts: Option<Vec<usize>>,
     /// The header's go-to button, or the empty state's *Go to Point...*: open
     /// the *Go to Point* dialog.
-    pub request_goto_point: bool,
+    pub(crate) request_goto_point: bool,
     /// A row was clicked -- select this image.
-    pub select_image: Option<usize>,
+    pub(crate) select_image: Option<usize>,
     /// A row was double-clicked -- enter camera view for this image.
-    pub request_camera_view: Option<usize>,
+    pub(crate) request_camera_view: Option<usize>,
     /// The clicked row's observation, in that image's own pixels: the place the
     /// Image Detail panel is asked to bring into view along with the image.
     /// `None` for an observation nothing has placed yet.
-    pub reveal_feature: Option<[f32; 2]>,
+    pub(crate) reveal_feature: Option<[f32; 2]>,
     /// The image under the pointer, for cross-panel hover.
-    pub hovered_image: Option<usize>,
+    pub(crate) hovered_image: Option<usize>,
     /// Whether the pointer is inside the panel.
-    pub has_pointer: bool,
+    pub(crate) has_pointer: bool,
 }
 
 /// Track View's body state.
@@ -234,8 +237,14 @@ pub struct TrackBody {
     /// What the boxes say about each observation of the track drawn, which is
     /// what its readings and its *Keep* or *Verdict* cell are coloured by:
     /// `None` for an observation nothing at the track's stage has measured,
-    /// which the bars do not judge.
+    /// which the bars do not judge, and for the row holding the reference
+    /// where unpinning it would move the bitmap ([`TrackBody::reference_waits`]).
     judged: Vec<Option<Judgement>>,
+    /// The pinned row that holds the reference where unpinning it would render
+    /// the bitmap again from the rule's pick, so the bars cannot judge it
+    /// until that render: its [`TrackBody::judged`] entry is `None` although
+    /// the row is measured. Computed with [`TrackBody::judged`].
+    reference_waits: Option<usize>,
     /// The mode, the track's label, the address of its `Arc` and the bars
     /// [`TrackBody::judged`] was computed from. A step on the track, or an
     /// evaluation of the viewed track landing, gives it a new `Arc`, which is
@@ -362,6 +371,7 @@ impl TrackBody {
             thresholds: Thresholds::default(),
             sliding: false,
             judged: Vec::new(),
+            reference_waits: None,
             judged_for: None,
             commit_refusal: None,
             commit_refusal_for: None,
@@ -446,6 +456,7 @@ impl TrackBody {
         self.build_refusal = None;
         self.sliding = false;
         self.judged.clear();
+        self.reference_waits = None;
         self.rows.clear();
     }
 
@@ -564,7 +575,8 @@ impl TrackBody {
         };
         let mut moved = BoxesMoved::default();
         ui.horizontal_top(|ui| {
-            show_track_patch(ui, patch, track.stage_kind(), BodyMode::Edited);
+            let kind = patch::BitmapKind::of(track);
+            show_track_patch(ui, patch, track.stage_kind(), BodyMode::Edited, kind);
             ui.vertical(|ui| {
                 show_headline(ui, track);
                 self.show_toolbar(ui, state, node, label, track, response);
@@ -627,7 +639,8 @@ impl TrackBody {
         let on_bench = state.bench_item_from_point(PointRef::new(id, viewed.point as usize));
         let patch = self.ensure_track_patch(ui.ctx(), &viewed.label, track);
         ui.horizontal_top(|ui| {
-            show_track_patch(ui, patch, track.stage_kind(), BodyMode::Viewed);
+            let kind = patch::BitmapKind::Patch;
+            show_track_patch(ui, patch, track.stage_kind(), BodyMode::Viewed, kind);
             ui.vertical(|ui| {
                 ui.weak(bench_line(on_bench.as_deref()));
                 ui.horizontal_wrapped(|ui| show_evaluation(ui, &self.evaluation));
@@ -904,7 +917,12 @@ impl TrackBody {
         let mut with_bars = (**track).clone();
         with_bars.thresholds = self.thresholds.clone();
         let stage = track.stage_kind();
-        self.judged = verdicts_if_unpinned(&with_bars)
+        let proposals = verdicts_if_unpinned(&with_bars);
+        self.reference_waits = with_bars.held_reference().filter(|&r| {
+            proposals.get(r).is_some_and(|p| p.is_none())
+                && bar_checks(&with_bars.observations[r], stage, &self.thresholds).is_some()
+        });
+        self.judged = proposals
             .into_iter()
             .zip(&with_bars.observations)
             .map(|(proposal, observation)| {
@@ -1201,6 +1219,28 @@ impl TrackBody {
 /// reading that was taken and came out non-finite prints `NaN`.
 pub(crate) fn zncc_text(whole: Option<f64>, middle: Option<f64>) -> String {
     stacked(whole, middle, |value| format!("{:.0}%", 100.0 * value))
+}
+
+/// The track stage's *ZNCC* cell: the row's plain score against the stored
+/// patch bitmap over its middle reading, as [`zncc_text`] prints them, with
+/// the blur-matched score after an arrow where the bitmap was blurred and the
+/// two print differently (`50% ⏵ 53% whole` over `61% mid`). The reference's
+/// own row reads 100%.
+fn track_zncc_text(m: Option<&sfmtool_core::bench::TrackMeasurement>) -> String {
+    let Some(m) = m else {
+        return "-".to_string();
+    };
+    let text = zncc_text(m.zncc, m.zncc_middle);
+    match reference::blur_matched_shown(m) {
+        // The arrow is U+23F5, which egui's bundled fonts draw; U+2192 draws
+        // as a box.
+        Some(matched) => text.replacen(
+            " whole",
+            &format!(" \u{23f5} {:.0}% whole", 100.0 * matched),
+            1,
+        ),
+        None => text,
+    }
 }
 
 /// [`zncc_text`] for a sentence, on one line (`92% / 61%`).
@@ -1707,14 +1747,14 @@ fn red_to_green(t: f64) -> egui::Color32 {
 /// The text after the minimum-ZNCC box in the threshold row: the unit and the
 /// name the ZNCC cell's first line prints with. In one constant so the tests
 /// aim at the text drawn.
-pub(crate) const MIN_ZNCC_LABEL: &str = "% whole";
+const MIN_ZNCC_LABEL: &str = "% whole";
 
 /// The minimum-ZNCC box's hover text.
 const MIN_ZNCC_TIP: &str = "The lowest whole-patch ZNCC a sighting may have. A row whose \
     whole ZNCC is under it is painted out.";
 
 /// The text after the minimum-middle-ZNCC box, under the one above.
-pub(crate) const MIN_ZNCC_MIDDLE_LABEL: &str = "% mid";
+const MIN_ZNCC_MIDDLE_LABEL: &str = "% mid";
 
 /// The minimum-middle-ZNCC box's hover text.
 const MIN_ZNCC_MIDDLE_TIP: &str = "The lowest middle ZNCC a sighting may have, read over the \
@@ -1723,7 +1763,7 @@ const MIN_ZNCC_MIDDLE_TIP: &str = "The lowest middle ZNCC a sighting may have, r
 
 /// The geometry search box's label, above the table: its bar judges no
 /// column, so it does not sit in the threshold row.
-pub(crate) const GEOMETRY_SEARCH_LABEL: &str = "geometry search min relative ZNCC (%)";
+const GEOMETRY_SEARCH_LABEL: &str = "geometry search min relative ZNCC (%)";
 
 /// The geometry search box's hover text.
 const GEOMETRY_SEARCH_TIP: &str = "The bar Find matches by geometry admits a photograph by: its \
@@ -1843,7 +1883,7 @@ const VIEWED_BARS_TIP: &str = "Judges the readings and the Verdict column by thi
 /// cell prints in. The box is the bar the painting judges a shift by, the
 /// radius the evaluation looks for each peak within, and the bound on how far
 /// a fit may move a sighting.
-pub(crate) const MAX_SHIFT_LABEL: &str = "px";
+const MAX_SHIFT_LABEL: &str = "px";
 
 /// The shift box's hover text.
 const MAX_SHIFT_TIP: &str = "The largest shift a sighting may have, in patch-grid px: how \
@@ -1854,7 +1894,7 @@ const MAX_SHIFT_TIP: &str = "The largest shift a sighting may have, in patch-gri
 /// The text after the self-similarity box in the threshold row, the unit and
 /// the name of the self-similarity cell's first line. The box is the largest
 /// ZNCC self-similarity radius an observation's whole tile may have.
-pub(crate) const MAX_SELF_SIMILARITY_LABEL: &str = "px whole";
+const MAX_SELF_SIMILARITY_LABEL: &str = "px whole";
 
 /// The self-similarity box's hover text.
 const MAX_SELF_SIMILARITY_TIP: &str = "The largest ZNCC self-similarity radius a sighting's \
@@ -1866,7 +1906,7 @@ const MAX_SELF_SIMILARITY_TIP: &str = "The largest ZNCC self-similarity radius a
 /// The text after the projection error box in the threshold row, the unit of
 /// the *Proj. err* cell's first line. The box is the largest reprojection
 /// error an observation may have.
-pub(crate) const MAX_PROJECTION_ERROR_LABEL: &str = "px";
+const MAX_PROJECTION_ERROR_LABEL: &str = "px";
 
 /// The projection error box's hover text.
 const MAX_PROJECTION_ERROR_TIP: &str = "The largest reprojection error a sighting may have, in \
@@ -1877,36 +1917,40 @@ const MAX_PROJECTION_ERROR_TIP: &str = "The largest reprojection error a sightin
 
 /// A kept-at-seed row's menu entry, which puts the sighting where the fit's
 /// walk would have taken it.
-pub(crate) const ACCEPT_WALK_LABEL: &str = "Accept walk";
+const ACCEPT_WALK_LABEL: &str = "Accept walk";
+
+/// A track-stage row's menu entry, which makes the row the track's reference,
+/// the row its patch bitmap is rendered from, and pins it.
+const SET_REFERENCE_LABEL: &str = "Set as reference";
 
 /// The toolbar entry that turns the patch to its photometric normal, in one
 /// constant so the tests aim at the label drawn.
-pub(crate) const FIT_NORMAL_LABEL: &str = "Fit Normal";
+const FIT_NORMAL_LABEL: &str = "Fit Normal";
 
 /// The toolbar entry that turns the patch to the plane its fitted pieces lie
 /// on.
-pub(crate) const FINITE_DIFF_NORMAL_LABEL: &str = "Finite Diff Normal";
+const FINITE_DIFF_NORMAL_LABEL: &str = "Finite Diff Normal";
 
 /// The toolbar entry that turns the patch to the plane through a grid of its
 /// fitted pieces.
-pub(crate) const GRID_PLANE_NORMAL_LABEL: &str = "Grid Plane Normal";
+const GRID_PLANE_NORMAL_LABEL: &str = "Grid Plane Normal";
 
 /// The Edited-mode checkbox that says whether Image Detail's dot drag moves the
 /// patch or one sighting, in one constant so the tests aim at the label drawn.
-pub(crate) const LOCK_LABEL: &str = "Lock";
+const LOCK_LABEL: &str = "Lock";
 
 /// Why *Lock* is greyed at the cluster stage.
-pub(crate) const LOCK_AT_CLUSTER: &str = "A cluster has no shared patch: every sighting is \
+const LOCK_AT_CLUSTER: &str = "A cluster has no shared patch: every sighting is \
     already moved on its own, locked or not.";
 
 /// The observation row's context-menu entry, in one constant, as the Image
 /// Detail menu's entries are: the label is quoted in a refusal and read back by
 /// a test, and three spellings of one entry would drift.
-pub(crate) const SEARCH_DESCRIPTORS_LABEL: &str = "Find matches by SIFT query";
+const SEARCH_DESCRIPTORS_LABEL: &str = "Find matches by SIFT query";
 
 /// The track-stage geometry search entry. It is separate from the SIFT label
 /// because it reads poses and photographs, and requires no descriptor index.
-pub(crate) const SEARCH_GEOMETRY_LABEL: &str = "Find matches by geometry";
+const SEARCH_GEOMETRY_LABEL: &str = "Find matches by geometry";
 
 /// What the toolbar says while an evaluation of the focused item's current
 /// inputs is running or waiting to start, and what each row's status cell says
@@ -1919,7 +1963,7 @@ pub(crate) const EVALUATED_LABEL: &str = "Evaluated";
 
 /// The status cell of a row whose track has no evaluation of its current
 /// inputs and gets none until a step changes them.
-pub(crate) const NOT_EVALUATED: &str = "not evaluated";
+const NOT_EVALUATED: &str = "not evaluated";
 
 /// Where the focused item's evaluation stands, at the head of the toolbar.
 ///
@@ -2267,12 +2311,15 @@ pub(crate) fn position_text(payload: &sfmtool_core::bench::TrackPayload) -> Stri
 /// no label, since the picture says what it is. With nothing to show -- a point
 /// with no stored patch, a track with no bitmap rendered yet, a cluster with no
 /// template cut -- the slot is an empty frame of the same size, so the controls
-/// beside it do not move when a fit or a stage change fills it.
+/// beside it do not move when a fit or a stage change fills it. A bitmap for
+/// judging is drawn dimmed ([`patch::track_patch_image`]) and its hover says it
+/// is not the track's patch; a patch the next render replaces says so too.
 fn show_track_patch(
     ui: &mut egui::Ui,
     texture: Option<egui::TextureId>,
     stage: StageKind,
     mode: BodyMode,
+    kind: patch::BitmapKind,
 ) {
     let size = STORED_PATCH_SIZE;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
@@ -2284,18 +2331,7 @@ fn show_track_patch(
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            response.on_hover_text(match (stage, mode) {
-                (StageKind::Track, BodyMode::Viewed) => {
-                    "The point's stored patch: the consensus of its observations"
-                }
-                (StageKind::Track, BodyMode::Edited) => {
-                    "The track's patch: the consensus of its observations, which a commit \
-                     writes as the point's stored patch"
-                }
-                (StageKind::Cluster, _) => {
-                    "The cluster's template, which every member registers onto"
-                }
-            });
+            response.on_hover_text(track_patch_hover(stage, mode, kind));
         }
         None => {
             ui.painter()
@@ -2310,6 +2346,34 @@ fn show_track_patch(
                 }
             });
         }
+    }
+}
+
+/// The hover text of the header's patch slot where it draws a picture.
+fn track_patch_hover(stage: StageKind, mode: BodyMode, kind: patch::BitmapKind) -> &'static str {
+    match (stage, mode, kind) {
+        (StageKind::Track, BodyMode::Edited, patch::BitmapKind::Judging) => {
+            "A bitmap for judging, drawn dimmed: not the track's patch. Fewer than two \
+             rows that are in carry a keypoint, so it was rendered from the rows with a \
+             keypoint, in or out, only for the bars to score the rows against. No row is \
+             its reference and a commit does not write it; the first evaluation after two \
+             rows that are in carry a keypoint renders the track's patch"
+        }
+        (StageKind::Track, BodyMode::Edited, patch::BitmapKind::Pending) => {
+            "The track's patch, kept until the next render replaces it: the reference's row \
+             is unpinned and the reference-view rule picks another row, so no row is scored \
+             against it. A commit before that render writes it as the point's stored patch"
+        }
+        (StageKind::Track, BodyMode::Viewed, _) => {
+            "The point's stored patch: the render of its reference observation, or the mean \
+             of its views where it has none"
+        }
+        (StageKind::Track, BodyMode::Edited, patch::BitmapKind::Patch) => {
+            "The track's patch: the render of its reference observation, the row marked in \
+             the Reference column, or the mean of its views where it has none; a commit \
+             writes it as the point's stored patch"
+        }
+        (StageKind::Cluster, _, _) => "The cluster's template, which every member registers onto",
     }
 }
 
@@ -2537,7 +2601,7 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 5] {
         StageKind::Track => {
             let m = observation.track.as_ref();
             [
-                zncc_text(m.and_then(|m| m.zncc), m.and_then(|m| m.zncc_middle)),
+                track_zncc_text(m),
                 px(m.and_then(|m| m.seed_shift_px)),
                 // One column for the reprojection error: in px to the
                 // triangulated point, or before there is one to the patch's
@@ -2552,33 +2616,37 @@ fn measured(observation: &Observation, stage: StageKind) -> [String; 5] {
                     m.and_then(|m| m.zncc_self_similarity_radius),
                     m.and_then(|m| m.zncc_self_similarity_radius_middle),
                 ),
-                // A row without a score says which of the reading's refusals it
-                // was, in the evaluation's own sentence. An evaluation drops
-                // nothing, so "no ZNCC" always has one of those answers behind
-                // it, and a row that has never been read says that instead.
+                // A row the localizer could not read, or that has no score
+                // against the bitmap, says why, in the evaluation's own
+                // sentence (`reason`): the localizer's refusal where there was
+                // one, whether or not the row has a score, and otherwise why
+                // there is no score. An evaluation drops nothing, so a missing
+                // reading always has one of those answers behind it, and a row
+                // that has never been read says that instead. "localized" is
+                // the localizer's reading (`loo_zncc`), not the score.
                 //
                 // The walk comes first among the answers a scored row can give:
                 // it says the sighting did *not* move where the correlation
                 // wanted it, which is the one thing about the row a person
                 // reading "localized" would get wrong.
-                // With the ZNCC the walk would have bought where the fit
-                // scored one, beside the row's own ZNCC read at the seed: the
-                // two numbers a person accepting the walk or not decides by.
+                // With the leave-one-out ZNCC the walk would have bought where
+                // the fit scored one; *Accept walk*'s hover sets it beside the
+                // row's own leave-one-out ZNCC at the seed.
                 match m {
                     Some(m) if m.walked_px.is_some() => format!(
                         "walked {:.0} grid px{}, kept at seed",
                         m.walked_px.expect("just matched"),
                         match m.walked_zncc {
                             Some(z) if z.is_finite() => format!(
-                                " (ZNCC {} there)",
+                                " (leave-one-out ZNCC {} there)",
                                 zncc_sentence(Some(z), m.walked_zncc_middle)
                             ),
                             _ => String::new(),
                         }
                     ),
-                    Some(m) if m.zncc.is_some() => "localized".to_string(),
                     Some(m) => match m.reason {
                         Some(reason) => reason.to_string(),
+                        None if m.loo_zncc.is_some() || m.zncc.is_some() => "localized".to_string(),
                         None => "not evaluated".to_string(),
                     },
                     None => "not evaluated".to_string(),

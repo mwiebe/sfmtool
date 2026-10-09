@@ -80,11 +80,13 @@ def ground_truth_reading(dataset, point: int) -> dict:
 
     edited = EditedReconstruction(dataset.recon)
     _, track = B.create_track(B.Bench(), edited, int(point))
-    track, _ = B.evaluate(track, edited, dataset.pyramids)
+    # A reading only: every row is pinned, so the verdicts stand, and the
+    # leave-one-out numbers read here need no bitmap rendered.
+    track, _ = B.evaluate(track, edited, dataset.pyramids, render_bitmap=False)
     rows = _in_rows(track)
     return {
         "track": track,
-        **_stats("gt_zncc", _track_numbers(rows, "zncc")),
+        **_stats("gt_zncc", _track_numbers(rows, "loo_zncc")),
         **_stats(
             "gt_self_similarity",
             _track_numbers(rows, "zncc_self_similarity_radius"),
@@ -218,7 +220,7 @@ def score(
             gt_scales.append(s)
     m.update(_scale_stats("gt_texel_scale", gt_scales))
 
-    zncc = _track_numbers(rows, "zncc")
+    zncc = _track_numbers(rows, "loo_zncc")
     m.update(_stats("zncc", zncc))
     m.update(
         _stats("self_similarity", _track_numbers(rows, "zncc_self_similarity_radius"))

@@ -110,11 +110,16 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           its rows in get_bench_track's shape, its state (current, evaluating, \
                           refused, failed) and reason, the read-only bars Track View's \
                           threshold boxes hold, and each row's verdict_by_bars (in, out, or \
-                          null where unmeasured), reference_observation, the row the \
-                          reference-view rule picked, has_bitmap, whether the point has a \
-                          stored bitmap its rows are scored against, and bitmap_observation, \
-                          the row that bitmap is the tile of (the reference in use, which can \
-                          differ from the rule's pick), or null. While evaluating, the measurements are the \
+                          null where unmeasured, and for the pinned row holding the \
+                          reference where unpinning it would render the bitmap again from \
+                          another row, which the bars cannot judge until then), has_bitmap, \
+                          whether the point has a stored bitmap its rows are scored against, \
+                          bitmap_for_judging, whether that bitmap was rendered only for the \
+                          bars because fewer than two in rows carry a keypoint, \
+                          reference_observation, \
+                          the row that bitmap is rendered from (the reference in use), or null, \
+                          and reference_view_observation, the row the reference-view rule \
+                          picked, which can differ from it, or null. While evaluating, the measurements are the \
                           last ones landed. Any other point has no evaluation block.",
             kind: Read,
             schema: object(&[], &[("point", point_schema())]),
@@ -277,7 +282,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             name: "get_bench_track",
             description: "One track on the bench, as its Track View table: the stage and its \
                           data (at the track stage, the patch placement in get_point's shape, \
-                          whose normal is the one tilt_bench_patch takes), the point \
+                          whose normal is the one tilt_bench_patch takes, and \
+                          stage_data.bitmap_pending, true while the bitmap waits to be \
+                          rendered again after its reference row was unpinned), the point \
                           it came from, the thresholds, the observations selected in Track \
                           View (selected_observations, which select_bench_observations sets; \
                           empty on a track that is not focused), and every observation with what put it \
@@ -299,7 +306,12 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           list. Observations are appended and no bench step renumbers them, so \
                           an index read here still names the same observation after a verdict \
                           or a fit; delete_camera_image is the one call that renumbers them, \
-                          since it renumbers the images they are in. Both the cluster and the track block carry \
+                          since it renumbers the images they are in. A cluster-stage zncc is the \
+                          member's ZNCC with the reference's template. A track-stage zncc is the \
+                          row's windowed ZNCC with the track's stored patch bitmap over the \
+                          samples both have, 1 on the row the bitmap is rendered from, and null \
+                          with a reason where the track has no bitmap yet or the pair could not \
+                          be read; the min_zncc bars judge it. Both the cluster and the track block carry \
                           zncc_middle beside zncc: the same samples correlated over only the \
                           middle square of the patch, half its width (the middle 12 x 12 of a \
                           24 x 24 grid). A high zncc with a low zncc_middle is an agreement \
@@ -379,7 +391,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           observation the last \
                           fit kept at its seed carries walked_px (how far the fit wanted to move \
                           it), walked_to (the pixel it would have reached), walked_zncc (the \
-                          ZNCC scored there, beside the row's own zncc read at the seed) and \
+                          leave-one-out ZNCC scored there, beside the row's own loo_zncc read at \
+                          the seed) and \
                           walked_zncc_middle and walked_zncc_grid (the parts' readings there); \
                           sight_bench_observation with walked_to as the pixel accepts the walk. \
                           A track-stage observation also carries the reference view's readings: \
@@ -409,27 +422,43 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           passed them: without_angle, without_angle_or_cells, without_any; \
                           without_angle drops only the 65 degree limit). \
                           These are null on an out observation, which the rule does not \
-                          consider. stage_data.reference_observation is the index of the row \
-                          the rule picked from the current readings, or null. A render stores \
-                          the tile of the track's reference observation where it has one \
-                          (read from the file, or kept through steps that leave its row in), \
-                          and the picked row's tile only where it has none, so the two can \
-                          differ: stage_data.bitmap_observation is the index of the row the \
-                          stored bitmap is the tile of, the reference in use, null for a \
-                          bitmap that names none (a mean of the rows, one stored before the \
-                          reference was recorded, or the render of an observation since \
-                          removed from the point), and has_bitmap says whether there is one. When there is one, every \
-                          track-stage observation also carries bitmap_zncc, its \
-                          windowed ZNCC with the stored bitmap over the samples both have; \
-                          blur_matched_bitmap_zncc, the same after the bitmap alone is blurred \
+                          consider. stage_data.reference_observation is the index of the \
+                          reference in use, the row the stored bitmap is rendered from, null \
+                          for a track with no bitmap or a bitmap that is the render of no row \
+                          (a mean of the rows, one stored before the reference was recorded, or \
+                          the render of an observation since removed from the point); \
+                          has_bitmap says whether there is a bitmap, and bitmap_for_judging \
+                          whether it was rendered only so the bars can score the rows of a \
+                          track fewer than two in rows of which carry a keypoint: from the \
+                          rule's pick among every row with a keypoint, naming no row, never \
+                          committed, and replaced by the next evaluation once two in rows \
+                          carry one. \
+                          stage_data.reference_view_observation is the index of the row the \
+                          rule picked from the current readings, or null. While the reference's \
+                          row is pinned every render renders from it, whichever row the rule \
+                          picks, so the two can differ; a track put on the bench from a point \
+                          has every row pinned. Unpinning the reference's row hands the \
+                          reference to the rule's pick at the next render, so the two also \
+                          differ between that unpin and the render, while no row is scored \
+                          against the bitmap kept until then (each row's reason says so), and \
+                          where the pick alternated between rows within one evaluation. \
+                          set_bench_track_reference makes a row the reference and pins it. \
+                          Beside zncc, every track-stage observation with a score carries \
+                          blur_matched_zncc, the same after the bitmap alone is blurred \
                           by a round Gaussian until its self-similarity semi-major axis reaches \
                           the row's semi-minor axis (at most 2 grid px), where that semi-minor \
                           axis is at least a quarter longer than the bitmap's semi-major axis, \
-                          and bitmap_zncc where it is not; bitmap_blur_sigma, the width of that \
+                          and zncc where it is not; bitmap_blur_sigma, the width of that \
                           blur in grid px, 0 where the pair was read plain; and \
                           sharper_than_bitmap, true where the row's tile is sharper than the \
                           bitmap along every direction (read plain; a candidate to replace the \
-                          reference). The bitmap's own row reads 1 and is not computed.",
+                          reference). The bitmap's own row reads 1 and is not computed. No bar \
+                          judges blur_matched_zncc. Every track-stage observation the localizer \
+                          could read also carries loo_zncc, its leave-one-out ZNCC against the \
+                          consensus of the other observations at the correlation peak \
+                          seed_shift_px is measured to, and loo_zncc_middle, the same over the \
+                          middle square; no bar judges them, and a commit writes loo_zncc as \
+                          the observation's confidence.",
             kind: Read,
             schema: object(
                 &[("track", bench_track_schema())],

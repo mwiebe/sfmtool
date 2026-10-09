@@ -495,6 +495,13 @@ pub(crate) enum Command {
         /// What the call does to them.
         verdict: VerdictAction,
     },
+    /// Make one observation the track's reference and pin it.
+    SetBenchTrackReference {
+        reconstruction_label: String,
+        track: Option<String>,
+        /// The observation's position in the track's list.
+        observation: usize,
+    },
     /// Set the track's bars and paint the proposed verdicts onto its unpinned
     /// observations, which is the one gesture the panel's button is.
     ApplyBenchTrackThresholds {
@@ -771,6 +778,8 @@ pub(crate) struct IntrinsicsChange {
 pub(crate) struct ThresholdChange {
     pub(crate) min_zncc: Option<f64>,
     pub(crate) min_zncc_middle: Option<f64>,
+    pub(crate) cluster_min_zncc: Option<f64>,
+    pub(crate) cluster_min_zncc_middle: Option<f64>,
     pub(crate) max_shift_px: Option<f64>,
     pub(crate) max_zncc_self_similarity_radius: Option<f64>,
     pub(crate) max_projection_error_px: Option<f64>,
@@ -789,6 +798,12 @@ impl ThresholdChange {
         }
         if let Some(value) = self.min_zncc_middle {
             next.min_zncc_middle = value;
+        }
+        if let Some(value) = self.cluster_min_zncc {
+            next.cluster_min_zncc = value;
+        }
+        if let Some(value) = self.cluster_min_zncc_middle {
+            next.cluster_min_zncc_middle = value;
         }
         if let Some(value) = self.max_shift_px {
             next.max_shift_px = value;
@@ -1694,6 +1709,16 @@ pub(crate) fn apply_with_window(
             track.as_deref(),
             rows,
             verdict,
+        )),
+        Command::SetBenchTrackReference {
+            reconstruction_label,
+            track,
+            observation,
+        } => done(bench::set_bench_track_reference(
+            state,
+            &reconstruction_label,
+            track.as_deref(),
+            observation,
         )),
         Command::ApplyBenchTrackThresholds {
             reconstruction_label,

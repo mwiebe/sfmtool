@@ -99,9 +99,9 @@ def local_prior(ctx, image: int, pixel, opts: dict) -> dict:
 
 def _median_zncc(track) -> float:
     z = [
-        o["track"]["zncc"]
+        o["track"]["loo_zncc"]
         for o in track.observations
-        if o["verdict"] == "in" and o.get("track", {}).get("zncc") is not None
+        if o["verdict"] == "in" and o.get("track", {}).get("loo_zncc") is not None
     ]
     return float(np.median(z)) if z else float("-inf")
 
@@ -237,7 +237,7 @@ def build_track(
 
     # 4. Cluster evaluation and the thresholds' verdicts.
     try:
-        track, _ = B.evaluate(track, ctx.edited, ctx.pyramids)
+        track, _ = B.evaluate(track, ctx.edited, ctx.pyramids, render_bitmap=True)
     except ValueError as e:
         fail("cluster evaluate", str(e))
     track, _ = B.apply_thresholds(track)

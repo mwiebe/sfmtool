@@ -494,11 +494,12 @@ exception in one respect only: its row is of kind `Edit`, because it is one
 | Put a point on the bench | `Put point 1207 on the bench as pt3d_a1b2c3d4_1207`; a put of the viewed point that carries Track View's read-only bars names the bars that differ from the defaults: `Put point 1207 on the bench as pt3d_a1b2c3d4_1207, with min ZNCC 80%` (§ "Live evaluation") |
 | Put a point on the bench again, once it has a patch frame its item lacks (§ "A view-only bench") | `Rebuilt pt3d_a1b2c3d4_1207 from point 1207, which now carries a patch frame` |
 | Start a cluster from a pixel | `Started IMG_0042@142,198 on the bench` |
-| Create a track at a pixel (the put; its commit is the commit's row) | `Created IMG_0042@142,198 at (142.0, 198.0) in IMG_0042.jpg with the clusters member` |
+| Create a track at a pixel (the put; its commit is the commit's row) | `Created IMG_0042@142,198 at (142.0, 198.0) in IMG_0042.jpg with the clusters member: 9 observations in, median leave-one-out ZNCC 91% / 88%` (the version's own label stops before the colon; `, after constellation refused` follows where earlier members were refused) |
 | Add an observation | `Added image_012.jpg to pt3d_a1b2c3d4_1207` |
 | A verdict | `Turned image_012.jpg out of pt3d_a1b2c3d4_1207` |
 | Unpin one verdict | `Handed image_012.jpg back to the thresholds in pt3d_a1b2c3d4_1207: in` |
 | Unpin several, or all | `Handed 4 verdicts back to the thresholds in pt3d_a1b2c3d4_1207: 1 turned in and 2 turned out, leaving 5 in, 3 out` (what moved, then the track's totals; `none moved` when the bars kept every verdict) |
+| Unpin the held reference's row where the rule picks another row, or an unpin whose repaint turns the reference row `out` (`bitmap_pending`) | `Handed image_012.jpg back to the thresholds in pt3d_a1b2c3d4_1207: waiting for the bitmap to be rendered from image_015.jpg`; for several rows, the sentence above followed by `; waiting for the bitmap to be rendered from image_015.jpg`. The bars judge nothing in this step (§ "The reference") |
 | Slide the patch | `Moved pt3d_a1b2c3d4_1207 by 0.123 units to (1.204, -0.318, 4.006)` |
 | Place one sighting | `Moved observation 3 of pt3d_a1b2c3d4_1207 to (1041.6, 1702.9) in IMG_0042.jpg (2.3 px)` |
 | Resize the patch | `Resized pt3d_a1b2c3d4_1207 to 7.4 px in IMG_0042.jpg` |
@@ -818,7 +819,11 @@ evaluation that lands after a step has moved the track on -- cancelled, or
 measured before it saw the flag -- is dropped, and the track reads `Evaluating`
 until the evaluation of its new inputs lands. A result that matches is written
 into the version at the cursor in place (`History::replace_current_bench`):
-**no version is pushed and no Action Log row is written.** An evaluation fills
+**no version is pushed**, and no Action Log row is written unless the
+evaluation's repaint moved a verdict of a bench item: then one `Bench` row
+says what the bars moved (`Evaluated 7f3a: the bars turned 2 in and 1 out`),
+since after an unpin that handed the reference to the rule the bars judge the
+rows here and nowhere else (§ "The reference"). An evaluation fills
 measurement slots and sets each unpinned verdict to what the bars propose from
 them, moving nothing a person put there, so a version per
 evaluation would put a step in the history for every edit that Undo would then
@@ -850,11 +855,13 @@ the reference too, and one that takes that row off the track (a delete of its
 image, a split) or turns it `out` drops both
 ([../core/bench/editable-track.md](../core/bench/editable-track.md) § "The
 stored bitmap's reference"). When the evaluation reads a track-stage
-track that has a placement and no bitmap, it also runs core's
-`render_bitmap_in_place` on the photographs it has already decoded. That renders
+track that has a placement and either no bitmap, or a reference row that is
+not pinned while the rule picks another row ([§ "The reference"](#the-reference)
+below), it also renders the bitmap on the photographs it has already decoded. That renders
 the patch as it now lies at the keypoints. Where the track holds a defined
-reference, an `in` row with a keypoint, it writes that row's tile as the
-bitmap and keeps the reference; otherwise it writes the tile of the `in`
+reference whose row is pinned, `in` and has a keypoint
+(`EditableTrack::held_reference`), it writes that row's tile as the bitmap
+and keeps the reference; otherwise it writes the tile of the `in`
 sighting the reference-view rule picks (or the fused mean of them where it
 picks none or reaches its pick only through its last fallback; [../core/patch/reference-view.md](../core/patch/reference-view.md)
 § "The stored bitmap"), and the
@@ -865,15 +872,96 @@ read before there was one. The three run as one call, core's
 tiles the evaluation already rendered where its reference-view rule ran over
 the same `in` rows on the same grid, so a patch step on a long track costs
 about one evaluation rather than an evaluation plus a render. A render keeps a
-defined reference: a reference the step kept, or the one the track was opened
-with from the file, is rendered from again, and the rule sets the reference
-only where the track has none (the point stored `-1`, or the reference row
-was deleted, split off or turned `out`). The rule's pick the evaluation
-reports per row is information and can differ from it. So a tilted patch shows its texture again
+held reference: a reference the step kept on a pinned row, or the one the track
+was opened with from the file, is rendered from again, and the rule sets the
+reference where the track holds none (the point stored `-1`, the reference row
+was deleted, split off or turned `out`, or it is unpinned; see "The reference"
+below). Where the repaint after the scores moves a verdict and so moves the
+rule's pick to another row on a track whose reference is not held, the same
+evaluation renders the bitmap again from the new pick and scores and judges
+the rows against it, so every verdict on the table was judged against the
+bitmap the track shows. So a tilted patch shows its texture again
 as soon as the evaluation lands, and can be committed into a reconstruction
 that stores a bitmap per point without a fit first. The bitmap is installed with
 the measurements, under the same rule: no version and no Action Log row. A track with fewer than two
-`in` sightings that carry a keypoint has nothing to render, and stays without one.
+`in` sightings that carry a keypoint has no patch to render, and gets a
+**bitmap for judging** instead (core's `TrackPayload::bitmap_for_judging`):
+the tile of the rule's pick among every row that carries a keypoint, `in` or
+`out`, or their fused mean, rendered only so that the bars have scores to
+judge and a loosened bar can turn rows back `in`. It names no reference, a
+commit does not write it, and Track View draws it dimmed with a hover saying
+it is not the track's patch ([track-view.md](track-view.md) § "The header").
+The first evaluation after two `in` rows carry a keypoint renders the patch by
+the usual rule in its place.
+
+### The reference
+
+The track's reference is the row its patch bitmap is rendered from, and only
+the reference-view rule or the person changes it
+([../core/bench/editable-track.md](../core/bench/editable-track.md) § "The
+stored bitmap's reference"). Which of the two decides is the pin of the row
+the reference is on:
+
+- **A pinned reference row keeps the reference.** While it is pinned every
+  render renders from it, whichever row the rule picks. A track put on the
+  bench from a point has every row pinned, so the point's stored reference
+  stays until the person unpins its row. A display-only pick, the one the viewer
+  made to render a file's display bitmaps for a point the file stores no
+  reference for, is held the same way.
+- **An unpinned reference row hands it to the rule.** Unpinning the row
+  (`AppState::unpin_bench_verdicts`, Track View's pin or *Unpin*, the wire's
+  `set_bench_track_verdict` with `unpin`) moves the reference to the rule's
+  pick at the next evaluation. Where the rule picks another row, the unpin
+  clears every row's score against the bitmap and keeps the bitmap until the
+  render replaces it, so the bars judge nothing in that step, and its Action Log row says so: `Handed IMG_0040.jpg
+  back to the thresholds in 7f3a: waiting for the bitmap to be rendered from
+  IMG_0042.jpg` (for several rows, the usual sentence followed by `; waiting
+  for the bitmap to be rendered from IMG_0042.jpg`; the row named is the one
+  the render will take, core's `bitmap_target`, and `the rule's pick at the
+  render, or the mean of the views` stands in its place where that names no
+  row, and `a bitmap for judging to be rendered from the rows with a keypoint,
+  in or out` where fewer than two `in` rows carry one). Until that render, each
+  row's Status says `the bitmap is to be rendered again before the row is
+  scored`, and Track View's patch slot says the patch is kept only until then.
+  The live evaluation then
+  renders the bitmap from the pick, scores every row against it and judges
+  them; where its repaint moves verdicts it logs `Evaluated 7f3a: the bars
+  turned 2 in and 1 out` (`Kind::Bench`, no version). While the row stays
+  unpinned the reference follows the pick at every evaluation, so the two
+  differ on an unpinned track only until that render (which waits as long as
+  the photographs it needs are not decoded), and where the pick alternates
+  between rows within one evaluation and the bitmap stays on the row it was
+  last rendered from
+  ([../core/bench/editable-track.md](../core/bench/editable-track.md) §
+  "The stored bitmap's reference"). In both, the *Reference* hovers say the
+  reference's row is unpinned and the pick becomes the reference at the next
+  evaluation after a step, rather than that a pin holds it.
+- **Tracks built on the bench start with pinned rows.** The seed of a cluster
+  started from a pixel, the sightings Track at Pixel adds (every one `in` and
+  pinned) and a row placed by a sighting step are pinned, so the rule's first
+  pick, where it lands on one of them, is held from then on until the person
+  unpins its row. Whether these builds should set their rows `in` unpinned,
+  or whether only a person's pin should hold the reference, is undecided
+  ([../drafts/sharper-patch-bitmap.md](../drafts/sharper-patch-bitmap.md) §
+  "Part 8: the reference on the bench").
+- **Set as reference** (`AppState::set_bench_reference`, core's
+  `set_reference`, Track View's row entry, the wire's
+  `set_bench_track_reference`) makes a row that is `in` and has a keypoint the
+  reference and pins it, as one version with an Action Log row (`Set
+  IMG_0042.jpg as the reference of 7f3a, in place of IMG_0040.jpg`). The step
+  drops the bitmap unless the row held the reference already, and the live
+  evaluation renders the bitmap from the row and scores every row against it.
+  A call on the reference the track holds on a pinned row is a no-effect row.
+  Pinning a row by itself does not make it the reference.
+- **Rows the reference cannot stay on.** Deleting, splitting off or turning
+  `out` the reference's row leaves the track with none, and the next render
+  takes the rule's pick.
+- **A commit** saves the reference the track holds.
+
+Track View's *Reference* column marks the reference and the rule's pick
+([track-view.md](track-view.md) § "The observation table"), and the wire names
+them `stage_data.reference_observation` and
+`stage_data.reference_view_observation`.
 
 **The node is not locked by it.** Every step stays available while an
 evaluation runs, and taking one is what cancels it. It is not a background task
@@ -913,7 +1001,7 @@ enum Subject {
 **It is built the way a put builds a bench track**: core's `create_track`, from
 the version at the cursor, under the label a put gives it (the point's portable
 ID) and with the same options. Its rows arrive `in` and pinned, the
-leave-one-out ZNCC is read back from the point's stored column, and the bars are
+leave-one-out ZNCC (`loo_zncc`) is read back from the point's stored column, and the bars are
 the defaults. It is held in `AppState::viewed_tracks` as a `ViewedTrack` (node,
 point, document serial, label, track, evaluation state), never in a version: no
 step accepts it, the Scene tree does not list it, and the bench layers do not
@@ -968,7 +1056,7 @@ point before putting it, or the wire's `create_bench_track` naming it) while the
 read-only bars differ from the defaults gives the new track those bars, in the
 same version as the put. The rows arrive pinned `in` as always, so the bars
 change no verdict until rows are unpinned. The version label, and so the wire's
-reply, names the bars that differ, in percent for the three ZNCC bars and in
+reply, names the bars that differ, in percent for the ZNCC bars and in
 patch-grid px for the shift and self-similarity bars (§ "What a step writes").
 A put of any other point, a cluster, and focusing a point's existing item (which
 keeps that item's own bars) carry nothing. The read-only bars keep their values
@@ -1105,7 +1193,7 @@ reconstruction that stores a bitmap per point as on one that does not.
 first is a bench step: the track put on the bench under the label a cluster
 started at that pixel would take (`IMG_0042@142,198`), focused, one `Bench`
 row whose sentence names the pixel, the member that built it, its `in` count and
-median ZNCC with the median middle ZNCC beside it (`median ZNCC 93% / 71%`),
+median leave-one-out ZNCC with the median middle ZNCC beside it (`median leave-one-out ZNCC 93% / 71%`),
 and any members that refused before it. The second is
 `commit_bench_track`, the step Track View's *Commit* takes, so its version, its
 `Edit` row, the selection of the written point and the item left seated on it
@@ -1371,6 +1459,9 @@ when the focused item was already what the call asked for.
 //                              "degrees": 12.3 }
 // shape_bench_observation    { "reconstruction_label": "bull", "observation": 3,
 //                              "shape": [[7.1, -0.4], [0.4, 7.1]] }
+//
+// The track stage's reference: the row the patch bitmap is rendered from.
+// set_bench_track_reference  { "reconstruction_label": "bull", "observation": 3 }
 // apply_bench_track_thresholds { "reconstruction_label": "bull", "min_zncc": 0.8 }
 // fit_bench_track           { "reconstruction_label": "bull" }
 // fit_bench_track_normal    { "reconstruction_label": "bull", "method": "photometric" }
@@ -1423,10 +1514,14 @@ axis is the radius, in grid px, image px and along the patch, and
 `zncc_self_similarity_ellipse_grid`, each ninth's in grid px
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
 ZNCC self-similarity radius"), at the track stage
-the two distances
+`zncc` as the score against the stored bitmap with `blur_matched_zncc`,
+`bitmap_blur_sigma` and `sharper_than_bitmap` beside it, the localizer's
+leave-one-out `loo_zncc` and `loo_zncc_middle`, the two distances
 (`seed_shift_px` and `projection_offset_px`), `walked_px`, `walked_to`, `walked_zncc`, `walked_zncc_middle` and `walked_zncc_grid` for a row the last fit
-refused to move (`sight_bench_observation` at `walked_to` accepts that walk), and, for a row the evaluation could
-not score, the `reason` sentence in place of a ZNCC. Each row also carries
+refused to move (`sight_bench_observation` at `walked_to` accepts that walk), and, for a row the localizer could
+not read or that has no score, the `reason` sentence. The track stage's data names
+the reference in use as `reference_observation` and the reference-view rule's
+pick as `reference_view_observation` (§ "The reference"). Each row also carries
 `patch_zoom`, the zoom Track View's *Zoom* column prints
 ([`track-view.md`](track-view.md) § "The observation table"), as `[least, most]`
 patch-grid px per photograph pixel, and `patch_jacobian`, the Jacobian it is

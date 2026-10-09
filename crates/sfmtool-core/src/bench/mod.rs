@@ -61,8 +61,8 @@ use std::sync::Arc;
 pub use classify::{classify_track_rays, ClassificationReason, TrackClassification, TrackRays};
 pub use commit::{commit, CommitError, CommitReport};
 pub use evaluate::{
-    evaluate, evaluate_preconditions, evaluate_rendering_bitmap, open_localizer, score_bitmap,
-    stored_patch_resolution, EvaluateError, EvaluateOptions, EvaluateReport,
+    bitmap_target, evaluate, evaluate_preconditions, evaluate_rendering_bitmap, open_localizer,
+    score_bitmap, stored_patch_resolution, EvaluateError, EvaluateOptions, EvaluateReport,
     DEFAULT_MAX_CACHE_BYTES, DEFAULT_MAX_SEED_OFFSET_PX,
 };
 pub use fit::{fit, fit_preconditions, render_bitmap_in_place, FitError, FitOptions, FitReport};
@@ -96,19 +96,20 @@ pub use stage::{set_stage, set_stage_preconditions, StageError, StageReport};
 pub use steps::{
     add_observation, apply_thresholds, bar_checks, clamp_to_photograph, create_cluster,
     create_track, duplicate, half_width_px, pin_verdicts, resize_patch, resize_patch_to_pixel,
-    set_verdict, shape_observation, sight_observation, spin_patch, split, tilt_patch,
-    translate_patch, translate_patch_to_pixel, unpin_verdicts, verdicts_if_unpinned,
+    set_reference, set_verdict, shape_observation, sight_observation, spin_patch, split,
+    tilt_patch, translate_patch, translate_patch_to_pixel, unpin_verdicts, verdicts_if_unpinned,
     AddObservationReport, Axis, BarCheck, BarChecks, ClusterSeed, CreateClusterError, CreateReport,
     CreateTrackError, CreateTrackOptions, DuplicateError, DuplicateReport, Edge, ObservationSeed,
-    PinReport, ResizeReport, ShapeReport, SightReport, SpinReport, SplitError, SplitReport,
-    ThresholdReport, TiltReport, TiltStop, TrackEditError, TranslateReport, TranslateToPixelReport,
-    UnpinReport, VerdictReport, Viewpoint, MAX_TILT_DEG,
+    PinReport, ReferenceReport, ResizeReport, ShapeReport, SightReport, SpinReport, SplitError,
+    SplitReport, ThresholdReport, TiltReport, TiltStop, TrackEditError, TranslateReport,
+    TranslateToPixelReport, UnpinReport, VerdictReport, Viewpoint, MAX_TILT_DEG,
 };
 pub use track::{
     ClusterMeasurement, ClusterPayload, ClusterTemplate, EditableTrack, Observation, Origin,
     Provenance, RepaintMark, Stage, StageKind, Thresholds, TrackMeasurement, TrackPayload,
-    Unmeasured, Verdict, BENCH_MAX_PROJECTION_ERROR_PX, BENCH_MAX_SHIFT_PX,
-    BENCH_MAX_ZNCC_SELF_SIMILARITY_RADIUS, BENCH_MIN_ZNCC, BENCH_MIN_ZNCC_MIDDLE,
+    Unmeasured, Verdict, BENCH_CLUSTER_MIN_ZNCC, BENCH_CLUSTER_MIN_ZNCC_MIDDLE,
+    BENCH_MAX_PROJECTION_ERROR_PX, BENCH_MAX_SHIFT_PX, BENCH_MAX_ZNCC_SELF_SIMILARITY_RADIUS,
+    BENCH_MIN_ZNCC, BENCH_MIN_ZNCC_MIDDLE,
 };
 pub use track_at_pixel::{
     build_track_at_pixel, CandidateKind, CandidateRecord, CascadeMember, ClusterMember,

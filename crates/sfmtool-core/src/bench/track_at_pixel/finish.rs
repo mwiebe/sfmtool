@@ -15,7 +15,7 @@
 
 use nalgebra::Vector3;
 
-use crate::bench::evaluate::{evaluate, EvaluateOptions};
+use crate::bench::evaluate::{evaluate_rendering_bitmap, EvaluateOptions};
 use crate::bench::fit::{fit, FitOptions};
 use crate::bench::geometry_search::{search_geometry, GeometrySearchOptions};
 use crate::bench::stage::set_stage;
@@ -41,7 +41,7 @@ pub(super) fn median_zncc(track: &EditableTrack) -> f64 {
         .observations
         .iter()
         .filter(|o| o.verdict == Verdict::In)
-        .filter_map(|o| o.track.as_ref()?.zncc)
+        .filter_map(|o| o.track.as_ref()?.loo_zncc)
         .collect();
     if z.is_empty() {
         f64::NEG_INFINITY
@@ -58,7 +58,7 @@ pub(super) fn median_zncc_middle(track: &EditableTrack) -> f64 {
         .observations
         .iter()
         .filter(|o| o.verdict == Verdict::In)
-        .filter_map(|o| o.track.as_ref()?.zncc_middle)
+        .filter_map(|o| o.track.as_ref()?.loo_zncc_middle)
         .collect();
     if z.is_empty() {
         f64::NAN
@@ -135,13 +135,18 @@ fn unplaced(track: &EditableTrack) -> bool {
         .any(|o| o.verdict == Verdict::In && o.track.as_ref().and_then(|m| m.keypoint).is_none())
 }
 
-/// Read `track` as it stands, with the default reading.
+/// Read `track` as it stands, with the default reading, rendering its bitmap
+/// where the patch stands when it has none
+/// ([`evaluate_rendering_bitmap`]): a move of the patch drops the bitmap, and
+/// without one no row is scored against it, so the bars, which judge that
+/// score, would judge nothing.
 pub(super) fn read(ctx: &Ctx<'_>, track: &EditableTrack) -> Result<EditableTrack, String> {
-    evaluate(
+    evaluate_rendering_bitmap(
         track,
         ctx.edited,
         ctx.views,
         &EvaluateOptions::default(),
+        &FitOptions::default(),
         &Progress::none(),
     )
     .map(|(t, _)| t)

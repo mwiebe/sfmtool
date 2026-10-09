@@ -56,7 +56,7 @@ use sfmtool_core::SfmrReconstruction;
 
 use super::patch::PatchJacobian;
 use super::reference::{
-    bitmap_cell, reference_cell, reference_rank, BitmapCell, ReferenceCell, BITMAP_TIP,
+    reference_cell, reference_rank, zncc_hover, ReferenceCell, ReferenceMark, ReferenceRows,
     REFERENCE_TIP,
 };
 use super::{
@@ -83,8 +83,6 @@ const KEEP_WIDTH: f32 = 64.0;
 const ZOOM_WIDTH: f32 = 76.0;
 /// The *Reference* column's width: room for `ninth differs` over `65°, 83%`.
 const REFERENCE_WIDTH: f32 = 112.0;
-/// The *Bitmap* column's width: room for `sharper` and `→ 100%`.
-const BITMAP_WIDTH: f32 = 66.0;
 /// Width of the *From* column: room for its longest cell, `feature 123456`.
 const FROM_WIDTH: f32 = 110.0;
 /// Width of the *Name* column, the last one. A name longer than this is
@@ -98,6 +96,12 @@ const SWITCH_SIZE: egui::Vec2 = egui::vec2(34.0, 18.0);
 /// The fill of an enabled *Keep* switch that is on. A greyed switch that is
 /// on is filled grey instead.
 pub(super) const KEEP_ON_FILL: egui::Color32 = egui::Color32::from_rgb(56, 150, 76);
+/// The fill of the *Reference* cell of a reference the reference-view rule
+/// does not pick.
+const REFERENCE_NOT_PICK_FILL: egui::Color32 = egui::Color32::from_rgb(195, 40, 35);
+/// The fill of the *Reference* cell of the rule's pick where it is not the
+/// reference: a neutral grey, since the pick is a proposal and not a fault.
+const PICK_FILL: egui::Color32 = egui::Color32::from_rgb(128, 128, 128);
 /// Side of one cell of a three-by-three grid a row draws: room for the line
 /// along its ellipse's major axis the self-similarity grid draws in a cell.
 const GRID_CELL: f32 = 10.0;
@@ -116,67 +120,68 @@ const SORT_TRIANGLE_HALF_WIDTH: f32 = 4.0;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RowSummary {
     /// The observation's index in the track, which is stable for its life.
-    pub observation: usize,
+    pub(crate) observation: usize,
     /// The image it names.
-    pub image: u32,
+    pub(crate) image: u32,
     /// The verdict it carries.
-    pub verdict: Verdict,
+    pub(crate) verdict: Verdict,
     /// Whether that verdict was set by hand.
-    pub pinned: bool,
+    pub(crate) pinned: bool,
     /// What the thresholds propose for it were its verdict unpinned, which is
     /// what its verdict cell is tinted by, or `None` for a row nothing at this
     /// stage has measured, whose cell is not tinted. In Viewed mode this is
     /// the row's *Verdict*.
-    pub proposal: Option<Verdict>,
+    pub(crate) proposal: Option<Verdict>,
     /// The verdict cell's hover text: in Edited mode what the switch and the
     /// pin say and why the bars propose what they do, in Viewed mode why the
     /// bars give the row the verdict they do.
-    pub keep_hover: String,
+    pub(crate) keep_hover: String,
     /// The *Verdict* cell as printed, `in`, `out`, `out (2)` or `-`, in Viewed mode;
     /// `None` in Edited mode, which draws a switch there.
-    pub verdict_text: Option<String>,
+    pub(crate) verdict_text: Option<String>,
     /// The colour the verdict cell was tinted, or `None` for an untinted one.
-    pub tint: Option<egui::Color32>,
+    pub(crate) tint: Option<egui::Color32>,
     /// The line the crop's hover view adds under the picture: the pixel and
     /// the feature index. `None` where no crop was drawn.
-    pub crop_caption: Option<String>,
+    pub(crate) crop_caption: Option<String>,
     /// The five measurement cells, as printed, a cell with two readings
     /// holding them on two lines.
-    pub cells: [String; 5],
+    pub(crate) cells: [String; 5],
     /// The whole and middle readings' ellipses, which the *Self-similarity*
     /// cell's hover lays out under [`SELF_SIMILARITY_ELLIPSE_CAPTION`] in grid
     /// px, image px and along the patch's axes
     /// ([`super::self_similarity_ellipse_text`], built only while the cell is
     /// hovered). Both `None` where the cell has no hover.
-    pub self_similarity_ellipse: [Option<SelfSimilarityEllipseUnits>; 2],
+    pub(crate) self_similarity_ellipse: [Option<SelfSimilarityEllipseUnits>; 2],
     /// The Jacobian at the centre of the row's tile, in photograph pixels per
     /// patch-grid px at the reconstruction's patch resolution, computed
     /// without the photograph ([`super::tile::patch_jacobian`], which lists
     /// where there is none).
-    pub jacobian: Option<PatchJacobian>,
+    pub(crate) jacobian: Option<PatchJacobian>,
     /// The *Zoom* cell as printed, `3.1/4.8×`, or `-`.
-    pub zoom_text: String,
+    pub(crate) zoom_text: String,
     /// What each line of each cell was coloured by, indexed as
     /// [`RowSummary::cells`] and then by line: a pass is drawn green, a fail
     /// red, and a reading no bar judged in the plain text colour. A cell's
     /// second entry is [`BarCheck::NotJudged`] where it has one line.
-    pub checks: [[BarCheck; 2]; 5],
+    pub(crate) checks: [[BarCheck; 2]; 5],
     /// The two grids drawn beside the ZNCC and the self-similarity cells.
-    pub grids: RowGrids,
+    pub(crate) grids: RowGrids,
     /// Whether the row drew a rendered tile, rather than the empty frame that
     /// stands in when there is nothing to render.
-    pub tile: bool,
+    pub(crate) tile: bool,
     /// Whether the row drew the crop of its photograph around the patch's
     /// outline, rather than the empty frame that stands in for it.
-    pub crop: bool,
+    pub(crate) crop: bool,
     /// Whether the row drew the self-similarity surface plot.
-    pub self_similarity_plot: bool,
+    pub(crate) self_similarity_plot: bool,
     /// The *Reference* cell as drawn, with its hover text and whether the
     /// rule picks the row.
-    pub reference: ReferenceCell,
-    /// The *Bitmap* cell as drawn, with its hover text and whether the
-    /// stored bitmap is the row's tile.
-    pub bitmap: BitmapCell,
+    pub(crate) reference: ReferenceCell,
+    /// The *ZNCC* cell's hover text at the track stage: the score against
+    /// the stored bitmap, the blur-matched score and the leave-one-out
+    /// reading ([`zncc_hover`]). `None` where the cell has no hover.
+    pub(crate) zncc_hover: Option<String>,
 }
 
 /// Fixed column x-offsets, relative to the left edge of the table.
@@ -194,7 +199,6 @@ pub(super) struct ColumnLayout {
     shift: f32,
     zoom: f32,
     reference: f32,
-    bitmap: f32,
     status: f32,
     from: f32,
 }
@@ -207,8 +211,9 @@ impl ColumnLayout {
         let tile = crop + TILE_SIZE + 4.0;
         let keep = tile + TILE_SIZE + 8.0;
         let zncc = keep + KEEP_WIDTH + 6.0;
-        // Room for `100% whole`, then the ZNCC grid.
-        let zncc_grid = zncc + 80.0;
+        // Room for `50% ⏵ 53% whole`, the plain score against the bitmap
+        // and the blur-matched one, then the ZNCC grid.
+        let zncc_grid = zncc + 112.0;
         // The self-similarity column opens with the whole tile's surface plot.
         let self_similarity_plot = zncc_grid + GRID_SIDE + 10.0;
         // Room for `2.3 px whole`, then the self-similarity grid.
@@ -222,8 +227,7 @@ impl ColumnLayout {
         // Room for `12.25 px`. The tile's zoom follows it.
         let zoom = shift + 62.0;
         let reference = zoom + ZOOM_WIDTH;
-        let bitmap = reference + REFERENCE_WIDTH;
-        let status = bitmap + BITMAP_WIDTH;
+        let status = reference + REFERENCE_WIDTH;
         // The status cell holds a sentence at the track stage -- the reason a
         // row was not read, or the walk a fit refused and what it scored -- so
         // it is given room for one and elided to it.
@@ -242,7 +246,6 @@ impl ColumnLayout {
             shift,
             zoom,
             reference,
-            bitmap,
             status,
             from,
         }
@@ -316,7 +319,6 @@ impl ColumnLayout {
             (self.shift, "Shift", SHIFT_TIP),
             (self.zoom, "Zoom", ZOOM_TIP.as_str()),
             (self.reference, "Reference", REFERENCE_TIP),
-            (self.bitmap, "Bitmap", BITMAP_TIP),
             (self.status, "Status", STATUS_TIP),
         ];
         if mode == BodyMode::Edited {
@@ -348,12 +350,10 @@ pub(crate) enum SortColumn {
     /// The zoom the tile applies to the photograph, as the geometric mean
     /// over its two singular directions.
     Zoom,
-    /// What the reference-view rule decided: the reference first, then the
-    /// rows nearest to being picked.
+    /// The reference and the reference-view rule's view of it: the reference
+    /// in use first, then the rule's pick, then the rows nearest to being
+    /// picked.
     Reference,
-    /// The blur-matched score against the stored bitmap, the row the bitmap
-    /// is the tile of counting as 1.
-    Bitmap,
     /// The status cell's text.
     Status,
     /// The image's name.
@@ -374,7 +374,6 @@ impl SortColumn {
             "Shift" => SortColumn::Shift,
             "Zoom" => SortColumn::Zoom,
             "Reference" => SortColumn::Reference,
-            "Bitmap" => SortColumn::Bitmap,
             "Status" => SortColumn::Status,
             "Name" => SortColumn::Name,
             _ => return None,
@@ -397,7 +396,6 @@ impl SortColumn {
             | SortColumn::Zncc
             | SortColumn::Zoom
             | SortColumn::Reference
-            | SortColumn::Bitmap
             | SortColumn::Status
             | SortColumn::Name => false,
         }
@@ -413,8 +411,7 @@ impl SortColumn {
             SortColumn::ProjectionError => "projection error",
             SortColumn::Shift => "shift",
             SortColumn::Zoom => "zoom",
-            SortColumn::Reference => "reference view",
-            SortColumn::Bitmap => "bitmap score",
+            SortColumn::Reference => "reference",
             SortColumn::Status => "status",
             SortColumn::Name => "name",
         }
@@ -646,7 +643,11 @@ pub(super) const ZNCC_TIP: &str = "Zero-mean normalized cross-correlation, in pe
     tile is, with every pixel weighted equally: green at 100, yellow at 75, red at 50 and \
     below, grey where the patch is flat. Hover it for the numbers.\n\n\
     At the cluster stage the match is against the reference's template. At the track stage it \
-    is against the consensus of the other observations, with this one left out.";
+    is against the stored patch bitmap, the render of the reference row (or the mean of the \
+    views where there is no reference), so the reference row reads 100%. A track stage with no \
+    bitmap yet has no score until the first render. Where the cell reads 50% ⏵ 53% whole, the \
+    first number is the plain score, which the bars judge, and the one after ⏵ is the \
+    blur-matched score: the bitmap blurred to this view's sharpness before the match.";
 
 /// The shift heading's hover text.
 pub(super) const SHIFT_TIP: &str = "How far the correlation peak sits from where the \
@@ -842,8 +843,9 @@ fn keep_switch(
 
 /// A row's *Verdict* cell, in Viewed mode: the word `in` or `out` for the
 /// verdict the read-only bars give the row, with how many bars an `out` row
-/// fails, or `-` where nothing has measured it, in the cell the caller has
-/// tinted. The cell takes the pointer for its
+/// fails, or `-` where nothing has measured it or where the row holds a
+/// reference the bars cannot judge until the bitmap is rendered again
+/// (`waits`), in the cell the caller has tinted. The cell takes the pointer for its
 /// hover text and no click, so a click on it is still the row's. Returns the
 /// hover text and the word.
 fn draw_verdict(
@@ -853,6 +855,7 @@ fn draw_verdict(
     observation: usize,
     judged: Option<&Judgement>,
     image: u32,
+    waits: bool,
 ) -> (String, String) {
     let cell = egui::Rect::from_min_max(
         egui::pos2(rect.min.x + cols.keep, rect.min.y),
@@ -866,7 +869,7 @@ fn draw_verdict(
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().text_color(),
     );
-    let hover = proposal_reason(judged, image);
+    let hover = proposal_reason(judged, image, waits);
     ui.interact(
         cell,
         ui.id().with(("track_view_verdict", observation)),
@@ -953,7 +956,13 @@ fn paint_pushpin(painter: &egui::Painter, c: egui::Pos2, color: egui::Color32, s
 
 /// The switch's hover text: what the switch says now, how to change it, and
 /// why the bars propose what they do for the row.
-fn keep_hover(kept: bool, pinned: bool, judged: Option<&Judgement>, image: u32) -> String {
+fn keep_hover(
+    kept: bool,
+    pinned: bool,
+    judged: Option<&Judgement>,
+    image: u32,
+    waits: bool,
+) -> String {
     let state = match (kept, pinned) {
         (true, true) => "Kept, set by hand.",
         (true, false) => "Kept, as the thresholds propose.",
@@ -964,7 +973,7 @@ fn keep_hover(kept: bool, pinned: bool, judged: Option<&Judgement>, image: u32) 
     };
     format!(
         "{state} Click to switch it, which pins it.\n\n{}",
-        proposal_reason(judged, image)
+        proposal_reason(judged, image, waits)
     )
 }
 
@@ -972,8 +981,12 @@ fn keep_hover(kept: bool, pinned: bool, judged: Option<&Judgement>, image: u32) 
 /// fails, named as the column headings name the readings, or, for a row that
 /// clears every bar and is still proposed `out`, that another sighting of its
 /// image keeps the image's one `in`.
-fn proposal_reason(judged: Option<&Judgement>, image: u32) -> String {
+pub(super) fn proposal_reason(judged: Option<&Judgement>, image: u32, waits: bool) -> String {
     let Some(judged) = judged else {
+        if waits {
+            return "The reference: the patch bitmap is this row's render, so it scores 1 \n                    against it, which says nothing. Unpinning it would render the bitmap \n                    again from the reference-view rule's pick first, so the bars cannot say \n                    yet what they would propose."
+                .to_string();
+        }
         return "Nothing at this stage has measured it, so the bars propose nothing.".to_string();
     };
     if judged.proposal == Verdict::In {
@@ -1014,6 +1027,20 @@ fn check_color(visuals: &egui::Visuals, check: BarCheck, plain: egui::Color32) -
         (BarCheck::Fail, true) => egui::Color32::from_rgb(240, 115, 105),
         (BarCheck::Pass, false) => egui::Color32::from_rgb(25, 125, 50),
         (BarCheck::Fail, false) => egui::Color32::from_rgb(195, 40, 35),
+    }
+}
+
+/// The fill of a row's *Reference* cell by its mark: green for the reference
+/// the rule also picks, red for a reference it does not pick when it picks
+/// another row, grey for the rule's pick where it is not the reference, and
+/// none for any other row, a reference among them where the rule picks none.
+pub(super) fn reference_fill(mark: ReferenceMark) -> Option<egui::Color32> {
+    match mark {
+        ReferenceMark::None => None,
+        ReferenceMark::Reference => Some(KEEP_ON_FILL),
+        ReferenceMark::ReferenceNotPick => Some(REFERENCE_NOT_PICK_FILL),
+        ReferenceMark::ReferenceWithoutPick => None,
+        ReferenceMark::Pick => Some(PICK_FILL),
     }
 }
 
@@ -1260,6 +1287,7 @@ impl TrackBody {
             bars_rect,
             &cols,
             &mut self.thresholds,
+            stage,
             bars_hover,
         )
     }
@@ -1283,6 +1311,7 @@ impl TrackBody {
             Evaluation::Refused(_) | Evaluation::Failed(_)
         );
         let judged_shown = mode == BodyMode::Edited || printed;
+        let reference_rows = ReferenceRows::of(track);
         let keys: Vec<Option<SortKey>> = track
             .observations
             .iter()
@@ -1330,32 +1359,11 @@ impl TrackBody {
                             .flatten()
                             .and_then(|jacobian| jacobian.mean_zoom()),
                     ),
-                    SortColumn::Reference => {
-                        let standing = row
-                            .track
-                            .as_ref()
-                            .and_then(|m| m.reference_view)
-                            .filter(|_| printed && stage == StageKind::Track);
-                        number_key(standing.map(reference_rank))
-                    }
-                    SortColumn::Bitmap => {
-                        let bitmap_row = track
-                            .track()
-                            .and_then(|p| p.bitmap.as_ref().and(p.reference));
-                        number_key(
-                            (printed && stage == StageKind::Track)
-                                .then(|| {
-                                    // The cell prints the bitmap's row as
-                                    // 100% only where the row was measured.
-                                    if bitmap_row == Some(i) && row.track.is_some() {
-                                        Some(1.0)
-                                    } else {
-                                        row.track.as_ref().and_then(|m| m.blur_matched_bitmap_zncc)
-                                    }
-                                })
-                                .flatten(),
-                        )
-                    }
+                    SortColumn::Reference => number_key(
+                        (printed && stage == StageKind::Track)
+                            .then(|| reference_rank(i, row, &reference_rows))
+                            .flatten(),
+                    ),
                     SortColumn::Status => Some(SortKey::Text(
                         measurements(row, stage, &self.evaluation)[4].clone(),
                     )),
@@ -1533,6 +1541,32 @@ impl TrackBody {
                     ui.close();
                 }
             }
+            // Offered on a track-stage row that is `in` and has a keypoint,
+            // the rows core's `set_reference` accepts.
+            if let Some(offer) = set_reference_offer(track, observation) {
+                let button = egui::Button::new(super::SET_REFERENCE_LABEL);
+                let refusal = state
+                    .bench_edit_refusal(id)
+                    .or_else(|| offer.err().map(str::to_string));
+                let clicked = match refusal {
+                    None => ui
+                        .add(button)
+                        .on_hover_text(
+                            "Render the patch bitmap from this row and pin it, so it stays the \
+                             track's reference whichever row the reference-view rule picks; \
+                             every row is then scored against the new bitmap",
+                        )
+                        .clicked(),
+                    Some(why) => {
+                        ui.add_enabled(false, button).on_disabled_hover_text(why);
+                        false
+                    }
+                };
+                if clicked {
+                    response.set_reference = Some(observation);
+                    ui.close();
+                }
+            }
         });
     }
 
@@ -1581,7 +1615,13 @@ impl TrackBody {
             row.pinned,
             enabled,
         );
-        let hover = keep_hover(kept, row.pinned, judged, row.image);
+        let hover = keep_hover(
+            kept,
+            row.pinned,
+            judged,
+            row.image,
+            self.reference_waits == Some(observation),
+        );
         if let Some(why) = refusal {
             pin.on_hover_text(why);
             keep.on_hover_text(why);
@@ -1739,8 +1779,15 @@ impl TrackBody {
                 None,
             )
         } else {
-            let (hover, text) =
-                draw_verdict(ui, rect, cols, observation, judged.as_ref(), row.image);
+            let (hover, text) = draw_verdict(
+                ui,
+                rect,
+                cols,
+                observation,
+                judged.as_ref(),
+                row.image,
+                self.reference_waits == Some(observation),
+            );
             (hover, Some(text))
         };
 
@@ -1980,19 +2027,19 @@ impl TrackBody {
             text(cols.from, &provenance_text(row.provenance), weak);
         }
 
-        // What the reference-view rule decided about the row, on a green cell
-        // for the row it picks, with every reading and the reason on hover.
-        let reference = reference_cell(row, stage, &self.evaluation);
+        // The reference and the reference-view rule's view of it: a green
+        // cell for the reference where the rule picks it too, a red one where
+        // it does not, and a grey one for the rule's pick where it is not the
+        // reference; every reading and the reason on hover.
+        let reference_rows = ReferenceRows::of(track);
+        let reference = reference_cell(observation, row, stage, &self.evaluation, &reference_rows);
         let reference_rect = egui::Rect::from_min_max(
             egui::pos2(x0 + cols.reference - 3.0, rect.min.y + 2.0),
             egui::pos2(x0 + cols.status - 6.0, rect.max.y - 2.0),
         );
-        if reference.is_reference {
-            ui.painter().rect_filled(
-                reference_rect,
-                2.0,
-                KEEP_ON_FILL.gamma_multiply(0.35 * fade),
-            );
+        if let Some(fill) = reference_fill(reference.mark) {
+            ui.painter()
+                .rect_filled(reference_rect, 2.0, fill.gamma_multiply(0.35 * fade));
         }
         lines(cols.reference, &reference.text, [number_color; 2]);
         if let Some(hover) = &reference.hover {
@@ -2004,25 +2051,24 @@ impl TrackBody {
             .on_hover_text(egui::RichText::new(hover).monospace());
         }
 
-        // How the row scores against the stored bitmap, on a green cell for
-        // the row the bitmap is the tile of.
-        let bitmap_row = track
-            .track()
-            .and_then(|p| p.bitmap.as_ref().and(p.reference));
-        let bitmap = bitmap_cell(observation, row, bitmap_row, stage, &self.evaluation);
-        let bitmap_rect = egui::Rect::from_min_max(
-            egui::pos2(x0 + cols.bitmap - 3.0, rect.min.y + 2.0),
-            egui::pos2(x0 + cols.status - 6.0, rect.max.y - 2.0),
-        );
-        if bitmap.is_bitmap {
-            ui.painter()
-                .rect_filled(bitmap_rect, 2.0, KEEP_ON_FILL.gamma_multiply(0.35 * fade));
-        }
-        lines(cols.bitmap, &bitmap.text, [number_color; 2]);
-        if let Some(hover) = &bitmap.hover {
+        // The ZNCC cell's hover, at the track stage: the row's score against
+        // the stored bitmap, plain and blur-matched, and the localizer's
+        // leave-one-out reading beside it.
+        let zncc_hover = (stage == StageKind::Track && !refused)
+            .then(|| {
+                row.track
+                    .as_ref()
+                    .map(|m| zncc_hover(m, reference_rows.reference == Some(observation)))
+            })
+            .flatten();
+        if let Some(hover) = &zncc_hover {
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(x0 + cols.zncc, rect.min.y),
+                egui::pos2(x0 + cols.zncc_grid - 4.0, rect.max.y),
+            );
             ui.interact(
-                bitmap_rect,
-                ui.id().with(("track_view_bitmap", observation)),
+                cell,
+                ui.id().with(("track_view_zncc", observation)),
                 egui::Sense::hover(),
             )
             .on_hover_text(hover);
@@ -2116,7 +2162,7 @@ impl TrackBody {
             crop: cropped,
             self_similarity_plot: plotted,
             reference,
-            bitmap,
+            zncc_hover,
         });
     }
 }
@@ -2246,12 +2292,35 @@ pub(super) fn grid_numbers(grid: &[[f64; 3]; 3], kind: GridKind) -> String {
         .join("\n")
 }
 
+/// Whether row `observation` of `track` offers *Set as reference*: `None` where
+/// the menu does not show it, which is at the cluster stage and on a row that
+/// is `out` or has no keypoint; `Some(Err(why))` where it is shown greyed,
+/// on the row that is the reference already and is pinned; `Some(Ok(()))`
+/// where it is enabled.
+pub(super) fn set_reference_offer(
+    track: &EditableTrack,
+    observation: usize,
+) -> Option<Result<(), &'static str>> {
+    let payload = track.track()?;
+    let row = track.observations.get(observation)?;
+    if row.verdict != Verdict::In || row.track.as_ref().and_then(|m| m.keypoint).is_none() {
+        return None;
+    }
+    Some(if payload.reference == Some(observation) && row.pinned {
+        Err("This row is the track's reference already, and its pin holds it.")
+    } else {
+        Ok(())
+    })
+}
+
 /// What *Accept walk* would do to `row`, as its hover text, or `None` for a row
 /// the last fit did not keep at its seed.
 ///
-/// The numbers a person decides by: how far, to where, and the ZNCC at each
-/// end -- the row's own, which the reading after the fit took at the seed, and
-/// the one the fit's localizer scored at the walked peak.
+/// The numbers a person decides by: how far, to where, and the leave-one-out
+/// ZNCC at each end -- the row's own `loo_zncc`, which the reading after the
+/// fit took at the seed, and the one the fit's localizer scored at the walked
+/// peak. Both are read against the consensus of the other rows, so they
+/// compare; the row's score against the bitmap is not read at the walked peak.
 pub(super) fn accepted_walk(row: &sfmtool_core::bench::Observation) -> Option<String> {
     let m = row.track.as_ref()?;
     let to = m.walked_to?;
@@ -2261,12 +2330,12 @@ pub(super) fn accepted_walk(row: &sfmtool_core::bench::Observation) -> Option<St
     };
     Some(format!(
         "Move this sighting {:.1} grid px, to ({:.1}, {:.1}), where the last fit's walk \
-         would have put it. ZNCC {} at the seed, {} at the walked peak. Pins it, \
-         as a hand placement does.",
+         would have put it. Leave-one-out ZNCC {} at the seed, {} at the walked peak. \
+         Pins it, as a hand placement does.",
         m.walked_px.unwrap_or(f64::NAN),
         to[0],
         to[1],
-        zncc(m.zncc, m.zncc_middle),
+        zncc(m.loo_zncc, m.loo_zncc_middle),
         zncc(m.walked_zncc, m.walked_zncc_middle),
     ))
 }
@@ -2453,16 +2522,18 @@ fn paint_sort_triangle(
 
 /// The threshold row under the headings: each bar's box in the column whose
 /// readings it judges, followed by the unit and the name those readings print
-/// with, so `[70]% whole` stands over `93% whole`. The two ZNCC bars stack as
+/// with, so `[65]% whole` stands over `93% whole`. The two ZNCC bars stack as
 /// the ZNCC cell stacks its two readings. The columns no bar judges are empty,
 /// so the word *Thresholds* takes the left of the row. Drawn the same in both
-/// modes, and greyed when `hover` is a refusal.
+/// modes, and greyed when `hover` is a refusal. The ZNCC boxes edit the bars of
+/// `stage`, the stage the track is in.
 fn draw_threshold_row(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     band: egui::Rect,
     cols: &ColumnLayout,
     bars: &mut Thresholds,
+    stage: StageKind,
     hover: BoxHover<'_>,
 ) -> BoxesMoved {
     let line = ui.spacing().interact_size.y;
@@ -2482,11 +2553,20 @@ fn draw_threshold_row(
     // read in percent, as the ZNCC cell does; the track stores them on the 0
     // to 1 scale. Listed left to right and top to bottom, which is the order
     // Tab moves through them.
+    // The two ZNCC boxes are the bars of the stage the track is in: the
+    // cluster stage judges another score, and has its own pair.
+    let (zncc_bar, middle_bar) = match stage {
+        StageKind::Track => (&mut bars.min_zncc, &mut bars.min_zncc_middle),
+        StageKind::Cluster => (
+            &mut bars.cluster_min_zncc,
+            &mut bars.cluster_min_zncc_middle,
+        ),
+    };
     let boxes = [
         (
             cols.zncc,
             0,
-            percent(egui::DragValue::new(&mut bars.min_zncc)),
+            percent(egui::DragValue::new(zncc_bar)),
             MIN_ZNCC_LABEL,
             MIN_ZNCC_TIP,
         ),
@@ -2494,7 +2574,7 @@ fn draw_threshold_row(
         (
             cols.zncc,
             1,
-            percent(egui::DragValue::new(&mut bars.min_zncc_middle)),
+            percent(egui::DragValue::new(middle_bar)),
             MIN_ZNCC_MIDDLE_LABEL,
             MIN_ZNCC_MIDDLE_TIP,
         ),

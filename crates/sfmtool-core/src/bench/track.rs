@@ -258,6 +258,13 @@ pub enum Unmeasured {
     /// The correlation could not be scored: the tile around the observation
     /// runs off the photograph, or no channel of it carries texture.
     Unscorable,
+    /// The track has no patch bitmap to score the observation against, as
+    /// before its first render, or one on another grid than the tile's.
+    NoBitmap,
+    /// The track holds a bitmap that the next render replaces
+    /// ([`TrackPayload::bitmap_pending`]), so no row is scored against it
+    /// until that render has run.
+    BitmapPending,
 }
 
 impl std::fmt::Display for Unmeasured {
@@ -277,6 +284,11 @@ impl std::fmt::Display for Unmeasured {
             ),
             Unmeasured::NoConsensus => write!(f, "nothing to correlate against"),
             Unmeasured::Unscorable => write!(f, "its tile could not be scored"),
+            Unmeasured::NoBitmap => write!(f, "there is no bitmap to score it against"),
+            Unmeasured::BitmapPending => write!(
+                f,
+                "the bitmap is to be rendered again before the row is scored"
+            ),
         }
     }
 }
@@ -284,8 +296,14 @@ impl std::fmt::Display for Unmeasured {
 /// What the track stage has measured about one observation.
 ///
 /// A track put on the bench from a committed point arrives with
-/// [`Self::keypoint`] and [`Self::zncc`] read off the stored columns; the rest
-/// is what an evaluation computes.
+/// [`Self::keypoint`] and [`Self::loo_zncc`] read off the stored columns; the
+/// rest is what an evaluation computes.
+///
+/// The row's **score** is its tile's ZNCC with the track's stored patch
+/// bitmap ([`Self::zncc`], with [`Self::zncc_middle`] and [`Self::zncc_grid`]
+/// beside it), which the bars judge. The localizer's leave-one-out reading
+/// against the consensus of the other rows, which places the row, is kept
+/// beside it as [`Self::loo_zncc`].
 ///
 /// The two distances are different questions, and both are here because a
 /// person reading a row has to tell them apart: [`Self::seed_shift_px`] is
@@ -303,29 +321,48 @@ pub struct TrackMeasurement {
     /// An evaluation never writes it: it reads the track as it stands, and this
     /// pixel is the thing it reads.
     pub keypoint: Option<[f32; 2]>,
-    /// The leave-one-out ZNCC against the consensus of the round's other
-    /// observations, at the correlation peak within the search radius of this
-    /// observation's own keypoint. With [`Self::seed_shift_px`] near zero it is
-    /// the agreement at the keypoint itself.
+    /// The **score**: the observation's tile, rendered at its keypoint, read
+    /// against the track's patch bitmap as stored ([`TrackPayload::bitmap`]),
+    /// plain, windowed, over the samples with data in both
+    /// ([`BitmapScorer`](crate::patch::stored_bitmap::BitmapScorer)). `1` for
+    /// the observation the bitmap is the render of
+    /// ([`TrackPayload::reference`]), which is not computed. This is the
+    /// reading [`Thresholds::min_zncc`] judges and the painting ranks rows by.
+    /// `None` where the track has no bitmap, the tile could not be rendered,
+    /// or the pair could not be read, and then [`Self::reason`] says which.
     pub zncc: Option<f64>,
-    /// The **middle ZNCC** beside [`Self::zncc`]: the same samples at the same
-    /// correlation peak against the same consensus, read over only the middle
-    /// square of the tile (the rows and columns `R/4 .. R - R/4`, the middle
-    /// `12 × 12` of a `24 × 24` tile). A high `zncc` that the middle does not
-    /// share is carried by the parts of the tile away from the keypoint: a
-    /// small near object in front of a textured background, a pixel at a depth
-    /// edge, a texture that repeats along the epipolar line. `None` wherever
-    /// `zncc` is, where the consensus's middle is flat, and on a track read
-    /// back from a committed point, which stores the whole-tile score alone.
+    /// The **middle ZNCC** beside [`Self::zncc`]: the same tile against the
+    /// same bitmap, read over only the middle square of the tile (the rows and
+    /// columns `R/4 .. R - R/4`, the middle `12 × 12` of a `24 × 24` tile). A
+    /// high `zncc` that the middle does not share is carried by the parts of
+    /// the tile away from the keypoint: a small near object in front of a
+    /// textured background, a pixel at a depth edge, a texture that repeats
+    /// along the epipolar line. `1` on the bitmap's own row. `None` wherever
+    /// `zncc` is and where the middle cannot be read.
     pub zncc_middle: Option<f64>,
-    /// The **ZNCC grid** beside [`Self::zncc`]: the same samples against the
-    /// same consensus, read over each cell of a three-by-three split of the
-    /// tile (rows and columns cut at `R/3` and `R - R/3`, `8 × 8` cells of a
-    /// `24 × 24` tile) with every pixel weighted equally, `grid[row][col]`
-    /// from the top-left cell. It says where in the tile an agreement or a
-    /// disagreement is. `None` wherever `zncc` is and on a track read back from a committed point; a single cell is
-    /// `NaN` where the consensus is flat over it.
+    /// The **ZNCC grid** beside [`Self::zncc`]: the same tile against the same
+    /// bitmap, read over each cell of a three-by-three split of the tile (rows
+    /// and columns cut at `R/3` and `R - R/3`, `8 × 8` cells of a `24 × 24`
+    /// tile) with every sample weighted equally, `grid[row][col]` from the
+    /// top-left cell. It says where in the tile an agreement or a disagreement
+    /// is. Every cell `1` on the bitmap's own row. `None` wherever `zncc` is;
+    /// a single cell is `NaN` where it cannot be read.
     pub zncc_grid: Option<[[f64; 3]; 3]>,
+    /// The **leave-one-out ZNCC**: the localizer's score against the
+    /// consensus of the round's other observations, at the correlation peak
+    /// within the search radius of this observation's own keypoint, which
+    /// [`Self::seed_shift_px`] is measured to. With that shift near zero it is
+    /// the agreement at the keypoint itself. No bar judges it; Track at Pixel's
+    /// own gates read it, and a commit writes it as the observation's
+    /// `observation_confidence`. `None` where the localizer could not read the
+    /// observation.
+    pub loo_zncc: Option<f64>,
+    /// The middle ZNCC beside [`Self::loo_zncc`]: the same samples at the
+    /// same peak against the same consensus, over the middle square. `None`
+    /// wherever `loo_zncc` is, where the consensus's middle is flat, and on a
+    /// track read back from a committed point, which stores the whole-tile
+    /// score alone.
+    pub loo_zncc_middle: Option<f64>,
     /// How far that correlation peak sits from the observation's own keypoint,
     /// in **patch-grid px** on the patch's plane: the observation's own
     /// evidence, and what [`Thresholds::max_shift_px`] paints on. In the unit of
@@ -437,30 +474,22 @@ pub struct TrackMeasurement {
     /// ([`choose_reference_view`](crate::patch::reference_view::choose_reference_view)).
     /// `None` for an `out` observation, which the rule does not consider.
     pub reference_view: Option<ReferenceStanding>,
-    /// The **bitmap score**: the observation's tile's ZNCC with the track's
-    /// patch bitmap as stored ([`TrackPayload::bitmap`]), windowed, over the
-    /// samples with data in both
-    /// ([`BitmapScorer`](crate::patch::stored_bitmap::BitmapScorer)). `1`
-    /// for the observation the bitmap is the render of
-    /// ([`TrackPayload::reference`]), which is not computed. `None` where the
-    /// track has no bitmap, the tile could not be rendered, or the pair could
-    /// not be read.
-    pub bitmap_zncc: Option<f64>,
-    /// The **blur-matched bitmap score**: [`Self::bitmap_zncc`] after the
-    /// bitmap, and only the bitmap, is blurred to this observation's
-    /// sharpness where it is sharper along every direction by at least the
-    /// ratio of 1.25; the plain score where it is not. `None` wherever
-    /// [`Self::bitmap_zncc`] is.
-    pub blur_matched_bitmap_zncc: Option<f64>,
+    /// The **blur-matched score**: [`Self::zncc`] after the bitmap, and only
+    /// the bitmap, is blurred to this observation's sharpness where it is
+    /// sharper along every direction by at least the ratio of 1.25; the plain
+    /// score where it is not. No bar judges it: a view out of focus scores as
+    /// well blur-matched as a sharp one, and the bars are there to catch it.
+    /// `None` wherever [`Self::zncc`] is.
+    pub blur_matched_zncc: Option<f64>,
     /// The width of the round blur, in grid px, the bitmap was blurred by for
-    /// [`Self::blur_matched_bitmap_zncc`]; `0` where the pair was read plain.
-    /// `None` wherever [`Self::bitmap_zncc`] is.
+    /// [`Self::blur_matched_zncc`]; `0` where the pair was read plain.
+    /// `None` wherever [`Self::zncc`] is.
     pub bitmap_blur_sigma: Option<f64>,
     /// Whether this observation's tile is sharper than the bitmap along every
     /// direction (its self-similarity semi-major axis shorter than the
     /// bitmap's semi-minor axis), so a candidate to replace the reference.
-    /// Such a pair is read plain. `None` wherever [`Self::bitmap_zncc`] is,
-    /// and for the reference observation itself.
+    /// Such a pair is read plain. `None` wherever [`Self::zncc`] is, and for
+    /// the reference observation itself.
     pub sharper_than_bitmap: Option<bool>,
     /// How far the last fit's correlation peak sat from this sighting's seed,
     /// when that was further than [`Thresholds::max_shift_px`] and the seed was
@@ -491,19 +520,23 @@ pub struct TrackMeasurement {
     pub walked_to: Option<[f64; 2]>,
     /// The leave-one-out ZNCC the fit's localizer scored at [`Self::walked_to`]
     /// against the round's consensus, when it scored one: the agreement the walk
-    /// would have bought, to set beside [`Self::zncc`], which the reading after
-    /// the fit took with the sighting kept at its seed. Set and cleared with
+    /// would have bought, to set beside [`Self::loo_zncc`], which the reading
+    /// after the fit took with the sighting kept at its seed. Set and cleared with
     /// [`Self::walked_px`].
     pub walked_zncc: Option<f64>,
     /// The middle ZNCC beside [`Self::walked_zncc`], read the way
-    /// [`Self::zncc_middle`] is. Set and cleared with [`Self::walked_px`].
+    /// [`Self::loo_zncc_middle`] is. Set and cleared with [`Self::walked_px`].
     pub walked_zncc_middle: Option<f64>,
-    /// The ZNCC grid beside [`Self::walked_zncc`], read the way
-    /// [`Self::zncc_grid`] is. Set and cleared with [`Self::walked_px`].
+    /// The leave-one-out ZNCC grid beside [`Self::walked_zncc`], against the same
+    /// consensus, cut into ninths of the patch as [`Self::zncc_grid`] cuts the
+    /// score against the bitmap. Set and cleared with [`Self::walked_px`].
     pub walked_zncc_grid: Option<[[f64; 3]; 3]>,
-    /// Why there is no ZNCC, when there is none: an evaluation that could not
-    /// read an observation says which of its refusals it was rather than
-    /// leaving the row blank.
+    /// Why a reading is missing, when an evaluation has read the row: where
+    /// the localizer could not read the observation ([`Self::loo_zncc`] is
+    /// `None`), which of its refusals it was, whether or not the row has a
+    /// score against the bitmap; otherwise why there is no score
+    /// ([`Self::zncc`]), and `None` where there is one. So a row without a
+    /// score never reads as an unexplained blank.
     pub reason: Option<Unmeasured>,
 }
 
@@ -692,20 +725,57 @@ pub struct TrackPayload {
     /// removes the reference observation from the track, splits it off, or
     /// turns it `out` drops both (`drop_bitmap`).
     ///
-    /// **A render keeps a defined reference.** Every render of a new bitmap
-    /// on the bench -- the live evaluation's, a fit's, a normal step's --
-    /// renders from this reference where it is defined (`Some`, naming an
-    /// `in` row with a keypoint). Only where it is undefined (`None`, or naming
-    /// a row that is not `in` or has no keypoint) does the render run
-    /// the reference-view rule over the `in` rows and set the bitmap and this
-    /// reference together. So the rule's pick that an evaluation reports per
-    /// row (`TrackMeasurement::reference_view`) can differ from this
-    /// reference, which is the one in use. A reference read from a column
-    /// rendered for display is the rule's pick on the file's track, so holding
-    /// it is the bench having set it from the rule. A commit writes this
-    /// reference as the point's reference observation, beside the bitmap it
-    /// is the render of where the reconstruction stores bitmaps.
+    /// **The pin of its row holds it.** Every render of a new bitmap on the
+    /// bench -- the live evaluation's, a fit's, a normal step's -- renders
+    /// from this reference where its row is `in`, carries a keypoint and is
+    /// pinned ([`EditableTrack::held_reference`]), whichever row the
+    /// reference-view rule would pick. Otherwise (`None`, or a row that is
+    /// unpinned, not `in` or without a keypoint) the render runs the rule over
+    /// the `in` rows and sets the bitmap and this reference together, so while
+    /// the reference row is unpinned the reference follows the rule's pick at
+    /// every render. The rule's pick that an evaluation reports per row
+    /// (`TrackMeasurement::reference_view`) can therefore differ from this
+    /// reference, the one in use, while the reference row is pinned, between
+    /// an unpin that hands the reference on and the render
+    /// ([`Self::bitmap_pending`]), and where the pick alternated between rows
+    /// within one evaluation.
+    /// [`set_reference`](super::steps::set_reference) makes a row the
+    /// reference and pins it. A track put on the bench from a point has every
+    /// row pinned, so the point's stored reference stays until the person
+    /// unpins its row. A reference read from a column rendered for display is
+    /// the rule's pick on the file's track, and is held the same way. A commit
+    /// writes this reference as the point's reference observation, beside the
+    /// bitmap it is the render of where the reconstruction stores bitmaps.
     pub reference: Option<usize>,
+    /// Whether [`Self::bitmap`] is a **bitmap for judging**: a render made
+    /// only so that the bars have something to score the rows against,
+    /// because no `in` row could hold the reference. The live evaluation
+    /// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap))
+    /// makes one where the render from the `in` rows gives no bitmap (every
+    /// row is `out`, or fewer than two `in` rows carry a keypoint), from the
+    /// reference-view rule's pick among every row that carries a keypoint,
+    /// `in` or `out`. Without it, a track whose `in` set emptied could never
+    /// be scored again, and loosening a bar could bring no row back.
+    ///
+    /// It names no reference ([`Self::reference`] is `None`), a step that
+    /// turns rows `out` leaves it in place, and a commit treats it as no
+    /// bitmap ([`Self::committable_bitmap`]). Once a row is `in` again, the
+    /// next render replaces it with a bitmap rendered by the usual rule.
+    pub bitmap_for_judging: bool,
+    /// Whether [`Self::bitmap`] is kept only until the next render replaces
+    /// it: an unpin handed the reference to the reference-view rule
+    /// ([`unpin_verdicts`](super::steps::unpin_verdicts)), whose pick is
+    /// another row, so every score read against this bitmap is about to be
+    /// replaced. While it is set, no row is scored against the bitmap (each
+    /// says [`Unmeasured::BitmapPending`]) and the bars judge none. The next
+    /// render
+    /// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap))
+    /// replaces the bitmap and clears it, and a step that holds the reference
+    /// again by pinning its row ([`pin_verdicts`](super::steps::pin_verdicts),
+    /// [`set_verdict`](super::steps::set_verdict)) clears it with nothing
+    /// rendered, since the bitmap is that row's render. A commit in between
+    /// writes this bitmap with the reference it is the render of.
+    pub bitmap_pending: bool,
     /// The colour the point carries, used when there is no bitmap to read one
     /// from.
     pub color: [u8; 3],
@@ -721,6 +791,8 @@ impl TrackPayload {
     /// keeps `in`.
     pub(crate) fn drop_bitmap(&mut self) {
         self.bitmap = None;
+        self.bitmap_for_judging = false;
+        self.bitmap_pending = false;
         self.reference = None;
     }
 
@@ -729,11 +801,20 @@ impl TrackPayload {
     /// but that observation is still on the track.
     pub fn drop_stale_bitmap(&mut self) {
         self.bitmap = None;
+        self.bitmap_for_judging = false;
+        self.bitmap_pending = false;
+    }
+
+    /// The bitmap a commit writes: [`Self::bitmap`], or `None` where the track
+    /// has none or its bitmap is one for judging only
+    /// ([`Self::bitmap_for_judging`]).
+    pub fn committable_bitmap(&self) -> Option<&Array3<u8>> {
+        self.bitmap.as_ref().filter(|_| !self.bitmap_for_judging)
     }
 
     /// Drop the bitmap with its reference observation when that observation
     /// is not one of `observations`' `in` rows: a reference is an observation
-    /// the track keeps.
+    /// the track keeps. A bitmap for judging names no reference, so it stays.
     pub fn drop_bitmap_unless_in(&mut self, observations: &[Observation]) {
         if let Some(r) = self.reference {
             if observations.get(r).is_none_or(|o| o.verdict != Verdict::In) {
@@ -800,31 +881,46 @@ pub struct Origin {
 /// [`Self::geometry_search_min_relative_zncc`]'s default is read from view
 /// selection's own parameter type rather than written out again, so the bench and the batch
 /// pass start from the same bar and moving it is the person choosing to
-/// differ. The other five are the bench's own. [`BENCH_MAX_SHIFT_PX`]: on the bench the bar is also how far a
+/// differ. The others are the bench's own. [`BENCH_MAX_SHIFT_PX`]: on the bench the bar is also how far a
 /// fit may move a sighting, and the cluster refinement's 3 px turned away walks
-/// a person wanted. [`BENCH_MIN_ZNCC`] and [`BENCH_MIN_ZNCC_MIDDLE`]: the
-/// cluster refinement's `0.85` judges the score it reached by fitting a whole
-/// affine warp, and the track stage's leave-one-out score runs lower on correct
-/// sightings, so that bar turned out sightings a person would keep.
+/// a person wanted. [`BENCH_CLUSTER_MIN_ZNCC`] and
+/// [`BENCH_CLUSTER_MIN_ZNCC_MIDDLE`]: the cluster refinement's `0.85` judges
+/// the score it reached by fitting a whole affine warp, and turned out
+/// sightings a person would keep. [`BENCH_MIN_ZNCC`] and
+/// [`BENCH_MIN_ZNCC_MIDDLE`]: the track stage judges another score, a row's
+/// tile against the stored bitmap, and has bars measured for it.
 /// [`BENCH_MAX_ZNCC_SELF_SIMILARITY_RADIUS`]: the keypoint localizer's member
 /// gate has the same default, but the bench runs that kernel with its gate off
 /// and judges the radius by this bar instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thresholds {
-    /// The ZNCC an observation has to reach: the achieved template ZNCC at the
-    /// cluster stage, the leave-one-out ZNCC at the track stage.
+    /// The ZNCC an observation has to reach at the track stage: the plain
+    /// score of its tile against the stored bitmap ([`TrackMeasurement::zncc`]).
+    /// The default is [`BENCH_MIN_ZNCC`]. The cluster stage judges another
+    /// score, and has its own bar, [`Self::cluster_min_zncc`].
     pub min_zncc: f64,
-    /// The middle ZNCC an observation has to reach: [`ClusterMeasurement::zncc_middle`]
-    /// at the cluster stage and [`TrackMeasurement::zncc_middle`] at the track
-    /// stage. It turns out a sighting whose whole-patch agreement is carried
-    /// by the patch's surroundings rather than its middle.
+    /// The middle ZNCC an observation has to reach at the track stage
+    /// ([`TrackMeasurement::zncc_middle`]). It turns out a sighting whose
+    /// whole-patch agreement is carried by the patch's surroundings rather
+    /// than its middle.
     ///
-    /// `0` turns the bar off. The default is [`BENCH_MIN_ZNCC_MIDDLE`]. An
+    /// `0` turns the bar off. The default is [`BENCH_MIN_ZNCC_MIDDLE`], which
+    /// is `0`, off; its doc gives what the measurement found. An
     /// observation with no middle reading, because its middle is flat or it
     /// was read back from a committed point, has nothing to judge and clears
     /// the bar, as a row with no self-similarity reading clears
     /// [`Self::max_zncc_self_similarity_radius`].
     pub min_zncc_middle: f64,
+    /// The achieved template ZNCC an observation has to reach at the cluster
+    /// stage ([`ClusterMeasurement::zncc`]). The default is
+    /// [`BENCH_CLUSTER_MIN_ZNCC`].
+    pub cluster_min_zncc: f64,
+    /// The middle ZNCC an observation has to reach at the cluster stage
+    /// ([`ClusterMeasurement::zncc_middle`]), judged as
+    /// [`Self::min_zncc_middle`] is at the track stage: `0` turns it off, and
+    /// a row with no middle reading clears it. The default is
+    /// [`BENCH_CLUSTER_MIN_ZNCC_MIDDLE`].
+    pub cluster_min_zncc_middle: f64,
     /// How far the correlation peak may sit from where the observation sits, in
     /// **patch-grid px**: [`ClusterMeasurement::shift_px`] at the cluster stage
     /// and [`TrackMeasurement::seed_shift_px`] at the track stage.
@@ -892,22 +988,54 @@ pub const BENCH_MAX_SHIFT_PX: f64 = 6.0;
 /// source-image px.
 pub const BENCH_MAX_PROJECTION_ERROR_PX: f64 = 3.0;
 
-/// The bench's default [`Thresholds::min_zncc`].
+/// The bench's default [`Thresholds::min_zncc`], the track stage's bar on the
+/// plain score against the stored bitmap: `0.65`.
 ///
 /// Below the cluster refinement's own `min_zncc` (0.85), which stays the batch
-/// pass's bar. The bench judges both stages by the one bar, and the track
-/// stage's leave-one-out ZNCC, scored against a consensus the sighting is left
-/// out of, reads lower on a correct sighting than the refinement's score does
-/// after it has fitted a whole affine warp.
-pub const BENCH_MIN_ZNCC: f64 = 0.7;
+/// pass's bar: a correct sighting's tile reads lower against one view's render
+/// than a fitted template does. Measured on 150 tracks from each of eight
+/// reconstructions (two ground truths, six solves whose members are taken as
+/// correct). Wrong views were planted by pasting an unwarped square of another
+/// place's pixels over a row's keypoint, and true members were blurred, which
+/// are views to keep. About 60% of the planted views fail a geometry bar and
+/// are out whatever this bar is, so the objective counts only rows that clear
+/// every geometry bar: the mean over tracks of the share of members kept and
+/// the share of wrong views in images the track observes turned out. Held out
+/// by reconstruction, the whole bar alone picks `0.65` on seven folds of eight
+/// and `0.70` on one, and `0.65` scores 93.6 against 92.6 for `0.60` and 93.5
+/// for a `0.7` bar alone. At `0.65` the bar loses 3.5% of the members that
+/// clear the geometry bars and turns out 92.8% of the wrong views that do:
+/// 82.8% of those 0.5 to 0.7 similar to the true content and 55.9% of those
+/// 0.7 to 0.85 similar. The margin over `0.70` is narrow: 93.64 against 93.46
+/// held out, better on four folds of eight. Which wrong views the objective
+/// counts moves the pick between `0.60` and `0.70`. The bar is expected to be
+/// measured again once normal estimation and fitting improve, since both move
+/// the scores it judges. The spec of the editable track
+/// (specs/core/bench/editable-track.md) gives the tables.
+pub const BENCH_MIN_ZNCC: f64 = 0.65;
 
-/// The bench's default [`Thresholds::min_zncc_middle`].
+/// The bench's default [`Thresholds::min_zncc_middle`]: `0`, off.
 ///
-/// No higher than [`BENCH_MIN_ZNCC`]: the middle reading covers a quarter of
-/// the samples, so on a correct sighting it scatters more and reads a little
-/// lower than the whole-patch one, and a middle bar above the whole bar would
-/// turn out correct sightings the whole bar keeps.
-pub const BENCH_MIN_ZNCC_MIDDLE: f64 = 0.7;
+/// In the measurement behind [`BENCH_MIN_ZNCC`], a middle bar from 0.30 to
+/// 0.55 beside the whole bar of `0.65` raises the score over all the data by
+/// 0.1 to 0.3 point (93.8 to at most 94.2), and from 0.60 up lowers it. The
+/// middle reading covers a quarter of the samples, so on a correct sighting
+/// it scatters more and reads lower than the whole-patch one, and a middle
+/// bar costs members the whole bar keeps. The bar stays for a person to set.
+pub const BENCH_MIN_ZNCC_MIDDLE: f64 = 0.0;
+
+/// The bench's default [`Thresholds::cluster_min_zncc`], the cluster stage's
+/// bar on the achieved template ZNCC.
+///
+/// `0.7`, below the cluster refinement's own `min_zncc` (0.85), which stays
+/// the batch pass's bar and turned out sightings a person would keep. The
+/// measurement behind [`BENCH_MIN_ZNCC`] read the track stage only; this bar
+/// is not measured.
+pub const BENCH_CLUSTER_MIN_ZNCC: f64 = 0.7;
+
+/// The bench's default [`Thresholds::cluster_min_zncc_middle`]: `0.7`, the
+/// same as [`BENCH_CLUSTER_MIN_ZNCC`], and likewise not measured.
+pub const BENCH_CLUSTER_MIN_ZNCC_MIDDLE: f64 = 0.7;
 
 /// The bench's default [`Thresholds::max_zncc_self_similarity_radius`], in
 /// patch-grid px.
@@ -926,14 +1054,30 @@ const _: () = assert!(
         == crate::patch::keypoint_localize::DEFAULT_MAX_MEMBER_ZNCC_SELF_SIMILARITY_RADIUS
 );
 
-// The middle bar sits no higher than the whole bar, for the reason above.
+// The middle bar, where it is on, sits no higher than the whole bar: the
+// middle reading reads lower than the whole one on a correct sighting.
 const _: () = assert!(BENCH_MIN_ZNCC_MIDDLE <= BENCH_MIN_ZNCC);
+
+impl Thresholds {
+    /// The whole and middle ZNCC bars at `stage`: [`Self::min_zncc`] and
+    /// [`Self::min_zncc_middle`] at the track stage, and
+    /// [`Self::cluster_min_zncc`] and [`Self::cluster_min_zncc_middle`] at the
+    /// cluster stage, which judge another score.
+    pub fn zncc_bars(&self, stage: StageKind) -> (f64, f64) {
+        match stage {
+            StageKind::Track => (self.min_zncc, self.min_zncc_middle),
+            StageKind::Cluster => (self.cluster_min_zncc, self.cluster_min_zncc_middle),
+        }
+    }
+}
 
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
             min_zncc: BENCH_MIN_ZNCC,
             min_zncc_middle: BENCH_MIN_ZNCC_MIDDLE,
+            cluster_min_zncc: BENCH_CLUSTER_MIN_ZNCC,
+            cluster_min_zncc_middle: BENCH_CLUSTER_MIN_ZNCC_MIDDLE,
             max_shift_px: BENCH_MAX_SHIFT_PX,
             max_zncc_self_similarity_radius: BENCH_MAX_ZNCC_SELF_SIMILARITY_RADIUS,
             max_projection_error_px: BENCH_MAX_PROJECTION_ERROR_PX,
@@ -987,6 +1131,14 @@ pub struct EditableTrack {
 /// then settles after one more evaluation, and a row left out of step with the
 /// bars shows as a verdict the bars disagree with until the next edit.
 ///
+/// [`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap)
+/// is the one exception: it repaints a marked track when its bitmap moves,
+/// because the new bitmap gives new scores for the bars to judge. A chain of
+/// such evaluations can run more than one extra evaluation; it is bounded
+/// because each one that renders does so from a row the mark does not already
+/// record (`rendered_from` below), so the chain is no longer than the number
+/// of distinct rows the bitmap can be rendered from.
+///
 /// **The mark belongs to the one value the evaluation returned.** Every step
 /// makes its new track by cloning the old one, and a clone does not carry the
 /// mark, so "only the repaint has changed since the readings" is exactly
@@ -1003,14 +1155,32 @@ pub struct RepaintMark {
     /// The verdict and pin of each observation as the repaint left them, or
     /// `None` for no mark.
     left: Option<Vec<(Verdict, bool)>>,
+    /// The rows the stored bitmap has been rendered from by the evaluations
+    /// since the last step (`None` for a render left to the reference-view
+    /// rule's own choice), so an evaluation of the marked track does not move
+    /// the bitmap back to one of them
+    /// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap)).
+    rendered_from: Vec<Option<usize>>,
 }
 
 impl RepaintMark {
     /// The mark for `track`'s verdicts and pins as they stand.
     pub(super) fn of(track: &EditableTrack) -> Self {
+        Self::after_renders(track, Vec::new())
+    }
+
+    /// The mark for `track`'s verdicts and pins as they stand, after
+    /// evaluations that rendered the bitmap from the rows `rendered_from`.
+    pub(super) fn after_renders(track: &EditableTrack, rendered_from: Vec<Option<usize>>) -> Self {
         Self {
             left: Some(verdicts_and_pins(track)),
+            rendered_from,
         }
+    }
+
+    /// The rows the bitmap has been rendered from since the last step.
+    pub(super) fn rendered_from(&self) -> &[Option<usize>] {
+        &self.rendered_from
     }
 
     /// The same mark, for a value that differs from the marked one in nothing
@@ -1019,6 +1189,7 @@ impl RepaintMark {
     pub(super) fn carried(&self) -> Self {
         Self {
             left: self.left.clone(),
+            rendered_from: self.rendered_from.clone(),
         }
     }
 }
@@ -1155,6 +1326,7 @@ impl EditableTrack {
             map.push(Some(next.observations.len()));
             next.observations.push(kept);
         }
+        let mut dropped = false;
         match &mut next.stage {
             Stage::Cluster(payload) => match map.get(payload.reference).copied().flatten() {
                 Some(reference) => payload.reference = reference,
@@ -1165,16 +1337,29 @@ impl EditableTrack {
             },
             // The row the bitmap is the tile of follows its observation. A
             // bitmap whose observation was dropped is the tile of a sighting
-            // the track no longer has, so it goes with its reference, and the
-            // live evaluation renders one from the rows that remain.
+            // the track no longer has, so it goes with its reference and every
+            // score read against it, and the live evaluation renders one from
+            // the rows that remain.
             Stage::Track(payload) => {
+                // A bitmap for judging names no row and can be the tile of a
+                // dropped observation, so it goes where any row went.
+                if payload.bitmap_for_judging && map.iter().any(Option::is_none) {
+                    payload.drop_bitmap();
+                    dropped = true;
+                }
                 if let Some(r) = payload.reference {
                     match map.get(r).copied().flatten() {
                         Some(kept) => payload.reference = Some(kept),
-                        None => payload.drop_bitmap(),
+                        None => {
+                            payload.drop_bitmap();
+                            dropped = true;
+                        }
                     }
                 }
             }
+        }
+        if dropped {
+            super::evaluate::clear_bitmap_scores(&mut next, Unmeasured::NoBitmap);
         }
         Some((next, map))
     }
@@ -1192,6 +1377,55 @@ impl EditableTrack {
         match &self.stage {
             Stage::Track(payload) => Some(payload),
             Stage::Cluster(_) => None,
+        }
+    }
+
+    /// The row the reference-view rule picked when the track was last read:
+    /// the one whose
+    /// [`reference_view`](TrackMeasurement::reference_view) standing is the
+    /// reference. `None` at the cluster stage, before an evaluation, and where
+    /// the rule picked none. Where the reference's row is pinned this can
+    /// differ from the reference in use ([`TrackPayload::reference`]).
+    pub fn reference_view_pick(&self) -> Option<usize> {
+        self.track()?;
+        self.observations.iter().position(|o| {
+            o.track
+                .as_ref()
+                .and_then(|m| m.reference_view)
+                .is_some_and(|standing| standing.is_reference())
+        })
+    }
+
+    /// The reference observation the next render of the bitmap renders from
+    /// whatever the reference-view rule picks: the track's reference
+    /// ([`TrackPayload::reference`]) where its row is `in`, carries a keypoint
+    /// and is **pinned**. `None` at the cluster stage and where the track
+    /// holds no reference that way; a render then takes the rule's pick.
+    pub fn held_reference(&self) -> Option<usize> {
+        let r = self.track()?.reference?;
+        let row = self.observations.get(r)?;
+        let keyed = row.track.as_ref().is_some_and(|m| m.keypoint.is_some());
+        (row.pinned && row.verdict == Verdict::In && keyed).then_some(r)
+    }
+
+    /// Whether the track's bitmap is kept only until the next render
+    /// replaces it ([`TrackPayload::bitmap_pending`]) while the reference is
+    /// not held again by its row's pin: no row is scored against it.
+    pub fn bitmap_pending(&self) -> bool {
+        self.track()
+            .is_some_and(|p| p.bitmap_pending && p.bitmap.is_some())
+            && self.held_reference().is_none()
+    }
+
+    /// Clear [`TrackPayload::bitmap_pending`] where the reference is held
+    /// again by its row's pin: the bitmap is that row's render, so nothing is
+    /// pending. Every step that pins a row calls this, so the field is set only
+    /// while a render is still to replace the bitmap.
+    pub(crate) fn end_pending_if_held(&mut self) {
+        if self.held_reference().is_some() {
+            if let Stage::Track(payload) = &mut self.stage {
+                payload.bitmap_pending = false;
+            }
         }
     }
 }

@@ -377,7 +377,7 @@ fn the_stored_confidence_is_carried_as_the_leave_one_out_score() {
         let zncc = observation
             .track
             .as_ref()
-            .and_then(|m| m.zncc)
+            .and_then(|m| m.loo_zncc)
             .expect("the column is carried");
         assert!((zncc - 200.0 / 255.0).abs() < 1e-9);
     }
@@ -941,6 +941,8 @@ fn scored_track(zncc: [f64; 2]) -> EditableTrack {
         observation.verdict = Verdict::Out;
         observation.pinned = false;
         let measurement = observation.track.as_mut().expect("a track slot");
+        // The localizer read the row: a row it refused is not judged.
+        measurement.loo_zncc = Some(score);
         measurement.zncc = Some(score);
         measurement.seed_shift_px = Some(0.5);
         measurement.zncc_self_similarity_radius = Some(0.5);
@@ -948,6 +950,197 @@ fn scored_track(zncc: [f64; 2]) -> EditableTrack {
     track
 }
 
+/// A row the keypoint localizer refused carries no leave-one-out reading; a
+/// score against the bitmap alone does not let the bars turn it in, and they
+/// leave it where it is.
+#[test]
+fn a_row_the_localizer_refused_is_not_judged_on_its_bitmap_score() {
+    let mut track = scored_track([0.95, 0.95]);
+    slot(&mut track, 1).loo_zncc = None;
+    slot(&mut track, 1).reason = Some(Unmeasured::Grazing { cosine: 0.05 });
+    let stage = track.stage_kind();
+    assert!(bar_checks(&track.observations[1], stage, &track.thresholds).is_none());
+    let (painted, report) = apply_thresholds(&track);
+    assert_eq!(painted.observations[0].verdict, Verdict::In);
+    assert_eq!(painted.observations[1].verdict, Verdict::Out);
+    assert_eq!(report.unmeasured, 1);
+}
+
+/// A render for [`settle`](super::evaluate::settle) that installs a blank
+/// bitmap naming `from` and scores the row rendered from `1` and every other
+/// row `0.1`, as the render of one view against another reads where the two
+/// differ.
+fn render_alternating(
+    track: &EditableTrack,
+    from: Option<usize>,
+    renders: &std::cell::Cell<usize>,
+) -> Result<EditableTrack, super::evaluate::EvaluateError> {
+    renders.set(renders.get() + 1);
+    let mut next = track.clone();
+    let payload = payload_of(&mut next);
+    payload.bitmap = Some(Array3::zeros((4, 4, 4)));
+    payload.bitmap_for_judging = false;
+    payload.reference = from;
+    for (i, observation) in next.observations.iter_mut().enumerate() {
+        let m = observation.track.as_mut().expect("a track slot");
+        m.zncc = Some(if Some(i) == from { 1.0 } else { 0.1 });
+    }
+    Ok(next)
+}
+
+/// A target that always moves the bitmap to the other of rows 0 and 1, as a
+/// reference-view rule whose pick flips with the `in` set would.
+fn alternating_target(track: &EditableTrack) -> Option<Option<usize>> {
+    match track.track()?.reference {
+        Some(0) => Some(Some(1)),
+        _ => Some(Some(0)),
+    }
+}
+
+/// Where the rule's pick alternates between two rows, the loop renders from
+/// each once and stops when the pick returns to a row already rendered from:
+/// the bitmap stays on the second row, the pick names the first, and every
+/// verdict is the bars' on the scores against the bitmap returned.
+#[test]
+fn the_rendering_loop_stops_when_the_pick_returns_to_a_row_it_rendered_from() {
+    let track = scored_track([0.95, 0.95]);
+    let renders = std::cell::Cell::new(0);
+    let settled = super::evaluate::settle(track, Vec::new(), true, alternating_target, |t, f| {
+        render_alternating(t, f, &renders)
+    })
+    .expect("no render fails");
+    assert_eq!(renders.get(), 2, "one render from each row");
+    assert_eq!(settled.rendered_from, vec![Some(0), Some(1)]);
+    assert!(settled.repainted);
+    let track = &settled.track;
+    assert_eq!(track.track().unwrap().reference, Some(1));
+    assert_eq!(
+        alternating_target(track),
+        Some(Some(0)),
+        "the pick is another row than the reference"
+    );
+    assert_eq!(track.observations[1].verdict, Verdict::In);
+    assert!(!apply_thresholds(track).1.changed, "judged on this bitmap");
+
+    // A marked evaluation of it carries both rows: the pick names one
+    // rendered from already, so nothing is rendered and nothing judged.
+    let mark = super::track::RepaintMark::after_renders(track, settled.rendered_from.clone());
+    assert_eq!(mark.rendered_from(), &[Some(0), Some(1)]);
+    let again = super::evaluate::settle(
+        track.clone(),
+        mark.rendered_from().to_vec(),
+        false,
+        alternating_target,
+        |t, f| render_alternating(t, f, &renders),
+    )
+    .expect("no render fails");
+    assert_eq!(renders.get(), 2, "the carried rows stop the render");
+    assert!(!again.repainted);
+    assert_eq!(again.track.track().unwrap().reference, Some(1));
+}
+
+/// A marked evaluation whose pick moves to a row not rendered from since the
+/// step renders from it and judges, and the rows it hands on to the next mark
+/// are the carried ones followed by its own.
+#[test]
+fn a_marked_evaluation_that_renders_carries_its_row_into_the_mark() {
+    let renders = std::cell::Cell::new(0);
+    let first = render_alternating(&scored_track([0.95, 0.95]), Some(0), &renders)
+        .expect("no render fails");
+    let (first, _) = apply_thresholds(&first);
+    assert_eq!(first.observations[0].verdict, Verdict::In);
+    let settled =
+        super::evaluate::settle(first, vec![Some(0)], false, alternating_target, |t, f| {
+            render_alternating(t, f, &renders)
+        })
+        .expect("no render fails");
+    assert_eq!(renders.get(), 2);
+    assert_eq!(settled.rendered_from, vec![Some(0), Some(1)]);
+    assert!(settled.repainted, "the new scores were judged");
+    assert_eq!(settled.track.observations[1].verdict, Verdict::In);
+    assert_eq!(settled.track.observations[0].verdict, Verdict::Out);
+}
+
+/// A bitmap for judging rendered again by a pass that finds rows `in` stands
+/// while the `in` set is the one it was rendered with: where the render from
+/// the `in` rows gives no bitmap, the loop renders once and stops rather than
+/// rendering the same bitmap for judging over and over.
+#[test]
+fn a_bitmap_for_judging_stands_while_the_in_rows_it_was_rendered_with_stand() {
+    let mut track = scored_track([0.95, 0.95]);
+    for observation in &mut track.observations {
+        observation.verdict = Verdict::In;
+        observation.pinned = true;
+    }
+    {
+        let payload = payload_of(&mut track);
+        payload.bitmap = Some(Array3::zeros((4, 4, 4)));
+        payload.bitmap_for_judging = true;
+        payload.reference = None;
+    }
+    let renders = std::cell::Cell::new(0);
+    // Render while the bitmap is one for judging, as `bitmap_target` asks
+    // once two `in` rows carry a keypoint; the render gives one for judging
+    // again, as it does where the render from the `in` rows fails.
+    let target = |t: &EditableTrack| t.track()?.bitmap_for_judging.then_some(None);
+    let settled = super::evaluate::settle(track, Vec::new(), true, target, |t, _| {
+        renders.set(renders.get() + 1);
+        let mut next = t.clone();
+        payload_of(&mut next).bitmap_for_judging = true;
+        Ok(next)
+    })
+    .expect("no render fails");
+    assert_eq!(renders.get(), 1, "rendered once for these `in` rows");
+    assert!(settled.track.track().unwrap().bitmap_for_judging);
+    assert_eq!(settled.rendered_from, vec![None]);
+}
+
+/// A bitmap for judging is never committed: into a reconstruction that stores
+/// a bitmap per point the commit is refused, and into one that stores none it
+/// writes the point with no reference observation.
+#[test]
+fn a_bitmap_for_judging_is_not_committed() {
+    let scene = Scene::new();
+    let judging = |edited: &EditedReconstruction| {
+        let (bench, label) = bench_with_point(edited, 0);
+        let mut track = track_of(&bench, &label);
+        let payload = payload_of(&mut track);
+        payload.bitmap = Some(Array3::zeros((BITMAP_R, BITMAP_R, 4)));
+        payload.bitmap_for_judging = true;
+        payload.reference = None;
+        track
+    };
+    let carried = edited_with_columns(&scene, WORLD);
+    assert_eq!(
+        commit(&carried, &judging(&carried)).expect_err("the base stores a bitmap per point"),
+        CommitError::NoBitmap
+    );
+    let plain = edited_fixture(&scene, WORLD);
+    assert!(!plain.has_patch_bitmaps());
+    let track = judging(&plain);
+    assert!(track.in_observations().len() >= 2);
+    let (next, report) = commit(&plain, &track).expect("no bitmap column to fill");
+    let written = next.point(report.point).expect("just written");
+    assert_eq!(written.reference_observation(), None);
+}
+
+/// The cluster stage judges its own ZNCC bars, not the track stage's.
+#[test]
+fn the_cluster_stage_judges_its_own_zncc_bars() {
+    let bars = Thresholds {
+        min_zncc: 0.1,
+        cluster_min_zncc: 0.9,
+        ..Thresholds::default()
+    };
+    assert_eq!(
+        bars.zncc_bars(StageKind::Track),
+        (0.1, bars.min_zncc_middle)
+    );
+    assert_eq!(
+        bars.zncc_bars(StageKind::Cluster),
+        (0.9, bars.cluster_min_zncc_middle)
+    );
+}
 #[test]
 fn the_painting_proposes_verdicts_from_the_stored_measurements() {
     let track = scored_track([0.95, 0.40]);
@@ -959,6 +1152,60 @@ fn the_painting_proposes_verdicts_from_the_stored_measurements() {
     assert!(report.changed);
     // Painting is not deciding: nothing it touched is pinned.
     assert!(painted.observations.iter().all(|o| !o.pinned));
+}
+
+/// The bars judge the plain score against the bitmap: a row whose
+/// blur-matched score clears `min_zncc` and whose plain score does not, as a
+/// view out of focus reads, is turned out, and the leave-one-out reading
+/// beside it plays no part.
+#[test]
+fn the_bars_judge_the_plain_score_against_the_bitmap() {
+    let mut track = scored_track([0.95, 0.55]);
+    let m = track.observations[1].track.as_mut().expect("a slot");
+    m.blur_matched_zncc = Some(0.92);
+    m.loo_zncc = Some(0.93);
+    let (painted, _) = apply_thresholds(&track);
+    assert_eq!(painted.observations[0].verdict, Verdict::In);
+    assert_eq!(
+        painted.observations[1].verdict,
+        Verdict::Out,
+        "the plain score is under the bar whatever the others read"
+    );
+    let checks = bar_checks(&track.observations[1], StageKind::Track, &track.thresholds)
+        .expect("a scored row");
+    assert_eq!(checks.min_zncc, BarCheck::Fail);
+}
+
+/// A row with no bitmap to read against has no score, says so, and the bars
+/// leave its verdict where it is, though the localizer read it.
+#[test]
+fn a_row_with_no_bitmap_to_read_against_is_unscored_and_left_alone() {
+    let scene = Scene::new();
+    let edited = edited_with_columns(&scene, WORLD);
+    let (mut track, added) = three_rows_the_bars_decide(&scene);
+    payload_of(&mut track).drop_bitmap();
+
+    let (read, report) = evaluate_over(&scene, &edited, &track).expect("two observations in");
+    assert_eq!((report.turned_in, report.turned_out), (0, 0));
+    for (i, observation) in read.observations.iter().enumerate() {
+        let m = observation.track.as_ref().expect("a track slot");
+        assert_eq!(m.zncc, None, "row {i}");
+        assert_eq!(m.zncc_middle, None, "row {i}");
+        assert_eq!(m.zncc_grid, None, "row {i}");
+        assert_eq!(m.blur_matched_zncc, None, "row {i}");
+        assert!(m.loo_zncc.is_some(), "row {i}: the localizer read it");
+        assert_eq!(m.reason, Some(Unmeasured::NoBitmap), "row {i}");
+        assert!(bar_checks(observation, StageKind::Track, &read.thresholds).is_none());
+    }
+    assert_eq!(
+        read.observations[added].verdict,
+        Verdict::Out,
+        "the added row stays where it was"
+    );
+    assert_eq!(
+        Unmeasured::NoBitmap.to_string(),
+        "there is no bitmap to score it against"
+    );
 }
 
 /// The middle-ZNCC bar turns out a row whose middle disagrees, is off at `0`,
@@ -1068,6 +1315,7 @@ fn unpinning_gives_the_verdict_back_to_the_thresholds() {
             unpinned: 1,
             turned_in: 1,
             turned_out: 1,
+            bitmap_pending: false,
             changed: true,
         },
         "the unpinned row goes out, and the unpinned 0.95 the bars take comes in"
@@ -1115,6 +1363,7 @@ fn unpinning_rows_that_are_not_pinned_changes_nothing() {
             unpinned: 0,
             turned_in: 0,
             turned_out: 0,
+            bitmap_pending: false,
             changed: false,
         }
     );
@@ -1882,10 +2131,18 @@ fn an_untouched_point_committed_back_rewrites_its_colour_and_its_error() {
     assert!(report.changed);
     let was = edited.point(0).expect("a live point").to_record();
     let now = next.point(report.point).expect("just written").to_record();
-    // The fixture's bitmap is blank and its colour is not, so the two differ
+    // The fixture's colour was not read from its bitmap, so the two differ
     // here; a point whose stored colour came from its own bitmap agrees.
+    let bitmap = track
+        .track()
+        .and_then(|p| p.bitmap.as_ref())
+        .expect("the fixture stores a bitmap");
+    let c = BITMAP_R / 2;
     assert_eq!(was.point.color, [120, 130, 140]);
-    assert_eq!(now.point.color, [0, 0, 0]);
+    assert_eq!(
+        now.point.color,
+        [bitmap[[c, c, 0]], bitmap[[c, c, 1]], bitmap[[c, c, 2]]]
+    );
     assert_eq!(was.point.error, 0.5);
     assert_eq!(now.point.error, 0.0);
     // Everything else, column for column.
@@ -1912,6 +2169,10 @@ fn observations_in_another_order_are_the_same_track() {
 
     let mut shuffled = track.with_origin(1, first.point);
     shuffled.observations.reverse();
+    // The reference follows its row, as every step that reorders rows keeps it.
+    let last = shuffled.observations.len() - 1;
+    let payload = payload_of(&mut shuffled);
+    payload.reference = payload.reference.map(|r| last - r);
     let (_, report) = commit(&next, &shuffled).expect("still two in");
     assert!(
         !report.changed,
@@ -2086,7 +2347,11 @@ fn a_column_the_commit_writes_is_a_column_it_compares() {
         measurement.keypoint = Some([keypoint[0] + 0.001, keypoint[1]]);
     });
     moved("an observation's confidence", &|t| {
-        t.observations[0].track.as_mut().expect("a track slot").zncc = Some(0.5);
+        t.observations[0]
+            .track
+            .as_mut()
+            .expect("a track slot")
+            .loo_zncc = Some(0.5);
     });
     moved("the error", &|t| {
         t.observations[0]
@@ -2764,6 +3029,17 @@ fn three_rows_the_bars_decide(scene: &Scene) -> (EditableTrack, usize) {
     let mut on_the_bench = track_of(&bench, &label);
     on_the_bench.thresholds.max_zncc_self_similarity_radius = 3.0;
     let (track, _) = unpin_verdicts(&on_the_bench, &[0, 1]).expect("live rows");
+    // Unpinning the reference's row hands the bitmap to the rule's pick; the
+    // evaluation that follows the unpin renders it and scores the rows.
+    let (track, _) = evaluate_rendering_bitmap(
+        &track,
+        &edited,
+        &scene.views(),
+        &EvaluateOptions::default(),
+        &FitOptions::default(),
+        &Progress::none(),
+    )
+    .expect("a framed track");
     let (track, added) = add_observation(
         &track,
         &ObservationSeed::at_pixel(2, scene.project(2, WORLD)),
@@ -3652,7 +3928,7 @@ fn a_seed_far_from_the_projection_is_named_rather_than_searched_for() {
         .track
         .as_ref()
         .expect("every row is written, measured or not");
-    assert!(row.zncc.is_none(), "nothing was searched for it");
+    assert!(row.loo_zncc.is_none(), "nothing was searched for it");
     let Some(Unmeasured::SeedTooFar {
         offset_px,
         bound_px,
@@ -4043,8 +4319,19 @@ fn moving_a_sighting_writes_its_keypoint_pins_it_and_drops_what_was_read_at_the_
     let measurement = moved.track.as_ref().expect("a track slot");
     assert_eq!(measurement.zncc, None);
     assert_eq!(measurement.seed_shift_px, None);
-    // Nothing else moved: the other sighting, the patch and the position stand.
-    assert_eq!(next.observations[0], track.observations[0]);
+    // The bitmap was this row's render at its old keypoint, so it goes, and
+    // with it every score read against it.
+    if track
+        .track()
+        .is_some_and(|p| p.reference == Some(1) && p.bitmap.is_some())
+    {
+        assert!(next.track().unwrap().bitmap.is_none());
+        assert_eq!(next.observations[0].track.as_ref().unwrap().zncc, None);
+    }
+    // Nothing else moved: the other sighting, its verdict, the patch and the
+    // position stand.
+    assert_eq!(next.observations[0].site(), track.observations[0].site());
+    assert_eq!(next.observations[0].verdict, track.observations[0].verdict);
     assert_eq!(
         next.track().map(|p| p.position),
         track.track().map(|p| p.position)
@@ -5748,7 +6035,7 @@ fn a_bearing_whose_rays_stay_parallel_stays_a_bearing_at_the_size_it_had() {
         .map(|o| {
             o.track
                 .as_ref()
-                .and_then(|m| m.zncc)
+                .and_then(|m| m.loo_zncc)
                 .expect("a bearing's tangent frame registers in every view")
         })
         .collect();
@@ -5810,7 +6097,7 @@ fn a_bearing_whose_rays_stay_parallel_stays_a_bearing_at_the_size_it_had() {
         let now = m.keypoint.expect("a keypoint");
         let moved = f64::from(now[0] - was[0]).hypot(f64::from(now[1] - was[1]));
         assert!(moved < 1.0, "sighting {k} moved {moved} px");
-        let zncc = m.zncc.expect("a score");
+        let zncc = m.loo_zncc.expect("a score");
         assert!(zncc > 0.5, "sighting {k} scored {zncc}");
         assert!(
             (zncc - seen[k]).abs() < 0.2,
@@ -6223,6 +6510,14 @@ fn the_bench_s_shift_bar_defaults_to_the_localizer_s_search_radius() {
 fn the_bench_s_zncc_bars_default_below_the_cluster_refinement_s() {
     assert_eq!(Thresholds::default().min_zncc, BENCH_MIN_ZNCC);
     assert_eq!(Thresholds::default().min_zncc_middle, BENCH_MIN_ZNCC_MIDDLE);
+    assert_eq!(
+        Thresholds::default().cluster_min_zncc,
+        BENCH_CLUSTER_MIN_ZNCC
+    );
+    assert_eq!(
+        Thresholds::default().cluster_min_zncc_middle,
+        BENCH_CLUSTER_MIN_ZNCC_MIDDLE
+    );
     // The kernel keeps its own bar: the batch pass is not moved by the bench.
     assert_eq!(ClusterRefineParams::default().min_zncc, 0.85);
 }

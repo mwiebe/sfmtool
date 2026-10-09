@@ -1123,7 +1123,44 @@ impl AppState {
             });
             return Ok(());
         }
+        // Where the unpin handed the reference to the rule's pick on another
+        // row, the scores were read against the outgoing bitmap, so the bars
+        // judged nothing: the evaluation that follows renders the new one,
+        // judges the rows and logs what it moved.
+        // The row named is the one the render will take (core's
+        // `bitmap_target`), which is the rule's pick unless only its last
+        // fallback reached it (the render is then the mean of the views) or no
+        // reading has given the rule a pick yet (the render runs the rule).
+        // Where fewer than two `in` rows carry a keypoint the render makes a
+        // bitmap for judging instead, from every row with one.
+        let keyed_ins = next
+            .observations
+            .iter()
+            .filter(|o| {
+                o.verdict == Verdict::In && o.track.as_ref().is_some_and(|m| m.keypoint.is_some())
+            })
+            .count();
+        let pending = report.bitmap_pending.then(|| {
+            if keyed_ins < 2 {
+                return "waiting for a bitmap for judging to be rendered from the rows with a \
+                        keypoint, in or out"
+                    .to_string();
+            }
+            let from = sfmtool_core::bench::bitmap_target(&next)
+                .flatten()
+                .map(|row| {
+                    self.image_name(ImageRef::new(id, next.observations[row].image as usize))
+                })
+                .unwrap_or_else(|| {
+                    "the rule's pick at the render, or the mean of the views".to_string()
+                });
+            format!("waiting for the bitmap to be rendered from {from}")
+        });
         let text = match &one {
+            Some((_, name)) if pending.is_some() => format!(
+                "Handed {name} back to the thresholds in {label}: {}",
+                pending.as_deref().unwrap_or_default()
+            ),
             Some((observation, name)) => format!(
                 "Handed {name} back to the thresholds in {label}: {}",
                 next.observations[*observation].verdict
@@ -1156,6 +1193,10 @@ impl AppState {
                     next.observations.len() - total_in
                 )
             }
+        };
+        let text = match (&one, &pending) {
+            (None, Some(pending)) => format!("{text}; {pending}"),
+            _ => text,
         };
         let bench = install(&bench, label, next)?;
         self.push_bench_step(index, bench, text);
@@ -1458,6 +1499,50 @@ impl AppState {
             "Applied the thresholds to {label}: {} in, {} out, {} pinned, {} unmeasured",
             report.turned_in, report.turned_out, report.pinned, report.unmeasured
         );
+        self.push_bench_step(index, bench, text);
+        Ok(())
+    }
+
+    /// Make `observation` the track's reference, the row its patch bitmap is
+    /// rendered from, and pin it (`sfmtool_core::bench::set_reference`): Track
+    /// View's *Set as reference* and the wire's `set_bench_track_reference`.
+    ///
+    /// One version. The step drops the bitmap unless the row held the
+    /// reference already, and the live evaluation that follows every step
+    /// renders it from the row and scores every row against it. A call on the
+    /// reference the track holds on a pinned row is a no-effect row instead.
+    pub(crate) fn set_bench_reference(
+        &mut self,
+        id: ReconId,
+        label: &str,
+        observation: usize,
+    ) -> Result<(), String> {
+        let (index, bench, track) = self.bench_step_target(id, label)?;
+        let (next, report) = bench::set_reference(&track, observation)
+            .map_err(|e| format!("Cannot set that reference: {e}"))?;
+        let name = self.image_name(ImageRef::new(
+            id,
+            track.observations[observation].image as usize,
+        ));
+        if !report.changed {
+            self.no_effect(format!(
+                "Set {name} as the reference of {label}: no effect, it is the reference already"
+            ));
+            return Ok(());
+        }
+        let text = match report.was {
+            Some(was) if was != observation => {
+                let before = track
+                    .observations
+                    .get(was)
+                    .map(|o| self.image_name(ImageRef::new(id, o.image as usize)))
+                    .unwrap_or_else(|| format!("observation {was}"));
+                format!("Set {name} as the reference of {label}, in place of {before}")
+            }
+            Some(_) => format!("Set {name} as the reference of {label}, and pinned it"),
+            None => format!("Set {name} as the reference of {label}"),
+        };
+        let bench = install(&bench, label, next)?;
         self.push_bench_step(index, bench, text);
         Ok(())
     }
@@ -2493,6 +2578,26 @@ pub(crate) fn patch_resolution(recon: &sfmtool_core::SfmrReconstruction) -> u32 
     EvaluateOptions::default().patch_resolution(recon)
 }
 
+/// The reference in use on a track-stage track: the row its stored bitmap is
+/// rendered from, or `None` where it has no bitmap, where the bitmap is the
+/// render of no row (a fused mean), and at the cluster stage. Track View's
+/// *Reference* column marks it, and the wire's `stage_data` names it
+/// `reference_observation`.
+pub(crate) fn reference_in_use(track: &EditableTrack) -> Option<usize> {
+    track
+        .track()
+        .and_then(|payload| payload.bitmap.as_ref().and(payload.reference))
+}
+
+/// The row the reference-view rule picked at the track's last evaluation, or
+/// `None` where it picked none or nothing has evaluated the track. While the
+/// reference's row is pinned this can differ from [`reference_in_use`];
+/// unpinning that row, or *Set as reference* on this one, makes the two agree.
+/// The wire names it `reference_view_observation`.
+pub(crate) fn reference_view_pick(track: &EditableTrack) -> Option<usize> {
+    track.reference_view_pick()
+}
+
 /// The sampler choice the bench's evaluation renders each view's tile with
 /// (`EvaluateOptions::localize`'s `sampler`, under the options
 /// [`evaluate_job`] runs with): the sampler rule by default.
@@ -2546,7 +2651,9 @@ pub(crate) fn evaluate_job(
             &FitOptions::default(),
             progress,
         ) {
-            Ok((measured, _)) => live::Measured::Track(Box::new(measured)),
+            Ok((measured, report)) => {
+                live::Measured::Track(Box::new(measured), (report.turned_in, report.turned_out))
+            }
             Err(sfmtool_core::bench::EvaluateError::Cancelled) => live::Measured::Cancelled,
             Err(e) => live::Measured::Failed(format!("Cannot evaluate {label}: {e}")),
         }

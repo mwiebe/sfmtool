@@ -21,12 +21,12 @@ use crate::progress::Progress;
 use crate::readable::Readable;
 use crate::reconstruction::edited::EditedReconstruction;
 
-use super::evaluate::restate_reference_view;
+use super::evaluate::{bitmap_target, clear_bitmap_scores, restate_reference_view};
 use super::fit::FitOptions;
 use super::stage::{set_stage, StageError};
 use super::track::{
     ClusterMeasurement, ClusterPayload, EditableTrack, Observation, Origin, Provenance,
-    RepaintMark, Stage, StageKind, Thresholds, TrackMeasurement, TrackPayload, Verdict,
+    RepaintMark, Stage, StageKind, Thresholds, TrackMeasurement, TrackPayload, Unmeasured, Verdict,
 };
 use super::{check_label, Bench, BenchError, BenchItem, ItemKind};
 
@@ -143,9 +143,12 @@ impl std::error::Error for CreateTrackError {}
 /// they stand until a person hands them to the bars ([`unpin_verdicts`]), and
 /// the evaluations that read the track leave them where they are. The
 /// measurements are carried from what the record stores and nothing is
-/// recomputed: the leave-one-out ZNCC is `observation_confidence` read back out
-/// of its byte scale where the column exists, and everything an evaluation
-/// would compute is left unmeasured. So putting a track on the bench and doing
+/// recomputed: the leave-one-out ZNCC (`loo_zncc`) is `observation_confidence`
+/// read back out of its byte scale where the column exists, and everything an
+/// evaluation would compute, the score against the bitmap among it, is left
+/// unmeasured. The point's stored reference observation comes on as the
+/// track's reference, and with every row pinned it is held until a person
+/// unpins its row. So putting a track on the bench and doing
 /// nothing shows the numbers the reconstruction already holds, plus the verdict
 /// column.
 ///
@@ -195,7 +198,7 @@ pub fn create_track(
                 // The stored column is the fit's own leave-one-out score in a
                 // byte scale; reading it back is carrying a measurement, not
                 // making one.
-                zncc: view
+                loo_zncc: view
                     .observation_confidence()
                     .map(|c| f64::from(c[k]) / f64::from(u8::MAX)),
                 ..TrackMeasurement::default()
@@ -216,6 +219,8 @@ pub fn create_track(
         // column names the observation the bitmap is, or is to be, rendered
         // from -- for a column rendered for display, the observation that
         // render rendered it from.
+        bitmap_for_judging: false,
+        bitmap_pending: false,
         reference: view
             .reference_observation()
             .and_then(|r| usize::try_from(r).ok()),
@@ -537,6 +542,12 @@ pub enum TrackEditError {
         /// The view the pixel was named in.
         viewpoint: Viewpoint,
     },
+    /// The observation is `out`, and only an `in` observation can be the
+    /// track's reference.
+    NotIn {
+        /// The observation named.
+        observation: usize,
+    },
 }
 
 /// Which photograph a pixel of a gesture is in, and so which square the pointer
@@ -633,6 +644,10 @@ impl std::fmt::Display for TrackEditError {
             TrackEditError::NoProjection { viewpoint } => {
                 write!(f, "the patch and that pixel do not meet in {viewpoint}")
             }
+            TrackEditError::NotIn { observation } => write!(
+                f,
+                "observation {observation} is out, and only an in observation can be the reference"
+            ),
         }
     }
 }
@@ -729,7 +744,7 @@ pub struct AddObservationReport {
 /// an image that only half holds it; bringing that seed inside would report a
 /// sighting where the search never said there was one, rather than leaving the
 /// reading to refuse it as
-/// [`Unmeasured::OffSensor`](super::track::Unmeasured::OffSensor). The clamp for
+/// [`Unmeasured::OffSensor`]. The clamp for
 /// a pixel a person or a caller named belongs to the caller that knows it is one,
 /// which for the viewer is `AppState::add_bench_observation`.
 pub fn add_observation(
@@ -828,6 +843,7 @@ pub fn set_verdict(
     if was != verdict {
         restate_reference_view(&mut next);
     }
+    next.end_pending_if_held();
     Ok((
         next,
         VerdictReport {
@@ -848,6 +864,18 @@ pub struct UnpinReport {
     pub turned_in: usize,
     /// How many they turned `out`.
     pub turned_out: usize,
+    /// Whether the bitmap is to be rendered again, from the reference-view
+    /// rule's pick, before the bars can judge the rows: the unpin handed the
+    /// reference to a pick on another row, or its repaint turned the reference
+    /// row `out` and the bitmap went with it. Where the unpin handed the
+    /// reference on, every row's score against the bitmap was cleared, so the
+    /// bars judged nothing here; the bitmap itself stays until the render
+    /// replaces it. The evaluation that follows
+    /// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap))
+    /// renders it, scores the rows and judges them, and its report says what
+    /// the bars moved. False while a pinned row still holds the reference,
+    /// whichever row was unpinned.
+    pub bitmap_pending: bool,
     /// Whether anything changed. False exactly when none of the named
     /// observations was pinned, and then the track comes back as it was.
     pub changed: bool,
@@ -869,6 +897,22 @@ pub struct UnpinReport {
 /// unpinned row is one the bars decide. A row can differ from what the bars
 /// propose only when the evaluation that last read it followed a repaint
 /// ([`RepaintMark`]), and this brings it back in step.
+///
+/// Unpinning the row that holds the track's reference observation
+/// ([`TrackPayload::reference`]) hands the reference to the reference-view
+/// rule: the next render
+/// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap))
+/// renders the bitmap from the rule's pick, and from then on the reference
+/// follows the pick at every render until a row holding it is pinned again or
+/// [`set_reference`] names one. Where the pick is another row, every score was
+/// read against the bitmap that render replaces, so the scores are cleared
+/// here and the bitmap kept until the render replaces it, marked
+/// [`TrackPayload::bitmap_pending`]: the bars judge none of the rows, each
+/// row's reason says [`Unmeasured::BitmapPending`], no evaluation scores a row
+/// against that bitmap, and the report says [`UnpinReport::bitmap_pending`]. A commit
+/// before that render writes the old bitmap with the reference it is the
+/// render of. The evaluation that follows renders the new bitmap, scores the
+/// rows against it and judges them.
 ///
 /// When none of `observations` is pinned nothing changes: the report says
 /// `changed: false` and a caller pushes no version for it. An index past the
@@ -898,6 +942,9 @@ pub fn unpin_verdicts(
         });
     }
     let mut next = track.clone();
+    // A mark left from before the reference was held again says nothing now:
+    // decide from the pins as they stand.
+    next.end_pending_if_held();
     let mut unpinned = 0;
     for &i in observations {
         if next.observations[i].pinned {
@@ -912,17 +959,41 @@ pub fn unpin_verdicts(
                 unpinned: 0,
                 turned_in: 0,
                 turned_out: 0,
+                bitmap_pending: false,
                 changed: false,
             },
         ));
     }
+    // An unpinned reference row hands the reference to the rule: where the
+    // rule picks another row, the scores were read against a bitmap that is
+    // about to be replaced, so the bars wait for the new one. The bitmap
+    // itself stays, the render of an `in` row, until that render replaces it.
+    let released = track.held_reference().is_some() && next.held_reference().is_none();
+    let moving = released && bitmap_target(&next).is_some();
+    if moving {
+        clear_bitmap_scores(&mut next, Unmeasured::BitmapPending);
+    }
+    if released {
+        if let Stage::Track(payload) = &mut next.stage {
+            payload.bitmap_pending = moving;
+        }
+    }
     let (painted, report) = apply_thresholds(&next);
+    // Judged after the repaint, which can turn the reference row `out` and
+    // drop the bitmap with it.
+    let committable =
+        |t: &EditableTrack| t.track().is_some_and(|p| p.committable_bitmap().is_some());
+    let dropped = committable(track) && !committable(&painted);
+    let bitmap_pending = (moving || dropped)
+        && painted.held_reference().is_none()
+        && bitmap_target(&painted).is_some();
     Ok((
         painted,
         UnpinReport {
             unpinned,
             turned_in: report.turned_in,
             turned_out: report.turned_out,
+            bitmap_pending,
             changed: true,
         },
     ))
@@ -986,11 +1057,102 @@ pub fn pin_verdicts(
             pinned += 1;
         }
     }
+    // Pinning the reference's row holds the reference again: the bitmap is
+    // that row's render, so no render is pending.
+    next.end_pending_if_held();
     Ok((
         next,
         PinReport {
             pinned,
             changed: pinned > 0,
+        },
+    ))
+}
+
+/// What one [`set_reference`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceReport {
+    /// The observation that is now the track's reference.
+    pub observation: usize,
+    /// The reference the track held before, if any.
+    pub was: Option<usize>,
+    /// Whether anything changed: the reference, or the pin of its row. Setting
+    /// the reference the track already holds on a pinned row changes nothing.
+    pub changed: bool,
+}
+
+/// Make `observation` the track's reference observation, the row its patch
+/// bitmap is rendered from, and pin it: *Set as reference* on a row of Track
+/// View.
+///
+/// The row's pin then holds the reference: every render renders the bitmap
+/// from it, whichever row the reference-view rule would pick, until the row is
+/// unpinned ([`unpin_verdicts`]), deleted, split off or turned `out`. The
+/// bitmap the track carries is no longer that row's render unless the row was
+/// the reference already, so it is dropped and the reference kept
+/// ([`TrackPayload::drop_stale_bitmap`]), with every row's score against it, so
+/// the bars judge nothing until the next render
+/// ([`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap),
+/// which SfM Explorer's live evaluation runs after every step, or a fit)
+/// renders the bitmap from the row and scores every row against it. Pinning a
+/// row by itself ([`pin_verdicts`]) does not make it the reference.
+///
+/// Refused at the cluster stage, for an index past the end, for an `out` row
+/// ([`TrackEditError::NotIn`]) and for a row with no keypoint
+/// ([`TrackEditError::NoPlace`]).
+///
+/// # Example
+///
+/// ```no_run
+/// # use sfmtool_core::bench::{set_reference, EditableTrack};
+/// # fn run(track: &EditableTrack) -> Result<(), Box<dyn std::error::Error>> {
+/// let (next, report) = set_reference(track, 3)?;
+/// assert_eq!(next.held_reference(), Some(3));
+/// println!("reference {:?} -> {}", report.was, report.observation);
+/// # Ok(())
+/// # }
+/// ```
+pub fn set_reference(
+    track: &EditableTrack,
+    observation: usize,
+) -> Result<(EditableTrack, ReferenceReport), TrackEditError> {
+    let row = track
+        .observations
+        .get(observation)
+        .ok_or(TrackEditError::NoSuchObservation {
+            observation,
+            observation_count: track.observations.len(),
+        })?;
+    let Stage::Track(payload) = &track.stage else {
+        return Err(TrackEditError::WrongStage {
+            wanted: StageKind::Track,
+            is: track.stage_kind(),
+        });
+    };
+    if row.verdict != Verdict::In {
+        return Err(TrackEditError::NotIn { observation });
+    }
+    if row.track.as_ref().and_then(|m| m.keypoint).is_none() {
+        return Err(TrackEditError::NoPlace { observation });
+    }
+    let was = payload.reference;
+    let changed = was != Some(observation) || !row.pinned;
+    let mut next = track.clone();
+    next.observations[observation].pinned = true;
+    if was != Some(observation) {
+        if let Stage::Track(payload) = &mut next.stage {
+            payload.drop_stale_bitmap();
+            payload.reference = Some(observation);
+        }
+        clear_bitmap_scores(&mut next, Unmeasured::NoBitmap);
+    }
+    next.end_pending_if_held();
+    Ok((
+        next,
+        ReferenceReport {
+            observation,
+            was,
+            changed,
         },
     ))
 }
@@ -1144,11 +1306,19 @@ pub fn sight_observation(
     let mut next = track.clone();
     // The bitmap of a track whose reference observation is sighted elsewhere
     // is that observation's render at its old keypoint, so it goes; the
-    // observation stays on the track, and so does the reference.
+    // observation stays on the track, and so does the reference. Every score
+    // read against that bitmap goes with it. A bitmap for judging names no
+    // row and can be this observation's tile, so it goes as well.
+    let mut stale = false;
     if let Stage::Track(payload) = &mut next.stage {
-        if payload.reference == Some(observation) {
+        let named = payload.reference == Some(observation) || payload.bitmap_for_judging;
+        if named && payload.bitmap.is_some() {
             payload.drop_stale_bitmap();
+            stale = true;
         }
+    }
+    if stale {
+        clear_bitmap_scores(&mut next, Unmeasured::NoBitmap);
     }
     let target = &mut next.observations[observation];
     match track.stage {
@@ -1566,7 +1736,7 @@ pub struct TranslateToPixelReport {
 /// them.
 ///
 /// A sighting the moved centre no longer projects into is left with no keypoint
-/// and [`Unmeasured::NoProjection`](super::track::Unmeasured::NoProjection) as
+/// and [`Unmeasured::NoProjection`] as
 /// its reason, which is the truth about it: the patch is no longer in that
 /// photograph.
 pub fn translate_patch_to_pixel(
@@ -1669,7 +1839,7 @@ pub struct TranslateReport {
 /// move by *different* amounts, and that spread is the parallax the old depth was
 /// wrong by. A sighting the moved patch no longer projects into is left with no
 /// keypoint and
-/// [`Unmeasured::NoProjection`](super::track::Unmeasured::NoProjection), which is
+/// [`Unmeasured::NoProjection`], which is
 /// the truth about it.
 ///
 /// The axes, the normal and the size are untouched. The bitmap and the
@@ -1897,7 +2067,7 @@ pub struct TiltReport {
 /// it preserves the same thing, which is where each photograph sees the patch's
 /// content against where the geometry puts its middle. A sighting the turned
 /// patch no longer projects into is left with no keypoint and
-/// [`Unmeasured::NoProjection`](super::track::Unmeasured::NoProjection).
+/// [`Unmeasured::NoProjection`].
 ///
 /// **The turn stops [`MAX_TILT_DEG`] from any observation.** With `e_i` the
 /// unit vector from the centre to observation `i`'s camera centre, a normal is
@@ -2227,7 +2397,7 @@ pub fn half_width_px(shape: [[f64; 2]; 2], radius: f64) -> f64 {
 /// a patch slid until its centre meets that pixel's ray is flung across the
 /// reconstruction. So the target is taken to the nearest pixel of
 /// `[0, width) x [0, height)` -- the sensor's own half-open extent, the range
-/// [`Unmeasured::OffSensor`](super::track::Unmeasured::OffSensor) is written
+/// [`Unmeasured::OffSensor`] is written
 /// against -- and the step reports that it did, so the sentence a person reads
 /// says where the patch went and why it is not where they pointed.
 ///
@@ -2535,17 +2705,35 @@ pub fn apply_thresholds(track: &EditableTrack) -> (EditableTrack, ThresholdRepor
 /// better. It is what the thresholds say about each row whatever the person
 /// decided, which is what a viewer shows beside a verdict set by hand to say
 /// whether the hand agrees with the bars.
+///
+/// The pinned row that holds the reference scores `1` against its own render,
+/// which says nothing about it. Where unpinning it would move the bitmap to
+/// the reference-view rule's pick on another row ([`unpin_verdicts`] reports
+/// that as [`UnpinReport::bitmap_pending`]), its entry is `None`: the bars
+/// can judge it only against the bitmap that unpin leads to.
 pub fn verdicts_if_unpinned(track: &EditableTrack) -> Vec<Option<Verdict>> {
     let painted = paint(track, &[]);
     (0..track.observations.len())
         .map(|i| {
             if track.observations[i].pinned {
+                if track.held_reference() == Some(i) && reference_would_move(track, i) {
+                    return None;
+                }
                 paint(track, &[i])[i]
             } else {
                 painted[i]
             }
         })
         .collect()
+}
+
+/// Whether unpinning row `i` of `track` would move its bitmap: the row holds
+/// the reference, and the reference-view rule picks another row.
+fn reference_would_move(track: &EditableTrack, i: usize) -> bool {
+    let mut unpinned = track.clone();
+    unpinned.end_pending_if_held();
+    unpinned.observations[i].pinned = false;
+    bitmap_target(&unpinned).is_some()
 }
 
 /// The verdicts the painting gives, one per observation: `None` for an
@@ -2680,7 +2868,12 @@ impl BarChecks {
 
 /// What each bar of `thresholds` says about `observation` at `stage`, or
 /// `None` when nothing at that stage has measured it, which is when it carries
-/// no whole-patch ZNCC.
+/// no whole-patch ZNCC. At the track stage a row the keypoint localizer could
+/// not read (no
+/// [`loo_zncc`](super::track::TrackMeasurement::loo_zncc): its seed too far
+/// from the projection, a grazing view, or nothing to score) is unmeasured as
+/// well, even where it has a score against the bitmap: its status cell shows
+/// the localizer's refusal, and a bitmap score alone does not turn it `in`.
 ///
 /// This is the whole of what the thresholds judge a row by, so the verdict
 /// they propose and anything that shows a reading as passing or failing its
@@ -2717,6 +2910,7 @@ pub fn bar_checks(
         }
         StageKind::Track => {
             let m = observation.track.as_ref()?;
+            m.loo_zncc?;
             (
                 m.zncc?,
                 m.zncc_middle,
@@ -2726,12 +2920,13 @@ pub fn bar_checks(
             )
         }
     };
+    let (min_zncc, min_middle) = thresholds.zncc_bars(stage);
     Some(BarChecks {
-        min_zncc: BarCheck::of(Some(zncc), |z| z >= thresholds.min_zncc),
-        min_zncc_middle: if thresholds.min_zncc_middle <= 0.0 {
+        min_zncc: BarCheck::of(Some(zncc), |z| z >= min_zncc),
+        min_zncc_middle: if min_middle <= 0.0 {
             BarCheck::NotJudged
         } else {
-            BarCheck::of(middle, |z| z >= thresholds.min_zncc_middle)
+            BarCheck::of(middle, |z| z >= min_middle)
         },
         max_shift_px: BarCheck::of(shift, |s| s <= thresholds.max_shift_px),
         max_zncc_self_similarity_radius: BarCheck::of(radius, |r| {
@@ -2972,15 +3167,26 @@ pub fn split(
     // The bitmap stays with the first track, and the row it is the tile of
     // moves up past the rows taken from before it. A bitmap whose row was
     // taken is the tile of a sighting the first track no longer has, so it
-    // goes with its reference.
+    // goes with its reference, and with every score read against it. A
+    // bitmap for judging names no row and can be a taken row's tile, so it
+    // goes as well.
+    let mut dropped = false;
     if let Stage::Track(payload) = &mut first.stage {
+        if payload.bitmap_for_judging {
+            payload.drop_bitmap();
+            dropped = true;
+        }
         if let Some(r) = payload.reference {
             if taken.binary_search(&r).is_ok() {
                 payload.drop_bitmap();
+                dropped = true;
             } else {
                 payload.reference = Some(r - taken.partition_point(|&t| t < r));
             }
         }
+    }
+    if dropped {
+        clear_bitmap_scores(&mut first, Unmeasured::NoBitmap);
     }
     reseat_reference(&mut first);
     let mut second = (**track).clone();
