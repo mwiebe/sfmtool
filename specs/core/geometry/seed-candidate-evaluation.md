@@ -363,6 +363,11 @@ non-measurements counted with their reason. Per pair, per frame and per
 member: median and p90 disagreement with the correlation medians beside
 them, plus the measurability census.
 
+This witness reads rotation-only members only; no channel of a finite member
+compares its photographs resampled into its patches. A photometric channel for
+every released candidate is proposed in
+[seed-photometric-candidate-score.md](../../drafts/seed-photometric-candidate-score.md).
+
 ### Per-frame support
 
 The observations the member holds on each posed frame, and that count against
