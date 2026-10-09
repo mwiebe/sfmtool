@@ -15,6 +15,7 @@ Amends:
 - [formats/matches-file-format.md](../formats/matches-file-format.md): `patch_size` of the cluster-patches file
 - [core/patch/patch-cloud.md](../core/patch/patch-cloud.md): the resolution a cloud is rendered at
 - [cli/reconstruction/embed-patches-command.md](../cli/reconstruction/embed-patches-command.md): the rounds
+- [core/geometry/seed-hypothesis-loop.md](../core/geometry/seed-hypothesis-loop.md) § "Product": what a release carries
 
 Amended by [surface-footprint-analysis.md](surface-footprint-analysis.md), which chooses the footprint the two tiers share.
 
@@ -79,7 +80,7 @@ The cluster-patches file has the same question at `patch_size`. The fleet refres
 
 - `R` is read in many places as a file-level constant. Before any per-track `R`, a grep for every reader of the patch resolution is the first task, so the format decision is made knowing the cost.
 - The resample of stage 1 must use the per-view sampler choice from the sharper-bitmap work, not the mip sampler alone; at 24 the anisotropy that choice handles is twice as visible.
-- The seed's hypothesis releases carry no patch frames today. For the seed to hand a survivor to the fine tier, the release must carry frames, which a photometric score of the candidates would require anyway.
+- The seed's hypothesis releases carry no patch frames today. For the seed to hand a survivor to the fine tier, the release must carry frames, which [seed-photometric-candidate-score.md](seed-photometric-candidate-score.md) requires anyway.
 
 ## Parameters
 

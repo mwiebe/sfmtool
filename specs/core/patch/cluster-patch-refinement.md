@@ -772,8 +772,9 @@ cascade's, for a measurement of the cells that must not change anything else.
 Moving under 0.4% of the kept members on `KerryPark480` changes which seed
 candidates are committed and which pass against the ground truth, and two loop
 variants that differ in a few dozen moved members give a failing and a passing
-pick. That is a sensitivity of the seed's pick, not evidence against the moved
-shapes.
+pick. That is a sensitivity of the seed's pick, which
+[seed-hypothesis-loop.md](../geometry/seed-hypothesis-loop.md#rank) records, not
+evidence against the moved shapes.
 
 #### The shape-moving loop (`move_shape`)
 

@@ -28,7 +28,7 @@ This draft proposes gating and weighting the pieces by their own self-similarity
 
 ### Why this matters for the seed
 
-The seed stage produces up to eight candidate reconstructions per capture and then chooses among them. Scored against the eight approved ground truths, a correct candidate exists in 7 of 8 captures and the seed's own rule picks it in 4 of 8. The rule reads only geometric residuals, and those cannot distinguish a right camera layout from a collapsed one at the same reprojection error. Photometric scoring of candidates is the independent signal that can, and it needs patch normals that are right often enough to be trusted.
+The seed stage produces up to eight candidate reconstructions per capture and then chooses among them. Scored against the eight approved ground truths, a correct candidate exists in 7 of 8 captures and the seed's own rule picks it in 4 of 8. The rule reads only geometric residuals, and those cannot distinguish a right camera layout from a collapsed one at the same reprojection error. Photometric scoring of candidates is the independent signal that can, and it needs patch normals that are right often enough to be trusted. That consumer is specified in [seed-photometric-candidate-score.md](seed-photometric-candidate-score.md).
 
 ## Rust API
 

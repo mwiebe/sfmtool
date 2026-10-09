@@ -9,8 +9,9 @@ Not decided: whether the gate reads the predicted precision or a wider minimum t
 Amends:
 - [core/patch/cell-plane-normals.md](../core/patch/cell-plane-normals.md): a precision output per cluster, and the gate on it (its Non-goals link here)
 - [core/patch/cluster-patch-refinement.md](../core/patch/cluster-patch-refinement.md) § "Piecewise refinement": a first consumer of the stored cells (its Non-goals link here)
+- [core/geometry/seed-hypothesis-loop.md](../core/geometry/seed-hypothesis-loop.md) § "Product": the seed's writer deriving patch frames from the cells
 
-Related drafts: [piece-gated-grid-normal.md](piece-gated-grid-normal.md) is the rendering estimator that shares the cell plane normal's verdict.
+Related drafts: [seed-photometric-candidate-score.md](seed-photometric-candidate-score.md) reads the frames this draft would give a release; [piece-gated-grid-normal.md](piece-gated-grid-normal.md) is the rendering estimator that shares the cell plane normal's verdict.
 
 ## Purpose
 
@@ -38,7 +39,7 @@ The alternative gate is a wider minimum triangulation angle. At 5° instead of 2
 
 ### The seed's writer derives its frames from the cells
 
-With a gate measured, the seed's writer builds each released point's patch frame from the cells: the gated cell plane normal where the cluster has one, and the viewing direction otherwise. Today the writer does not read the cells at all. A photometric score of the seed's candidates is the consumer that needs those frames.
+With a gate measured, the seed's writer builds each released point's patch frame from the cells: the gated cell plane normal where the cluster has one, and the viewing direction otherwise. Today the writer does not read the cells at all. The photometric candidate score of [seed-photometric-candidate-score.md](seed-photometric-candidate-score.md) is the consumer that needs those frames.
 
 ## Open questions
 
