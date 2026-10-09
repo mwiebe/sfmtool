@@ -1563,6 +1563,130 @@ fn a_split_whose_reference_moved_reseats_both_halves() {
     assert_eq!(second.observations[0].image, 0);
 }
 
+/// The row a track-stage bitmap is the tile of follows its observation through
+/// a split and an image delete, and the bitmap goes with its reference when
+/// that observation leaves the track.
+#[test]
+fn the_bitmap_s_row_follows_its_observation_or_goes_with_it() {
+    let scene = Scene::new();
+    let edited = edited_with_columns(&scene, WORLD);
+    let (bench, label) = bench_with_point(&edited, 0);
+    let mut track = track_of(&bench, &label);
+    let n = track.observations.len();
+    assert!(n >= 2, "{n} observations");
+    payload_of(&mut track).reference = Some(n - 1);
+    payload_of(&mut track).bitmap = Some(Array3::zeros((4, 4, 4)));
+    let last_image = track.observations[n - 1].image;
+    let bench = install(&bench, &label, track.clone());
+
+    // Splitting off the first row moves the bitmap's row up by one.
+    let (after, _) = split(&bench, &edited, &label, &[0]).expect("one row off");
+    let first = after.track(&label).expect("still on");
+    let row = first
+        .track()
+        .and_then(|p| p.reference)
+        .expect("still named");
+    assert_eq!(row, n - 2);
+    assert_eq!(first.observations[row].image, last_image);
+    assert!(first.track().unwrap().bitmap.is_some());
+    // Splitting off the bitmap's own row drops the bitmap with it.
+    let (after, _) = split(&bench, &edited, &label, &[n - 1]).expect("one row off");
+    let payload = after.track(&label).unwrap().track().unwrap();
+    assert_eq!(payload.reference, None);
+    assert!(payload.bitmap.is_none());
+
+    // Deleting an earlier image renumbers the row; deleting its own drops it.
+    let earlier = track.observations[0].image;
+    if earlier != last_image {
+        let (moved, map) = track.delete_image(earlier).expect("the track sees it");
+        let row = moved
+            .track()
+            .and_then(|p| p.reference)
+            .expect("still named");
+        assert_eq!(Some(row), map[n - 1]);
+        assert!(moved.track().unwrap().bitmap.is_some());
+    }
+    let (gone, _) = track.delete_image(last_image).expect("the track sees it");
+    assert_eq!(gone.track().unwrap().reference, None);
+    assert!(gone.track().unwrap().bitmap.is_none());
+}
+
+/// Sighting a track's reference observation at another keypoint drops the
+/// bitmap, since it was rendered at the old keypoint, and keeps the reference,
+/// since the observation is still on the track; sighting any other
+/// observation keeps both.
+#[test]
+fn sighting_the_reference_observation_drops_the_bitmap_and_keeps_the_reference() {
+    let scene = Scene::new();
+    let edited = edited_with_columns(&scene, WORLD);
+    let (bench, label) = bench_with_point(&edited, 0);
+    let mut track = track_of(&bench, &label);
+    let n = track.observations.len();
+    assert!(n >= 2, "{n} observations");
+    payload_of(&mut track).reference = Some(0);
+    payload_of(&mut track).bitmap = Some(Array3::zeros((4, 4, 4)));
+    let pixel_of = |track: &EditableTrack, i: usize| {
+        let [x, y] = track.observations[i].site().expect("a sighting");
+        [x + 8.0, y + 8.0]
+    };
+
+    let (other, _) = sight_observation(&track, &edited, 1, pixel_of(&track, 1)).expect("sighted");
+    assert_eq!(other.track().unwrap().reference, Some(0));
+    assert!(other.track().unwrap().bitmap.is_some());
+
+    let (own, _) = sight_observation(&track, &edited, 0, pixel_of(&track, 0)).expect("sighted");
+    assert_eq!(own.track().unwrap().reference, Some(0));
+    assert!(own.track().unwrap().bitmap.is_none());
+    // The reconstruction stores a bitmap per point, so a commit waits for the
+    // render that sets the bitmap and its reference together.
+    assert!(matches!(
+        commit(&edited, &own),
+        Err(crate::bench::CommitError::NoBitmap)
+    ));
+}
+
+/// A patch step makes the bitmap stale and keeps the reference observation,
+/// which is still on the track: the next render renders a new bitmap.
+#[test]
+fn a_patch_step_drops_the_bitmap_and_keeps_the_reference() {
+    let scene = Scene::new();
+    let edited = edited_with_columns(&scene, WORLD);
+    let (bench, label) = bench_with_point(&edited, 0);
+    let mut track = track_of(&bench, &label);
+    payload_of(&mut track).reference = Some(1);
+    payload_of(&mut track).bitmap = Some(Array3::zeros((4, 4, 4)));
+    let (spun, report) = spin_patch(&track, 0.3).expect("a finite angle");
+    assert!(report.changed);
+    assert_eq!(spun.track().unwrap().reference, Some(1));
+    assert!(spun.track().unwrap().bitmap.is_none());
+}
+
+/// Turning out the observation a track-stage bitmap is the render of drops
+/// the bitmap with its reference, by hand or by the thresholds; turning out
+/// another keeps both.
+#[test]
+fn turning_out_the_bitmap_s_observation_drops_the_bitmap() {
+    let scene = Scene::new();
+    let edited = edited_with_columns(&scene, WORLD);
+    let (bench, label) = bench_with_point(&edited, 0);
+    let mut track = track_of(&bench, &label);
+    let n = track.observations.len();
+    assert!(n >= 2, "{n} observations");
+    for observation in &mut track.observations {
+        observation.verdict = Verdict::In;
+    }
+    payload_of(&mut track).reference = Some(0);
+    payload_of(&mut track).bitmap = Some(Array3::zeros((4, 4, 4)));
+
+    let (other, _) = set_verdict(&track, 1, Verdict::Out).expect("a verdict");
+    assert_eq!(other.track().unwrap().reference, Some(0));
+    assert!(other.track().unwrap().bitmap.is_some());
+
+    let (own, _) = set_verdict(&track, 0, Verdict::Out).expect("a verdict");
+    assert_eq!(own.track().unwrap().reference, None);
+    assert!(own.track().unwrap().bitmap.is_none());
+}
+
 /// The rows a person splits off are usually the ones the thresholds just turned
 /// out, so a half with no `in` observation in it is the ordinary case rather
 /// than a refusal.
@@ -1743,7 +1867,7 @@ fn a_commit_onto_the_point_that_already_holds_the_track_writes_nothing() {
 
 /// What the **first** commit of an untouched point rewrites, which is why it is
 /// a change and the ones after it are not: the colour, which the commit reads
-/// from the consensus bitmap's centre rather than carrying the stored byte, and
+/// from the patch bitmap's centre rather than carrying the stored byte, and
 /// the error, which is the mean of what an evaluation measured and so zero for
 /// a track nothing has read. Every other column round-trips exactly, and after
 /// the first write the two agree as well.
@@ -2512,11 +2636,11 @@ fn a_track_from_a_point_fits_to_the_kernels_own_numbers() {
         position,
         "the frame follows the position"
     );
-    let bitmap = payload.bitmap.as_ref().expect("a fused consensus");
+    let bitmap = payload.bitmap.as_ref().expect("a stored bitmap");
     assert_eq!(bitmap.shape(), [BITMAP_R, BITMAP_R, 4]);
     assert!(
         bitmap.iter().any(|&v| v > 0),
-        "the fused tile shows the plane"
+        "the stored tile shows the plane"
     );
 }
 
@@ -4786,7 +4910,7 @@ fn a_translation_along_the_normal_keeps_every_in_plane_offset() {
         .zncc = Some(0.91);
     assert!(
         track.track().and_then(|p| p.bitmap.as_ref()).is_some(),
-        "the column fixture should carry a consensus bitmap to drop"
+        "the column fixture should carry a patch bitmap to drop"
     );
     // The fixture's keypoints are each point's exact projection, so every
     // in-plane offset is zero and a step that reset them all would pass. Put
@@ -5013,7 +5137,7 @@ fn a_tilt_is_the_least_rotation_and_rebuilds_every_sighting_on_the_turned_axes()
         .zncc = Some(0.91);
     assert!(
         track.track().and_then(|p| p.bitmap.as_ref()).is_some(),
-        "the column fixture should carry a consensus bitmap to drop"
+        "the column fixture should carry a patch bitmap to drop"
     );
     // The fixture's keypoints are each point's exact projection, so every
     // in-plane offset is zero and a step that reset them all would pass. Put

@@ -7,7 +7,7 @@
 //! [`evaluate`](super::evaluate::evaluate()) reads a track and writes only what it
 //! read, [`fit`] is the modification: at the track stage it localizes every
 //! sighting against the patch, refines each to sub-pixel, re-triangulates the
-//! `in` results, fuses the consensus bitmap and writes the keypoints, the
+//! `in` results, renders the patch bitmap and writes the keypoints, the
 //! position and the frame. It sets no verdict -- the thresholds propose and
 //! [`apply_thresholds`](super::steps::apply_thresholds) applies the proposal --
 //! so what it writes is geometry and a report, and a decision about nothing.
@@ -29,10 +29,10 @@ use crate::patch::cloud::OrientedPatch;
 use crate::patch::keypoint_localize::{
     try_localize_patch_keypoints, KeypointLocalizeParams, LocalizeError,
 };
-use crate::patch::keypoint_subpixel::{
-    fuse_patch_bitmap_reporting, refine_patch_keypoints_reporting, KeypointSubpixelParams,
-};
+use crate::patch::keypoint_subpixel::{refine_patch_keypoints_reporting, KeypointSubpixelParams};
 use crate::patch::normal_refine::ProjectedImage;
+use crate::patch::reference_view::render_view_tile;
+use crate::patch::stored_bitmap::{bitmap_from_tile, render_patch_bitmap};
 use crate::progress::{Cancelled, Progress};
 use crate::progress_note;
 use crate::reconstruction::edited::EditedReconstruction;
@@ -46,7 +46,7 @@ use super::evaluate::{
     grid_distance, open_localizer, plan_rounds, seed_of, shown_bytes, EvaluateError,
     EvaluateOptions, EvaluateReport,
 };
-use super::track::{EditableTrack, Stage, StageKind, TrackPayload};
+use super::track::{EditableTrack, Stage, StageKind, TrackPayload, Verdict};
 
 /// What the kernels a fit runs are allowed to do, and how its result is read
 /// back.
@@ -67,8 +67,10 @@ pub struct FitOptions {
     /// ([`stored_patch_resolution`](super::evaluate::stored_patch_resolution)),
     /// the grid the evaluation it ends with reads at.
     pub localize: KeypointLocalizeParams,
-    /// The sub-pixel kernel, chained after the discrete one, and the fuse that
-    /// renders the consensus bitmap.
+    /// The sub-pixel kernel, chained after the discrete one, and the render of
+    /// the patch bitmap: its resolution and sampler shape the reference view's
+    /// tile, and its window and robust iterations the fused mean where that
+    /// is stored.
     pub refine: KeypointSubpixelParams,
     /// The evaluation a fit ends with, which is where every number it reports
     /// comes from. A caller that reads with its own search radius fits with the
@@ -306,8 +308,8 @@ impl std::fmt::Display for FitReport {
     }
 }
 
-/// Fit `track` at the stage it is in: localize, refine, re-triangulate and fuse
-/// at the track stage, and read the result back.
+/// Fit `track` at the stage it is in: localize, refine, re-triangulate and
+/// render the patch bitmap at the track stage, and read the result back.
 ///
 /// `images` is one [`ProjectedImage`] per image of `edited`, indexed by image
 /// index, exactly as every other photometric step of the bench takes them.
@@ -315,7 +317,7 @@ impl std::fmt::Display for FitReport {
 /// **At the track stage** the patch is registered into every view of every
 /// round by the two kernels the embed pass chains -- as the
 /// track carries it, bearing and all -- the `in` results are re-triangulated,
-/// the frame is placed at what they resolve to and the consensus bitmap is fused
+/// the frame is placed at what they resolve to and the patch bitmap is rendered
 /// over them. An observation the kernels did not place keeps the pixel it had,
 /// so the column still says where the sighting is and the re-triangulation still
 /// has its ray. The fitted track is then evaluated, which is where its
@@ -350,8 +352,9 @@ impl std::fmt::Display for FitReport {
 /// that reads the patches writes what it read and nothing else changes.
 ///
 /// `progress` names the phases the batch kernels carry: `localize`, `refine` and
-/// `fuse` for the fit itself, then `localize` and `self-similarity` for the
-/// reading; `refine` and `self-similarity` at the cluster stage.
+/// `bitmap` for the fit itself, then `localize`, `self-similarity`, `reference
+/// view` and `bitmap scores` for the reading; `refine` and `self-similarity` at
+/// the cluster stage.
 ///
 /// # Example
 ///
@@ -414,41 +417,53 @@ pub fn fit(
     }
 }
 
-/// Fuse the consensus bitmap of a track-stage track where it stands, and move
+/// Render the stored bitmap of a track-stage track where it stands, and move
 /// nothing.
 ///
-/// "In place" is the patch's: the bitmap is fused over the placement the track
-/// already has. The track itself is not changed; the fused track is returned.
+/// "In place" is the patch's: the bitmap is rendered through the placement
+/// the track already has. The track itself is not changed; the rendered track
+/// is returned.
 ///
-/// The fuse a [`fit`] ends its geometry with, for a track whose last step moved
-/// the patch and so left no bitmap: `build_track_at_pixel` ends on a slide of
-/// the patch onto the queried pixel, and fuses with this before it returns, and
-/// the viewer's live evaluation fuses with it after a patch step. The
-/// placement, the position, the verdicts and every keypoint come back as they
-/// were; what is written is the bitmap the `in` sightings show at their
-/// keypoints, on the reconstruction's own bitmap grid where it stores one, and
-/// the colour at its centre.
+/// The render a [`fit`] ends its geometry with, for a track whose last step
+/// moved the patch and so left no bitmap: `build_track_at_pixel` ends on a
+/// slide of the patch onto the queried pixel, and renders with this before it
+/// returns, and the viewer's live evaluation renders with it after a patch
+/// step. The placement, the position, the verdicts and every keypoint come
+/// back as they were; what is written is the tile of the track's reference
+/// observation ([`TrackPayload::reference`]) where it holds one that is `in`
+/// with a keypoint, and otherwise the tile of the `in` sighting the
+/// reference-view rule picks (or the mean of the `in` sightings' tiles where
+/// it picks none or reaches its pick only through its last fallback, see
+/// [`ReferenceRender::stored_reference`](crate::patch::stored_bitmap::ReferenceRender::stored_reference)),
+/// with [`TrackPayload::reference`] naming that sighting, on the
+/// reconstruction's own bitmap grid where it stores one, and the colour at its
+/// centre.
+///
+/// The rows' bitmap scores are not touched: a caller scores them against the
+/// new bitmap with [`score_bitmap`](super::evaluate::score_bitmap), or runs
+/// [`evaluate_rendering_bitmap`](super::evaluate::evaluate_rendering_bitmap),
+/// which reads, renders and scores in one call.
 ///
 /// A cluster, a track with no placement, and one with fewer than two `in`
-/// sightings that carry a keypoint come back unchanged, since there is no
-/// consensus to fuse.
+/// sightings that carry a keypoint come back unchanged, since there is
+/// nothing to render a bitmap from.
 ///
 /// The track's [`RepaintMark`](super::track::RepaintMark) comes across: the
-/// bitmap is nothing a reading or a verdict depends on, so an evaluation whose
-/// answer is fused here still hands on what its repaint did.
-pub fn fuse_bitmap_in_place(
+/// bitmap is nothing a verdict depends on, so an evaluation whose answer is
+/// rendered here still hands on what its repaint did.
+pub fn render_bitmap_in_place(
     track: &EditableTrack,
     edited: &EditedReconstruction,
     images: &[ProjectedImage<'_>],
     options: &FitOptions,
 ) -> EditableTrack {
-    let mut next = fused_in_place(track, edited, images, options);
+    let mut next = rendered_in_place(track, edited, images, options);
     next.repaint = track.repaint.carried();
     next
 }
 
-/// [`fuse_bitmap_in_place`] before the mark is carried across.
-fn fused_in_place(
+/// [`render_bitmap_in_place`] before the mark is carried across.
+fn rendered_in_place(
     track: &EditableTrack,
     edited: &EditedReconstruction,
     images: &[ProjectedImage<'_>],
@@ -461,7 +476,7 @@ fn fused_in_place(
         return track.clone();
     };
     let ins = track.in_observations();
-    let (bitmap, color) = fuse_bitmap(
+    let (bitmap, reference, color) = render_bitmap(
         track,
         edited,
         images,
@@ -474,13 +489,62 @@ fn fused_in_place(
         return track.clone();
     };
     let mut next = track.clone();
-    if let Stage::Track(payload) = &mut next.stage {
+    install_bitmap(&mut next, bitmap, reference, color);
+    next
+}
+
+/// Write a rendered bitmap, the row it is the render of, and the colour at its
+/// centre into `track`'s track-stage payload.
+pub(super) fn install_bitmap(
+    track: &mut EditableTrack,
+    bitmap: Array3<u8>,
+    reference: Option<usize>,
+    color: Option<[u8; 3]>,
+) {
+    if let Stage::Track(payload) = &mut track.stage {
         payload.bitmap = Some(bitmap);
+        payload.reference = reference;
         if let Some(color) = color {
             payload.color = color;
         }
     }
-    next
+}
+
+/// The `(resolution, channels)` a track's bitmap is rendered at: the
+/// reconstruction's own bitmap grid where it stores one, and otherwise the
+/// sub-pixel kernel's resolution with four channels.
+pub(super) fn bitmap_layout(edited: &EditedReconstruction, options: &FitOptions) -> (usize, usize) {
+    match edited.base.point_set.patch_bitmaps_y_x_rgba.as_ref() {
+        Some(bitmaps) => (bitmaps.shape()[1], bitmaps.shape()[3]),
+        None => (options.refine.resolution.max(2) as usize, 4),
+    }
+}
+
+/// An `R·R·4` RGBA render as a `(R, R, channels)` bitmap, keeping as many
+/// channels as the column carries, and the colour at its centre.
+pub(super) fn column_bitmap(
+    rgba: &[u8],
+    resolution: usize,
+    channels: usize,
+) -> (Array3<u8>, [u8; 3]) {
+    let mut bitmap = Array3::<u8>::zeros((resolution, resolution, channels));
+    for row in 0..resolution {
+        for col in 0..resolution {
+            for c in 0..channels {
+                bitmap[[row, col, c]] = if c < 4 {
+                    rgba[(row * resolution + col) * 4 + c]
+                } else {
+                    u8::MAX
+                };
+            }
+        }
+    }
+    let (row, col) = (resolution / 2, resolution / 2);
+    let mut color = [0u8; 3];
+    for (c, out) in color.iter_mut().enumerate() {
+        *out = bitmap[[row, col, if channels >= 3 { c } else { 0 }]];
+    }
+    (bitmap, color)
 }
 
 /// Whether `track` can be fitted at the stage it stands in, judged on the track
@@ -705,8 +769,8 @@ pub(super) fn placed_frame(
     }
 }
 
-/// Register `frame` into every view, re-triangulate the `in` results, fuse the
-/// consensus bitmap, write the geometry, and read the whole of it back.
+/// Register `frame` into every view, re-triangulate the `in` results, render
+/// the patch bitmap, write the geometry, and read the whole of it back.
 ///
 /// Shared by [`fit`] at the track stage and by the upgrade
 /// ([`set_stage`](super::stage::set_stage)), which differ only in where the
@@ -834,14 +898,25 @@ pub(super) fn fit_track(
         images,
         &in_images,
     );
-    let (bitmap, color) = {
-        let mut phase = progress.phase("fuse");
-        let fused = fuse_bitmap(&next, edited, images, &placed, &ins, options, &phase);
+    let (bitmap, reference, color) = {
+        let mut phase = progress.phase("bitmap");
+        let rendered = render_bitmap(&next, edited, images, &placed, &ins, options, &phase);
         progress_note!(phase, "{} observations", ins.len());
-        fused
+        rendered
     };
 
     let previous = track.track();
+    // A render that drew nothing leaves the reference the track carried, as
+    // `render_bitmap_in_place` does, where that observation is still `in`.
+    let reference = if bitmap.is_some() {
+        reference
+    } else {
+        previous.and_then(|p| p.reference).filter(|&r| {
+            next.observations
+                .get(r)
+                .is_some_and(|o| o.verdict == Verdict::In)
+        })
+    };
     next.stage = Stage::Track(TrackPayload {
         position: Some(position),
         at_infinity: classification.at_infinity,
@@ -850,6 +925,7 @@ pub(super) fn fit_track(
             .or_else(|| previous.map(|p| p.color))
             .unwrap_or([0; 3]),
         bitmap,
+        reference,
         normal_confidence: previous.and_then(|p| p.normal_confidence),
         condition_number: finite(triangulation.condition_number),
     });
@@ -1100,15 +1176,21 @@ pub(super) fn triangulate_rays(
     Ok((triangulation, built))
 }
 
-/// Fuse the `in` observations into one consensus tile at their final keypoints,
-/// and read the point's colour off its centre.
+/// Render the track's stored bitmap from the `in` observations at their final
+/// keypoints, and read the point's colour off its centre.
 ///
-/// The fuse is [`fuse_patch_bitmap_reporting`], the sub-pixel kernel's own fuse run with
-/// no Gauss-Newton step so it moves nothing: the keypoints are the ones the fit
-/// already settled, and this pass only renders and blends them. The grid is the
-/// reconstruction's own bitmap grid where it stores one, so what is fused is a
-/// tile the column can hold.
-fn fuse_bitmap(
+/// Where the track holds a defined reference observation
+/// ([`TrackPayload::reference`]) that is one of the `in` rows with a keypoint,
+/// the bitmap is that row's tile at its keypoint ([`render_view_tile`]), and
+/// the reference stays. Otherwise the reference is undefined and the bitmap is
+/// [`render_patch_bitmap`]: the tile of the observation the reference-view
+/// rule picks among the `in` observations, or the fused mean where it picks
+/// none or reaches its pick only through its last fallback. Nothing moves: the
+/// keypoints are the ones the fit already settled. The grid is the
+/// reconstruction's own bitmap grid where it stores one, so what is rendered
+/// is a tile the column can hold. The second value is the row of the track
+/// whose tile the bitmap is.
+fn render_bitmap(
     track: &EditableTrack,
     edited: &EditedReconstruction,
     images: &[ProjectedImage<'_>],
@@ -1116,12 +1198,9 @@ fn fuse_bitmap(
     ins: &[usize],
     options: &FitOptions,
     progress: &Progress<'_>,
-) -> (Option<Array3<u8>>, Option<[u8; 3]>) {
-    let stored = edited.base.point_set.patch_bitmaps_y_x_rgba.as_ref();
-    let (resolution, channels) = match stored {
-        Some(bitmaps) => (bitmaps.shape()[1], bitmaps.shape()[3]),
-        None => (options.refine.resolution.max(2) as usize, 4),
-    };
+) -> (Option<Array3<u8>>, Option<usize>, Option<[u8; 3]>) {
+    let (resolution, channels) = bitmap_layout(edited, options);
+    let mut rows: Vec<usize> = Vec::with_capacity(ins.len());
     let mut view_set: Vec<u32> = Vec::with_capacity(ins.len());
     let mut keypoints: Vec<[f64; 2]> = Vec::with_capacity(ins.len());
     for &i in ins {
@@ -1129,38 +1208,45 @@ fn fuse_bitmap(
         let Some(keypoint) = observation.track.as_ref().and_then(|m| m.keypoint) else {
             continue;
         };
+        rows.push(i);
         view_set.push(observation.image);
         keypoints.push([f64::from(keypoint[0]), f64::from(keypoint[1])]);
     }
     if view_set.len() < 2 {
-        return (None, None);
+        return (None, None, None);
+    }
+    // A defined reference is rendered from; the rule sets one only where the
+    // track holds none.
+    let held = track
+        .track()
+        .and_then(|p| p.reference)
+        .and_then(|r| rows.iter().position(|&i| i == r));
+    if let Some(k) = held {
+        let tile = render_view_tile(
+            patch,
+            &images[view_set[k] as usize],
+            Some(keypoints[k]),
+            resolution,
+            options.refine.sampler,
+            progress,
+        );
+        let (bitmap, color) = column_bitmap(&bitmap_from_tile(&tile), resolution, channels);
+        return (Some(bitmap), Some(rows[k]), Some(color));
     }
     let params = KeypointSubpixelParams {
         resolution: resolution as u32,
         ..options.refine.clone()
     };
-    let Some(fused) =
-        fuse_patch_bitmap_reporting(patch, images, &view_set, &keypoints, &params, progress)
+    let Some(rendered) =
+        render_patch_bitmap(patch, images, &view_set, &keypoints, &params, progress)
     else {
-        return (None, None);
+        return (None, None, None);
     };
-    // The kernel fuses RGBA; the column takes as many channels as it carries.
-    let mut bitmap = Array3::<u8>::zeros((resolution, resolution, channels));
-    for row in 0..resolution {
-        for col in 0..resolution {
-            for c in 0..channels {
-                bitmap[[row, col, c]] = if c < 4 {
-                    fused[(row * resolution + col) * 4 + c]
-                } else {
-                    u8::MAX
-                };
-            }
-        }
-    }
-    let (row, col) = (resolution / 2, resolution / 2);
-    let mut color = [0u8; 3];
-    for (c, out) in color.iter_mut().enumerate() {
-        *out = bitmap[[row, col, if channels >= 3 { c } else { 0 }]];
-    }
-    (Some(bitmap), Some(color))
+    // The kernel renders RGBA; the column takes as many channels as it carries.
+    let (bitmap, color) = column_bitmap(&rendered.rgba, resolution, channels);
+    (
+        Some(bitmap),
+        rendered.reference.map(|r| rows[r]),
+        Some(color),
+    )
 }

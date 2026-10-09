@@ -116,17 +116,33 @@ round a near-edge value up to exactly width/height, which the writer's
 `embed-patches` pipeline (`src/sfmtool/_embed_patches.py`).
 
 **Persisting the patch bitmaps (`bitmaps`).** With `bitmaps` (the default) the
-binding additionally fuses each point's RGBA representative texture at the
-**final** refined keypoints and the command scatters them into a
-`(point_count, R, R, 4)` uint8 array (zero rows where the point produced no
-valid cross-view consensus) attached via
-`clone_with_changes(patches=cloud, patch_bitmaps=…)`; the stored frame is
+binding additionally renders each point's stored bitmap at the **final**
+refined keypoints, the tile of the view the reference-view rule picks, or the
+fused mean of the views, naming no observation, where the rule picks none or
+reaches its pick only through its last fallback
+([reference-view.md](../../../core/patch/reference-view.md) § "The stored
+bitmap"), and the command scatters them into a `(point_count, R, R, 4)` uint8
+array (zero rows where the point produced no valid cross-view consensus) and
+records each point's reference observation, attached via
+`clone_with_changes(patches=cloud, patch_bitmaps=…,
+reference_observations=…)`; the stored frame is
 re-persisted alongside so the bitmaps have a frame to attach to (the frame
-itself is unchanged — keypoints moved, not the surfel). On by default so the
+itself is unchanged — keypoints moved, not the surfel). A point whose
+`tracks/reference_observations` entry already names an observation keeps it,
+and only a point at `-1` takes the refiner's pick. Every point with a
+reference then has its bitmap rendered again from that observation at its
+refined keypoint as the file stores it, in `f32` (`render_from_references` in
+[`_patch_compaction.py`](../../../../src/sfmtool/_patch_compaction.py), through
+`PatchCloud.render_bitmaps(referenced_only=True)`), so dropping and adding the
+bitmaps later gives the same bytes. On by default so the
 refined reconstruction carries its per-point patch textures and can display them
-without re-rendering; it costs one extra full-grid source render per view per
+without re-rendering; it costs a tile render and a self-similarity reading per view per
 point, so a multi-stage pipeline can pass `bitmaps=false` on intermediate stages
-and render once on the finalizing stage.
+and render once on the finalizing stage. With `bitmaps=false` the command
+writes the keypoints and drops any stored bitmaps, which were rendered at the
+old keypoints, as `--refine-normals bitmaps=false` does; the
+`tracks/reference_observations` entries carry across as they were, so a later
+`--add-patch-bitmaps` renders each point from its reference.
 
 The transform prints a one-line summary in the established `xform` style over
 the finitely-scored views (a point with fewer than two views has no consensus;

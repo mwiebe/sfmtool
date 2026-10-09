@@ -18,6 +18,7 @@ use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 use sfmtool_sfmr_format::{
     resolve_workspace_dir, SfmrCamera, SfmrData, SfmrError, FEATURE_SOURCE_EMBEDDED_PATCHES,
+    NO_REFERENCE_OBSERVATION,
 };
 
 use crate::camera::CameraIntrinsics;
@@ -387,6 +388,7 @@ impl SfmrReconstruction {
             .collect::<Result<Vec<_>, _>>()?;
 
         let infinity_point_count = count_points_at_infinity(&points);
+        let has_patch_frame = data.patch_u_halfvec_xyz.is_some();
 
         let recon = SfmrReconstruction {
             workspace_dir: data.workspace_dir.unwrap_or_default(),
@@ -433,6 +435,13 @@ impl SfmrReconstruction {
                     _ => None,
                 },
                 observation_confidence: data.observation_confidence.map(|c| c.to_vec()),
+                // The format reader fills it with `-1` for an older file with
+                // patch frames; a value built by hand with a frame and no
+                // column gets the same.
+                reference_observations: data.reference_observations.map(|r| r.to_vec()).or_else(
+                    || has_patch_frame.then(|| vec![NO_REFERENCE_OBSERVATION; point_count]),
+                ),
+                display_only_references: None,
                 observations,
                 image_feature_to_point,
                 max_track_feature_index,
@@ -645,6 +654,21 @@ impl SfmrReconstruction {
             keypoints_xy,
             point_indexes,
             observation_counts,
+            // Present exactly with the patch frame, with or without the
+            // bitmaps: a reference names the observation the bitmap is, or is
+            // to be, rendered from. A pick only the display render made is
+            // written as `-1`, as the display bitmaps are not written, and a
+            // value with a frame and no column writes every point as having
+            // no reference.
+            reference_observations: self.point_set.patch_u_halfvec_xyz.as_ref().map(|_| {
+                Array1::from_vec(
+                    self.point_set
+                        .saved_reference_observations()
+                        .unwrap_or_else(|| {
+                            vec![NO_REFERENCE_OBSERVATION; self.point_set.points.len()]
+                        }),
+                )
+            }),
             depth_statistics: self.image_table.depth_statistics.clone(),
             observed_depth_histogram_counts,
         }

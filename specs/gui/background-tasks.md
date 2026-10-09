@@ -21,7 +21,7 @@ observations`; `Add image to tracks`; and the seven the bench runs, `Fit track`,
 evaluation is not one of them: it locks no node, writes no row and is not what
 the Background panel shows ([bench.md](bench.md) § "Live evaluation"). The open polls the
 flag between files, between each file's stages, before every thumbnail it builds
-and every photograph it decodes, and before every patch it fuses, and a
+and every photograph it decodes, and before every patch it renders, and a
 cancelled open appends no node. The bench steps
 that read photographs poll the flag on either side of the decode and inside the
 kernels -- between the fit's rounds and between the views the localizer or
@@ -345,7 +345,7 @@ neither today, in exchange for nothing. So:
 read. Measured, an open of the 45 MB dino set spends **141 ms** on the read and
 the derived-index build; what can make an open long is a file that carries no
 thumbnails or no patch bitmaps, whose columns the open builds for display before
-the node appears (§ "Opening a file"). A decode of every photograph and a fuse
+the node appears (§ "Opening a file"). A decode of every photograph and a render
 per point is work of the size of an adjustment, and belongs where one runs.
 
 The **materialisation** an edit performs before calling a kernel is the one
@@ -380,15 +380,22 @@ of the bar. Each file's stages sit under a phase `open` of its own:
 | `read`, `convert convention`, `derive`, `keypoints` | always | `SfmrReconstruction::load`'s own stages and notes; `keypoints` reads a `sift_files` file's `.sift` positions when it carries no inline keypoint column, with a count of `images`, and notes `not filled: {reason}` when a `.sift` is missing or does not match |
 | `thumbnails` | the file carries no thumbnail column | a count of `images`; note `{a} from .sift files, {b} from photographs, {c} placeholders` |
 | `patch bitmaps` > `decode photographs` | the file has patch frames and inline keypoints but no bitmaps | a count of `images`; note `{k} of {n} read`, with `, {r} reused from the cache` when the cache already held any |
-| `patch bitmaps` > `fuse` | the same | a count of `patches`; note `{P} patches at {R} px` |
+| `patch bitmaps` > `render` | the same | a count of `patches`; note `{P} patches at {R} px` |
 
 The file's share of the bar splits 1 : 9 between the read and the rest, and the
 rest 1 : 8 between thumbnails and bitmaps, a stage the file does not need taking
 a weight of zero. The thumbnail rows come from each image's verified `.sift`
 first and its photograph second
 ([multi-panel-image-browser.md](multi-panel-image-browser.md) § "Thumbnail
-loading"). The bitmaps are the fuse `sfm xform --add-patch-bitmaps` runs,
-`fuse_patch_cloud_bitmaps`, over every photograph that decodes at its camera's
+loading"). The bitmaps are the render `sfm xform --add-patch-bitmaps` runs,
+`render_patch_cloud_bitmaps`, through `render_patch_bitmap_column`: each point
+from the reference observation the file stores for it, and a point the file
+stores at `-1` from the reference-view rule's pick (or the fused mean). The
+render returns the reference each row is the tile of; the open puts a pick it
+made for a point at `-1` into the value's references, marked
+`PointSet::display_only_references`, so Track View marks the row the display
+bitmap is the tile of.
+It runs over every photograph that decodes at its camera's
 size; one that does not is left out of every patch's views. The photographs are
 read through the viewer's photograph cache
 ([../core/camera/photograph-cache.md](../core/camera/photograph-cache.md)), so
@@ -401,7 +408,8 @@ marked `PointSet::patch_bitmaps_for_display`, because every reader of bitmaps
 looks there: the bench fit and commit, every edit that selects or reorders
 rows, Track View and the renderer. A column held beside the value would need
 each of those row maps carried out a second time. The mark keeps the column out
-of `to_sfmr_data`, so no save writes it and no content hash covers it, and the
+of `to_sfmr_data`, so no save writes it and no content hash covers it, and a
+save writes the file's `-1` for every display pick, so the
 value keeps the content hash of the file it was read from, which is what every
 point id is minted against ([saving.md](saving.md)).
 
@@ -434,11 +442,11 @@ Cancel is live ([operation-progress.md](operation-progress.md)).
 
 `to_embedded_patches` fills in the phases, the count and the fraction: `patch
 frames`, `read keypoints` and `assemble` from the core conversion, then `patch
-bitmaps` with `decode photographs` and `fuse` beneath it. The frame build has
+bitmaps` with `decode photographs` and `render` beneath it. The frame build has
 its own passes nested under the first stage, with one count per image under
 each of its two `.sift` walks and a fraction reported every two-hundredth of
 the way through each pass over the points and the observations. The bitmap
-stage uses the same render-only fuse as the open, but its column belongs to
+stage uses the same render-only pass as the open, but its column belongs to
 the new version and is saved rather than marked for display only. Unreadable
 or wrong-sized photographs are left out; if none can be read, the conversion
 still succeeds without bitmaps. The conversion and bitmap stages share the
@@ -826,7 +834,7 @@ Panel, through `test_support::run_frame_headless`:
   from where.
 - A file with patch frames and no bitmaps gets the column rendered and marked
   for display, a tile for a point two photographs see and a zero row for one
-  seen once, under `patch bitmaps`, `decode photographs` and `fuse`.
+  seen once, under `patch bitmaps`, `decode photographs` and `render`.
 - The value keeps the file's content hash with the display column in it; a
   plain Save writes the file's own columns back with the same hash, and a Save
   that folds an edit mints a version whose hash is the written file's.

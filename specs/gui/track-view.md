@@ -55,7 +55,7 @@ draws both modes: `mod.rs` the header, the toolbar and the boxes, `table.rs` the
 observation table, `tile.rs` the tile each row draws and its hover view,
 `crop.rs` the crop of the photograph beside the tile and its hover view,
 `surface_plot.rs` the self-similarity surface plot, `reference.rs` the
-*Reference* column's cell, hover text and sort key, and `patch.rs` the warp a
+*Reference* and *Bitmap* columns' cells, hover text and sort key, and `patch.rs` the warp a
 track-stage tile is rendered through and the picture of a track's own patch,
 which the header and the strip both draw. The
 viewed track is [bench/viewed.rs](../../crates/sfm-explorer/src/bench/viewed.rs).
@@ -417,7 +417,7 @@ at the cursor, from any loaded node. The strip is drawn in both modes and in the
 empty state, so after the box is cleared its first chip is the item just left.
 
 **What a chip shows.** The item's patch at 24 points square, the same picture
-the header's patch slot draws for that item (the consensus bitmap at the track
+the header's patch slot draws for that item (the patch bitmap at the track
 stage, the template at the cluster stage, an empty frame when there is neither,
 through `body::track_patch_image`), drawn with nearest filtering, and the label
 beside it, shortened by a cut out of the middle so that the start and the end
@@ -670,13 +670,13 @@ a direction before any number is read.
 square (`STORED_PATCH_SIZE`) with nearest filtering and no label, since the
 picture says what it is. The line under the header, the toolbar and the
 geometry search box stand to its right, and the table's separator runs directly
-under it. At the track stage it is the consensus bitmap
+under it. At the track stage it is the patch bitmap
 (`TrackPayload::bitmap`): for the viewed track that is the point's stored patch,
 and for a bench track the bitmap a commit writes as the point's stored patch,
-so a *Fit* that re-fuses the track changes it and a person sees what the commit
+so a *Fit* that re-renders the track's bitmap changes it and a person sees what the commit
 would store before committing. At the cluster stage it is the template every
 member registers onto, once an evaluation has cut one. With neither -- a point
-that stores no patch, a track not yet fused, or a cluster with no template --
+that stores no patch, a track with no bitmap rendered yet, or a cluster with no template --
 the slot is an empty frame of the same size, so the controls beside it do not
 move when a step fills it. Its hover text says which it is, or what would fill
 it. The bitmap is converted by `patch::stored_patch_image`: one channel repeated
@@ -748,7 +748,7 @@ evaluation measures every observation where it sits and **moves nothing**, so a
 person asking whether a track is right gets an answer that does not change the
 thing asked about, and no kernel's gate drops a row; that is why it can run on
 its own after every change. *Fit* moves the track: localize, re-triangulate,
-re-fuse, and read the result back, and it stays a button because it replaces
+re-render the bitmap, and read the result back, and it stays a button because it replaces
 what the person placed. *Fit* greys with `fit_preconditions`' sentence for a
 track stage with fewer than two `in` observations, while the evaluation still
 runs for it, because one sighting is something to report.
@@ -758,7 +758,8 @@ the patch along the sightings' rays and keeps the way it faces; *Fit Normal*,
 *Finite Diff Normal* and *Grid Plane Normal* do the opposite, each estimating a
 normal and turning
 the patch to it by the same least rotation the 3D viewer's arrowhead drag makes,
-then reading the track back and fusing its bitmap as a fit does
+then reading the track back, rendering its stored bitmap and scoring every row
+against it, as a fit does
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md) §
 "Estimating the normal"). *Fit Normal* takes the normal at which the `in`
 sightings' tiles agree best. *Finite Diff Normal* fits a row of smaller square
@@ -824,7 +825,7 @@ row directly under the column headings**, each in the column of the readings it
 judges and followed by the unit and name those readings print with:
 
 ```
-Img  Crop  Patch  Keep  ZNCC          Self-similarity           Proj. err  Shift     Zoom  Reference  Status  ...  Name
+Img  Crop  Patch  Keep  ZNCC          Self-similarity           Proj. err  Shift     Zoom  Reference  Bitmap  Status  ...  Name
 Thresholds              [70]% whole         [2.5] px whole      [3.0] px   [6.0] px
                         [70]% mid
 ```
@@ -900,7 +901,7 @@ proposals are what unpinning each row would give, which is the verdict the
 bench's own evaluation would give the row once the point is on the bench and
 the row unpinned. The judgement is kept on the body against the mode, the
 track's `Arc` and the bars, and recomputed when one of them moves rather than
-per frame, because a copy of a track carries its consensus bitmap. An
+per frame, because a copy of a track carries its patch bitmap. An
 evaluation of the viewed track landing gives it a new `Arc`, which is one such
 move.
 
@@ -936,9 +937,10 @@ Clicking a heading orders the rows by that column, worst first where a bar
 judges the column and increasing where none does, and clicking the same
 heading again reverses the order. Worst first is decreasing for *Keep* and
 *Verdict* (the most bars failed), *Self-similarity*, *Proj. err* and *Shift*,
-and increasing for *ZNCC*; *Img*, *Zoom*, *Reference*, *Status* and *Name*
-start increasing. *Zoom* and *Reference* are among them because no bar judges
-them. The
+and increasing for *ZNCC*; *Img*, *Zoom*, *Reference*, *Bitmap*, *Status* and
+*Name* start increasing. *Zoom*, *Reference* and *Bitmap* are among them
+because no bar judges them; *Bitmap* orders by the blur-matched score, the
+bitmap's own row reading 1. The
 heading the rows are ordered by carries a small triangle after its word,
 pointing up for increasing and down for decreasing, and a heading that orders
 the rows is drawn in the plain text colour under the pointer. Its hover text
@@ -955,6 +957,7 @@ name is *Sort by …*. The keys are what the rows print:
 | Shift | the shift in px |
 | Zoom | the geometric mean of the two zooms, `1 / sqrt(abs(det J))` |
 | Reference | what the reference-view rule decided: the reference first, then the rows turned away for sharpness, agreement, a ninth, the angle, clipping and coverage, in that order, so the rows nearest to being picked come first; an `out` row has no key |
+| Bitmap | the blur-matched score against the stored bitmap, which is the plain score where the pair was read plain, the bitmap's own row reading 1; a row with no score has no key |
 | Status | the Status cell's text, compared character by character |
 | Name | the image's file name, compared character by character |
 
@@ -996,7 +999,7 @@ beside it is that patch warped square, so the eye reads from the raw pixels to
 the picture the numbers are read from. The two photometric columns come
 straight after the verdict, *ZNCC* and then *Self-similarity*, since they are
 the readings the verdict is most often decided by; the reprojection error, the
-shift, the patch's zoom, the *Reference* column, the status and, in Edited
+shift, the patch's zoom, the *Reference* and *Bitmap* columns, the status and, in Edited
 mode, the provenance follow them. The image's name is the last column, 220 points wide: hovering it or the
 *Img* cell shows the name whole, so the room in the middle of the table goes to
 the readings. The columns stand at the same offsets in both modes, and Viewed
@@ -1061,6 +1064,7 @@ that is not there prints a bare `-`, with no unit.
 | Shift | how far the refinement moved the member off its seed, in patch-grid px: `1.20 px` | how far the correlation peak, looked for within the shift bar, sits from the observation's own keypoint, in patch-grid px on the patch's plane |
 | Zoom | `-` | patch-grid px, at the reconstruction's patch resolution `R`, per photograph pixel at the patch's centre, the reciprocals of the two singular values of the Jacobian there of the warp from the patch grid to the photograph, least over most, each to two significant digits: `0.71/1.3×`, and both numbers even where the two print the same, `0.19/0.19×`; `-` for a track with no patch yet, an observation with nothing saying where it sits, a patch whose centre is behind the camera or outside the camera model's domain, and a patch seen edge on |
 | Reference | `-` | what the reference-view rule decided about the row over its viewing angle and pair ZNCC: `reference` over `24°, 87%` on a green cell for the row it picks, or the test that turned the row away, `partial`, `clipped`, `oblique`, `ninth differs`, `agrees less` or `less sharp`; an `out` row, which the rule does not consider, prints `-` over its angle; hovering the cell gives the reason and every reading |
+| Bitmap | `-` | on the row the stored bitmap is the tile of (the track's reference observation), `bitmap` over `100%` on a green cell; on every other row its ZNCC with the bitmap over the blur-matched score after an arrow, `sharper` for a row sharper than the bitmap along every direction, or nothing where the pair was read plain; `-` where the track has no bitmap or the row was not scored; hovering the cell gives both scores and the blur's width |
 | Status | the kernel's `member_status` | `walked 19 grid px (ZNCC 87% / 41% there), kept at seed` where the last fit refused to move it, the ZNCC being the one the fit scored at the walked peak (left out where it scored none), `localized` where the evaluation scored it, the reason's own sentence where it could not, `not evaluated` where nothing has been read |
 | From (Edited) | the provenance | the provenance |
 | Name | the image's file name elided in its middle to fit, the start of the path and the end of the file name both kept; hovering the name shows it whole | the same |
@@ -1314,7 +1318,7 @@ hover view with the anisotropic sampler where one mip level for both axes would
 read the less compressed axis at least 1.5 times too coarsely
 (`PatchJacobian::sampler`, `tile::tile_sampler`), and with `bilinear_mip`
 otherwise, so a view is drawn with the sampler the bench's evaluation and the
-fuse render it with. Hovering a *Zoom* cell names the sampler and why the
+stored bitmap's render use. Hovering a *Zoom* cell names the sampler and why the
 choice picked it (`table::zoom_sampler_text`): under the rule, the loss against
 the rule's threshold, or that the view is compressed less than √2 along both
 axes; under a fixed choice, that the bench renders every view with that
@@ -1324,8 +1328,10 @@ block report each row's `sampler` (`anisotropic` or `bilinear_mip`) and
 `sampler_minor_axis_loss`, both null where `patch_jacobian` is, and the loss
 null as well where it is not finite.
 
-**The *Reference* column says which row's tile could stand as the patch
-bitmap.** A track-stage evaluation runs the reference-view rule over the `in`
+**The *Reference* column says which row's tile the reference-view rule would
+store as the patch bitmap.** It is the rule's pick from the current
+readings; where the track holds a defined reference, a render keeps it and
+the *Bitmap* column marks it, so the two can differ. A track-stage evaluation runs the reference-view rule over the `in`
 rows ([`../core/patch/reference-view.md`](../core/patch/reference-view.md)): a
 candidate has at least 99% of its tile on the photograph, at most 5% of the
 photograph under the tile clipped, a viewing angle of at most 65°, and no ninth
@@ -1333,14 +1339,7 @@ where it agrees with the other rows more than 0.3 below the track's **typical
 agreement** there, the median over the `in` rows; of the candidates whose pair
 ZNCC, the median of its ZNCCs with the other `in` rows, is within 15 points of
 the best candidate's, the rule picks the one with the smallest self-similarity
-radius. Both agreements are **blur-matched** by default: where one row's tile
-is sharper than the other's along every direction (the other's
-self-similarity semi-minor axis is at least a quarter longer than its
-semi-major axis), it is blurred by a round Gaussian until its semi-major axis
-reaches the other's semi-minor axis before the two are correlated
-([`../core/patch/blur-matched-zncc.md`](../core/patch/blur-matched-zncc.md)),
-so a sharp row is counted as disagreeing less for detail a blurrier row lacks.
-The cell bar is 0.3 on either reading. When no row passes, the rule drops the
+radius. The agreements are read plain. When no row passes, the rule drops the
 65° limit, then the check of the ninths, then coverage and clipping; a row
 that sees the patch at 90° or more, edge on or from behind, is never picked.
 The cell's first line is the pick, `reference`, drawn on a green fill, or the
@@ -1350,18 +1349,53 @@ says the rule could not compare its sharpness, rather than naming a sharper
 row. The column says *ninth* for a cell of the ZNCC grid, since a *cell* in the
 table is one row's entry in one column. Its second line is the viewing angle, the angle
 between the patch's normal and the direction to the camera at the keypoint, and
-the pair ZNCC the rule read, in percent: the blur-matched one by default.
+the pair ZNCC the rule read, in percent.
 Hovering the cell (`reference::reference_hover`)
 gives the reason in a sentence with the row's own reading against the
 threshold that goes with it, the tests the rule dropped when no row passed
 them, and every reading: the viewing angle and the tilt direction (the
 direction in the patch's plane the ray from the camera leans along, from `u`
-towards `v`), the coverage, the clipped share, the pair ZNCC and its
-blur-matched form, the cell deficit and its blur-matched form, each followed by
-`The rule reads it.` where the rule read it, and the pair ZNCC of each ninth,
-plain and blur-matched. The cell prints `-` at the cluster stage, before the track is
-evaluated, and where it could not be evaluated. The column reports the rule's
-pick; the track's bitmap is the fused one, and no bar reads the pick.
+towards `v`), the coverage, the clipped share, the pair ZNCC, the cell deficit,
+and the pair ZNCC of each ninth. The cell prints `-` at the cluster stage,
+before the track is evaluated, and where it could not be evaluated. A render
+stores the tile of the track's reference where it is defined, and the picked
+row's tile only where it is not, or the fused mean of the `in` rows, naming no
+row, where the rule reached that pick only through its last fallback
+([`../core/patch/reference-view.md`](../core/patch/reference-view.md) § "The
+stored bitmap"); no bar reads the pick.
+
+**The *Bitmap* column says how each row scores against the stored bitmap.**
+The row the bitmap is the tile of (`TrackPayload::reference`) reads `bitmap`
+over `100%` on a green fill: its score is 1 and is not computed. Every other
+row reads its ZNCC with the bitmap in percent, and under it, where the bitmap
+was blurred to the row's sharpness (the bitmap sharper than the row's tile
+along every direction by the ratio of 1.25), an arrow and the blur-matched
+score, or `sharper` for a row sharper than the bitmap along every direction,
+which is read plain and could replace the reference
+([`../core/patch/blur-matched-zncc.md`](../core/patch/blur-matched-zncc.md)
+§ "Scores against the stored bitmap"). Hovering it (`reference::bitmap_cell`)
+gives both scores and the blur's width in grid px, or says why the pair was
+read plain. The row the column marks is the track's reference observation,
+the reference in use: the row the bitmap is the render of. The *Reference*
+column marks the row the reference-view rule picks from the current
+readings, which is information. Where the rule set the reference the two are
+the same row, except where the bitmap is the fused mean of a last-fallback
+pick, when this column marks no row and scores every row. Where the track
+holds a defined reference -- read from the file, or kept through steps that
+leave its row `in` -- every render renders from it, so the two columns can
+mark different rows: the *Bitmap* column then shows which row the bitmap
+comes from. A step that sights the marked row elsewhere drops the bitmap and
+keeps the reference, and the live evaluation renders a new one from the same
+row; one that takes it off the track or turns it `out` drops both, and the
+live evaluation renders and scores a new one from the rule's pick
+([`../core/bench/editable-track.md`](../core/bench/editable-track.md) § "The
+stored bitmap's reference"). On a file with patch frames but no stored
+bitmaps, the bitmap is the one SfM Explorer rendered for display when it
+opened the file, and the marked row is the row it was rendered from: the
+file's reference observation, or the display render's own pick for a point
+the file stores at `-1`. A track with no
+bitmap, the cluster stage, and a track that could not be evaluated print `-`.
+No bar reads the scores.
 
 **The tile is the column the numbers are about.** A ZNCC is a number; the
 picture that produced it is what a person can judge. So each row draws what its
@@ -1912,8 +1946,7 @@ The whole bench family is [`bench.md`](bench.md) § "The wire" and
   of two other items on the bench appearing nowhere in what the frame painted; a
   row per observation in index order; the *Reference* column marking exactly
   one row `reference` once the track is evaluated, every row printing its
-  viewing angle and pair ZNCC with the readings on hover, the blur-matched
-  readings shown and named as the ones the rule read, and the cell's word
+  viewing angle and pair ZNCC with the readings on hover, and the cell's word
   and reason for each test that turns a row away, a dropped test, an `out` row,
   the cluster stage and a refused evaluation; a verdict under the same observation index,
   pinned; the *Keep* switch's cell taking a click the row behind it does not,
@@ -1975,7 +2008,7 @@ The whole bench family is [`bench.md`](bench.md) § "The wire" and
   walked pixel, pinned, in one version; the Status cell's reading sentence and
   its `walked` form with and without the walked ZNCC; the ZNCC cell's
   `whole / middle` percent form at both stages, and `-` for a missing middle; the
-  header's `Bearing (...)` and `Position (` lines; the infinity mark first in a bearing's header and absent from a position's; the track's patch slot empty before a fit and filled with the consensus bitmap after it, with the toolbar to its right and the table's first heading not; the cluster stage's slot following whether a template is cut; a bitmap of one, three or four channels drawn opaque and an all-zero one not drawn; the row menu's search entries
+  header's `Bearing (...)` and `Position (` lines; the infinity mark first in a bearing's header and absent from a position's; the track's patch slot empty before a fit and filled with the patch bitmap after it, with the toolbar to its right and the table's first heading not; the cluster stage's slot following whether a template is cut; a bitmap of one, three or four channels drawn opaque and an all-zero one not drawn; the row menu's search entries
   and their remedies; a row click reporting the image and the pixel, and a
   double-click asking for camera view with the pixel; *Lock* starting ticked, a
   click clearing it and a second ticking it again with no version pushed and no
@@ -2000,9 +2033,14 @@ The whole bench family is [`bench.md`](bench.md) § "The wire" and
   a click on *Img* reversing that and a second putting it back; a click on
   *Proj. err* ordering the rows largest error first and a second click smallest
   first; a click on *Keep* ordering them by how many bars they fail, most first,
-  and a second click fewest first; a first click on each heading but
-  *Reference* starting worst first where a bar judges the column and increasing
-  where none does, and a second click reversing; a row with no key sorting last
+  and a second click fewest first; a first click on each heading, *Reference*
+  and *Bitmap* among them, starting worst first where a bar judges the column
+  and increasing where none does, and a second click reversing; the *Bitmap*
+  cell marking the row the bitmap is the tile of `bitmap 100%`, printing the
+  plain score with the blur-matched one after an arrow where the bitmap was
+  blurred and `sharper` for a row sharper than it, and `-` at the cluster stage
+  and on an unscored row; after a fit, exactly one row drawn as the bitmap's,
+  the one the stored bitmap names, and every other row scored; a row with no key sorting last
   both ways, with ties in increasing order of image; every heading but *Crop*,
   *Patch* and *From* ordering the rows; the *Verdict* text of an `out` row
   counting the bars it fails, `out (2)`, and `out` alone for one that fails

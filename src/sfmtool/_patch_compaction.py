@@ -9,7 +9,7 @@ This is the *write* tail of the
 given a reconstruction, its refined :class:`PatchCloud`, and the per-point
 keypoint-localization results, :func:`compact_to_embedded_patches` culls
 under-supported points (and, given a validity mask, points with no valid
-consensus bitmap), renumbers the survivors into a dense point set, and emits a
+stored bitmap), renumbers the survivors into a dense point set, and emits a
 valid ``embedded_patches`` :class:`SfmrReconstruction` (inline ``keypoints_xy``,
 per-point patch frame + optional bitmaps, ``image_file_hashes``,
 ``feature_source = "embedded_patches"``).
@@ -79,6 +79,33 @@ def image_file_hashes_from_sift(recon: SfmrReconstruction) -> list[bytes]:
     return hashes
 
 
+def reference_observations_from_images(
+    recon: SfmrReconstruction, reference_images: np.ndarray
+) -> np.ndarray:
+    """Each point's reference observation, from the image its bitmap is the tile of.
+
+    ``reference_images`` is ``(P,)``, one image index per point of ``recon``,
+    ``-1`` where the point's bitmap names none. The result is the ``(P,)``
+    int32 column ``clone_with_changes(reference_observations=...)`` takes: the
+    place in the point's own track of its first observation in that image,
+    ``-1`` where the point names no image or its track holds none in it.
+    """
+    reference_images = np.asarray(reference_images, dtype=np.int64)
+    points = np.asarray(recon.track_point_indexes, dtype=np.int64)
+    images = np.asarray(recon.track_image_indexes, dtype=np.int64)
+    counts = np.asarray(recon.observation_counts, dtype=np.int64)
+    offsets = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(np.int64)
+    out = np.full(len(counts), -1, dtype=np.int32)
+    rows = np.flatnonzero(images == reference_images[points])
+    hit_points = points[rows]
+    within = (rows - offsets[hit_points]).astype(np.int32)
+    # `rows` is increasing, so the first index `np.unique` returns for each
+    # point is its first observation in the image.
+    first_points, first = np.unique(hit_points, return_index=True)
+    out[first_points] = within[first]
+    return out
+
+
 def compact_to_embedded_patches(
     recon: SfmrReconstruction,
     cloud: PatchCloud,
@@ -103,20 +130,36 @@ def compact_to_embedded_patches(
         localizations: The per-point dicts returned by
             :meth:`PatchCloud.localize_keypoints` — each ``{point_index, views,
             keypoints, ...}`` with the kept image indices and refined keypoints.
+            With ``patch_bitmaps``, a dict's optional ``reference_image`` names
+            the image whose tile the point's bitmap is, and becomes the
+            reference observation of a point that has none (see below).
         image_file_hashes: One 16-byte XXH128 per image (see
             :func:`image_file_hashes_from_images`), parallel to ``recon.image_names``.
-        patch_bitmaps: Optional ``(point_count, R, R, 4)`` uint8 reference textures
+        patch_bitmaps: Optional ``(point_count, R, R, 4)`` uint8 stored bitmaps
             scattered per source point (the pipeline sources these from
-            ``refine_keypoints(render_bitmaps=True)``, fused at the final
-            keypoints; ``refine_normals(render_bitmaps=True)``'s ``bitmaps`` fit
-            too); culled to the survivors and stored as the patch bitmaps.
+            ``refine_keypoints(render_bitmaps=True)``, each the reference view's
+            tile at the final keypoints; ``refine_normals(render_bitmaps=True)``'s
+            ``bitmaps`` fit too); culled to the survivors and stored as the patch
+            bitmaps.
         valid: Optional bool mask per source point (parallel to ``recon``'s
             points): ``True`` where the keypoint refiner produced a valid
-            cross-view consensus bitmap for the point. When given, a ``False``
+            stored bitmap for the point. When given, a ``False``
             point is **dropped** — uniformly for finite and infinity points (a
             culled point would otherwise be kept with an all-black bitmap).
             ``None`` skips the validity cull (``min_views`` still applies).
         min_views: Drop a point whose kept-view count is below this.
+
+    Each surviving point's reference observation is the observation of the
+    same image in its new track as the reference observation ``recon`` stores
+    for it: a reference names the observation the point's bitmap is, or is to
+    be, rendered from, and moving keypoints or refining the frame does not
+    change it. Where ``recon`` stores none for the point (``-1``), or the
+    localizer dropped that image from its track, it is the observation of
+    the image the point's bitmap names (``reference_image``) where
+    ``patch_bitmaps`` is passed and the new track holds that image, and
+    ``-1`` otherwise. A point whose stored reference is kept has a bitmap that
+    is not necessarily that observation's render, so a caller passing ``patch_bitmaps``
+    renders those points again (:func:`render_from_references`).
 
     Returns:
         A new ``embedded_patches`` :class:`SfmrReconstruction`, ready to ``save()``.
@@ -143,7 +186,7 @@ def compact_to_embedded_patches(
     valid_arr = None if valid is None else np.asarray(valid, dtype=bool)
 
     # Survivors: points with a patch, at least `min_views` kept observations, and
-    # (when a validity mask is given) a valid consensus bitmap — the same rule for
+    # (when a validity mask is given) a valid stored bitmap — the same rule for
     # finite and infinity points — in ascending source-point order (so the
     # renumbering is deterministic).
     survivors = sorted(
@@ -222,15 +265,43 @@ def compact_to_embedded_patches(
             np.asarray(patch_bitmaps, dtype=np.uint8)[survivors]
         )
 
-    # Flat, point-then-image-sorted observations and parallel keypoints.
+    # The image of each source point's stored reference observation, -1 where
+    # it stores none.
+    stored_reference_images = np.full(recon.point_count, -1, dtype=np.int64)
+    if recon.reference_observations is not None:
+        stored = np.asarray(recon.reference_observations, dtype=np.int64)
+        counts = np.asarray(recon.observation_counts, dtype=np.int64)
+        offsets = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(np.int64)
+        named = np.flatnonzero(stored >= 0)
+        stored_reference_images[named] = np.asarray(
+            recon.track_image_indexes, dtype=np.int64
+        )[offsets[named] + stored[named]]
+
+    # Flat, point-then-image-sorted observations and parallel keypoints. Each
+    # point's reference observation is the place in its sorted track of the
+    # image its stored reference observation was in, or, with bitmaps, of the
+    # image its bitmap is the tile of (``reference_image`` on its
+    # localization); -1 where there is none.
     track_image_indexes: list[int] = []
     track_point_indexes: list[int] = []
     keypoints: list[np.ndarray] = []
+    reference_observations = np.full(p_new, -1, dtype=np.int32)
     for new_id, old_id in enumerate(survivors):
         loc = loc_by_pid[old_id]
         views = np.asarray(loc["views"], dtype=np.uint32)
         kpts = np.asarray(loc["keypoints"], dtype=np.float32).reshape(-1, 2)
-        for j in np.argsort(views, kind="stable"):
+        # The stored reference where its image is still in the track, else
+        # the image the bitmap names.
+        candidates = [int(stored_reference_images[old_id])]
+        if patch_bitmaps is not None and loc.get("reference_image") is not None:
+            candidates.append(int(loc["reference_image"]))
+        reference_image = next(
+            (c for c in candidates if c >= 0 and bool(np.any(views == c))), None
+        )
+        for k, j in enumerate(np.argsort(views, kind="stable")):
+            if reference_image is not None and int(views[j]) == int(reference_image):
+                if reference_observations[new_id] < 0:
+                    reference_observations[new_id] = k
             track_image_indexes.append(int(views[j]))
             track_point_indexes.append(new_id)
             keypoints.append(kpts[j])
@@ -274,5 +345,54 @@ def compact_to_embedded_patches(
     kwargs["track_point_indexes"] = track_point_indexes_arr
     if new_bitmaps is not None:
         kwargs["patch_bitmaps"] = new_bitmaps
+    kwargs["reference_observations"] = reference_observations
 
     return recon.clone_with_changes(**kwargs)
+
+
+def render_from_references(
+    recon: SfmrReconstruction,
+    images,
+    bitmaps: np.ndarray,
+    references: np.ndarray,
+    *,
+    resolution: int,
+    sampler: str = "per_view",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render each point's bitmap from its reference, as ``recon`` stores it.
+
+    ``recon`` carries the final patch frames and keypoints, and the reference
+    observation each point is to be rendered from (``-1`` where none has been
+    chosen). ``bitmaps`` and ``references`` are a render of every point by the
+    reference-view rule, such as a refinement's. Each point ``recon`` stores a
+    reference for keeps it, and a point at ``-1`` takes the one in
+    ``references``. Every point with a reference then gets that observation's
+    tile rendered from ``recon`` itself
+    (``PatchCloud.render_bitmaps(referenced_only=True)``), and a point left at
+    ``-1`` keeps its bitmap from ``bitmaps``, a fused mean. So a refinement
+    that moves keypoints or the frame keeps each point's reference, and each
+    referenced bitmap is rendered from the ``f32`` keypoints and frame the
+    file stores rather than the refiner's ``f64`` ones, which makes it
+    byte-identical to what ``--drop-patch-bitmaps`` then
+    ``--add-patch-bitmaps`` renders for the point.
+
+    Returns:
+        ``(bitmaps, references)``, as
+        ``clone_with_changes(patch_bitmaps=..., reference_observations=...)``
+        takes them.
+    """
+    references = np.asarray(references, dtype=np.int32)
+    stored = recon.reference_observations
+    if stored is not None:
+        stored = np.asarray(stored, dtype=np.int32)
+        references = np.where(stored >= 0, stored, references).astype(np.int32)
+    named = references >= 0
+    bitmaps = np.array(bitmaps, dtype=np.uint8, copy=True)
+    if not named.any():
+        return bitmaps, references
+    picked = recon.clone_with_changes(reference_observations=references)
+    own, _ = picked.patches.render_bitmaps(
+        picked, images, resolution=resolution, sampler=sampler, referenced_only=True
+    )
+    bitmaps[named] = np.asarray(own)[named]
+    return bitmaps, references

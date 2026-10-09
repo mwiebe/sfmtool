@@ -1867,9 +1867,10 @@ impl AppState {
     ///
     /// The step that **moves** the track: at the track stage it localizes every
     /// sighting against the patch, re-triangulates the `in` ones, re-centres
-    /// the frame and fuses the consensus, and then reads the result back so the
-    /// numbers it leaves behind are the ones an evaluation reports. The
-    /// reading looks for each peak within the track's own `max_shift_px`.
+    /// the frame and renders the stored bitmap from the reference view, and
+    /// then reads the result back so the numbers it leaves behind are the ones
+    /// an evaluation reports. The reading looks for each peak within the
+    /// track's own `max_shift_px`.
     ///
     /// The photographs the kernels read are decoded **on that worker**: the
     /// file reads and the pyramid builds are seconds of work, and a step that
@@ -1996,7 +1997,7 @@ impl AppState {
     /// "Estimating the normal": [`NormalStep::Photometric`] is Track View's
     /// *Fit Normal* and [`NormalStep::FiniteDifference`] its *Finite Diff
     /// Normal*. Both move the patch's normal and leave its centre, and both
-    /// end, as a fit does, with the track read back and its bitmap fused.
+    /// end, as a fit does, with the track read back and its bitmap rendered again.
     ///
     /// **What the track alone decides is decided here**, through
     /// [`sfmtool_core::bench::normal_preconditions`], for the reason
@@ -2337,8 +2338,8 @@ impl AppState {
     /// `max_shift_px`, so it is part of the track. The photographs are decoded
     /// on the worker, from the node's cached pyramids where it has them.
     ///
-    /// A track-stage track with a placement and no consensus bitmap also gets
-    /// its bitmap fused where it stands (`bench::fuse_bitmap_in_place`), which
+    /// A track-stage track with a placement and no patch bitmap also gets
+    /// its bitmap rendered where it stands (`bench::render_bitmap_in_place`), which
     /// moves nothing either. So a tilt, a resize, a spin or a move of the
     /// patch, each of which drops the bitmap, gets it back from the
     /// photographs as the patch now lies, without waiting for a fit.
@@ -2531,27 +2532,24 @@ pub(crate) fn evaluate_job(
             return live::Measured::Cancelled;
         }
         let views = decoded.views();
-        let measured = match bench::evaluate(&track, &edited, &views, &options, progress) {
-            Err(sfmtool_core::bench::EvaluateError::Cancelled) => return live::Measured::Cancelled,
-            Err(e) => return live::Measured::Failed(format!("Cannot evaluate {label}: {e}")),
-            Ok((measured, _)) => measured,
-        };
-        // A patch step drops the consensus bitmap, since it was fused over
-        // the square as it stood. The photographs are decoded here anyway,
-        // so fuse it again over the square as it stands now, moving
-        // nothing, rather than leave the track without one until a fit.
-        let needs_bitmap = matches!(
-            &measured.stage,
-            Stage::Track(payload) if payload.placement.is_some() && payload.bitmap.is_none()
-        );
-        if !needs_bitmap {
-            return live::Measured::Track(Box::new(measured));
+        // A step that drops the patch bitmap -- one that moves the patch, or
+        // removes, re-sights or turns out the row it is the render of --
+        // leaves the track without one. The photographs are decoded here
+        // anyway, so the evaluation renders it again where the patch stands,
+        // moving nothing, and scores every row against it, rather than leave
+        // the track without one until a fit.
+        match bench::evaluate_rendering_bitmap(
+            &track,
+            &edited,
+            &views,
+            &options,
+            &FitOptions::default(),
+            progress,
+        ) {
+            Ok((measured, _)) => live::Measured::Track(Box::new(measured)),
+            Err(sfmtool_core::bench::EvaluateError::Cancelled) => live::Measured::Cancelled,
+            Err(e) => live::Measured::Failed(format!("Cannot evaluate {label}: {e}")),
         }
-        if progress.is_cancelled() {
-            return live::Measured::Cancelled;
-        }
-        let fused = bench::fuse_bitmap_in_place(&measured, &edited, &views, &FitOptions::default());
-        live::Measured::Track(Box::new(fused))
     })
 }
 
@@ -3017,6 +3015,12 @@ fn lacks_frame(track: &EditableTrack) -> bool {
 /// which may carry readings the old one could not. An item nobody edited
 /// comes out as `fresh` with the item's own verdicts and thresholds, which are
 /// the ones `fresh` was built with.
+///
+/// `fresh`'s bitmap is the render of its reference observation as `fresh`
+/// holds that row. A kept row the person turned out drops the bitmap with its
+/// reference, and a kept row sighted elsewhere drops the bitmap and keeps the
+/// reference, as the same edits made on a track with a frame do, so the next
+/// evaluation renders a bitmap from the rows the item holds.
 fn with_frame_of(old: &EditableTrack, fresh: &EditableTrack) -> EditableTrack {
     let keypoint = |o: &Observation| o.track.as_ref().and_then(|t| t.keypoint);
     // A keypoint the old item never knew (a node loaded without its keypoint
@@ -3042,10 +3046,25 @@ fn with_frame_of(old: &EditableTrack, fresh: &EditableTrack) -> EditableTrack {
             }
             _ => kept.clone(),
         })
-        .collect();
+        .collect::<Vec<Observation>>();
+    let mut stage = fresh.stage.clone();
+    if let Stage::Track(payload) = &mut stage {
+        payload.drop_bitmap_unless_in(&observations);
+        if let Some(r) = payload.reference {
+            let same_row = match (observations.get(r), fresh.observations.get(r)) {
+                (Some(kept), Some(made)) => {
+                    kept.image == made.image && keypoint(kept) == keypoint(made)
+                }
+                _ => false,
+            };
+            if !same_row {
+                payload.drop_stale_bitmap();
+            }
+        }
+    }
     EditableTrack {
         observations,
-        stage: fresh.stage.clone(),
+        stage,
         origin: fresh.origin,
         thresholds: old.thresholds.clone(),
         repaint: old.repaint.clone(),

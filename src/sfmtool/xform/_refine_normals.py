@@ -29,6 +29,10 @@ import numpy as np
 
 from .._sfmtool.reconstruction import SfmrReconstruction
 from ._images import load_workspace_images
+from .._patch_compaction import (
+    reference_observations_from_images,
+    render_from_references,
+)
 from ._patch_params import validate_patch_params
 
 # Confidence (the peakedness of Φ at the optimum) is normalized to roughly
@@ -224,7 +228,7 @@ class RefineNormalsTransform:
         # The input is already embedded_patches, so always persist the refined
         # patch cloud (its u/v frame now matches the refined normal) — otherwise the
         # stored frame would disagree with the rewritten normals. With `bitmaps`,
-        # also persist the fused per-point RGBA patch textures (scattered to
+        # also persist the per-point stored bitmaps (scattered to
         # per-point rows by the binding).
         if self.bitmaps:
             n_filled = int(np.count_nonzero(result["bitmaps"].any(axis=(1, 2, 3))))
@@ -232,8 +236,22 @@ class RefineNormalsTransform:
                 f"  Saving {len(point_ids)} patches and {n_filled} bitmaps "
                 f"to the reconstruction"
             )
-            return recon.clone_with_changes(
-                normals=normals, patches=cloud, patch_bitmaps=result["bitmaps"]
+            # A point that already names a reference observation keeps it,
+            # and a point at -1 takes the view the reference-view rule picked
+            # at the refined normal. Every bitmap with a reference is rendered
+            # again from the stored (f32) frame, so dropping and adding the
+            # bitmaps later gives the same bytes; a fusion stays as rendered.
+            out = recon.clone_with_changes(normals=normals, patches=cloud)
+            bitmaps, references = render_from_references(
+                out,
+                images,
+                result["bitmaps"],
+                reference_observations_from_images(recon, result["reference_images"]),
+                resolution=self.resolution,
+                sampler=self.sampler,
+            )
+            return out.clone_with_changes(
+                patch_bitmaps=bitmaps, reference_observations=references
             )
         return recon.clone_with_changes(normals=normals, patches=cloud)
 

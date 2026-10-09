@@ -208,6 +208,7 @@ reconstruction.sfmr (ZIP archive)
     ├── observation_confidence.{M}.uint8.zst   # (Optional) per-observation sharpness confidence (version 6+)
     ├── point_indexes.{M}.uint32.zst           # Point index per observation
     ├── observation_counts.{N}.uint32.zst      # Observations per point
+    ├── reference_observations.{N}.int32.zst   # (with the patch frame) observation the bitmap is, or is to be, rendered from (version 12+)
     └── metadata.json.zst                      # Tracks metadata
 ```
 
@@ -237,7 +238,7 @@ JSON structure describing the reconstruction:
 
 ```json
 {
-  "version": 11,
+  "version": 12,
   "feature_source": "sift_files",
   "operation": "sfm_solve",
   "tool": "colmap",
@@ -407,7 +408,7 @@ in the `content_xxh128` entry below.
 - `frames_xxh128`: (Optional) The `frames/` section hash. Present only when the `frames/` section exists.
 - `images_xxh128`: The `images/` section hash. Before version 10 it also covered the depth statistics and histogram files, which are now the `derived/` section. The mode-dependent per-image hash files are included as present: `feature_tool_hashes` + `sift_content_hashes` for a `sift_files` file, or `image_file_hashes` for an `embedded_patches` file. The optional `thumbnails_y_x_rgb` participates only when present, in its lexicographic slot (after `sift_content_hashes`, before `translations_xyz`). The `images/metadata.json` bytes, which carry the `has_thumbnails` flag, are always included, so two files that differ only in whether they carry thumbnails hash differently.
 - `points3d_xxh128`: The `points3d/` section hash. Includes the optional per-point arrays — `normals_xyz`, `normal_confidence`, the constraint triple `point_constraints` / `constraint_distances` / `constraint_reference_images` (in their lexicographic slots: `constraint_distances` and `constraint_reference_images` after `colors_rgb` and before `metadata.json`, `point_constraints` after the patch-frame files and before `positions_xyzw`), and the patch-frame files `patch_u_halfvec_xyz`, `patch_v_halfvec_xyz`, `patch_bitmaps_y_x_rgba` — only when they are present.
-- `tracks_xxh128`: The `tracks/` section hash. `feature_indexes` is present for a `sift_files` file and absent for an `embedded_patches` one. `keypoints_xy` participates whenever it is present — always in an `embedded_patches` file, and in a `sift_files` file when it carries the optional inline copy — in its lexicographic slot (after `image_indexes`, before `metadata.json`). The optional `observation_confidence` column participates when present, in its lexicographic slot (after `metadata.json`, before `observation_counts`).
+- `tracks_xxh128`: The `tracks/` section hash. `feature_indexes` is present for a `sift_files` file and absent for an `embedded_patches` one. `keypoints_xy` participates whenever it is present — always in an `embedded_patches` file, and in a `sift_files` file when it carries the optional inline copy — in its lexicographic slot (after `image_indexes`, before `metadata.json`). The optional `observation_confidence` column participates when present, in its lexicographic slot (after `metadata.json`, before `observation_counts`). `reference_observations` participates when present (version 12+, exactly when `points3d/metadata.json` has `has_uv_frames`), in its lexicographic slot, after `point_indexes`.
 - `derived_xxh128`: (Version 10+, required) The `derived/` section hash, over `depth_statistics.json.zst` then `observed_depth_histogram_counts`. Verified like every other section hash, and **not** part of `content_xxh128`. A version 10+ file without it fails verification; a file below version 10 has no such field, because its depth statistics are part of `images_xxh128`.
 - `content_xxh128`: The whole-file digest over the section hashes that say what the reconstruction *is*, in the order metadata, cameras, rigs (if present), frames (if present), images, points3d, tracks. The `derived/` section is excluded (see "Derived data is verified but not identifying"). Before version 10 the depth statistics reached this digest through `images_xxh128`.
 
@@ -1388,9 +1389,21 @@ rules are checked on the flags alone.
 - **Data type**: `uint8` (little-endian)
 - **Format**: Row-major RGBA data, one `R×R` texture per point. Dimension order
   `(point_index, y, x, channel)` — the RGB layout used for image thumbnails plus
-  a fourth **alpha** channel carrying a per-pixel confidence (`0`–`255`). Rows
-  for points with no patch are zero. Present only when `has_patch_bitmaps` is
-  `true`.
+  a fourth **alpha** channel carrying a per-pixel confidence (`0`–`255`), where
+  `0` marks a sample that carries no data. Rows for points with no patch are
+  zero. Present only when `has_patch_bitmaps` is `true`.
+- **What it holds**: a point's bitmap is the render of its reference
+  observation, which `tracks/reference_observations` names: its colour as
+  rendered, alpha `255` on the samples on the photograph and `0` on the rest.
+  A point whose reference is `-1` has no reference observation in its track,
+  so its bitmap is not the render of one of its observations. It is a fused
+  mean of its views, alpha their agreement and coverage (every bitmap written
+  before version 12, and a point for which the reference-view rule picked no
+  view or reached its pick only through its last fallback, `without_any`; see
+  [../core/patch/reference-view.md](../core/patch/reference-view.md) § "The
+  stored bitmap", `ReferenceRender::stored_reference`), or the render of an
+  observation that a later edit removed from the point, which keeps the
+  bitmap (§ 9, "Keeping it true").
 
 ### 9. Tracks
 
@@ -1539,6 +1552,86 @@ Observations per point:
   - Sum must equal observation_count
   - Every value must be >= 1 (every 3D point must have at least one observation)
 
+#### `tracks/reference_observations.{N}.int32.zst` (with the patch frame, version 12+)
+
+Which observation each point's patch bitmap is, or is to be, rendered from:
+
+- **Shape**: `(N,)` where N = point_count
+- **Data type**: `int32` (little-endian)
+- **Format**: Per point, the index of its **reference observation** among the
+  point's own observations, `0` to `observation_counts[i] − 1`, counting from
+  the start of the point's run in the tracks (which are sorted by
+  `(point_indexes, image_indexes)`, so a point's observations are one
+  contiguous run). It names the observation the point's bitmap is, or is to
+  be, rendered from. Where the file stores `patch_bitmaps_y_x_rgba`, the
+  point's row is that observation's `R×R` render: through the point's patch
+  re-anchored on that observation's keypoint, at `R`, with the sampler the
+  sampler rule picks for that view
+  ([../core/patch/reference-view.md](../core/patch/reference-view.md) § "The
+  stored bitmap"). Where the file stores no bitmaps, a later render (`sfm
+  xform --add-patch-bitmaps`, SfM Explorer's display bitmaps, `sfm
+  web-export`) renders the point from this observation, so dropping the
+  bitmaps and adding them again gives the same bitmaps. `-1` where the point
+  has no reference observation in its track: a stored bitmap is then not the
+  render of one of its observations -- a fused mean (from before version 12,
+  or where the reference-view rule picks no view or reaches its pick only
+  through its last fallback, `without_any`), or the render of an observation
+  that has since been removed from the point -- and a later render runs the
+  reference-view rule for the point and records its pick.
+- **Presence**: required in a version 12 file whose `points3d/metadata.json`
+  has `has_uv_frames: true`, and absent otherwise, so it needs no flag of its
+  own. It is present with the patch frame, not with the bitmaps: a file
+  without bitmaps keeps the column and its references. A reader and a
+  verifier refuse a value that is neither `-1` nor within its point's run; a
+  writer refuses the column missing beside a patch frame, present without one,
+  or out of range. All three accept a reference other than `-1` in a file
+  without bitmaps.
+- **Keeping it true**: where a stored bitmap and a reference `≥ 0` are both
+  present, the bitmap is that observation's render as of the last render. A
+  writer that removes a point removes its row, so a point filter leaves every
+  surviving point's index unchanged. A writer that removes or reorders a
+  point's observations moves the index with the reference observation, and
+  writes `-1` where it removes the reference observation itself; it keeps the
+  point's bitmap, which is then the render of an observation the point no
+  longer has, until a later render replaces it from a reference the rule
+  picks. A writer that moves geometry (a bundle adjustment, a similarity, moved keypoints, a refit
+  normal or a new patch frame) keeps the index: the bitmap rendered after it
+  is rendered from the same observation. That includes a writer that zeroes a
+  point's patch frame (`--convert-infinity` where a point's patch has no extent
+  to keep): the point then has no patch and a zero bitmap row, and keeps its
+  reference, since the observation is still in its track, so a render after a
+  later writer gives it a frame again renders from it. A writer that drops the bitmaps keeps
+  the column: `--minimal`, `--drop-patch-bitmaps`, `--localize-keypoints`
+  (which carries each point's reference to the observation of the same image
+  in its new track), and `--refine-keypoints` and `--refine-normals` without
+  `bitmaps`. A writer that
+  renders the bitmaps renders each point that has a reference from that
+  observation, and runs the reference-view rule only for a point at `-1`,
+  writing the observation it picks: `--add-patch-bitmaps`, `--refine-keypoints`
+  and `--refine-normals` with `bitmaps`, and `sfm embed-patches` on an input
+  that is already `embedded_patches`. In memory,
+  `SfmrReconstruction::to_sfmr_data` writes the column as the reconstruction
+  holds it, except that a pick only SfM Explorer's display render made is
+  written as `-1` (`PointSet::saved_reference_observations`) unless a bench
+  commit has made it the point's own, and
+  `validate_point_columns` checks the range and refuses the column without
+  patch frames. Python `clone_with_changes` keeps the old references unless
+  new ones are passed, whether it keeps, replaces or drops the bitmaps or
+  passes `patches` for the same points; it moves each reference with its
+  image where the tracks are replaced (the image at the same index when the
+  image table is unchanged, the same names in the same order, and otherwise
+  the image matched by name), and gives every row `-1` where the frame is
+  new. A call that has patch frames and changes the point count, or replaces
+  the tracks and changes the image table while an image a reference is in no
+  longer has its name on exactly one image, has no way to carry the references
+  and is refused unless it passes the column, where the input names any
+  reference. A call that changes the point count and keeps the input's patch
+  frames is refused for the frames first.
+- **Older files**: a reader that reads a file below version 12 with patch
+  frames creates the column with every row `-1`, so every reconstruction with
+  patch frames has one in memory and every later save writes it. A file below
+  version 12 without patch frames gets no column.
+
 ### Observation source (version 4+)
 
 A version-4 file declares at the top level which kind of observation it carries —
@@ -1664,6 +1757,11 @@ frame is per point (not per observation), two views of the same point share
 2. **Observation counts must align**:
    - `observation_counts[i]` = number of entries in track arrays where `point_indexes == i`
    - `sum(observation_counts)` must equal `observation_count`
+
+3. **A reference observation counts in the sorted run**:
+   - `reference_observations[i]` indexes point `i`'s run in that sorted order;
+     a writer that sorts the tracks it was handed moves each index with the
+     observation it named.
 
 ### Index Relationships
 
@@ -2026,9 +2124,9 @@ All extensions should:
 
 ## Versioning and Migration
 
-The format spans eleven versions (`1` to `11`), all valid; each extends the
+The format spans twelve versions (`1` to `12`), all valid; each extends the
 previous, and how an older file maps to the current model is given below.
-Version 11 is the current format version: a reader accepts any version up to
+Version 12 is the current format version: a reader accepts any version up to
 it. This section is the one place the versions and their changes are
 described; [Version History](#version-history) is an index into it.
 
@@ -2037,6 +2135,23 @@ version by which optional columns a file carries: every optional column (normals
 in 3, observation confidence in 6, constraints in 7, thumbnails in 11) was
 introduced this way, and a writer that picked its version by content would make
 "which version is this file" a question about its columns.
+
+### Version 11 → Version 12
+
+| Change | Detail |
+|---|---|
+| `tracks/reference_observations.{N}.int32.zst` | New column, **required with the patch frame** (`points3d/metadata.json` `has_uv_frames: true`) and absent otherwise: per point, the index within its own track of the observation its patch bitmap is, or is to be, rendered from, `-1` where the point has no reference observation in its track (its bitmap, if any, is then a fused mean or the render of an observation since removed). Folded into `tracks_xxh128` in its lexicographic slot, after `point_indexes`. No metadata key is added, since `has_uv_frames` says whether it is present. |
+| `points3d/patch_bitmaps_y_x_rgba` | Writers store a point's reference view's render, with alpha `255` on the samples on the photograph and `0` elsewhere, in place of a fused mean of the views ([../core/patch/reference-view.md](../core/patch/reference-view.md) § "The stored bitmap"). The entry's layout is unchanged. |
+
+Migration is mechanical. A version 11 file with patch frames reads with every
+point's reference observation `-1`, which says its bitmap (a fused mean) is not
+known to be one observation's render; it saves as version 12 with that column, and the
+tracks section's hash changes by its bytes. A version 11 file without patch
+frames reads and saves with no column, and its tracks section is unchanged. A
+version 12 file maps back to version 11 by dropping the column, which loses
+each point's reference observation, in a file that stores no bitmaps as much
+as in one that does: the observation a bitmap was, or a later render would be,
+rendered from.
 
 ### Version 10 → Version 11
 
@@ -2237,6 +2352,8 @@ row, reads `tracks/points3d_indexes` as `tracks/point_indexes` and both
 One line per version, newest first. Each version's changes are described in
 the migration section it links to.
 
+- **Version 12**: `tracks/reference_observations`, required with the patch
+  frame. See [Version 11 → Version 12](#version-11--version-12).
 - **Version 11**: `images/thumbnails_y_x_rgb` becomes optional. See
   [Version 10 → Version 11](#version-10--version-11).
 - **Version 10**: the depth statistics move into a `derived/` section that is

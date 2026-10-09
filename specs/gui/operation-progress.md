@@ -750,13 +750,13 @@ The operations:
 
 | Phase | Where | Seen at |
 |-------|-------|---------|
-| `open`, with `read`, `convert convention`, `derive`, `keypoints`, then `thumbnails` and `patch bitmaps` when the file lacks them, under it; then `append nodes` on the GUI thread | `state::open::open_job` over `SfmrReconstruction::load`, `DisplayThumbnails::build` and `fuse_patch_cloud_bitmaps` | 143 ms for the read of a dino open |
+| `open`, with `read`, `convert convention`, `derive`, `keypoints`, then `thumbnails` and `patch bitmaps` when the file lacks them, under it; then `append nodes` on the GUI thread | `state::open::open_job` over `SfmrReconstruction::load`, `DisplayThumbnails::build` and `render_display_patch_bitmaps` | 143 ms for the read of a dino open |
 | `save`, with `materialise` over `push version`, then `write` | `state::save` | |
 | `undo` / `redo` / `go to`, with `history step`, `selection follow` and `forget images` | `state::edits` | 447 ms to 2.36 s across a bulk edit |
 | `materialise` | wherever an edit folds an overlay before a kernel call | |
 | the kernel a bulk edit runs, by its own name | one row, or the call's own stages where it takes a `Progress` | 838 ms for a resection |
 | `patch frames`, `read keypoints` and `assemble` | `SfmrReconstruction::to_embedded_patches`, with the frame build's own `read feature scales`, `patch spatial index`, `patch sizes`, `finite frames` and `infinity frames` nested under the first of them; a count per image under each `.sift` walk | 4.5 s / 1.9 s / 0.92 s on a 4054-image, 1.07M-point capture |
-| `patch bitmaps`, with `decode photographs` and `fuse` | The viewer's convert job reuses `state::open::render_patch_bitmaps` after `to_embedded_patches`; this bitmap column belongs to the new version | |
+| `patch bitmaps`, with `decode photographs` and `render` | The viewer's convert job reuses `state::open::render_patch_bitmaps` after `to_embedded_patches`; this bitmap column belongs to the new version | |
 | `row map` | `RowMap::by_scan` | |
 | `push version` | `History::push`, where the budget accounting runs | |
 | `localize` and `refine` | the two calls a bench fit makes | |

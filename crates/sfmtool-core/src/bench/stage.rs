@@ -87,7 +87,8 @@ pub struct StageReport {
     /// reported rather than refused, and the caller pushes no version for it.
     pub changed: bool,
     /// The fit the upgrade ran, which is the track stage's own localization,
-    /// triangulation and fuse, with its reading of the result inside it.
+    /// triangulation and bitmap render, with its reading of the result inside
+    /// it.
     pub fit: Option<FitReport>,
     /// At a downgrade, the observation the cluster is now cut around.
     pub reference: Option<usize>,
@@ -131,8 +132,8 @@ impl std::fmt::Display for StageReport {
 /// triangulated depth, with the mean viewing direction as the normal; and the
 /// track-stage fit then localizes and refines every `in` and
 /// `candidate` observation against that patch, re-triangulates the `in`
-/// results and fuses the consensus. The cluster-stage measurements are
-/// dropped: they describe a registration against a reference and a template
+/// results and stores the reference view's tile as the patch bitmap. The
+/// cluster-stage measurements are dropped: they describe a registration against a reference and a template
 /// the track no longer has.
 ///
 /// **Down, track to cluster.** Always possible, and lossy on purpose: the

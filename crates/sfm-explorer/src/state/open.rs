@@ -16,12 +16,19 @@
 //! - **`patch bitmaps`**, for a file with patch frames and inline keypoints but
 //!   no bitmaps: every photograph read through the viewer's photograph cache
 //!   ([`AppState::photographs`], so the panels and later operations find them
-//!   decoded), then every patch fused at its stored frame and keypoints by the fuse `sfm xform --add-patch-bitmaps` runs
-//!   ([`render_display_patch_bitmaps`], which `sfm web-export` also calls).
-//!   The column goes into the value marked
-//!   [`sfmtool_core::PointSet::patch_bitmaps_for_display`], so the bench, the
-//!   edits and Track View read it as they would a file's own, while no save
-//!   writes it and no content hash covers it.
+//!   decoded), then every patch's bitmap rendered at its stored frame and
+//!   keypoints by the render `sfm xform --add-patch-bitmaps` runs
+//!   ([`render_patch_bitmap_column`], whose bitmaps `sfm web-export` also
+//!   renders): each point from the reference observation the file stores for
+//!   it, and a point the file stores at `-1` from the observation the
+//!   reference-view rule picks. The column goes into the value marked
+//!   [`sfmtool_core::PointSet::patch_bitmaps_for_display`], and each pick the
+//!   render made for a point at `-1` goes into the value's references, marked
+//!   [`sfmtool_core::PointSet::display_only_references`]. The bench, the edits
+//!   and Track View read the bitmaps and references as they would a file's
+//!   own, so each marks the row a display bitmap is the tile of, while no save
+//!   writes the bitmaps or the display picks (a save writes the file's `-1`
+//!   for those) and no content hash covers them.
 //!
 //! The GUI thread then appends one node per file, in the order asked for
 //! ([`AppState::append_opened`]).
@@ -30,7 +37,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sfmtool_core::camera::PhotographCache;
-use sfmtool_core::patch::display_bitmaps::render_display_patch_bitmaps;
+use sfmtool_core::patch::display_bitmaps::render_patch_bitmap_column;
+use sfmtool_core::patch::stored_bitmap::PatchBitmapColumn;
 use sfmtool_core::progress::{Cancelled, Progress};
 use sfmtool_core::progress_note;
 use sfmtool_core::SfmrReconstruction;
@@ -257,7 +265,7 @@ fn load_for_display(
         && recon.point_set.patch_bitmaps_y_x_rgba.is_none()
         && recon.keypoints_xy().is_some();
     // Weighed by what each costs: a thumbnail is mostly a `.sift` read, and a
-    // bitmap column is a decode of every photograph and a fuse per point.
+    // bitmap column is a decode of every photograph and a render per point.
     let [thumbnails, bitmaps] = rest.split([
         if wants_thumbnails { 1.0 } else { 0.0 },
         if wants_bitmaps { 8.0 } else { 0.0 },
@@ -279,8 +287,22 @@ fn load_for_display(
     if wants_bitmaps {
         let phase = bitmaps.phase("patch bitmaps");
         if let Some(column) = render_patch_bitmaps(&recon, photographs, &phase)? {
-            recon.point_set.patch_bitmaps_y_x_rgba = Some(Arc::new(column));
+            recon.point_set.patch_bitmaps_y_x_rgba = Some(Arc::new(column.bitmaps));
             recon.point_set.patch_bitmaps_for_display = true;
+            // The render read the file's references, so a point with one
+            // comes back with it unchanged. A point at -1 comes back with the
+            // rule's pick, which the bench and Track View read so they mark
+            // the row its display bitmap is the tile of; the mark keeps a save
+            // writing -1 for it, as the display bitmaps are not saved either.
+            let stored = recon.point_set.reference_observations.as_deref();
+            let marks = column
+                .reference_observations
+                .iter()
+                .enumerate()
+                .map(|(p, &r)| r >= 0 && stored.is_none_or(|s| s[p] < 0))
+                .collect();
+            recon.point_set.display_only_references = Some(marks);
+            recon.point_set.reference_observations = Some(column.reference_observations);
         }
     }
     progress.set_fraction(1.0);
@@ -290,18 +312,20 @@ fn load_for_display(
     })
 }
 
-/// Render `recon`'s display patch bitmaps at its stored frames and keypoints,
-/// moving nothing: [`render_display_patch_bitmaps`], reading the photographs
-/// through `photographs`. `Ok(None)` when not one photograph could be read,
-/// since a column of zero rows would draw nothing. The conversion worker also
-/// calls this, but keeps the result as a stored column rather than marking it
-/// for display only.
+/// Render `recon`'s patch bitmaps at its stored frames and keypoints, moving
+/// nothing, with the reference observation each row is the render of
+/// ([`render_patch_bitmap_column`]: the stored reference where there is one,
+/// the rule's pick where it is `-1`), reading the photographs through
+/// `photographs`. The open keeps the column for display only, marking the
+/// picks as display-only, and the conversion worker keeps it as a stored
+/// column with its references. `Ok(None)` when not one photograph could be read, since a column
+/// of zero rows would draw nothing.
 pub(super) fn render_patch_bitmaps(
     recon: &SfmrReconstruction,
     photographs: &PhotographCache,
     progress: &Progress<'_>,
-) -> Result<Option<ndarray::Array4<u8>>, Cancelled> {
-    render_display_patch_bitmaps(recon, photographs, progress)
+) -> Result<Option<PatchBitmapColumn>, Cancelled> {
+    render_patch_bitmap_column(recon, photographs, progress)
 }
 
 #[cfg(test)]

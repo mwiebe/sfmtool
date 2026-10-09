@@ -372,8 +372,11 @@ impl SfmrReconstruction {
 
     /// Check that the optional per-point constraint columns are parallel to
     /// `points`, carry a constraint this format defines, and reference only images
-    /// this reconstruction holds. Returns a message describing the first
-    /// violation.
+    /// this reconstruction holds, and that each reference observation is `-1` or
+    /// within its point's track and present only with the patch frame, with or
+    /// without the patch bitmaps, and that the display-only marks are parallel
+    /// to `points` and present only with the references. Returns a message
+    /// describing the first violation.
     ///
     /// The companion of [`Self::validate_observation_columns`] on the point
     /// axis: the same in-memory editors that can leave an observation column out
@@ -381,6 +384,41 @@ impl SfmrReconstruction {
     /// and a stale image reference is the failure a file-level check would only
     /// catch at write time.
     pub fn validate_point_columns(&self) -> Result<(), String> {
+        if let Some(marks) = &self.point_set.display_only_references {
+            if self.point_set.reference_observations.is_none() {
+                return Err("display_only_references requires reference_observations".to_string());
+            }
+            if marks.len() != self.point_set.points.len() {
+                return Err(format!(
+                    "display_only_references length ({}) must match point count ({})",
+                    marks.len(),
+                    self.point_set.points.len()
+                ));
+            }
+        }
+        if let Some(references) = &self.point_set.reference_observations {
+            // A save writes the column only with the patch frame, so one
+            // without it would be dropped without a word.
+            if self.point_set.patch_u_halfvec_xyz.is_none() {
+                return Err("reference_observations requires the patch frame".to_string());
+            }
+            let counts = &self.point_set.observation_counts;
+            if references.len() != counts.len() {
+                return Err(format!(
+                    "reference_observations length ({}) must match point count ({})",
+                    references.len(),
+                    counts.len()
+                ));
+            }
+            for (p, (&r, &count)) in references.iter().zip(counts).enumerate() {
+                if r != -1 && !(r >= 0 && (r as u32) < count) {
+                    return Err(format!(
+                        "point {p} names reference observation {r}, which is neither -1 \
+                         nor one of its {count} observations"
+                    ));
+                }
+            }
+        }
         let Some(constraints) = &self.point_set.point_constraints else {
             return Ok(());
         };

@@ -190,8 +190,10 @@ from .._cli_utils import timed_command
         "normal-informative views per point (a D-optimal geometric pick: "
         "least-oblique anchor plus azimuthally-complementary oblique views). "
         "0 uses all views (disables the cap). Only the refinement basis shrinks "
-        "— all observations stay in the output, and the consensus bitmaps are "
-        "still fused over the full view set. The default (8) cuts roughly a "
+        "— all observations stay in the output, and each stored bitmap is "
+        "still the tile of the point's reference observation, or, for a point "
+        "with none, of the view the reference-view rule picks from the full "
+        "view set. The default (8) cuts roughly a "
         "third off end-to-end time on large view sets (the round-2+ refine pass "
         "itself drops ~5x). See specs/core/patch/patch-normal-refine-view-subset.md."
     ),
@@ -202,7 +204,7 @@ from .._cli_utils import timed_command
     default=2.5,
     show_default=True,
     help=(
-        "Cull points whose cross-view consensus bitmap pins no 2D position, "
+        "Cull points whose patch bitmap pins no 2D position, "
         "EARLY — right after round 1's localize + sub-pixel refine, before the "
         "multi-round refinement: its ZNCC self-similarity radius, how far the "
         "bitmap can slide over itself and still match itself, is above this, in "
@@ -257,7 +259,8 @@ from .._cli_utils import timed_command
     help=(
         "Pyramid sampler for every photometric kernel in the pipeline (normal "
         "refinement, view selection, keypoint localization, sub-pixel "
-        "refinement, the fuse). 'per_view' applies the sampler rule to each view: "
+        "refinement, the stored bitmap's render). 'per_view' applies the sampler "
+        "rule to each view: "
         "'anisotropic' where 'bilinear_mip' would read the view's less "
         "compressed axis too coarsely, 'bilinear_mip' otherwise. The other "
         "three render every view with one sampler. 'bilinear_mip' taps the mip level nearest the warp's "
@@ -305,6 +308,11 @@ def embed_patches_command(
     The observation set is the input track reshaped — expanded by vetting, trimmed
     by per-view discards, then compacted — so point and observation counts
     generally differ from the input.
+
+    An input that is already embedded_patches and stores reference
+    observations keeps them: each such point's bitmap is rendered from its own
+    reference observation at the final keypoints, where its track still holds
+    that image, and only a point with none takes the reference-view rule's pick.
 
     \b
     Examples:

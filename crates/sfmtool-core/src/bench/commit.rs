@@ -182,7 +182,7 @@ impl From<EditError> for CommitError {
 /// Write `track` into `edited` as one point.
 ///
 /// The record is the track's payload plus its `in` observations' keypoints: the
-/// coordinate it carries, the frame it stands on, the consensus bitmap, the
+/// coordinate it carries, the frame it stands on, the patch bitmap, the
 /// colour read from that bitmap's centre, the normal the frame states, and one
 /// observation per `in` observation with its keypoint and its leave-one-out
 /// ZNCC in `observation_confidence` where the column exists.
@@ -213,7 +213,11 @@ impl From<EditError> for CommitError {
 /// value comes back as it stands with `changed: false` and `point` naming the
 /// point that already holds the track. Committing the same track twice
 /// otherwise deletes a point and re-adds an identical one at a new index for
-/// every press of the button.
+/// every press of the button. The exception is an origin whose reference
+/// observation only the display render picked
+/// ([`PointRecord::display_only_reference`]): a commit saves the reference the
+/// bench holds, so that origin is written again with the mark cleared, and a
+/// save then writes its reference rather than `-1`.
 ///
 /// Nothing here triangulates. The track commits with the position it carries,
 /// and a track that carries none refuses naming the fit as the step that
@@ -354,6 +358,20 @@ pub fn commit(
             f64::NAN,
             sfmtool_sfmr_format::NO_REFERENCE_IMAGE,
         )),
+        // The track's reference observation: its place in the sorted track.
+        // With a bitmap it is the observation the bitmap is the render of (a
+        // fused mean names none); without one, the reference the track
+        // carries, which a later render renders from. A reference whose
+        // observation is not `in` was dropped by the step that turned it out,
+        // so `rows` holds it; a reference set by hand on a row that is not
+        // `in` is written as none.
+        reference_observation: edited.has_reference_observations().then(|| {
+            payload
+                .reference
+                .and_then(|r| rows.iter().position(|&(_, i)| i == r))
+                .map_or(sfmtool_sfmr_format::NO_REFERENCE_OBSERVATION, |k| k as i32)
+        }),
+        display_only_reference: false,
     };
 
     // ---- The edit ----
@@ -385,12 +403,15 @@ pub fn commit(
     //
     // The origin's own record, column for column, against the one above. A
     // track with something to absorb has an edit to make whatever the two say.
+    // So has an origin whose reference only the display render picked: the
+    // commit saves the reference the bench holds, which the mark would save
+    // as `-1`.
     if let Some(point) = origin.filter(|_| absorbed.is_empty()) {
         let held = edited
             .point(point)
             .expect("the origin resolves")
             .to_record();
-        if held.agrees_with(&record) {
+        if held.agrees_with(&record) && !held.display_only_reference {
             return Ok((
                 edited.clone(),
                 CommitReport {
@@ -443,12 +464,13 @@ pub fn commit(
     ))
 }
 
-/// The colour the committed point carries: the centre of the consensus bitmap
+/// The colour the committed point carries: the centre of the patch bitmap
 /// when there is one, and the colour the payload carries otherwise.
 ///
-/// The bitmap is the appearance every `in` observation agreed on, so its centre
-/// is the colour of the surface at the point rather than the colour one
-/// photograph happened to show there.
+/// The bitmap is the reference view's render, or the fused mean of the `in`
+/// observations where the rule picked no view, so its centre is the colour
+/// one photograph (or that mean) shows at the point, and the point's colour
+/// agrees with its own bitmap.
 fn bitmap_color(payload: &TrackPayload) -> [u8; 3] {
     let Some(bitmap) = &payload.bitmap else {
         return payload.color;

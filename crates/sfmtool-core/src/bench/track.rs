@@ -431,28 +431,37 @@ pub struct TrackMeasurement {
     /// `0` where no cell is. `None` for an `out` observation and where it has
     /// no reading in any judged cell.
     pub cell_deficit: Option<f64>,
-    /// The **blur-matched pair ZNCC**: [`Self::pair_zncc`] with each pair's
-    /// tiles blur-matched first, the sharper blurred to the other's sharpness
-    /// ([`blur_matched_agreement`](crate::patch::reference_view::blur_matched_agreement)),
-    /// over each pair's own samples with data rather than member coherence's
-    /// common support. `None` for an `out` observation, where the evaluation
-    /// took no blur-matched readings
-    /// ([`ReferenceViewOptions::matching`](super::ReferenceViewOptions::matching)),
-    /// and where it has no reading.
-    pub blur_matched_pair_zncc: Option<f64>,
-    /// [`Self::pair_zncc_grid`] on the same blur-matched pairs. `None` wherever
-    /// [`Self::blur_matched_pair_zncc`] is not taken.
-    pub blur_matched_pair_zncc_grid: Option<[[f64; 3]; 3]>,
-    /// [`Self::cell_deficit`] of [`Self::blur_matched_pair_zncc_grid`]. `None`
-    /// wherever that grid is, and where it has no reading in any judged cell.
-    pub blur_matched_cell_deficit: Option<f64>,
     /// What the reference-view rule decided about this observation: picked as
-    /// the **reference view**, or the test that turned it away, which tests
-    /// the rule dropped for the track, and which readings its agreement test
-    /// and cell check read
-    /// ([`choose_reference_view_with`](crate::patch::reference_view::choose_reference_view_with)).
+    /// the **reference view**, or the test that turned it away, and which
+    /// tests the rule dropped for the track
+    /// ([`choose_reference_view`](crate::patch::reference_view::choose_reference_view)).
     /// `None` for an `out` observation, which the rule does not consider.
     pub reference_view: Option<ReferenceStanding>,
+    /// The **bitmap score**: the observation's tile's ZNCC with the track's
+    /// patch bitmap as stored ([`TrackPayload::bitmap`]), windowed, over the
+    /// samples with data in both
+    /// ([`BitmapScorer`](crate::patch::stored_bitmap::BitmapScorer)). `1`
+    /// for the observation the bitmap is the render of
+    /// ([`TrackPayload::reference`]), which is not computed. `None` where the
+    /// track has no bitmap, the tile could not be rendered, or the pair could
+    /// not be read.
+    pub bitmap_zncc: Option<f64>,
+    /// The **blur-matched bitmap score**: [`Self::bitmap_zncc`] after the
+    /// bitmap, and only the bitmap, is blurred to this observation's
+    /// sharpness where it is sharper along every direction by at least the
+    /// ratio of 1.25; the plain score where it is not. `None` wherever
+    /// [`Self::bitmap_zncc`] is.
+    pub blur_matched_bitmap_zncc: Option<f64>,
+    /// The width of the round blur, in grid px, the bitmap was blurred by for
+    /// [`Self::blur_matched_bitmap_zncc`]; `0` where the pair was read plain.
+    /// `None` wherever [`Self::bitmap_zncc`] is.
+    pub bitmap_blur_sigma: Option<f64>,
+    /// Whether this observation's tile is sharper than the bitmap along every
+    /// direction (its self-similarity semi-major axis shorter than the
+    /// bitmap's semi-minor axis), so a candidate to replace the reference.
+    /// Such a pair is read plain. `None` wherever [`Self::bitmap_zncc`] is,
+    /// and for the reference observation itself.
+    pub sharper_than_bitmap: Option<bool>,
     /// How far the last fit's correlation peak sat from this sighting's seed,
     /// when that was further than [`Thresholds::max_shift_px`] and the seed was
     /// therefore kept, in patch-grid px.
@@ -660,8 +669,43 @@ pub struct TrackPayload {
     /// [`Self::position`] when both are present, and its `w` agrees with
     /// [`Self::at_infinity`].
     pub placement: Option<OrientedPatch>,
-    /// The `(R, R, C)` consensus bitmap the observations were fused into.
+    /// The `(R, R, C)` patch bitmap: the render of the reference observation
+    /// [`Self::reference`] names, or, where it names none, a mean of the `in`
+    /// observations' renders (a bitmap fused before the reference was recorded,
+    /// or one the reference-view rule found no view for).
     pub bitmap: Option<Array3<u8>>,
+    /// The track's **reference observation**, as an index into the track's
+    /// observations: the observation [`Self::bitmap`] is, or is to be,
+    /// rendered from. With a bitmap, the bitmap is that observation's render.
+    /// `None` means the track has no reference observation: a bitmap beside
+    /// it is not the render of an observation the track has (a fused mean, or
+    /// the render of an observation since removed from the point). Without a
+    /// bitmap it is the reference the track carries until the next render,
+    /// read from the point's stored reference or kept from a bitmap a step
+    /// made stale.
+    ///
+    /// It follows its observation through every step that reorders or removes
+    /// other observations. A step that makes the bitmap stale while the
+    /// reference observation stays `in` -- one that moves the patch, or
+    /// sights the reference observation at another keypoint -- drops the
+    /// bitmap and keeps the reference (`drop_stale_bitmap`). A step that
+    /// removes the reference observation from the track, splits it off, or
+    /// turns it `out` drops both (`drop_bitmap`).
+    ///
+    /// **A render keeps a defined reference.** Every render of a new bitmap
+    /// on the bench -- the live evaluation's, a fit's, a normal step's --
+    /// renders from this reference where it is defined (`Some`, naming an
+    /// `in` row with a keypoint). Only where it is undefined (`None`, or naming
+    /// a row that is not `in` or has no keypoint) does the render run
+    /// the reference-view rule over the `in` rows and set the bitmap and this
+    /// reference together. So the rule's pick that an evaluation reports per
+    /// row (`TrackMeasurement::reference_view`) can differ from this
+    /// reference, which is the one in use. A reference read from a column
+    /// rendered for display is the rule's pick on the file's track, so holding
+    /// it is the bench having set it from the rule. A commit writes this
+    /// reference as the point's reference observation, beside the bitmap it
+    /// is the render of where the reconstruction stores bitmaps.
+    pub reference: Option<usize>,
     /// The colour the point carries, used when there is no bitmap to read one
     /// from.
     pub color: [u8; 3],
@@ -669,6 +713,34 @@ pub struct TrackPayload {
     pub normal_confidence: Option<u8>,
     /// The last triangulation's condition number.
     pub condition_number: Option<f64>,
+}
+
+impl TrackPayload {
+    /// Drop the bitmap and the reference observation, together, for a step
+    /// after which the reference observation is no longer one the track
+    /// keeps `in`.
+    pub(crate) fn drop_bitmap(&mut self) {
+        self.bitmap = None;
+        self.reference = None;
+    }
+
+    /// Drop the bitmap and keep the reference observation, for a step after
+    /// which the bitmap no longer shows what the reference observation sees
+    /// but that observation is still on the track.
+    pub fn drop_stale_bitmap(&mut self) {
+        self.bitmap = None;
+    }
+
+    /// Drop the bitmap with its reference observation when that observation
+    /// is not one of `observations`' `in` rows: a reference is an observation
+    /// the track keeps.
+    pub fn drop_bitmap_unless_in(&mut self, observations: &[Observation]) {
+        if let Some(r) = self.reference {
+            if observations.get(r).is_none_or(|o| o.verdict != Verdict::In) {
+                self.drop_bitmap();
+            }
+        }
+    }
 }
 
 /// Which of the two representations a track is in, and that representation's
@@ -942,7 +1014,7 @@ impl RepaintMark {
     }
 
     /// The same mark, for a value that differs from the marked one in nothing
-    /// a reading or a verdict depends on: a step that fuses the consensus
+    /// a reading or a verdict depends on: a step that re-renders the stored
     /// bitmap where the patch stands carries the mark across with this.
     pub(super) fn carried(&self) -> Self {
         Self {
@@ -1054,7 +1126,9 @@ impl EditableTrack {
     /// A cluster's reference follows its observation. When the reference
     /// itself was dropped, it is pointed at the first observation left and the
     /// template is dropped, because the template is a cut around the old
-    /// reference.
+    /// reference. A track-stage reference follows its observation the same
+    /// way; when it was dropped, the patch bitmap, its render, is dropped with
+    /// it ([`TrackPayload::reference`]).
     ///
     /// Returns `None` when the track observes no image at or past `image`,
     /// since then nothing about it changes. Otherwise returns the new track and
@@ -1081,12 +1155,24 @@ impl EditableTrack {
             map.push(Some(next.observations.len()));
             next.observations.push(kept);
         }
-        if let Stage::Cluster(payload) = &mut next.stage {
-            match map.get(payload.reference).copied().flatten() {
+        match &mut next.stage {
+            Stage::Cluster(payload) => match map.get(payload.reference).copied().flatten() {
                 Some(reference) => payload.reference = reference,
                 None => {
                     payload.reference = 0;
                     payload.template = None;
+                }
+            },
+            // The row the bitmap is the tile of follows its observation. A
+            // bitmap whose observation was dropped is the tile of a sighting
+            // the track no longer has, so it goes with its reference, and the
+            // live evaluation renders one from the rows that remain.
+            Stage::Track(payload) => {
+                if let Some(r) = payload.reference {
+                    match map.get(r).copied().flatten() {
+                        Some(kept) => payload.reference = Some(kept),
+                        None => payload.drop_bitmap(),
+                    }
                 }
             }
         }

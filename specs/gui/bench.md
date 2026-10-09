@@ -213,7 +213,7 @@ impl AppState {
     /// all -- a point that already holds the track is not written again.
     pub(crate) fn commit_bench_track(&mut self, id: ReconId, label: &str)
         -> Result<Committed, String>;
-    /// Move it: localize, re-triangulate, re-fuse, then read the result back.
+    /// Move it: localize, re-triangulate, re-render the bitmap, then read the result back.
     /// The reading looks for each peak within the track's `max_shift_px`.
     pub(crate) fn start_bench_fit(&mut self, id: ReconId, label: &str) -> Result<(), String>;
     pub(crate) fn start_bench_stage(&mut self, id: ReconId, label: &str, stage: StageKind)
@@ -422,7 +422,7 @@ pays for, applied to one more field.
   dirty, because what the file holds is then no version of this history.
 - **The budget counts the bench.** A version's unshared bytes are the unshared
   half of its value plus the items its predecessor's bench does not share, each
-  charged its observations and its consensus bitmap. Every item a step did not
+  charged its observations and its patch bitmap. Every item a step did not
   touch is the same `Arc` in both benches and costs nothing, so a step on one
   track costs that track. A bench is small against a bulk edit, so the budget's
   arithmetic does not change, only what it sums. A released version keeps its
@@ -842,17 +842,38 @@ their first evaluation takes them in when they clear the bars. A cluster
 started from a pixel arrives with its one seed pinned `in` for the same reason:
 it is what the person pointed at.
 
-**A track-stage track with no bitmap gets one fused.** A patch step -- a move,
-a resize, a spin or a tilt -- drops the consensus bitmap, because it was fused
-over the square as it stood. When the evaluation reads a track-stage track that
-has a placement and no bitmap, it also runs core's `fuse_bitmap_in_place` on
-the photographs it has already decoded. That renders the `in` sightings through
-the patch as it now lies, at their keypoints, and writes the bitmap and the
-colour at its centre, moving nothing. So a tilted patch shows its texture again
+**A track-stage track with no bitmap gets one rendered.** A patch step -- a
+move, a resize, a spin or a tilt -- drops the patch bitmap, because it was
+rendered over the square as it stood, and keeps the reference observation.
+A step that sights the bitmap's own row elsewhere drops the bitmap and keeps
+the reference too, and one that takes that row off the track (a delete of its
+image, a split) or turns it `out` drops both
+([../core/bench/editable-track.md](../core/bench/editable-track.md) § "The
+stored bitmap's reference"). When the evaluation reads a track-stage
+track that has a placement and no bitmap, it also runs core's
+`render_bitmap_in_place` on the photographs it has already decoded. That renders
+the patch as it now lies at the keypoints. Where the track holds a defined
+reference, an `in` row with a keypoint, it writes that row's tile as the
+bitmap and keeps the reference; otherwise it writes the tile of the `in`
+sighting the reference-view rule picks (or the fused mean of them where it
+picks none or reaches its pick only through its last fallback; [../core/patch/reference-view.md](../core/patch/reference-view.md)
+§ "The stored bitmap"), and the
+colour at its centre, moving nothing. It then scores every row against the new
+bitmap (core's `score_bitmap`), since the evaluation's own bitmap scores were
+read before there was one. The three run as one call, core's
+`evaluate_rendering_bitmap`, which takes the bitmap and the scores from the
+tiles the evaluation already rendered where its reference-view rule ran over
+the same `in` rows on the same grid, so a patch step on a long track costs
+about one evaluation rather than an evaluation plus a render. A render keeps a
+defined reference: a reference the step kept, or the one the track was opened
+with from the file, is rendered from again, and the rule sets the reference
+only where the track has none (the point stored `-1`, or the reference row
+was deleted, split off or turned `out`). The rule's pick the evaluation
+reports per row is information and can differ from it. So a tilted patch shows its texture again
 as soon as the evaluation lands, and can be committed into a reconstruction
 that stores a bitmap per point without a fit first. The bitmap is installed with
 the measurements, under the same rule: no version and no Action Log row. A track with fewer than two
-`in` sightings that carry a keypoint has nothing to fuse, and stays without one.
+`in` sightings that carry a keypoint has nothing to render, and stays without one.
 
 **The node is not locked by it.** Every step stays available while an
 evaluation runs, and taking one is what cancels it. It is not a background task
@@ -1074,8 +1095,8 @@ transfer and sweep members read neither and run as usual. The node's files are
 opened on sight and re-judged when the run starts
 (`refresh_index_files`), so the states it reads are the node's as it stands.
 
-**The track arrives with its bitmap.** `build_track_at_pixel` fuses the
-consensus bitmap and colour where the track stands before it returns
+**The track arrives with its bitmap.** `build_track_at_pixel` renders the
+patch bitmap and colour where the track stands before it returns
 ([`../core/bench/track-at-pixel.md`](../core/bench/track-at-pixel.md) § "The
 finish"), so the commit takes the track as the operation returned it, on a
 reconstruction that stores a bitmap per point as on one that does not.
@@ -1430,7 +1451,7 @@ patch whose centre is behind the camera or outside the camera model's domain;
 `patch_zoom` is null as well for a patch seen edge on. Each row also carries
 `sampler`, the sampler the evaluation's sampler choice (the sampler rule by
 default, `crate::bench::sampler_choice`) picks from `patch_jacobian` and the one
-its tile is rendered with by the evaluation, the fuse and Track View
+its tile is rendered with by the evaluation, the bitmap render and Track View
 (`anisotropic` or `bilinear_mip`), and `sampler_minor_axis_loss`, the loss the
 rule compares with its threshold; both are null where `patch_jacobian` is, and
 the loss is null as well where it is not finite. The
@@ -1452,7 +1473,7 @@ that list**, which no bench step renumbers, so an index an agent is holding afte
 a verdict or a fit still names the same observation. `delete_camera_image` is
 the one call that renumbers it (§ "One history for the pair"), and its
 description says so. The template's
-samples and the consensus bitmap are reported as present or absent rather than
+samples and the patch bitmap are reported as present or absent rather than
 sent: they are pictures, and that surface is not a data channel.
 
 **`pixel` is where the observation sits, whatever said so**: the keypoint the
@@ -1619,6 +1640,14 @@ it would write against the one the origin holds, column for column, `NaN`
 agreeing with `NaN`
 ([`../core/bench/editable-track.md`](../core/bench/editable-track.md)
 § "The commit"), and answers `changed: false` when the two say the same thing.
+One origin is written even when the two agree: a point whose reference
+observation only the display render picked (the file stores it at `-1` and the
+open rendered [display patch bitmaps](../GLOSSARY.md)). Committing it is what
+makes that pick the point's own, so the first commit of such a point, edited or
+not, writes it again: one version, one undo entry and an `Edit` row, the
+document marked dirty, and `changed: true` with the index of the point it
+wrote. A save then writes the reference rather than `-1`. The point it wrote
+carries no such mark, so a later press with nothing edited has no effect.
 
 **A pixel off the photograph is brought inside it rather than refused.** A
 pointer can be dragged past the edge of the picture and a call can carry any two
@@ -1693,6 +1722,8 @@ point's exact projection and a photograph cached for every image:
   already holds the track included: repeated presses push no version, mint no
   index, keep the point selected and write one no-effect row each, while the
   press after a sighting is turned out or after an undo writes again;
+- the first commit of an unedited point whose reference only the display render
+  picked writes it (one version, dirty), and the press after it has no effect;
 - a run of bench steps over a clean value is clean, a commit is dirty, and
   undoing the commit is clean again;
 - a report lands on the item it measured, and one for an item that is not there

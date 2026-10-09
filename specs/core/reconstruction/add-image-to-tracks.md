@@ -9,8 +9,10 @@ where the point's patch appears in the photograph, checks that the appearance
 there agrees with the point's other observations, and adds the observation when
 it does. Nothing else moves: every point keeps its index, position, patch frame
 and bitmap, every existing observation stays as it is, and nothing is
-re-triangulated or adjusted. What a caller does afterwards (retriangulate,
-adjust, or nothing) is the caller's.
+re-triangulated or adjusted. Each point's `reference_observations` entry moves
+with its observation where the new one lands before it in the track, so it names
+the same image as before; the bitmap is not re-rendered. What a caller does
+afterwards (retriangulate, adjust, or nothing) is the caller's.
 
 It answers a narrower question than the bench's evaluation
 ([editable-track.md](../bench/editable-track.md)). The bench reads a track by
@@ -94,7 +96,7 @@ because the reference consensus and the leave-one-out scores are measured, not
 read. Poses and cameras are read from `recon`, so a view can never disagree
 with the value it is being added to. An image whose photograph is `None` is left
 out of every reference set rather than failing the call, the rule
-`fuse_patch_cloud_bitmaps` follows.
+`render_patch_cloud_bitmaps` follows.
 
 **Why the rule is an enum.** Several rules are useful, and they are compared
 with each other by the leave-one-image-out harness in
@@ -145,7 +147,7 @@ For a point `p` with existing observations in images `J`, and the target image
    side and skips the grazing and facing checks.
 2. **Reference consensus.** Each existing observation in a decoded image is
    rendered on the patch grid anchored at its own keypoint (the in-plane offset
-   its keypoint states, as the bench and the bitmap fuse anchor it). The renders
+   its keypoint states, as the bench and the bitmap render anchor it). The renders
    are z-normalised and combined into the robust IRLS consensus. From the same
    renders come each reference's leave-one-out ZNCC (against the robust
    consensus of the others) and the pairwise ZNCCs between references. Fewer
@@ -279,7 +281,9 @@ on a synthetic capture (pinhole cameras over a textured plane): a removed
 observation is found again within 0.1 px of its projection; the same with a
 stored bitmap as the template, fused by `fuse_patch_bitmap`, which pins the
 bitmap's grid orientation; existing observations, positions and frames come back
-unchanged and tracks stay in image order; a two-reference track is judged by the
+unchanged and tracks stay in image order; a reference observation moves with
+its observation where the new one lands before it in the track and stays where
+it lands after it; a two-reference track is judged by the
 pair rule; `PooledOrTrack` accepts what either bar accepts; a photograph of a
 different texture is refused by every rule; a point out of frame is
 `not_in_frame`; a camera behind the plane is `back_facing`; two points at one

@@ -499,9 +499,9 @@ fn a_cluster_near_the_pixel_carries_it_into_the_other_photographs() {
     assert_rebuilt(&scene, &track, &report);
 }
 
-/// The returned track carries its consensus bitmap, fused where the track
+/// The returned track carries its patch bitmap, rendered where the track
 /// stands after the final slide onto the pixel, on the reconstruction's own
-/// bitmap grid, and the colour at its centre; fusing it again moves nothing.
+/// bitmap grid, and the colour at its centre; rendering it again moves nothing.
 #[test]
 fn the_returned_track_carries_a_bitmap_on_the_reconstructions_grid() {
     let scene = Scene::new();
@@ -532,8 +532,23 @@ fn the_returned_track_carries_a_bitmap_on_the_reconstructions_grid() {
         [bitmap[[3, 3, 0]], bitmap[[3, 3, 1]], bitmap[[3, 3, 2]]],
         "the colour is not the tile's centre"
     );
+    // The rows are scored against that bitmap: the one it is the render of
+    // reads 1, and every other measured row carries a score.
+    for (i, observation) in track.observations.iter().enumerate() {
+        let Some(measured) = observation.track.as_ref() else {
+            continue;
+        };
+        if Some(i) == payload.reference {
+            assert_eq!(measured.bitmap_zncc, Some(1.0), "row {i}");
+        } else if measured.keypoint.is_some() {
+            assert!(
+                measured.bitmap_zncc.is_some(),
+                "row {i} has no bitmap score"
+            );
+        }
+    }
 
-    let again = crate::bench::fit::fuse_bitmap_in_place(
+    let again = crate::bench::fit::render_bitmap_in_place(
         &track,
         &edited,
         &views,

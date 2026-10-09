@@ -13,13 +13,15 @@ reconstruction, and round-trips it through ``.sfmr`` to confirm validity. See
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
-from sfmtool._embed_patches import _refine_subpixel
+from sfmtool._embed_patches import _localizations_from_recon, _refine_subpixel
 from sfmtool._patch_compaction import (
     compact_to_embedded_patches,
     image_file_hashes_from_images,
+    reference_observations_from_images,
 )
 from sfmtool._sfmtool.reconstruction import SfmrReconstruction
 from sfmtool._sfmtool.patches import PatchCloud
@@ -60,6 +62,28 @@ def test_from_halfvec_arrays_round_trips_a_cloud():
     assert np.allclose(p0.center, [1.0, 1.0, 1.0])
     assert np.allclose(p0.half_extent, [2.0, 2.0])
     assert np.allclose(np.asarray(p0.u_axis) * p0.half_extent[0], [2.0, 0.0, 0.0])
+
+
+def test_reference_observations_from_images_names_the_first_observation_in_the_image():
+    """Each point's reference is the place in its own track of its first
+    observation in the named image, and -1 where it names no image or its
+    track has no observation in that image."""
+    # Point 0 sees images 4, 2, 7; point 1 sees 3, 5, 3 (image 3 twice); point
+    # 2 sees 1, 6; point 3 sees 0.
+    recon = SimpleNamespace(
+        track_point_indexes=np.array([0, 0, 0, 1, 1, 1, 2, 2, 3], dtype=np.uint32),
+        track_image_indexes=np.array([4, 2, 7, 3, 5, 3, 1, 6, 0], dtype=np.uint32),
+        observation_counts=np.array([3, 3, 2, 1], dtype=np.uint32),
+    )
+    reference_images = np.array([7, 3, 5, -1], dtype=np.int64)
+
+    refs = reference_observations_from_images(recon, reference_images)
+
+    assert refs.dtype == np.int32
+    # Point 0: image 7 is its third observation. Point 1: image 3 first appears
+    # at its first observation. Point 2: no observation in image 5. Point 3:
+    # names no image.
+    np.testing.assert_array_equal(refs, [2, 0, -1, -1])
 
 
 def test_image_file_hashes_from_images_shape(seoul_bull_workspace: Path):
@@ -143,6 +167,97 @@ def test_compact_to_embedded_patches_round_trip(
     assert len(rcloud) == reloaded.point_count
     assert reloaded.patch_bitmaps is not None
     assert reloaded.patch_bitmaps.shape[0] == reloaded.point_count
+
+
+def test_compact_writes_references_naming_observations_of_the_compacted_tracks(
+    seoul_bull_workspace: Path,
+):
+    """A localization's ``reference_image`` becomes the place, in the point's
+    compacted (image-sorted) track, of its observation in that image, and
+    ``-1`` where it is absent, ``None`` or not one of the kept views."""
+    recon = SfmrReconstruction.load(seoul_bull_workspace)
+    images = load_images(recon)
+    cloud, bitmaps, locs = _run_pipeline(recon, images)
+    hashes = image_file_hashes_from_images(recon)
+
+    # Name a kept view other than the first in input order, so the index has to
+    # follow the sort; leave some points without a reference, and name an image
+    # the point does not keep for others.
+    expected_image: dict[int, int] = {}
+    for i, loc in enumerate(locs):
+        views = np.asarray(loc["views"]).tolist()
+        pid = int(loc["point_index"])
+        if not views:
+            continue
+        if i % 4 == 1:
+            loc["reference_image"] = None
+        elif i % 4 == 2:
+            absent = [j for j in range(recon.image_count) if j not in views]
+            if absent:
+                loc["reference_image"] = absent[0]
+        else:
+            loc["reference_image"] = views[-1]
+            expected_image[pid] = views[-1]
+
+    new = compact_to_embedded_patches(
+        recon, cloud, locs, hashes, patch_bitmaps=bitmaps, min_views=2
+    )
+    refs = np.asarray(new.reference_observations)
+    counts = np.asarray(new.observation_counts)
+    offsets = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(int)
+    timg = np.asarray(new.track_image_indexes)
+    assert refs.shape == (new.point_count,)
+    assert np.all((refs >= -1) & (refs < counts))
+
+    cloud_pids = {int(p) for p in cloud.point_indexes}
+    survivors = sorted(
+        int(loc["point_index"])
+        for loc in locs
+        if int(loc["point_index"]) in cloud_pids and len(np.asarray(loc["views"])) >= 2
+    )
+    named = 0
+    for new_id, old_id in enumerate(survivors):
+        if old_id in expected_image:
+            assert refs[new_id] >= 0, f"point {new_id} (src {old_id})"
+            assert timg[offsets[new_id] + refs[new_id]] == expected_image[old_id]
+            named += 1
+        else:
+            assert refs[new_id] == -1, f"point {new_id} (src {old_id})"
+    assert 0 < named < new.point_count
+
+    # Compacting again without bitmaps, as the keypoint localizer does, keeps
+    # each point's reference where its track still holds the image, and -1
+    # where the localization dropped it.
+    relocs = _localizations_from_recon(new)
+    old_image = {
+        p: timg[offsets[p] + refs[p]] for p in range(new.point_count) if refs[p] >= 0
+    }
+    dropped = set()
+    for loc in relocs:
+        pid = int(loc["point_index"])
+        views = np.asarray(loc["views"])
+        if pid % 3 == 0 and pid in old_image and len(views) > 2:
+            keep = views != old_image[pid]
+            loc["views"] = views[keep]
+            loc["keypoints"] = np.asarray(loc["keypoints"])[keep]
+            dropped.add(pid)
+    again = compact_to_embedded_patches(
+        new, new.patches, relocs, list(new.image_file_hashes), min_views=2
+    )
+    assert again.patch_bitmaps is None
+    assert again.point_count == new.point_count
+    refs2 = np.asarray(again.reference_observations)
+    counts2 = np.asarray(again.observation_counts)
+    offsets2 = np.concatenate([[0], np.cumsum(counts2)[:-1]]).astype(int)
+    timg2 = np.asarray(again.track_image_indexes)
+    kept = 0
+    for p in range(again.point_count):
+        if p in dropped or p not in old_image:
+            assert refs2[p] == -1, f"point {p}"
+        else:
+            assert timg2[offsets2[p] + refs2[p]] == old_image[p], f"point {p}"
+            kept += 1
+    assert kept > 0 and dropped
 
 
 def _normal_frame_angles_deg(recon) -> np.ndarray:
@@ -233,7 +348,7 @@ def test_compact_min_views_culls_points(seoul_bull_workspace: Path):
 
 def test_compact_preserves_points_at_infinity(seoul_bull_workspace: Path):
     """A point at infinity (w = 0) with enough covering views produces a real
-    cross-view **consensus bitmap** in the sub-pixel refiner (it is refined, not
+    **stored bitmap** in the sub-pixel refiner (it is refined, not
     skipped), passes the uniform validity cull — there is no infinity exemption
     any more — and stays at infinity through compaction, carrying that bitmap
     (nonzero alpha) instead of the zero row the old pipeline stored."""
@@ -305,22 +420,22 @@ def test_compact_preserves_points_at_infinity(seoul_bull_workspace: Path):
         )
     hashes = [b"\x00" * 16] * recon.image_count
 
-    # The sub-pixel refiner fuses the consensus bitmaps + validity — the pipeline
+    # The sub-pixel refiner renders the stored bitmaps + validity — the pipeline
     # source for both (points at infinity go through the same path).
     locs, bitmaps, valid = _refine_subpixel(
         cloud, recon, images, locs, sweeps=1, resolution=12, render_bitmaps=True
     )
     assert valid is not None and bool(valid[pi]), (
-        "the well-observed infinity point must produce a consensus bitmap"
+        "the well-observed infinity point must produce a stored bitmap"
     )
-    assert bitmaps[pi][..., 3].any(), "its consensus bitmap has real agreement"
+    assert bitmaps[pi][..., 3].any(), "its stored bitmap has real samples"
 
     out = compact_to_embedded_patches(
         recon, cloud, locs, hashes, patch_bitmaps=bitmaps, valid=valid, min_views=2
     )
 
     # The infinity point survived, is still at infinity, and carries its nonzero
-    # consensus bitmap (not the old zero row).
+    # stored bitmap (not the old zero row).
     is_inf = np.asarray(out.point_is_at_infinity)
     assert is_inf.sum() == 1, "the one infinity point should survive as w = 0"
     out_bitmaps = np.asarray(out.patch_bitmaps)
@@ -372,11 +487,11 @@ def _project_direction(recon, d: np.ndarray, image_idx: int, margin: float = 0.0
     return uv
 
 
-def test_compact_drops_points_without_consensus_bitmap(
+def test_compact_drops_points_without_a_valid_bitmap(
     seoul_bull_workspace: Path,
 ):
     """The validity mask is a hard cull: a point with enough kept views but no
-    valid consensus bitmap (``valid[pid] == False`` — the refiner produced no
+    valid stored bitmap (``valid[pid] == False`` — the refiner produced no
     representative) is dropped by the final compact instead of being kept with an
     all-black bitmap."""
     recon = SfmrReconstruction.load(seoul_bull_workspace)
@@ -456,3 +571,16 @@ def test_drop_grazing_observations_skips_points_at_infinity():
     # Infinity point: untouched despite the (meaningless) grazing geometry.
     assert len(by_pid[1]["views"]) == 1
     assert dropped == 1
+
+
+def test_reference_observations_from_images_takes_the_first_observation():
+    """A track with two observations in the reference image names the first."""
+    recon = SimpleNamespace(
+        # Point 0 sees images 3, 5, 5; point 1 sees 2, 2; point 2 sees 4.
+        track_point_indexes=np.array([0, 0, 0, 1, 1, 2]),
+        track_image_indexes=np.array([3, 5, 5, 2, 2, 4]),
+        observation_counts=np.array([3, 2, 1]),
+    )
+    out = reference_observations_from_images(recon, np.array([5, 2, 7]))
+    np.testing.assert_array_equal(out, [1, 0, -1])
+    assert out.dtype == np.int32

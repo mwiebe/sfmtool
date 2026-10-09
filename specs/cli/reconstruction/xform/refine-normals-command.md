@@ -140,7 +140,10 @@ that is the step which builds the frame this one reuses (see "Patch frame"
 below). Persisting the frame is not a knob either — the refined cloud is always
 written back, so the stored frame cannot fall out of step with the rewritten
 normals. `bitmaps` is the only persistence choice here, and it governs the RGBA
-textures alone.
+textures alone. Writing the refined patch frame drops any bitmaps the input
+stored, so with `bitmaps=false` the output has none; it keeps every
+`tracks/reference_observations` entry, so a later `--add-patch-bitmaps`
+renders each point from the same observation through the refined frame.
 
 ### Candidate-scoring cache (`cache` / `cache_supersample` / `quality`)
 
@@ -282,14 +285,27 @@ found normal and writes the per-point `patch_bitmaps_y_x_rgba` array
 (`(point_count, R, R, 4)` uint8, `R = resolution`) beside the frame. The binding
 (`PatchCloud.refine_normals(render_bitmaps=True)`) returns the textures already
 scattered to per-3D-point rows (zero rows for points with no refined patch), and
-the command attaches them via `clone_with_changes(patch_bitmaps=…)`. Each patch
-texture is the cross-view **fusion** of the kept views at the optimum: RGB is the
-robust IRLS-weighted mean (the same per-view weights the consensus uses; an
-unweighted mean under `objective=mean`), and the **alpha channel is a per-pixel
-cross-view agreement confidence** — high where the views agree, `0` where no kept
-view covers the pixel (and `0` for a pixel seen by a single view, which carries no
-cross-view evidence). Rendering costs one extra full-grid source render per kept
-view per patch. It is on by default so the refined reconstruction carries its
+the command attaches them via `clone_with_changes(patch_bitmaps=…,
+reference_observations=…)`. Each patch texture is the stored bitmap at the
+refined normal: the tile of the view the reference-view rule picks, rendered
+through the refined patch at that view's stored keypoint, with alpha `255` on
+the samples on the photograph and `0` elsewhere, and the point's
+`tracks/reference_observations` row names that observation
+([reference-view.md](../../../core/patch/reference-view.md) § "The stored
+bitmap"). Where the rule picks no view, or reaches its pick only through its
+last fallback, the texture is the cross-view
+**fusion** of the kept views at the optimum: RGB the robust IRLS-weighted mean
+(an unweighted mean under `objective=mean`) and alpha a per-pixel cross-view
+agreement confidence, and the point names no observation. A point whose
+`tracks/reference_observations` entry already names an observation keeps it,
+and only a point at `-1` takes the rule's pick. Every point with a reference
+then has its texture rendered again from that observation through the refined
+patch as the file stores it, in `f32` (`render_from_references` in
+[`_patch_compaction.py`](../../../../src/sfmtool/_patch_compaction.py)), so
+dropping and adding the bitmaps later gives the same bytes; a fusion stays as
+the refinement rendered it. Rendering costs a
+tile render and a self-similarity reading per view and member coherence's
+matrix per patch. It is on by default so the refined reconstruction carries its
 per-point patch textures and can display them without re-rendering; a multi-stage
 pipeline can pass `bitmaps=false` on intermediate stages to skip the redundant
 render and render once on the finalizing stage.

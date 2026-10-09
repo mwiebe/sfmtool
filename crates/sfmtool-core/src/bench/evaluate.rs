@@ -33,6 +33,7 @@ use ndarray::{Array2, Array3};
 
 use crate::camera::image::ImageU8Pyramid;
 
+use crate::patch::blur_matched::TilePlanes;
 use crate::patch::cloud::OrientedPatch;
 use crate::patch::cluster_refine::{
     refine_cluster_patches_borrowed, sample_member_grid, ClusterRefineParams, FeatureGeometry,
@@ -42,17 +43,16 @@ use crate::patch::keypoint_localize::{
     keypoint_grid_offset, project_unclipped, try_localize_patch_keypoints, view_cache_bytes,
     KeypointLocalizeParams, LocalizeError,
 };
-use crate::patch::member_coherence::{member_zncc_matrix_reporting, MemberCoherenceParams};
+use crate::patch::member_coherence::MemberCoherenceParams;
 use crate::patch::normal_refine::ProjectedImage;
-use crate::patch::pair_sharpness::{PairMatching, DEFAULT_MIN_ELLIPSE_RATIO};
 use crate::patch::reference_view::{
-    blur_matched_agreement, cell_agreement, choose_reference_view_with, finite_middle,
-    render_view_tile, PairZnccReading, ReferenceReadings, ReferenceRuleInputs, ViewTile,
+    choose_reference_view, read_track, render_view_tile, ReferenceReadings, ViewTile,
 };
 use crate::patch::self_similarity::{
     zncc_self_similarity_parts, PatchTile, SelfSimilarityEllipse, SelfSimilarityEllipseUnits,
     SelfSimilarityParams,
 };
+use crate::patch::stored_bitmap::{bitmap_from_tile, stored_view, BitmapScorer};
 use crate::progress::{Cancelled, Progress};
 use crate::progress_note;
 use crate::reconstruction::edited::EditedReconstruction;
@@ -134,62 +134,6 @@ pub struct EvaluateOptions {
     /// window with it. The default is 256 MiB, which is a couple of hundred
     /// views at the offset bound and thousands at the default search radius.
     pub max_cache_bytes: usize,
-    /// How the track stage reads the agreement between its `in` views that the
-    /// reference-view rule decides on.
-    pub reference_view: ReferenceViewOptions,
-}
-
-/// How an evaluation reads the agreement between a track's views for the
-/// reference-view rule: whether it takes blur-matched readings beside the
-/// plain ones, and which of the two the rule's agreement test and cell check
-/// read.
-///
-/// The plain readings are always taken. The blur-matched ones cost a blur of
-/// the sharper tile for each pair in which one tile is sharper than the other
-/// along every direction.
-///
-/// The default takes the blur-matched readings, leaving a pair plain where
-/// the other tile's semi-minor axis is less than [`DEFAULT_MIN_ELLIPSE_RATIO`]
-/// times the sharper tile's semi-major axis, and has both tests read them:
-/// on the review cases and pool samples that adds about 0.13 ms to a track's
-/// evaluation (2%), and agrees with the hand picks exactly on as many tracks
-/// as the plain readings (28 of 77). `specs/core/patch/reference-view.md`
-/// § "Blur-matched agreement" has the measurements.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ReferenceViewOptions {
-    /// How the blur-matched readings are taken. [`PairMatching::Plain`] takes
-    /// none, and both tests then read the plain readings whatever
-    /// [`Self::agreement`] and [`Self::cells`] say.
-    pub matching: PairMatching,
-    /// Which pair ZNCC the agreement test reads.
-    pub agreement: PairZnccReading,
-    /// Which pair ZNCC grid the cell check reads.
-    pub cells: PairZnccReading,
-}
-
-impl Default for ReferenceViewOptions {
-    fn default() -> Self {
-        Self {
-            matching: PairMatching::BlurMatchedAboveRatio(DEFAULT_MIN_ELLIPSE_RATIO),
-            agreement: PairZnccReading::BlurMatched,
-            cells: PairZnccReading::BlurMatched,
-        }
-    }
-}
-
-impl ReferenceViewOptions {
-    /// Which readings the rule reads under these options: the plain ones
-    /// wherever no blur-matched readings are taken.
-    pub fn inputs(&self) -> ReferenceRuleInputs {
-        if self.matching.is_blur_matched() {
-            ReferenceRuleInputs {
-                agreement: self.agreement,
-                cells: self.cells,
-            }
-        } else {
-            ReferenceRuleInputs::PLAIN
-        }
-    }
 }
 
 /// [`EvaluateOptions::max_seed_offset_px`]'s default: 64 patch-grid px.
@@ -215,7 +159,6 @@ impl Default for EvaluateOptions {
             },
             max_seed_offset_px: DEFAULT_MAX_SEED_OFFSET_PX,
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
-            reference_view: ReferenceViewOptions::default(),
         }
     }
 }
@@ -256,8 +199,8 @@ impl EvaluateOptions {
 /// declares as `patch_bitmap_resolution`, or `None` where it stores none.
 ///
 /// A column the viewer rendered for display because the file had none counts
-/// as well, as it does for the fit's fuse: the bench reads it as it would the
-/// file's own.
+/// as well, as it does for the fit's bitmap render: the bench reads it as it
+/// would the file's own.
 pub fn stored_patch_resolution(recon: &SfmrReconstruction) -> Option<u32> {
     let bitmaps = recon.point_set.patch_bitmaps_y_x_rgba.as_deref()?;
     u32::try_from(bitmaps.shape()[1]).ok().filter(|&r| r > 0)
@@ -546,17 +489,49 @@ pub fn evaluate(
     options: &EvaluateOptions,
     progress: &Progress<'_>,
 ) -> Result<(EditableTrack, EvaluateReport), EvaluateError> {
+    evaluate_keeping_tiles(track, edited, images, options, progress)
+        .map(|(read, report, _)| (read, report))
+}
+
+/// The tiles a track-stage evaluation rendered, kept for a bitmap render that
+/// follows it ([`evaluate_rendering_bitmap`]).
+struct KeptTiles {
+    /// Per observation that had a pixel to render at: its row and its tile.
+    tiles: Vec<(usize, ViewTile)>,
+    /// The `in` rows the reference-view rule ran over, in the order it read
+    /// them.
+    in_rows: Vec<usize>,
+    /// The row whose tile stands as the stored bitmap ([`stored_view`]), or
+    /// `None` where the rule picked none or reached its pick only through its
+    /// last fallback.
+    stored: Option<usize>,
+    /// The resolution the tiles were rendered at.
+    resolution: usize,
+}
+
+/// [`evaluate`], with the tiles a track-stage reading rendered.
+fn evaluate_keeping_tiles(
+    track: &EditableTrack,
+    edited: &EditedReconstruction,
+    images: &[ProjectedImage<'_>],
+    options: &EvaluateOptions,
+    progress: &Progress<'_>,
+) -> Result<(EditableTrack, EvaluateReport, Option<KeptTiles>), EvaluateError> {
     check_views(edited, images)?;
     evaluate_preconditions(track)?;
-    let (read, mut report) = match &track.stage {
-        Stage::Cluster(payload) => evaluate_cluster(track, payload, images, options, progress)?,
+    let (read, mut report, kept) = match &track.stage {
+        Stage::Cluster(payload) => {
+            let (read, report) = evaluate_cluster(track, payload, images, options, progress)?;
+            (read, report, None)
+        }
         Stage::Track(payload) => {
             let options = options.at_resolution(options.patch_resolution(&edited.base));
-            evaluate_track(track, images, payload, &options, progress)?
+            let (read, report, kept) = evaluate_track(track, images, payload, &options, progress)?;
+            (read, report, Some(kept))
         }
     };
     if track.repainted() {
-        return Ok((read, report));
+        return Ok((read, report, kept));
     }
     let (mut painted, repaint) = apply_thresholds(&read);
     report.turned_in = repaint.turned_in;
@@ -564,7 +539,104 @@ pub fn evaluate(
     if repaint.changed {
         painted.repaint = RepaintMark::of(&painted);
     }
-    Ok((painted, report))
+    Ok((painted, report, kept))
+}
+
+/// [`evaluate`], and then, for a track-stage track with a patch and no bitmap,
+/// its bitmap rendered where the patch stands, moving nothing
+/// ([`render_bitmap_in_place`](super::fit::render_bitmap_in_place) under
+/// `fit`), with every row scored against it ([`score_bitmap`]).
+///
+/// What a caller runs after a step that dropped the bitmap: SfM Explorer's
+/// live evaluation after a patch step, and the end of
+/// [`fit_normal`](super::normal::fit_normal). The answer is the one those
+/// three calls give in turn, but the render reuses what the evaluation already
+/// read where it can. When the evaluation's repaint left the `in` set as the
+/// rule read it, every `in` row carries a keypoint, and the evaluation's tiles
+/// are on the bitmap's grid with the render's sampler, the tile the render
+/// would make is one the evaluation already made: the bitmap is then the
+/// evaluation's tile of the track's defined reference observation
+/// ([`TrackPayload::reference`]) where it holds one, and of the row the
+/// evaluation's reference-view rule picked where it does not, and the scores
+/// are read off the evaluation's tiles. Otherwise, and where the rule stores
+/// the fused mean, the render and the scoring run as their own calls.
+///
+/// A track that has a bitmap, a cluster, and a track with no patch come back
+/// as [`evaluate`] returns them.
+///
+/// # Errors
+///
+/// [`evaluate`]'s.
+pub fn evaluate_rendering_bitmap(
+    track: &EditableTrack,
+    edited: &EditedReconstruction,
+    images: &[ProjectedImage<'_>],
+    options: &EvaluateOptions,
+    fit: &super::fit::FitOptions,
+    progress: &Progress<'_>,
+) -> Result<(EditableTrack, EvaluateReport), EvaluateError> {
+    let (read, report, kept) = evaluate_keeping_tiles(track, edited, images, options, progress)?;
+    let needs_bitmap = matches!(
+        &read.stage,
+        Stage::Track(payload) if payload.placement.is_some() && payload.bitmap.is_none()
+    );
+    if !needs_bitmap {
+        return Ok((read, report));
+    }
+    progress.check_cancel()?;
+    if let Some(next) =
+        kept.and_then(|kept| bitmap_from_reading(&read, edited, options, fit, kept, progress))
+    {
+        return Ok((next, report));
+    }
+    let rendered = super::fit::render_bitmap_in_place(&read, edited, images, fit);
+    let scored = score_bitmap(&rendered, edited, images, options, progress)?;
+    Ok((scored, report))
+}
+
+/// The bitmap [`render_bitmap_in_place`](super::fit::render_bitmap_in_place)
+/// would render for `read`, taken from the tiles its evaluation `kept`, with
+/// every row scored against it; `None` where the two could differ.
+fn bitmap_from_reading(
+    read: &EditableTrack,
+    edited: &EditedReconstruction,
+    options: &EvaluateOptions,
+    fit: &super::fit::FitOptions,
+    kept: KeptTiles,
+    progress: &Progress<'_>,
+) -> Option<EditableTrack> {
+    let (resolution, channels) = super::fit::bitmap_layout(edited, fit);
+    // The render reads the `in` rows that carry a keypoint, at its own grid
+    // and sampler; the rule's pick is the evaluation's only where those are
+    // the rows, the grid and the sampler the evaluation read.
+    let ins = read.in_observations();
+    let keyed = ins.iter().all(|&i| {
+        read.observations[i]
+            .track
+            .as_ref()
+            .is_some_and(|m| m.keypoint.is_some())
+    });
+    if !keyed
+        || ins != kept.in_rows
+        || ins.len() < 2
+        || resolution != kept.resolution
+        || fit.refine.sampler != options.localize.sampler
+    {
+        return None;
+    }
+    // The render's row: the track's defined reference where it is one of
+    // those rows, and the rule's pick otherwise.
+    let held = read
+        .track()
+        .and_then(|p| p.reference)
+        .filter(|r| ins.contains(r));
+    let row = held.or(kept.stored)?;
+    let tile = &kept.tiles.iter().find(|(i, _)| *i == row)?.1;
+    let (bitmap, color) = super::fit::column_bitmap(&bitmap_from_tile(tile), resolution, channels);
+    let mut next = read.clone();
+    super::fit::install_bitmap(&mut next, bitmap, Some(row), Some(color));
+    score_against_bitmap(&mut next, &kept.tiles, progress);
+    Some(next)
 }
 
 /// Whether `track` can be read at the stage it stands in, judged on the track
@@ -1152,7 +1224,7 @@ fn evaluate_track(
     payload: &TrackPayload,
     options: &EvaluateOptions,
     progress: &Progress<'_>,
-) -> Result<(EditableTrack, EvaluateReport), EvaluateError> {
+) -> Result<(EditableTrack, EvaluateReport, KeptTiles), EvaluateError> {
     let frame = payload.placement.clone().ok_or(EvaluateError::NoFrame)?;
     check_observation_views(track, images)?;
 
@@ -1205,8 +1277,9 @@ fn evaluate_track(
     let resolution = options.localize.resolution.max(2) as usize;
     let mut next = track.clone();
     let (mut measured, mut unmeasured) = (0, 0);
-    // The `in` observations' tiles, kept for the reference view's readings,
-    // which correlate them in pairs.
+    // Every rendered observation's tile, kept for the reference view's
+    // readings, which correlate the `in` ones in pairs, and for the scores
+    // against the stored bitmap, which every observation has.
     let mut kept_tiles: Vec<(usize, ViewTile)> = Vec::new();
     {
         let mut phase = progress.phase("self-similarity");
@@ -1243,9 +1316,10 @@ fn evaluate_track(
             measurement.pair_zncc = None;
             measurement.pair_zncc_grid = None;
             measurement.cell_deficit = None;
-            measurement.blur_matched_pair_zncc = None;
-            measurement.blur_matched_pair_zncc_grid = None;
-            measurement.blur_matched_cell_deficit = None;
+            measurement.bitmap_zncc = None;
+            measurement.blur_matched_bitmap_zncc = None;
+            measurement.bitmap_blur_sigma = None;
+            measurement.sharper_than_bitmap = None;
             measurement.reference_view = None;
             if let Some(pixel) = seed_of(observation) {
                 // The offset is measured from the **patch's** projection,
@@ -1284,9 +1358,7 @@ fn evaluate_track(
                     tile.viewing_angle.and_then(|a| a.tilt_direction_deg);
                 measurement.coverage = Some(tile.coverage);
                 measurement.clipped_share = tile.clipped_share;
-                if observation.verdict == Verdict::In {
-                    kept_tiles.push((i, tile));
-                }
+                kept_tiles.push((i, tile));
             }
             if measurement.zncc.is_some() {
                 measured += 1;
@@ -1298,7 +1370,20 @@ fn evaluate_track(
         progress_note!(phase, "{} observations", track.observations.len());
     }
     progress.check_cancel()?;
-    read_reference_view(&mut next, images, &frame, &kept_tiles, options, progress);
+    let in_tiles: Vec<(usize, &ViewTile)> = kept_tiles
+        .iter()
+        .filter(|(i, _)| next.observations[*i].verdict == Verdict::In)
+        .map(|(i, tile)| (*i, tile))
+        .collect();
+    let in_rows: Vec<usize> = in_tiles.iter().map(|(i, _)| *i).collect();
+    let stored = read_reference_view(&mut next, images, &frame, &in_tiles, options, progress);
+    score_against_bitmap(&mut next, &kept_tiles, progress);
+    let kept = KeptTiles {
+        tiles: kept_tiles,
+        in_rows,
+        stored,
+        resolution,
+    };
 
     Ok((
         next,
@@ -1316,6 +1401,7 @@ fn evaluate_track(
             turned_in: 0,
             turned_out: 0,
         },
+        kept,
     ))
 }
 
@@ -1583,35 +1669,36 @@ fn view_tile_self_similarity(tile: &ViewTile) -> TileSelfSimilarity {
     )
 }
 
+/// The self-similarity semi-axes, in grid px, an observation's track-stage
+/// slot carries for its tile.
+fn slot_semi_axes(measurement: Option<&super::track::TrackMeasurement>) -> Option<[f64; 2]> {
+    measurement
+        .and_then(|m| m.zncc_self_similarity_ellipse)
+        .map(|e| e.grid_px.axes)
+}
+
 /// Read what the reference-view rule needs across the `in` observations whose
 /// tiles are in `tiles`, run the rule, and write each one's pair ZNCC, pair ZNCC
 /// grid, cell deficit and standing into its track-stage slot.
 ///
-/// The pair ZNCC is the median of the observation's row of member coherence's
-/// matrix ([`member_zncc_matrix_reporting`]), rendered over the observations'
-/// common support with member coherence's window at the evaluation's
-/// resolution and sampler, anchored at each observation's keypoint. The cell
-/// readings come from the tiles already rendered ([`cell_agreement`]): member
-/// coherence renders only the samples inside its window's disk and common to
-/// every member, so its corner cells would hold part of their square, and the
-/// cell check was measured on whole cells with each pair's own support.
-///
-/// Where [`ReferenceViewOptions::matching`] asks for them, the blur-matched
-/// readings are taken from the same tiles ([`blur_matched_agreement`]), each
-/// tile's self-similarity ellipse saying how sharp it is, and the rule reads
-/// the readings [`ReferenceViewOptions::inputs`] names. Timed as the
-/// `reference view` phase of `progress`, whose detail phases time member
-/// coherence's renders and the blur-matched pairs.
+/// The readings are [`read_track`]'s: the pair ZNCC is the median of the
+/// observation's row of member coherence's matrix, rendered over the
+/// observations' common support with member coherence's window at the
+/// evaluation's resolution and sampler, anchored at each observation's
+/// keypoint, and the cell readings are taken on the tiles already rendered.
+/// The rule ranks by the self-similarity ellipse each slot carries. Timed as
+/// the `reference view` phase of `progress`, whose detail phases time member
+/// coherence's renders.
 fn read_reference_view(
     next: &mut EditableTrack,
     images: &[ProjectedImage<'_>],
     frame: &OrientedPatch,
-    tiles: &[(usize, ViewTile)],
+    tiles: &[(usize, &ViewTile)],
     options: &EvaluateOptions,
     progress: &Progress<'_>,
-) {
+) -> Option<usize> {
     if tiles.is_empty() {
-        return;
+        return None;
     }
     let mut phase = progress.phase("reference view");
     let members: Vec<u32> = tiles
@@ -1622,110 +1709,204 @@ fn read_reference_view(
         .iter()
         .map(|(i, _)| seed_of(&next.observations[*i]))
         .collect();
-    let params = MemberCoherenceParams {
-        resolution: options.localize.resolution.max(2),
-        sampler: options.localize.sampler,
-        ..MemberCoherenceParams::default()
-    };
-    let matrix =
-        member_zncc_matrix_reporting(frame, images, &members, Some(&keypoints), &params, &phase);
-    // One `in` observation per image, so the matrix's members are the tiles'
-    // images in the same order; looked up by image all the same.
-    let pair_zncc: Vec<Option<f64>> = members
+    let semi_axes: Vec<Option<[f64; 2]>> = tiles
         .iter()
-        .map(|image| {
-            let row = matrix.members.iter().position(|m| m == image)?;
-            let others: Vec<f64> = (0..matrix.len())
-                .filter(|&j| j != row)
-                .map(|j| matrix.get(row, j))
-                .collect();
-            finite(finite_middle(&others))
-        })
+        .map(|(i, _)| slot_semi_axes(next.observations[*i].track.as_ref()))
         .collect();
-    let refs: Vec<&ViewTile> = tiles.iter().map(|(_, tile)| tile).collect();
-    let cells = cell_agreement(&refs);
-    let reference = options.reference_view;
-    let blur_matched = reference.matching.is_blur_matched().then(|| {
-        let ellipses: Vec<Option<[[f64; 2]; 2]>> = tiles
-            .iter()
-            .map(|(i, _)| {
-                next.observations[*i]
-                    .track
-                    .as_ref()
-                    .and_then(|m| m.zncc_self_similarity_ellipse)
-                    .map(|e| e.grid_px)
-                    .filter(|e| e.axes.iter().all(|a| a.is_finite()))
-                    .map(|e| e.matrix)
-            })
-            .collect();
-        blur_matched_agreement(&refs, &ellipses, reference.matching, params.window, &phase)
-    });
+    let refs: Vec<&ViewTile> = tiles.iter().map(|(_, tile)| *tile).collect();
+    let reading = read_track(
+        frame,
+        images,
+        &members,
+        &keypoints,
+        &refs,
+        &semi_axes,
+        options.localize.sampler,
+        &phase,
+    );
     for (k, (i, _)) in tiles.iter().enumerate() {
         if let Some(measurement) = next.observations[*i].track.as_mut() {
-            measurement.pair_zncc = pair_zncc[k];
-            measurement.pair_zncc_grid = Some(cells.pair_zncc_grid[k]);
-            measurement.cell_deficit = finite(cells.deficit[k]);
-            if let Some(b) = &blur_matched {
-                measurement.blur_matched_pair_zncc = finite(b.pair_zncc[k]);
-                measurement.blur_matched_pair_zncc_grid = Some(b.cells.pair_zncc_grid[k]);
-                measurement.blur_matched_cell_deficit = finite(b.cells.deficit[k]);
-            }
+            measurement.pair_zncc = reading.pair_zncc[k];
+            measurement.pair_zncc_grid = Some(reading.cells.pair_zncc_grid[k]);
+            measurement.cell_deficit = finite(reading.cells.deficit[k]);
+            measurement.reference_view = reading.choice.standing(k);
         }
     }
-    let rows: Vec<usize> = tiles.iter().map(|(i, _)| *i).collect();
-    let picked = decide_reference_view(next, &rows, reference.inputs());
-    match (picked, &blur_matched) {
-        (Some(i), Some(b)) => progress_note!(
+    match reading.choice.reference {
+        Some(k) => progress_note!(
             phase,
-            "{} views, observation {i} picked, {} of {} pairs blurred",
-            rows.len(),
-            b.pairs.pairs_blurred,
-            b.pairs.pairs
+            "{} views, observation {} picked",
+            tiles.len(),
+            tiles[k].0
         ),
-        (Some(i), None) => progress_note!(phase, "{} views, observation {i} picked", rows.len()),
-        (None, _) => progress_note!(phase, "{} views, none picked", rows.len()),
+        None => progress_note!(phase, "{} views, none picked", tiles.len()),
     }
+    stored_view(&reading.choice).map(|k| tiles[k].0)
 }
 
-/// Run the reference-view rule over the observations `rows` from the readings
-/// their track-stage slots carry, the ones `inputs` names, write each one's
-/// standing, and return the observation it picks.
-fn decide_reference_view(
-    track: &mut EditableTrack,
-    rows: &[usize],
-    inputs: ReferenceRuleInputs,
-) -> Option<usize> {
-    let readings: Vec<ReferenceReadings> = rows
-        .iter()
-        .map(|&i| {
-            let m = track.observations[i].track.as_ref();
-            let axes = m
-                .and_then(|m| m.zncc_self_similarity_ellipse)
-                .map(|e| e.grid_px.axes);
-            ReferenceReadings {
-                coverage: m.and_then(|m| m.coverage),
-                clipped_share: m.and_then(|m| m.clipped_share),
-                viewing_angle_deg: m.and_then(|m| m.viewing_angle_deg),
-                cell_deficit: m.and_then(|m| match inputs.cells {
-                    PairZnccReading::Plain => m.cell_deficit,
-                    PairZnccReading::BlurMatched => m.blur_matched_cell_deficit,
-                }),
-                pair_zncc: m.and_then(|m| match inputs.agreement {
-                    PairZnccReading::Plain => m.pair_zncc,
-                    PairZnccReading::BlurMatched => m.blur_matched_pair_zncc,
-                }),
-                semi_major: axes.map(|a| a[0]),
-                semi_minor: axes.map(|a| a[1]),
+/// Score every observation whose tile is in `tiles` against the track's
+/// stored bitmap, and write its bitmap scores into its track-stage slot.
+///
+/// The scores are [`BitmapScorer`]'s, plain and blur-matched, blurring only
+/// the bitmap, over member coherence's default window; the observation the
+/// bitmap is the render of ([`TrackPayload::reference`]) scores `1` and is not
+/// computed. A track with no bitmap, or one whose bitmap is not on the tiles'
+/// grid, scores nothing. Timed as the `bitmap scores` phase of `progress`,
+/// with a note of how many observations had the bitmap blurred and how many
+/// are sharper than it.
+fn score_against_bitmap(
+    next: &mut EditableTrack,
+    tiles: &[(usize, ViewTile)],
+    progress: &Progress<'_>,
+) {
+    let Stage::Track(payload) = &next.stage else {
+        return;
+    };
+    let Some(bitmap) = payload.bitmap.as_ref() else {
+        return;
+    };
+    let Some(first) = tiles.first() else {
+        return;
+    };
+    let resolution = first.1.resolution();
+    let shape = bitmap.shape();
+    if shape[0] != resolution || shape[1] != resolution || shape[2] == 0 {
+        return;
+    }
+    let mut phase = progress.phase("bitmap scores");
+    let channels = shape[2];
+    let samples: Vec<u8> = bitmap.iter().copied().collect();
+    let data: Vec<bool> = if channels == 4 || channels == 2 {
+        samples
+            .chunks_exact(channels)
+            .map(|p| p[channels - 1] > 0)
+            .collect()
+    } else {
+        vec![true; resolution * resolution]
+    };
+    let planes = TilePlanes::from_interleaved(&samples, resolution, channels, &data);
+    let reference = payload.reference;
+    let window = MemberCoherenceParams::default().window;
+    let mut scorer = BitmapScorer::new(&planes, window);
+    let (mut blurred, mut sharper) = (0usize, 0usize);
+    for (i, tile) in tiles {
+        let Some(measurement) = next.observations[*i].track.as_mut() else {
+            continue;
+        };
+        if Some(*i) == reference {
+            measurement.bitmap_zncc = Some(1.0);
+            measurement.blur_matched_bitmap_zncc = Some(1.0);
+            measurement.bitmap_blur_sigma = Some(0.0);
+            measurement.sharper_than_bitmap = None;
+            continue;
+        }
+        let ellipse = measurement
+            .zncc_self_similarity_ellipse
+            .map(|e| e.grid_px)
+            .filter(|e| e.axes.iter().all(|a| a.is_finite()))
+            .map(|e| e.matrix);
+        let score = scorer.score(&tile.planes(), ellipse);
+        measurement.bitmap_zncc = finite(score.zncc);
+        measurement.blur_matched_bitmap_zncc = finite(score.blur_matched_zncc);
+        measurement.bitmap_blur_sigma = measurement.bitmap_zncc.map(|_| score.blur_sigma);
+        measurement.sharper_than_bitmap =
+            measurement.bitmap_zncc.map(|_| score.sharper_than_bitmap);
+        blurred += usize::from(score.blur_sigma > 0.0);
+        sharper += usize::from(score.sharper_than_bitmap);
+    }
+    progress_note!(
+        phase,
+        "{} observations, bitmap blurred for {blurred}, {sharper} sharper than it",
+        tiles.len()
+    );
+}
+
+/// Score `track`'s observations against the stored bitmap it holds, rendering
+/// each observation's tile at its keypoint over the track's placement, and
+/// return the track with those bitmap scores written into its rows.
+///
+/// [`evaluate`] scores against the bitmap a track holds when it is read. A
+/// caller that renders the bitmap after the evaluation, as Track at Pixel does
+/// after its member's evaluation
+/// ([`render_bitmap_in_place`](super::fit::render_bitmap_in_place)), calls
+/// this so that every row carries its score against the bitmap that stands;
+/// [`evaluate_rendering_bitmap`] does both after an evaluation. The scores are
+/// the ones [`evaluate`] writes, at the same resolution
+/// ([`EvaluateOptions::patch_resolution`]) and sampler; nothing else in the
+/// rows changes. A track that is not at the track stage, or has no placement
+/// or no bitmap, comes back unchanged, and so does every row of one whose
+/// bitmap is on another grid than that resolution -- a bitmap rendered under
+/// a [`FitOptions`](super::fit::FitOptions) whose resolution differs from the
+/// evaluation's, on a reconstruction that stores no bitmaps, is not scored.
+///
+/// # Example
+///
+/// ```no_run
+/// # use sfmtool_core::bench::{render_bitmap_in_place, score_bitmap, EditableTrack,
+/// #     EvaluateOptions, FitOptions};
+/// # use sfmtool_core::EditedReconstruction;
+/// # use sfmtool_core::patch::normal_refine::ProjectedImage;
+/// # use sfmtool_core::progress::Progress;
+/// # fn run(track: &EditableTrack, edited: &EditedReconstruction, views: &[ProjectedImage<'_>])
+/// # -> Result<(), Box<dyn std::error::Error>> {
+/// let rendered = render_bitmap_in_place(track, edited, views, &FitOptions::default());
+/// let scored = score_bitmap(&rendered, edited, views, &EvaluateOptions::default(), &Progress::none())?;
+/// # let _ = scored;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// [`EvaluateError::Cancelled`] when `progress` was cancelled, and
+/// [`EvaluateError::NoView`] when an observation names an image `images`
+/// does not hold.
+pub fn score_bitmap(
+    track: &EditableTrack,
+    edited: &EditedReconstruction,
+    images: &[ProjectedImage<'_>],
+    options: &EvaluateOptions,
+    progress: &Progress<'_>,
+) -> Result<EditableTrack, EvaluateError> {
+    // A clone drops the repaint mark; the scores change nothing a verdict
+    // depends on, so the mark carries across.
+    let mut next = track.clone();
+    next.repaint = track.repaint.carried();
+    let Stage::Track(payload) = &track.stage else {
+        return Ok(next);
+    };
+    let (Some(frame), Some(_)) = (payload.placement.as_ref(), payload.bitmap.as_ref()) else {
+        return Ok(next);
+    };
+    check_observation_views(track, images)?;
+    let options = options.at_resolution(options.patch_resolution(&edited.base));
+    let resolution = options.localize.resolution.max(2) as usize;
+    let mut tiles: Vec<(usize, ViewTile)> = Vec::new();
+    {
+        let phase = progress.phase("render tiles");
+        for i in evaluated(track) {
+            progress.check_cancel()?;
+            let observation = &track.observations[i];
+            if observation.track.is_none() {
+                continue;
             }
-        })
-        .collect();
-    let choice = choose_reference_view_with(&readings, inputs);
-    for (k, &i) in rows.iter().enumerate() {
-        if let Some(measurement) = track.observations[i].track.as_mut() {
-            measurement.reference_view = choice.standing(k);
+            let Some(pixel) = seed_of(observation) else {
+                continue;
+            };
+            let view = &images[observation.image as usize];
+            let tile = render_view_tile(
+                frame,
+                view,
+                Some(pixel),
+                resolution,
+                options.localize.sampler,
+                &phase,
+            );
+            tiles.push((i, tile));
         }
     }
-    choice.reference.map(|k| rows[k])
+    score_against_bitmap(&mut next, &tiles, progress);
+    Ok(next)
 }
 
 /// Bring the reference-view readings into line with verdicts that a step has
@@ -1735,17 +1916,22 @@ fn decide_reference_view(
 /// `in` when the track is read, so a verdict moved afterwards
 /// ([`apply_thresholds`], [`set_verdict`](super::steps::set_verdict)) leaves
 /// them describing the old `in` set. Here an `out` row loses its pair ZNCC,
-/// pair ZNCC grid, cell deficit, their blur-matched readings and its standing,
-/// which an `out` row never carries, and the rule runs again over the rows
-/// that are still `in` and that it decided on last time, from the readings
-/// they carry and on the inputs it read them by last time. Those readings were
+/// pair ZNCC grid, cell deficit and its standing, which an `out` row never
+/// carries, and the rule runs again over the rows that are still `in` and that
+/// it decided on last time, from the readings they carry. Those readings were
 /// taken under the old set; the next evaluation reads them under the new one.
 /// A row turned `in` since the reading has no pair readings and no standing
 /// until then, because the rule has not read it. So the reference view is
-/// always an `in` row, and there is at most one.
+/// always an `in` row, and there is at most one. The bitmap scores stay: they
+/// are read against the bitmap, which a verdict does not change -- except
+/// where the observation the bitmap is the render of turned `out`, when the
+/// bitmap is dropped with its reference ([`TrackPayload::reference`]) and the
+/// next evaluation renders one from the rows that are `in`.
 pub(super) fn restate_reference_view(track: &mut EditableTrack) {
+    if let Stage::Track(payload) = &mut track.stage {
+        payload.drop_bitmap_unless_in(&track.observations);
+    }
     let mut rows = Vec::new();
-    let mut inputs = ReferenceRuleInputs::PLAIN;
     for (i, observation) in track.observations.iter_mut().enumerate() {
         let Some(measurement) = observation.track.as_mut() else {
             continue;
@@ -1754,18 +1940,35 @@ pub(super) fn restate_reference_view(track: &mut EditableTrack) {
             measurement.pair_zncc = None;
             measurement.pair_zncc_grid = None;
             measurement.cell_deficit = None;
-            measurement.blur_matched_pair_zncc = None;
-            measurement.blur_matched_pair_zncc_grid = None;
-            measurement.blur_matched_cell_deficit = None;
             measurement.reference_view = None;
-        } else if let Some(standing) = measurement.reference_view {
-            // Every standing of one reading carries the same inputs.
-            inputs = standing.inputs;
+        } else if measurement.reference_view.is_some() {
             rows.push(i);
         }
     }
-    if !rows.is_empty() {
-        decide_reference_view(track, &rows, inputs);
+    if rows.is_empty() {
+        return;
+    }
+    let readings: Vec<ReferenceReadings> = rows
+        .iter()
+        .map(|&i| {
+            let m = track.observations[i].track.as_ref();
+            let axes = slot_semi_axes(m);
+            ReferenceReadings {
+                coverage: m.and_then(|m| m.coverage),
+                clipped_share: m.and_then(|m| m.clipped_share),
+                viewing_angle_deg: m.and_then(|m| m.viewing_angle_deg),
+                cell_deficit: m.and_then(|m| m.cell_deficit),
+                pair_zncc: m.and_then(|m| m.pair_zncc),
+                semi_major: axes.map(|a| a[0]),
+                semi_minor: axes.map(|a| a[1]),
+            }
+        })
+        .collect();
+    let choice = choose_reference_view(&readings);
+    for (k, &i) in rows.iter().enumerate() {
+        if let Some(measurement) = track.observations[i].track.as_mut() {
+            measurement.reference_view = choice.standing(k);
+        }
     }
 }
 

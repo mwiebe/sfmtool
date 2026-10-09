@@ -1063,6 +1063,59 @@ fn committing_a_track_the_point_already_holds_pushes_no_version() {
     }
 }
 
+/// A point whose reference observation only the display render picked is
+/// written by its first commit even with nothing edited, so that a save names
+/// the reference rather than `-1`: one version, and the document dirty. The
+/// point it wrote carries no mark, so the press after it has no effect.
+#[test]
+fn the_first_commit_of_an_unedited_display_pick_writes_it() {
+    // Settle the point on what the bench writes, so that the record the commit
+    // would write differs from the point's only by the mark.
+    let (mut settle, id) = state();
+    let label = put_on_bench(&mut settle, id);
+    let first = settle
+        .commit_bench_track(id, &label)
+        .expect("a track stage");
+    let (mut recon, map) = settle.scene[0].edited().materialize();
+    let point = map.forward(first.point).expect("the point is live") as usize;
+    let mut references = vec![sfmtool_sfmr_format::NO_REFERENCE_OBSERVATION; recon.point_count()];
+    references[point] = 0;
+    recon.point_set.reference_observations = Some(references);
+
+    // Committed twice, with the mark set or not; answers whether each wrote,
+    // and the versions and dirtiness after the first.
+    let commit_twice = |marked: bool| {
+        let mut recon = recon.clone();
+        let mut marks = vec![false; recon.point_count()];
+        marks[point] = marked;
+        recon.point_set.display_only_references = Some(marks);
+        let (mut state, id) = state_of(recon);
+        let label = state
+            .put_point_on_bench(PointRef::new(id, point), None)
+            .expect("a live point");
+        let before = versions(&state, id);
+        let first = state.commit_bench_track(id, &label).expect("a track stage");
+        let after_first = (versions(&state, id) - before, state.is_dirty(id));
+        let second = state.commit_bench_track(id, &label).expect("a track stage");
+        assert_eq!(
+            second.point, first.point,
+            "the second press named another point"
+        );
+        (first.changed, second.changed, after_first)
+    };
+
+    assert_eq!(
+        commit_twice(false),
+        (false, false, (0, false)),
+        "a stored reference: the unedited commit has no effect"
+    );
+    assert_eq!(
+        commit_twice(true),
+        (true, false, (1, true)),
+        "a display pick: the first commit writes it, the second has no effect"
+    );
+}
+
 /// And the press after something moved writes again: the no-effect reading is
 /// about what the point holds now, not about having committed once already.
 #[test]
@@ -1776,4 +1829,66 @@ fn a_geometry_search_reads_only_the_images_that_could_see_the_patch() {
         "{}",
         rows[0].1
     );
+}
+
+/// A re-bench after Convert to Embedded Patches takes the converted point's
+/// bitmap, which is the render of its reference row as the conversion left
+/// it. Where the item kept the person's edit of that row, the bitmap does not
+/// stay beside it: a row turned out drops the bitmap with its reference, and a
+/// row sighted elsewhere drops the bitmap and keeps the reference, as the same
+/// steps do on a track with a frame. An unedited row keeps both.
+#[test]
+fn a_rebench_drops_a_bitmap_its_kept_reference_row_no_longer_matches() {
+    use sfmtool_core::bench::{create_track, Bench, CreateTrackOptions, Stage};
+
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let (mut state, id) = crate::state::edits::tests::convertible_state(dir.path());
+    state
+        .start_convert_to_embedded_patches(id)
+        .expect("well posed");
+    state.finish_background_task();
+    let (made, report) = create_track(
+        &Bench::new(),
+        state.scene[0].edited(),
+        3,
+        &CreateTrackOptions::default(),
+    )
+    .expect("the point goes on");
+    let mut fresh = (**made.track(&report.label).expect("on")).clone();
+    let r = 1;
+    let Stage::Track(payload) = &mut fresh.stage else {
+        panic!("a track");
+    };
+    assert!(
+        payload.placement.is_some(),
+        "the converted point has a frame"
+    );
+    // The fixture has no photographs to render from; a stored bitmap stands
+    // in for the conversion's render of row `r`.
+    payload.bitmap = Some(ndarray::Array3::zeros((4, 4, 4)));
+    payload.reference = Some(r);
+
+    let outcome = |old: &sfmtool_core::bench::EditableTrack| {
+        let Stage::Track(p) = super::with_frame_of(old, &fresh).stage else {
+            panic!("a track");
+        };
+        (p.bitmap.is_some(), p.reference)
+    };
+
+    assert_eq!(
+        outcome(&fresh),
+        (true, Some(r)),
+        "an unedited row keeps both"
+    );
+
+    let mut turned_out = fresh.clone();
+    turned_out.observations[r].verdict = Verdict::Out;
+    turned_out.observations[r].pinned = true;
+    assert_eq!(outcome(&turned_out), (false, None));
+
+    let mut sighted = fresh.clone();
+    let measurement = sighted.observations[r].track.as_mut().expect("a track row");
+    let [x, y] = measurement.keypoint.expect("a keypoint");
+    measurement.keypoint = Some([x + 7.0, y - 3.0]);
+    assert_eq!(outcome(&sighted), (false, Some(r)));
 }

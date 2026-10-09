@@ -66,6 +66,8 @@ pub struct PointSet {
     pub normal_confidence: Option<Vec<u8>>,
     pub point_constraints: Option<PointConstraintColumns>,
     pub observation_confidence: Option<Vec<u8>>,
+    pub reference_observations: Option<Vec<i32>>, // per point, within its track; -1 none
+    pub display_only_references: Option<Vec<bool>>, // picks only the display render made
     // Derived from the fields above and the image count.
     pub observation_offsets: Vec<usize>,
     pub image_feature_to_point: Vec<HashMap<u32, u32>>,
@@ -77,6 +79,11 @@ impl PointSet {
     pub fn point_count(&self) -> usize;
     pub fn observation_count(&self) -> usize;
     pub fn observations_for_point(&self, point_idx: usize) -> &[TrackObservation];
+    // The reference observations of a set built by selecting points and
+    // observation rows of this one, each index moved with its observation.
+    pub fn select_reference_observations(&self, point_rows: &[usize],
+        observation_rows: &[usize]) -> Option<Vec<i32>>;
+    pub fn reference_observation_row(&self, point: usize) -> Option<usize>;
     pub fn observation_row(&self, image_index: usize, point_index: u32, feature_index: u32)
         -> Option<usize>;
     pub fn feature_indexes(&self) -> Option<&[u32]>;
@@ -144,7 +151,25 @@ edits and the panels read it as they would a file's own. A marked column is
 **left out of what `to_sfmr_data` emits**, and so out of every save and every
 content hash (`content_xxh128` runs the writer over `to_sfmr_data`): the value
 keeps the identity of the file it was read from, and a save writes the columns
-that file had. Every pass that selects or reorders the column's rows
+that file had. The open renders each point from the reference observation
+the file stores for it, so `reference_observations` keeps the file's column
+for those points. A point the file stores at `-1` gets the display render's
+own pick, which goes into `reference_observations` so the bench and Track View
+mark the row the display bitmap is the tile of, and is marked in
+`display_only_references` (`Some` only beside a marked column). A display pick
+is shown and never saved, as the display bitmaps are not:
+`PointSet::saved_reference_observations`, which `to_sfmr_data` writes, gives
+`-1` for each marked row, and `PointSet::drop_patch_bitmaps` drops the bitmap column
+and resets the marked rows to `-1`. Every pass that drops or reorders points
+selects the marks in lockstep with the points
+(`PointSet::select_display_only_references`); a point an edit adds, such as a
+bench commit, is unmarked, so its reference is saved as the point's own.
+`validate_point_columns` checks each reference's range and refuses the
+reference column without patch frames; it accepts references without a bitmap
+column, since a reference names the observation a bitmap is, or is to be,
+rendered from
+([../../formats/sfmr-file-format.md](../../formats/sfmr-file-format.md) §
+"9. Tracks"). Every pass that selects or reorders the column's rows
 (`filter_points_by_mask`, `subset_by_image_indices`, the similarity transform,
 the materialisation, the prune) carries the mark with them; a producer that
 builds a new column clears it, as `clone_with_changes(patch_bitmaps=...)` does.
@@ -289,6 +314,7 @@ impl EditedReconstruction {
     pub fn has_patch_bitmaps(&self) -> bool;
     pub fn has_normal_confidence(&self) -> bool;
     pub fn has_point_constraints(&self) -> bool;
+    pub fn has_reference_observations(&self) -> bool;
 
     // Reading one point without materialising.
     pub fn point(&self, index: u32) -> Option<PointView<'_>>;
@@ -321,6 +347,7 @@ pub struct PointRecord {
     pub patch_bitmap: Option<Array3<u8>>,
     pub normal_confidence: Option<u8>,
     pub constraint: Option<(u8, f64, u32)>,
+    pub reference_observation: Option<i32>, // an index into `observations`, or -1
 }
 
 pub struct RecordObservation {
@@ -688,7 +715,11 @@ distances as agreeing, since both say the point is at no distance from anything.
 **Validation is split the same way.** `validate_observation_columns` checks the
 per-observation columns against the track count and the per-image hashes against
 the image count; `validate_point_columns` checks the constraint triple against
-the point count and its reference images against the image count. Both are
+the point count and its reference images against the image count, and each
+reference observation against its point's track. A record's
+`reference_observation` is refused unless it is `-1` or an index into its own
+observations (`EditError::ReferenceObservationOutOfRange`), and like every
+column it is present exactly when the base carries the column. Both are
 reachable from `SfmrReconstruction`, which supplies the count the point set
 cannot see, and both are what the `.sfmr` conversion and the kwargs-driven
 Python editor run before handing back a value.

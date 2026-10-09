@@ -43,13 +43,19 @@ class DropThumbnailsTransform:
 
 
 class DropPatchBitmapsTransform:
-    """Discard the per-point patch bitmap column, keeping the patch frames."""
+    """Discard the per-point patch bitmap column, keeping the patch frames.
+
+    The reference observations stay: each names the observation the point's
+    bitmap is to be rendered from again, so ``--add-patch-bitmaps`` renders
+    the same bitmaps.
+    """
 
     def apply(self, recon: SfmrReconstruction) -> SfmrReconstruction:
         if recon.patch_bitmap_resolution is None:
             print("  No patch bitmaps to drop")
             return recon
-        # The frames and normals stay, so a later step can render onto them.
+        # The frames, normals and reference observations stay, so a later step
+        # can render the same bitmaps onto them.
         print(f"  Dropping patch bitmaps of {recon.point_count} points")
         return recon.clone_with_changes(patch_bitmaps=None)
 
@@ -218,9 +224,17 @@ class AddPatchBitmapsTransform:
     """Render the patch bitmap column at the stored frames and keypoints.
 
     Moves nothing: positions, normals, frames, keypoints and tracks come out
-    exactly as they went in. The render is the sub-pixel refiner's zero-step
-    fuse (``PatchCloud.render_bitmaps``). A point with fewer than two
-    observations that render in frame gets a zero row.
+    exactly as they went in. A point that stores a reference observation
+    (left by ``--drop-patch-bitmaps``, ``--minimal`` or a refinement that
+    dropped the bitmaps) gets that observation's tile and keeps the
+    reference. A point at ``-1`` gets the tile of the observation the
+    reference-view rule picks, and the reference observation column records
+    which (``PatchCloud.render_bitmaps``); where the rule picks none, or
+    reaches its pick only through its last fallback, the bitmap is the
+    observations' fused mean and the column records ``-1``. A point at ``-1``
+    with fewer than two observations, or one where the rule picks none and
+    fewer than two observations render in frame for the mean, gets a zero
+    row.
     """
 
     # Precondition checked per-step by `apply_transforms` (see `_apply.py`).
@@ -253,10 +267,12 @@ class AddPatchBitmapsTransform:
             f"  Rendering {self.resolution}x{self.resolution} patch bitmaps for "
             f"{recon.point_count} points"
         )
-        bitmaps = cloud.render_bitmaps(
+        bitmaps, references = cloud.render_bitmaps(
             recon, images, resolution=self.resolution, sampler=self.sampler
         )
-        return recon.clone_with_changes(patch_bitmaps=bitmaps)
+        return recon.clone_with_changes(
+            patch_bitmaps=bitmaps, reference_observations=references
+        )
 
     def description(self) -> str:
         return (
