@@ -90,7 +90,7 @@ def load_member(cs_dir, idx):
 
 def open_source(matches_path):
     """The selection handle the run holds, from the capture's matches file."""
-    from sfmtool._sfmtool.io import MatchesFile
+    from sfmtool.fileio import MatchesFile
 
     return MatchesFile(str(matches_path)).select_clusters(min_span=MIN_SPAN)
 
@@ -299,7 +299,7 @@ def instrument(clock):
     clock.wrap(evict, "band_census")
     # `seed_relax.pairs` imports the kernel inside the call, so the wrap has to
     # sit on the binding module itself rather than on a name `pairs` holds.
-    import sfmtool._sfmtool.analysis as analysis
+    import sfmtool.analysis as analysis
 
     clock.wrap(analysis, "keypoint_pairs_within_reach", REACH_KERNEL)
     return seed_relax, pipeline

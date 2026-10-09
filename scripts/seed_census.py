@@ -148,7 +148,7 @@ def _needs_ray_path(cam):
 def _default_camera(data, f):
     """The centred SIMPLE_PINHOLE at ``f`` — the model this census assumed
     before its callers could carry a camera context."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     w, h = data["dims"][0]
     return CameraIntrinsics.from_dict(
@@ -173,7 +173,7 @@ def _census_score_native(data, posed, R, C, f, camera=None):
 def _native_report(data, posed, R, C, f, camera=None, **kwargs):
     from scipy.spatial.transform import Rotation
 
-    from sfmtool._sfmtool.analysis import cluster_census
+    from sfmtool.analysis import cluster_census
 
     # The native kernel is model-generic: it unprojects the members with
     # ``pixel_to_ray`` and scores the explanation with ``ray_to_pixel``, so
@@ -202,8 +202,8 @@ def _native_report(data, posed, R, C, f, camera=None, **kwargs):
 
 
 def _census_score_py(data, posed, R, C, f, camera=None):
-    from sfmtool._sfmtool.analysis import triangulate_batch
-    from sfmtool._sfmtool.matching import ClusterCovisibility
+    from sfmtool.analysis import triangulate_batch
+    from sfmtool.matching import ClusterCovisibility
 
     oc, oi, ouv = data["obs_c"], data["obs_i"], data["obs_uv"]
     n_img, n_cl = data["n_img"], data["n_cl"]

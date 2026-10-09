@@ -58,7 +58,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from sfmtool._sfmtool.geometry import (
+from sfmtool.geometry import (
     estimate_absolute_pose,
     factorize_affine,
     inlier_fraction as _inlier_fraction,
@@ -1029,7 +1029,7 @@ def load_clusters():
     (reference/kept members, span filter) runs as the matches-format crate's
     ``select_clusters`` derivation.
     """
-    from sfmtool._sfmtool.io import MatchesFile
+    from sfmtool.fileio import MatchesFile
 
     override = os.environ.get("SFMTOOL_MATCHES")
     patches = (
@@ -1363,7 +1363,7 @@ def estimate_intrinsics(obs_c, obs_i, u):
     winning column at the top level, so they are read off the screening
     vote); ``fisheye`` is the CONFIRMED equidistant verdict block, else
     None."""
-    from sfmtool._sfmtool import geometry
+    from sfmtool import geometry
 
     w, h = seed_camera._CAM_WH
     # The kernel takes the cluster-grouped (CSR) form the .matches backbone
@@ -1423,7 +1423,7 @@ def estimate_intrinsics(obs_c, obs_i, u):
 def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
     """Core hypothesis from the native far-field rotation initializer, or None.
 
-    Thin wrapper over ``sfmtool._sfmtool.geometry.rotation_init``
+    Thin wrapper over ``sfmtool.geometry.rotation_init``
     (specs/core/geometry/rotation-init.md): far-field conjugate homographies fix a
     rotation skeleton (spanning tree + chordal-mean averaging), the near
     field seeds the baseline and structure, translation grows by
@@ -1432,7 +1432,7 @@ def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
     the core to a panorama).  Adapts the kernel's posed-subset dict to
     grow_to_cap's per-hypothesis candidate tuple.
     """
-    from sfmtool._sfmtool.geometry import rotation_init
+    from sfmtool.geometry import rotation_init
 
     w, h = seed_camera._CAM_WH
     res = rotation_init(
@@ -1476,7 +1476,7 @@ def rotation_core(o_c, o_i, o_u, nw, n_cl, f0):
 
 
 def build_covisibility(obs_c, obs_i, n_img, n_cl):
-    from sfmtool._sfmtool.matching import ClusterCovisibility
+    from sfmtool.matching import ClusterCovisibility
 
     starts = np.searchsorted(obs_c, np.arange(n_cl + 1)).astype(np.uint32)
     return ClusterCovisibility.from_arrays(starts, obs_i.astype(np.uint32), n_img)
@@ -1680,7 +1680,7 @@ def _tri_ray_pair(d1, d2, r_rel, t_rel):
     The Phase-1 primitive (`triangulate_batch`) does the work, so this is the
     same midpoint solve the rest of the pipeline uses — no DLT on a `z = 1`
     plane, which a beyond-hemisphere ray has no representation on."""
-    from sfmtool._sfmtool.analysis import triangulate_batch
+    from sfmtool.analysis import triangulate_batch
 
     n = len(d1)
     c2 = -r_rel.T @ t_rel
@@ -1707,7 +1707,7 @@ def ray_pair_pose(x1, x2, f, seed=0, min_inliers=FISHEYE_PAIR_MIN_INL):
     Returns a dict with the relative pose (world = camera 1), the epipolar
     consensus mask, the cheiral count and the pair's median translation-
     parallax angle in degrees (rotation removed by the decomposition)."""
-    from sfmtool._sfmtool.geometry import estimate_essential_rays
+    from sfmtool.geometry import estimate_essential_rays
 
     if len(x1) < FISHEYE_PAIR_MIN_CORR:
         return None
@@ -1972,7 +1972,7 @@ def ray_rotation_edges(
     Returns ``(per-image cluster index, candidate pairs, edges)`` with each
     edge ``(inliers, a, b, R_ab)``, or None when the pair graph is too thin to
     produce any."""
-    from sfmtool._sfmtool.geometry import fit_ray_rotation
+    from sfmtool.geometry import fit_ray_rotation
 
     counts = _pair_counts(obs_c, obs_i, n_img, n_cl)
     ia, ib = np.nonzero(counts >= min_corr)
@@ -2091,7 +2091,7 @@ def rotation_core_rays(obs_c, obs_i, u, n_img, n_cl, f, max_pairs=120):
 
     Returns ``rotation_core``'s tuple (inlier fraction, parallax, rvec, tvec,
     points, posed mask, median inlier fraction), or None."""
-    from sfmtool._sfmtool.geometry import resect_translation
+    from sfmtool.geometry import resect_translation
 
     found = ray_rotation_edges(obs_c, obs_i, u, n_img, n_cl, f, max_pairs)
     if found is None:
@@ -2192,7 +2192,7 @@ def triangulate(obs_c, obs_i, u, rot, trans, used, n_cl, f, cam=None):
     lens the context does not carry: a structure triangulated through a
     different map than the one that placed the poses is not the same structure,
     and the writer that reprojects it will cull most of it."""
-    from sfmtool._sfmtool.analysis import triangulate_batch
+    from sfmtool.analysis import triangulate_batch
 
     pts = np.full((n_cl, 3), np.nan)
     sel = used[obs_i]
@@ -3134,8 +3134,8 @@ def localize_anchors(names, sub, rvec, tvec, f0, pts_a, tr_a, tr_img, tr_feat):
     """
     import cv2
 
-    from sfmtool._sfmtool.patches import CameraViews, ImagePyramidSet, PatchCloud
-    from sfmtool._sfmtool.io import read_sift_partial
+    from sfmtool.patches import CameraViews, ImagePyramidSet, PatchCloud
+    from sfmtool.fileio import read_sift_partial
     from sfmtool.sift.file import get_sift_path_for_image
 
     sub_names = [names[int(g)] for g in sub]
@@ -3229,8 +3229,8 @@ def compare_to_reference(names, rvec, tvec, f_est, mask):
     if not ref_files:
         print("no reference solve found; skipping comparison")
         return
-    from sfmtool._sfmtool.reconstruction import SfmrReconstruction
-    from sfmtool._sfmtool.analysis import estimate_alignment_rs
+    from sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.analysis import estimate_alignment
 
     # A workspace can hold reconstructions this build cannot read (e.g. a
     # beta-model file from before a parameterization change); skip those
@@ -3270,7 +3270,7 @@ def compare_to_reference(names, rvec, tvec, f_est, mask):
         np.einsum("nij,nkj->nik", r_ref, np.einsum("nij,jk->nik", r_est, g))
     ).magnitude() * (180 / np.pi)
 
-    tf = estimate_alignment_rs(
+    tf = estimate_alignment(
         np.ascontiguousarray(c_est, dtype=np.float64),
         np.ascontiguousarray(c_ref, dtype=np.float64),
     )
@@ -3803,7 +3803,7 @@ def commit_hypothesis(rung, idx, res, write, model="finite", f_source=None, extr
     points = None
     if release is not None:
         try:
-            from sfmtool._sfmtool.reconstruction import SfmrReconstruction
+            from sfmtool.reconstruction import SfmrReconstruction
 
             points = int(SfmrReconstruction.load(str(release)).point_count)
         except Exception as exc:  # noqa: BLE001 — a manifest field, never the run

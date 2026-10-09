@@ -20,7 +20,7 @@ JITTER_PX = 0.4
 
 
 def _camera():
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return CameraIntrinsics.from_dict(
         {

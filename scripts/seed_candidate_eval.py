@@ -46,8 +46,8 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from sfmtool._sfmtool.analysis import triangulate_batch
-from sfmtool._sfmtool.geometry import (
+from sfmtool.analysis import triangulate_batch
+from sfmtool.geometry import (
     estimate_absolute_pose,
     estimate_essential_rays,
     refine_absolute_pose,
@@ -601,7 +601,7 @@ def member_arrays(m):
 
 def member_from_arrays(d):
     """A :class:`Member` from what :func:`member_arrays` holds."""
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     return Member(
         d["idx"],
@@ -2474,7 +2474,7 @@ def rot_nonmember_channels(m, pair_obs):
     homography -- a parallax-free pair simply is a rotation of unit rays -- and
     not an essential matrix: a model with no baseline has no epipolar geometry
     to estimate, and asking for one would fit noise."""
-    from sfmtool._sfmtool.geometry import fit_ray_rotation
+    from sfmtool.geometry import fit_ray_rotation
 
     images = []
     out = {"measurable": False, "images": images, "k_requested": K_HELD_OUT}

@@ -50,7 +50,7 @@ def _handle(names=NAMES):
 
 def _member():
     import seed_candidate_eval as EV
-    from sfmtool._sfmtool.geometry import CameraIntrinsics
+    from sfmtool.geometry import CameraIntrinsics
 
     cam = CameraIntrinsics.from_dict(
         {

@@ -19,7 +19,7 @@ coin toss.
 
 The vote itself is the core's
 ``sfmtool_core::geometry::translation_averaging`` kernel, reached through
-``sfmtool._sfmtool.geometry.orientation_reading``; what is here is the world
+``sfmtool.geometry.orientation_reading``; what is here is the world
 rays the member's rotations produce.  See
 ``specs/core/geometry/translation-averaging.md``.
 """
@@ -41,7 +41,7 @@ def angw_bit(m, per_frame, placed, tol):
     The reading is exactly antisymmetric under ``c -> -c``, so one pass
     describes both orientations and the second is arithmetic that is already
     known."""
-    from sfmtool._sfmtool.geometry import orientation_reading
+    from sfmtool.geometry import orientation_reading
 
     frames = sorted(placed)
     slot = {f: k for k, f in enumerate(frames)}
