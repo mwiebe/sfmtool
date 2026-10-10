@@ -328,21 +328,39 @@ fn feature_size_without_sift_is_an_error() {
         &Progress::none(),
     )
     .unwrap_err();
-    // Every observation fails for the unreadable-scale reason (no `.sift`); none
-    // for the coincident-camera reason, since the demo points are not on top of
-    // their cameras.
+    // Every observation fails because its image's `.sift` file was not found;
+    // none for an unreadable scale or the coincident-camera reason, since the
+    // demo points are not on top of their cameras.
+    let message = err.to_string();
     let PatchCloudError::MissingFeatureScale {
+        point_index,
         observations,
+        missing_sift_file,
+        missing_sift_example,
         unreadable_scale,
         coincident_with_camera,
-        ..
     } = err
     else {
         panic!("{err} is not a missing-scale refusal")
     };
     assert!(observations > 0);
-    assert_eq!(unreadable_scale, observations);
+    assert_eq!(missing_sift_file, observations);
+    assert_eq!(unreadable_scale, 0);
     assert_eq!(coincident_with_camera, 0);
+    // The example is the path tried for the point's first observing image.
+    let first_obs = recon.point_set.observation_offsets[point_index as usize];
+    let first_image = recon.point_set.tracks[first_obs].image_index as usize;
+    let example = missing_sift_example.expect("a missing file names its path");
+    assert_eq!(example, recon.sift_path_for_image(first_image));
+    assert!(!example.exists());
+    // The message states the fact with the path, and says nothing about poses.
+    assert!(message.contains("not found"), "{message}");
+    assert!(
+        message.contains(&example.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("feature_prefix_dir"), "{message}");
+    assert!(!message.contains("collapsed"), "{message}");
 
     let cloud = PatchCloud::from_reconstruction(
         &recon,
@@ -810,6 +828,54 @@ fn from_tracks_matches_reconstruction_pixel_radius_and_stored_normal() {
 }
 
 #[test]
+fn feature_size_with_unreadable_sift_is_not_a_missing_file() {
+    // Each image's `.sift` file exists at its resolved path but is not a valid
+    // `.sift` archive. The refusal counts every observation as an unreadable
+    // scale and none as a missing file.
+    let mut recon = SfmrReconstruction::demo(12);
+    let dir = std::env::temp_dir().join(format!("patch_bad_sift_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("features")).unwrap();
+    recon.workspace_dir = dir.clone();
+    recon.metadata.workspace.contents.feature_prefix_dir = "features".into();
+    for img in 0..recon.image_table.images.len() {
+        let path = recon.sift_path_for_image(img);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not a sift file").unwrap();
+    }
+
+    let err = PatchCloud::from_reconstruction(
+        &recon,
+        PatchNormal::MeanViewing,
+        PatchExtent::FeatureSize {
+            factor: 5.0,
+            across: ViewReduce::Median,
+        },
+        true,
+        &Progress::none(),
+    )
+    .unwrap_err();
+    let message = err.to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    let PatchCloudError::MissingFeatureScale {
+        observations,
+        missing_sift_file,
+        missing_sift_example,
+        unreadable_scale,
+        coincident_with_camera,
+        ..
+    } = err
+    else {
+        panic!("{err} is not a missing-scale refusal")
+    };
+    assert!(observations > 0);
+    assert_eq!(missing_sift_file, 0);
+    assert!(missing_sift_example.is_none());
+    assert_eq!(unreadable_scale, observations);
+    assert_eq!(coincident_with_camera, 0);
+    assert!(!message.contains("not found"), "{message}");
+}
+
+#[test]
 fn from_tracks_nan_scale_counts_as_unreadable() {
     // Two points, each with one observation. A NaN scale entry is treated exactly
     // like an unreadable `.sift` scale, so FeatureSize errors with the same
@@ -843,9 +909,12 @@ fn from_tracks_nan_scale_counts_as_unreadable() {
         &Progress::none(),
     )
     .unwrap_err();
+    let message = err.to_string();
     let PatchCloudError::MissingFeatureScale {
         point_index,
         observations,
+        missing_sift_file,
+        missing_sift_example,
         unreadable_scale,
         coincident_with_camera,
     } = err
@@ -854,8 +923,13 @@ fn from_tracks_nan_scale_counts_as_unreadable() {
     };
     assert_eq!(point_index, 0);
     assert_eq!(observations, 1);
+    assert_eq!(missing_sift_file, 0);
+    assert!(missing_sift_example.is_none());
     assert_eq!(unreadable_scale, 1);
     assert_eq!(coincident_with_camera, 0);
+    assert!(message.contains("could not be read"), "{message}");
+    assert!(!message.contains("not found"), "{message}");
+    assert!(!message.contains("collapsed"), "{message}");
 
     // A readable (finite) scale for the same geometry sizes the patch fine.
     let ok = PatchCloud::from_tracks(

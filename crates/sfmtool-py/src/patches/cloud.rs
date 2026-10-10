@@ -111,8 +111,9 @@ impl PyPatchCloud {
     ///         parallel to ``track_point_indexes``.
     ///     keypoint_scales: Optional ``(M,)`` float64 keypoint scale ``σ`` per
     ///         observation; **required** for ``extent="feature_size"``. A ``NaN``
-    ///         entry counts as an unreadable scale (same
-    ///         ``MissingFeatureScale`` handling as a missing ``.sift`` scale).
+    ///         entry counts as an unreadable scale (the same
+    ///         ``MissingFeatureScale`` refusal as a scale that cannot be read
+    ///         from a ``.sift`` file).
     ///     normals: Optional ``(P, 3)`` float64 per-point normals; **required** for
     ///         ``normal="stored"`` (a zero/degenerate row falls back to the mean
     ///         viewing direction).

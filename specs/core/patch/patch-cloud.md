@@ -253,12 +253,19 @@ impl PatchCloud {
     /// first observing camera, normal and half-size per the given policies.
     /// Errors with `PatchCloudError::MissingFeatureScale` under
     /// `PatchExtent::FeatureSize` when no observation of a point yields a usable
-    /// size — either its keypoint scale is unreadable in every view (missing/stale
-    /// `.sift`), or (finite points only) it coincides with every observing camera
-    /// centre so the distance-scaled world size vanishes at `‖p_cam‖ ≈ 0` (a
-    /// degenerate reconstruction where the frames' poses collapsed onto the
-    /// point). The error carries a per-cause observation breakdown. No silent size
-    /// fallback.
+    /// size. The error counts the point's observations by cause:
+    /// `missing_sift_file` (no `.sift` file exists at the path resolved from the
+    /// workspace's `feature_prefix_dir` and the image name; the first such path
+    /// is `missing_sift_example`), `unreadable_scale` (the file exists but the
+    /// keypoint's scale cannot be read from it, the observation has no feature
+    /// index, or a `from_tracks` scale is NaN), and `coincident_with_camera`
+    /// (finite points only: the point sits on the camera centre, so the
+    /// distance-scaled world size vanishes at `‖p_cam‖ ≈ 0`, which happens when
+    /// the frames' poses collapsed onto the point). When every observation's
+    /// file is missing, the message says the `.sift` files were not found,
+    /// names the example path, and points at the image-name/feature-layout
+    /// match; it mentions collapsed poses only when `coincident_with_camera` is
+    /// nonzero. No silent size fallback.
     ///
     /// When `exclude_points_at_infinity` is `false` (the binding default — every
     /// patch operation handles infinity patches), each point at infinity also gets
@@ -323,9 +330,10 @@ pub enum PatchExtent {
     /// it reduces to `sigma_i·|z_i|/f_i` for a pinhole and `sigma_i·R_i/f_i`
     /// under the equidistant map, and picks up local distortion magnification
     /// for every other model. Reads the workspace `.sift` files. A point with no
-    /// readable scale in any view — or a finite point coincident with every
-    /// observing camera centre, where the distance-scaled size vanishes — is an
-    /// error (`PatchCloudError::MissingFeatureScale`) — there is no silent size
+    /// readable scale in any view (its `.sift` files not found, or found but
+    /// without a readable scale), or a finite point coincident with every
+    /// observing camera centre, where the distance-scaled size vanishes, is an
+    /// error (`PatchCloudError::MissingFeatureScale`); there is no silent size
     /// fallback.
     FeatureSize { factor: f64, across: ViewReduce },
 }
@@ -639,8 +647,8 @@ Semantics match `from_reconstruction` exactly, sourced from the arrays:
 - **`FeatureSize`.** The world half-size is `factor · σ_i / σ_min` reduced
   across views — the `PixelRadius` rule at a per-observation pixel budget — with
   `σ_i` read from `keypoint_scales` instead of the `.sift` affine shapes. A NaN
-  scale entry counts as an unreadable scale, so the `MissingFeatureScale` error
-  and its per-cause breakdown are unchanged.
+  scale entry counts as an unreadable scale in the `MissingFeatureScale` error;
+  `missing_sift_file` is always `0` here, since no `.sift` file is read.
 - **`normal="stored"`** reads the supplied `normals` rows (zero/degenerate rows
   fall back to the mean viewing direction, as in `from_reconstruction`); omitting
   `normals` with `normal="stored"` is a `ValueError`. The default is

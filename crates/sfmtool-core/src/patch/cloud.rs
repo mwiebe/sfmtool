@@ -7,6 +7,8 @@
 //! surface element in world space; [`crate::camera::WarpMap::from_patch`]
 //! projects a camera's image onto one to render its canonical appearance.
 
+use std::path::{Path, PathBuf};
+
 use nalgebra::{Matrix3, Point3, UnitQuaternion, Vector3};
 use ndarray::Array2;
 
@@ -28,9 +30,15 @@ pub enum PatchCloudError {
     /// scale. The counts break the `observations` down by cause so the message
     /// can name the actual failure:
     ///
-    /// - `unreadable_scale` — the observation's `.sift` keypoint scale could not
-    ///   be read (missing/stale `.sift`, or the observation carries no feature
-    ///   index). This is an I/O problem.
+    /// - `missing_sift_file` — the observing image's `.sift` file does not exist
+    ///   at the path resolved from the workspace's `feature_prefix_dir` and the
+    ///   image name. `missing_sift_example` holds the first such path. This
+    ///   usually means the reconstruction's image names do not match the
+    ///   workspace's feature layout, or the features were never extracted.
+    /// - `unreadable_scale` — the observation's keypoint scale could not be
+    ///   read although its `.sift` file exists (the file is stale or damaged, or
+    ///   the observation carries no feature index), or, from
+    ///   [`PatchCloud::from_tracks`], its supplied scale is `NaN`.
     /// - `coincident_with_camera` — the observation's viewing distance
     ///   `d = ‖X − C‖` is ~0, i.e. the point sits on top of the camera centre.
     ///   A pixel scale `σ` maps to a world size `σ·d/f`, which vanishes at
@@ -41,6 +49,8 @@ pub enum PatchCloudError {
     MissingFeatureScale {
         point_index: u32,
         observations: usize,
+        missing_sift_file: usize,
+        missing_sift_example: Option<PathBuf>,
         unreadable_scale: usize,
         coincident_with_camera: usize,
     },
@@ -56,18 +66,70 @@ impl std::fmt::Display for PatchCloudError {
             PatchCloudError::MissingFeatureScale {
                 point_index,
                 observations,
+                missing_sift_file,
+                missing_sift_example,
                 unreadable_scale,
                 coincident_with_camera,
-            } => write!(
-                f,
-                "cannot size point {point_index}'s patch from FeatureSize: none of its \
-                 {observations} observation(s) gave a usable keypoint scale \
-                 ({coincident_with_camera} coincident with the camera centre / zero viewing \
-                 distance, {unreadable_scale} with an unreadable .sift scale). A point \
-                 coincident with its cameras is a degenerate reconstruction artifact (its \
-                 frames' poses have collapsed onto the point); an unreadable scale usually \
-                 means the .sift files are missing or stale."
-            ),
+            } => {
+                let example = missing_sift_example
+                    .as_deref()
+                    .map(|path| format!(" (for example {})", path.display()))
+                    .unwrap_or_default();
+                let layout_hint = "Features are resolved from the workspace's \
+                                   feature_prefix_dir and the image name; check that the \
+                                   image names match the workspace layout.";
+                if *missing_sift_file == *observations {
+                    return write!(
+                        f,
+                        "cannot size point {point_index}'s patch from FeatureSize: the .sift \
+                         files of its {observations} observation(s) were not found{example}. \
+                         {layout_hint}"
+                    );
+                }
+                write!(
+                    f,
+                    "cannot size point {point_index}'s patch from FeatureSize: none of its \
+                     {observations} observation(s) gave a usable keypoint scale"
+                )?;
+                let mut causes: Vec<String> = Vec::new();
+                if *missing_sift_file > 0 {
+                    causes.push(format!(
+                        "{missing_sift_file} with a .sift file that was not found{example}"
+                    ));
+                }
+                if *unreadable_scale > 0 {
+                    causes.push(format!(
+                        "{unreadable_scale} with a keypoint scale that could not be read"
+                    ));
+                }
+                if *coincident_with_camera > 0 {
+                    causes.push(format!(
+                        "{coincident_with_camera} at zero distance from the camera centre"
+                    ));
+                }
+                if !causes.is_empty() {
+                    write!(f, " ({})", causes.join(", "))?;
+                }
+                f.write_str(".")?;
+                if *missing_sift_file > 0 {
+                    write!(f, " {layout_hint}")?;
+                }
+                if *unreadable_scale > 0 {
+                    f.write_str(
+                        " A scale that cannot be read means the observation's .sift file is \
+                         stale or damaged, the observation has no feature index, or its \
+                         supplied scale is NaN.",
+                    )?;
+                }
+                if *coincident_with_camera > 0 {
+                    f.write_str(
+                        " A point at zero distance from its cameras means those frames' \
+                         poses have collapsed onto the point, which is a defect of the \
+                         reconstruction.",
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -720,6 +782,9 @@ impl PatchCloud {
             progress.split([0.0, 1.0])
         };
 
+        // Per image, the `.sift` path that was tried and not found, so a sizing
+        // failure can say which files are absent. Empty when no scales are read.
+        let mut missing_sift: Vec<Option<PathBuf>> = Vec::new();
         let obs_scales: Vec<Option<f64>> = if reads_scales {
             let n_images = recon.image_table.images.len();
             let n_obs = recon.point_set.tracks.len();
@@ -733,7 +798,20 @@ impl PatchCloud {
                 // Between the images rather than inside one file's read: a
                 // `.sift` read is one call, so this is where a cancel lands.
                 reading.check_cancel()?;
-                img_scales.push(read_image_scales(recon, i));
+                match read_image_scales(recon, i) {
+                    ImageScales::Read(scales) => {
+                        img_scales.push(Some(scales));
+                        missing_sift.push(None);
+                    }
+                    ImageScales::FileNotFound(path) => {
+                        img_scales.push(None);
+                        missing_sift.push(Some(path));
+                    }
+                    ImageScales::Unreadable => {
+                        img_scales.push(None);
+                        missing_sift.push(None);
+                    }
+                }
                 reading.count(i as u64 + 1, Some(n_images as u64), "image");
             }
             let feature_indexes = recon.feature_indexes();
@@ -762,6 +840,7 @@ impl PatchCloud {
             obs_offsets: &recon.point_set.observation_offsets,
             obs_images: &obs_images,
             obs_scales: &obs_scales,
+            missing_sift: &missing_sift,
             cam_quats: &cam_quats,
             cam_translations: &cam_translations,
             cam_intrinsics: &cam_intrinsics,
@@ -840,6 +919,7 @@ impl PatchCloud {
             obs_offsets,
             obs_images,
             obs_scales: &obs_scales_opt,
+            missing_sift: &[],
             cam_quats,
             cam_translations,
             cam_intrinsics,
@@ -966,6 +1046,10 @@ struct PatchScene<'a> {
     /// Per-observation keypoint scale `σ` (`None` = unreadable), or empty when the
     /// extent policy reads no scales. `M` entries or empty.
     obs_scales: &'a [Option<f64>],
+    /// Per-image `.sift` path that was tried and not found (`None` when the file
+    /// exists or was not looked for). `N` entries, or empty when the scales did
+    /// not come from `.sift` files. Read only to explain a sizing failure.
+    missing_sift: &'a [Option<PathBuf>],
     /// Per-image `cam_from_world` rotation. `N` entries.
     cam_quats: &'a [UnitQuaternion<f64>],
     /// Per-image `cam_from_world` translation. `N` entries.
@@ -981,6 +1065,11 @@ struct PatchScene<'a> {
 }
 
 impl PatchScene<'_> {
+    /// The `.sift` path that was tried and not found for image `img`, if any.
+    fn missing_sift_path(&self, img: usize) -> Option<&Path> {
+        self.missing_sift.get(img).and_then(|p| p.as_deref())
+    }
+
     /// In-plane "up" hint: the first observing camera's up axis (canonical camera
     /// `+y` — image up) rotated into world, or world `+y` when the point has no
     /// observation. Pins the in-plane rotation identically for finite and infinity
@@ -1106,13 +1195,14 @@ fn build_patch_cloud(
             let end = scene.obs_offsets[p + 1];
             let mut sizes: Vec<f64> = Vec::new();
             // Per-cause tallies so a failure can name why every observation was
-            // rejected (unreadable scale vs. zero viewing distance).
-            let mut unreadable_scale = 0usize;
+            // rejected (missing `.sift` file, unreadable scale, or zero viewing
+            // distance).
+            let mut no_scale = NoScaleTally::default();
             let mut coincident_with_camera = 0usize;
             for obs in start..end {
                 let img = scene.obs_images[obs] as usize;
                 let Some(sigma) = scene.obs_scales.get(obs).copied().flatten() else {
-                    unreadable_scale += 1;
+                    no_scale.add(scene.missing_sift_path(img));
                     continue;
                 };
                 let p_cam = scene.cam_quats[img] * center.coords + scene.cam_translations[img];
@@ -1135,7 +1225,9 @@ fn build_patch_cloud(
                 return Err(PatchCloudError::MissingFeatureScale {
                     point_index: p as u32,
                     observations: end - start,
-                    unreadable_scale,
+                    missing_sift_file: no_scale.missing_sift_file,
+                    missing_sift_example: no_scale.missing_sift_example,
+                    unreadable_scale: no_scale.unreadable_scale,
                     coincident_with_camera,
                 });
             }
@@ -1329,22 +1421,27 @@ fn push_infinity_patches(
             }
             PatchExtent::FeatureSize { factor, across } => {
                 let mut angles: Vec<f64> = Vec::new();
+                let mut no_scale = NoScaleTally::default();
                 for obs in start..end {
                     let img = scene.obs_images[obs] as usize;
                     if let Some(sigma) = scene.obs_scales.get(obs).copied().flatten() {
                         angles.push(
                             scene.cam_intrinsics[img].pixel_radius_to_angle(bearing(img), sigma),
                         );
+                    } else {
+                        no_scale.add(scene.missing_sift_path(img));
                     }
                 }
                 if angles.is_empty() {
                     // An infinity patch's angular size needs no viewing distance,
-                    // so the only failure cause is an unreadable scale —
-                    // `coincident_with_camera` never applies here.
+                    // so the only failure causes are a missing `.sift` file and an
+                    // unreadable scale — `coincident_with_camera` never applies here.
                     return Err(PatchCloudError::MissingFeatureScale {
                         point_index: p as u32,
                         observations: end - start,
-                        unreadable_scale: end - start,
+                        missing_sift_file: no_scale.missing_sift_file,
+                        missing_sift_example: no_scale.missing_sift_example,
+                        unreadable_scale: no_scale.unreadable_scale,
                         coincident_with_camera: 0,
                     });
                 }
@@ -1477,7 +1574,9 @@ pub enum PatchExtent {
     /// magnification for every other model.
     ///
     /// Reads the workspace `.sift` files; a point whose scale can't be read in
-    /// any view yields a [`PatchCloudError::MissingFeatureScale`].
+    /// any view yields a [`PatchCloudError::MissingFeatureScale`], which tells
+    /// a `.sift` file that was not found apart from one whose scale could not
+    /// be read.
     FeatureSize { factor: f64, across: ViewReduce },
 }
 
@@ -1494,17 +1593,59 @@ impl Default for PatchExtent {
     }
 }
 
+/// Counts the observations of one point that have no keypoint scale, split by
+/// whether the observing image's `.sift` file was not found.
+#[derive(Default)]
+struct NoScaleTally {
+    missing_sift_file: usize,
+    missing_sift_example: Option<PathBuf>,
+    unreadable_scale: usize,
+}
+
+impl NoScaleTally {
+    /// Count one observation without a scale; `missing` is the `.sift` path that
+    /// was tried and not found for its image, if that is the cause.
+    fn add(&mut self, missing: Option<&Path>) {
+        match missing {
+            Some(path) => {
+                self.missing_sift_file += 1;
+                if self.missing_sift_example.is_none() {
+                    self.missing_sift_example = Some(path.to_path_buf());
+                }
+            }
+            None => self.unreadable_scale += 1,
+        }
+    }
+}
+
+/// What reading one image's keypoint scales from its `.sift` file produced.
+enum ImageScales {
+    /// Per-feature keypoint scales, indexed by feature.
+    Read(Vec<f64>),
+    /// No file exists at the resolved `.sift` path.
+    FileNotFound(PathBuf),
+    /// The file exists but could not be read, or the image has no tracks.
+    Unreadable,
+}
+
 /// Per-feature keypoint scales (column-0 norm of the affine shape) read from an
-/// image's `.sift` file, or `None` if it cannot be read.
+/// image's `.sift` file, or why they could not be read.
 ///
 /// Reads the keypoint columns and leaves the descriptors and the thumbnail
 /// compressed: a scale is the affine shape's first column, and the descriptors
 /// beside it are a hundred times the bytes.
-fn read_image_scales(recon: &SfmrReconstruction, image_index: usize) -> Option<Vec<f64>> {
-    let read_count = *recon.point_set.max_track_feature_index.get(image_index)? as usize + 1;
+fn read_image_scales(recon: &SfmrReconstruction, image_index: usize) -> ImageScales {
+    let Some(&max_feature) = recon.point_set.max_track_feature_index.get(image_index) else {
+        return ImageScales::Unreadable;
+    };
+    let read_count = max_feature as usize + 1;
     let path = recon.sift_path_for_image(image_index);
-    let (_, shapes) = sfmtool_sift_format::read_sift_keypoints(&path, read_count).ok()?;
-    Some(
+    let shapes = match sfmtool_sift_format::read_sift_keypoints(&path, read_count) {
+        Ok((_, shapes)) => shapes,
+        Err(_) if !path.exists() => return ImageScales::FileNotFound(path),
+        Err(_) => return ImageScales::Unreadable,
+    };
+    ImageScales::Read(
         shapes
             .iter()
             .map(|shape| {
