@@ -1,10 +1,10 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The rotation core's resection retry floor.
+"""The seed's qualification rule and the rotation core's resection retry floor.
 
-It lives in `scripts/exp_fast_seed.py`
-(specs/core/geometry/rotation-locked-resection.md § "Callers").
+Both live in `scripts/exp_fast_seed.py` (specs/core/geometry/seed-hypothesis-loop.md
+§ "Rank" and specs/core/geometry/rotation-locked-resection.md § "Callers").
 """
 
 import numpy as np
@@ -12,6 +12,34 @@ import pytest
 
 import exp_fast_seed as FS
 from sfmtool.geometry import CameraIntrinsics
+
+
+def _res(**over):
+    res = {"kept": FS.COMMIT_MIN_KEPT, "reach": 0.5, "spread": 0.2, "flags": []}
+    res.update(over)
+    return res
+
+
+@pytest.mark.parametrize("reach", [0.04, 0.29, 0.59, 0.60, 0.61, 1.0])
+def test_qualification_does_not_read_reach(reach):
+    assert FS.qualifies(_res(reach=reach))
+
+
+def test_qualification_reads_the_posed_count_and_the_scan_spread():
+    assert not FS.qualifies(_res(kept=FS.COMMIT_MIN_KEPT - 1))
+    assert not FS.qualifies(_res(spread=0.049))
+    assert FS.qualifies(_res(spread=0.05))
+
+
+@pytest.mark.parametrize(
+    "flag", ["vote_divergence", "flat_scan", "edge_scan", "near_static_seed"]
+)
+def test_a_blocking_flag_disqualifies(flag):
+    assert not FS.qualifies(_res(flags=[flag]))
+
+
+def test_narrow_reach_and_low_consensus_do_not_block():
+    assert FS.qualifies(_res(reach=0.05, flags=["narrow_reach", "low_consensus"]))
 
 
 @pytest.mark.parametrize(

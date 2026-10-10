@@ -4980,10 +4980,17 @@ def rotation_only_hypothesis(
 
 def qualifies(res):
     """Whether a committed hypothesis clears the structure-trust gates the rank
-    reads: the commit bar (posed count, coverage reach, focal observability), a
-    release inside the corrected vote band, and no flat-scan / edge-scan /
-    near-static-seed verdict."""
-    if res["kept"] < COMMIT_MIN_KEPT or res["reach"] < 0.60 or res["spread"] < 0.05:
+    reads: the commit bar's posed count and focal observability, a release
+    inside the corrected vote band, and no flat-scan / edge-scan /
+    near-static-seed verdict.
+
+    Coverage reach is not one of them.  Reach says how much of the capture a
+    solve connects to, which is what the exploration's commit bar and outcome
+    order read; it is not evidence that the solve is right (a focal-blind
+    sliver and a sound wide solve read alike on it, and the scan spread is
+    what separates them).  The finite candidates' reach readings spread over
+    the whole range, so no bar on it falls in a gap between them."""
+    if res["kept"] < COMMIT_MIN_KEPT or res["spread"] < 0.05:
         return False
     blocking = {
         "vote_divergence",
