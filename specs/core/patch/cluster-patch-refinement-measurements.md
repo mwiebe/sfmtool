@@ -2,7 +2,7 @@
 
 This file records the fleet measurements behind the piecewise refinement of [cluster-patch-refinement.md](cluster-patch-refinement.md#piecewise-refinement), and the ground-truth measurements behind [cell-plane-normals.md](cell-plane-normals.md). The piecewise refinement registers each kept member's nine cells against the cluster's template, starting at the member's cascade shape, fits a robust affine map to the cell shifts to find the cells that disagree with the others, and stores the shifts with a status per cell in the `.matches` file. By default it also applies the fitted map as an update of the shape, by a loop that keeps the cascade's ZNCC from falling (`PiecewiseParams::move_shape`, on by default); with `move_shape` off it is a measurement only and leaves the member's shape as the cascade found it. The measurements bear on whether the stage runs by default (`sfm cluster-patches --piecewise`), and on the defaults of `min_cell_zncc` (provisionally `0.8`) and of `min_cell_curvature` (provisionally `0.02`).
 
-The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, and the last repeats the cell plane normals on files written at the current defaults. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
+The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, and the one after repeats the cell plane normals on files written at the current defaults. The last measures, against the ground truths of two entries and with a blind human review, which members a blur-matched score at the refinement's bar would accept that the plain score rejects, by the scale ratio of member to reference. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
 
 ## Setup of the fleet run (f787be3b)
 
@@ -1162,3 +1162,100 @@ Few of the changed clusters are matched to a ground-truth point. At 3 px one mov
 
 - **The cell plane normal figures hold at the current defaults.** [cell-plane-normals.md](cell-plane-normals.md#what-the-measurements-show) quotes this section's numbers. The question of the [precision gate draft](../../drafts/cell-plane-normal-precision-gate.md#open-questions) whether the moved shapes change the normals is answered: on these ground truths they do not, measurably.
 - Nothing else changes. The displacements against the shapes, and the gate on the normal's precision, stay open for the reasons in the sections above.
+
+## Blur-matched scores across scales (2026-10-10)
+
+**Question.** The refinement accepts a member when its whole-member ZNCC against the reference's template reaches `min_zncc` (0.85). The reference is the cluster's member with the largest SIFT scale ([Which member anchors](cluster-patch-refinement.md#which-member-anchors-and-which-members-are-eligible)), so most members are sampled from a smaller footprint, and a member whose photograph saw the surface from further away is blurrier on the template grid than the reference. Its plain ZNCC is then lower than a sharp member's would be. The [blur-matched ZNCC](blur-matched-zncc.md) blurs the sharper tile of a pair to the other's sharpness before correlating, and other consumers judge their bars on it; the refinement reads plain. If the refinement's bar judged the blur-matched score, which members would it accept that it now rejects, at which scale ratios, and are they right correspondences? The statistics answer under ground-truth poses, which miss a wrong member along the epipolar line; a blind human review answers on a sample.
+
+**Method.**
+
+- **Files.** Branch `bootstrap-core-migration` at `ad12cb7a`, the extension rebuilt with `pixi run maturin develop --release`. `sfm cluster-patches --piecewise --patch-size 12`, the other settings at their defaults (`min_zncc` 0.85, `move_shape` on, both gates at the refined shape on), wrote one file each for `KerryPark480`, from `kerry_park-clusters.matches` (13,699 clusters, 39,481 members, 15,609 kept), and `DnDTabletop`, from `20260718-01-cluster-20250112_044748489_1-1681x5-clusters.matches` (483,767 clusters, 2,192,233 members, 1,370,494 kept).
+- **Scores.** `scripts/cluster_strips.py score` ([cluster-review-strips.md](../../drafts/cluster-review-strips.md#the-scores)) rendered every measured member (status `kept`, `rejected_low_zncc`, `rejected_shift`, `rejected_unlocalizable_refined` or `rejected_unlocalizable_cells`; 21,683 and 1,529,377) and its reference on the template grid, in numpy, with the kernel's pyramid-level rule and pixel-centre convention, and scored each member plain and blur-matched, with the pair rule of [blur-matched-zncc.md](blur-matched-zncc.md) at a ratio of 1.25 and a target capped at 2 grid px. Its plain score reproduces the file's `member_zncc` to a median difference of 0.00000 and 0.00010 and a 99th percentile of 0.00023 and 0.00106, and puts 0 and 248 members on the other side of 0.85. Where a pair is blurred, the blur-matched score is above the plain one by a median of 0.029 and 0.021. The *scale ratio* is the member's `√|det S|` over the reference's, at the refined shapes.
+- **Ground truth.** The epipolar rule of [Gates at the refined shape](#gates-at-the-refined-shape-2026-10-09): a member is *wrong* when its refined position lies further than `max(3, 5·m)` px of its own photograph from the epipolar half-line of its reference's position under the ground truth's poses, `m` the entry's median over kept members, and *right* otherwise. `m` is 0.21 px on `KerryPark480` (bar 3.00 px) and 0.94 px on `DnDTabletop` (bar 4.68 px), and every measured member is judged on both. A wrong correspondence along the epipolar line counts as right, so the wrong shares are lower bounds.
+- **Populations.** *Accepted*: kept members. *Rejected low-ZNCC*: members with status `rejected_low_zncc`. *Rescued*: rejected low-ZNCC members whose pair the rule blurs, whose blur-matched score reaches 0.85, and which pass the later gates (shift at most 3 px, self-similarity radius at most 2.5). A pair read plain is left out, since it reaches the bar only through the script's sampling (74 members on `DnDTabletop`, none on `KerryPark480`). *Dropped*: kept members whose blur-matched score is under 0.85.
+- **Review set.** `scripts/cluster_strips.py review` with seed `20261010` drew 40 rescued members, stratified by scale-ratio bin (`< 1/4`, `1/4–1/2`, `1/2–0.7`, `0.7–1.4`, `≥ 1.4`), one at a time from each (entry, bin) pool in turn. No member is rescued at `≥ 1.4`, so the draw is five per entry in each of the other four bins. It drew 8 controls, round robin over the entries: 4 kept members whose blur-matched score also reaches the bar, and 4 rejected low-ZNCC members that pass the later gates and whose blur-matched score also misses it. All eight fell in the `0.7–1.4` bin. Each case showed the reference's tile and the member's tile on the template grid, over crops of their photographs with the footprints outlined, and nothing naming a score, status, ratio or dataset; the cases were shuffled before they were numbered. The reviewer, the maintainer, answered *right*, *wrong* or *unsure* with an optional note, and opened the key after answering every case.
+- **Limits of the review.** One reviewer, who is the maintainer. Ten cases per bin, five per entry, so a bin's share has a wide error. The draw is stratified, so the 40 cases' overall share is not the rescued population's, which lies mostly in `0.7–1.4`.
+
+**Result: below half the reference's scale, the members of every population are mostly wrong.**
+
+`KerryPark480`, each cell members / median epipolar distance in px / share wrong:
+
+| scale ratio | accepted | rejected low-ZNCC | rescued | dropped | pairs blurred: reference / member |
+|---|---|---|---|---|---|
+| < 1/4 | 82 / 147.18 / 93.9% | 369 / 155.03 / 98.4% | 13 / 106.19 / 100.0% | 0 | 324 / 4 |
+| 1/4–1/2 | 386 / 35.99 / 60.9% | 946 / 115.44 / 87.9% | 72 / 29.30 / 62.5% | 0 | 754 / 2 |
+| 1/2–0.7 | 1,132 / 0.28 / 25.7% | 1,249 / 75.09 / 69.4% | 74 / 0.27 / 29.7% | 0 | 772 / 31 |
+| 0.7–1.4 | 14,005 / 0.20 / 13.6% | 2,929 / 3.47 / 51.2% | 58 / 0.31 / 31.0% | 0 | 659 / 131 |
+| ≥ 1.4 | 4 / 5.77 / 50.0% | 10 / 161.82 / 100.0% | 0 | 0 | 4 / 0 |
+| all | 15,609 / 0.21 / 16.1% | 5,503 / 37.19 / 64.9% | 217 / 0.71 / 45.2% | 0 | 2,513 / 168 |
+
+`DnDTabletop`:
+
+| scale ratio | accepted | rejected low-ZNCC | rescued | dropped | pairs blurred: reference / member |
+|---|---|---|---|---|---|
+| < 1/4 | 217 / 842.92 / 99.5% | 1,088 / 825.84 / 99.4% | 80 / 915.76 / 98.8% | 0 | 727 / 8 |
+| 1/4–1/2 | 1,868 / 123.71 / 62.8% | 3,675 / 819.56 / 94.7% | 188 / 526.35 / 78.2% | 2 / 1595.91 / 100.0% | 1,656 / 120 |
+| 1/2–0.7 | 14,790 / 2.75 / 32.4% | 5,955 / 260.70 / 75.0% | 411 / 3.74 / 43.1% | 5 / 10.51 / 60.0% | 3,082 / 943 |
+| 0.7–1.4 | 1,353,616 / 0.92 / 9.2% | 30,862 / 2.62 / 35.3% | 4,260 / 1.96 / 23.1% | 43 / 1.90 / 27.9% | 35,687 / 45,623 |
+| ≥ 1.4 | 3 / 7.45 / 66.7% | 19 / 378.66 / 89.5% | 0 | 0 | 1 / 4 |
+| all | 1,370,494 / 0.94 / 9.5% | 41,599 / 4.20 / 47.9% | 4,939 / 2.21 / 28.1% | 50 / 2.46 / 34.0% | 41,153 / 46,698 |
+
+Below 1/8 the accepted members are wrong at 100.0% (6) and 100.0% (35), the rejected low-ZNCC ones at 99.0% (98) and 99.5% (219). Without the later gates the rescued set is 303 and 6,031 members, wrong at 60.1% and 30.8%. The rescued members' plain scores have a 5th percentile, median and 95th percentile of 0.790, 0.832 and 0.848 on `KerryPark480` and 0.765, 0.830 and 0.848 on `DnDTabletop`. Below 1/2 the rule almost always blurs the reference's tile. The blur-matched score drops no kept member on `KerryPark480`, and 50 on `DnDTabletop`.
+
+**Scale span.** Per cluster with a reference and at least one accepted member, the span is the largest `√|det S|` over the smallest, the reference included. *Plain* counts the kept members; *blur-matched* counts the kept members that reach the bar blur-matched and the rescued ones, one per image (the highest blur-matched score), as the refinement keeps one member per image.
+
+| entry | accepted set | clusters | span p50 / p90 / p99 | 1–1.4 | 1.4–2 | 2–4 | 4–8 | ≥ 8 | over 1.5 |
+|---|---|---|---|---|---|---|---|---|---|
+| KerryPark480 | plain | 8,648 | 1.097 / 1.523 / 3.463 | 7,405 | 908 | 275 | 55 | 5 | 923 (10.7%) |
+| KerryPark480 | blur-matched | 8,773 | 1.100 / 1.576 / 3.667 | 7,406 | 962 | 335 | 64 | 6 | 1,035 (11.8%) |
+| DnDTabletop | plain | 396,995 | 1.056 / 1.225 / 1.656 | 384,441 | 10,849 | 1,535 | 144 | 26 | 7,443 (1.9%) |
+| DnDTabletop | blur-matched | 397,739 | 1.056 / 1.227 / 1.679 | 384,733 | 11,120 | 1,660 | 185 | 41 | 7,791 (2.0%) |
+
+At the refined shapes 3,498 of `KerryPark480`'s measured members and 360,938 of `DnDTabletop`'s have a scale ratio above 1, and 15 and 57 one of 1.4 or more, so a span is in effect the reference's scale over the smallest accepted member's.
+
+**Coarse-to-fine bridges.** A cluster bridges when it accepts a member whose feature size (the mean column norm of `S`) is above 40 px and one of at most 10 px (or 20 px). `KerryPark480`'s 480 × 480 photographs hold no member above 40 px. On `DnDTabletop`, 1,651 clusters accept a coarse member plain and 1,656 blur-matched; 14 of them bridge to a member of at most 10 px plain and 21 blur-matched, 17 and 24 to one of at most 20 px.
+
+**Human review.** Answers on the 40 rescued members, against the epipolar verdict of the same members:
+
+| scale ratio | cases | right | wrong | unsure | wrong by the reviewer, of answered | wrong by the ground truth |
+|---|---|---|---|---|---|---|
+| < 1/4 | 10 | 0 | 9 | 1 | 9 of 9 | 10 of 10 |
+| 1/4–1/2 | 10 | 1 | 8 | 1 | 8 of 9 | 9 of 10 |
+| 1/2–0.7 | 10 | 9 | 0 | 1 | 0 of 9 | 1 of 10 |
+| 0.7–1.4 | 10 | 8 | 2 | 0 | 2 of 10 | 3 of 10 |
+| all rescued | 40 | 18 | 19 | 3 | 19 of 37 (51.4%) | 23 of 40 (57.5%) |
+
+Per entry, the reviewer answered 9 right, 10 wrong and 1 unsure on `KerryPark480` (11 wrong by the ground truth), and 9, 9 and 2 on `DnDTabletop` (12).
+
+| reviewer | right by the ground truth | wrong by the ground truth |
+|---|---|---|
+| right | 22 (rescued 17) | 1 (rescued 1) |
+| wrong | 0 | 22 (rescued 19) |
+| unsure | 0 | 3 (rescued 3) |
+
+Over all 48 cases the reviewer and the ground truth agree on 44 of the 45 answered, and on 36 of 37 among the rescued. No member the reviewer called wrong is right by the ground truth. The one the reviewer called right and the ground truth wrong:
+
+| case | entry | member | cluster | scale ratio | plain / blur-matched | epipolar px (bar) | note |
+|---|---|---|---|---|---|---|---|
+| c23 | DnDTabletop | 1760727 | 309564 | 0.831 | 0.842 / 0.874 | 6.92 (4.68) | none |
+
+It is the nearest to the epipolar line of the 23 rescued members wrong by the ground truth; the next is 16.0 px. The three *unsure* answers are all wrong by the ground truth:
+
+| case | entry | member | cluster | scale ratio | epipolar px | note |
+|---|---|---|---|---|---|---|
+| c04 | DnDTabletop | 818029 | 101438 | 0.621 | 3822.6 | "This is more plausible, but the member is too blurry to tell." |
+| c07 | DnDTabletop | 396578 | 43806 | 0.388 | 607.1 | "These are probably different, but it's easy to see why they would match photometrically." |
+| c15 | KerryPark480 | 21711 | 5325 | 0.129 | 33.1 | "Both are vegetation with some sky peeking through, but likely different subjects" |
+
+**Controls.** Of the 4 accepted by both scores, the reviewer called 3 right and 1 wrong (c42, `KerryPark480`, 29.4 px from the epipolar line, plain 0.898); of the 4 rejected by both, 2 right (c14, `DnDTabletop`, 2.1 px, plain 0.844; c34, `KerryPark480`, 0.3 px, plain 0.773) and 2 wrong. All eight answers match the ground truth.
+
+**Notes on the wrong cases.** Six of the 19 rescued members the reviewer called wrong carry a note naming a difference of colour, among them c01: "This is grass vs a dirt path. The color is different -- are we using RGB photometric or did we collapse to greyscale? We've converted to color elsewhere, maybe this part was missed.", c29: "This is one where the color could eliminate it easily", and c38: "Very different colors". Two name contrast or texture, c13: "The member has almost no texture detail, probably some kind of contrast factor should be eliminating it?" and c47: "The contrast is very different between these". Both scores read every colour channel: each channel of the member is correlated with the same channel of the reference, each normalised by its own mean and contrast under the window ([The objective](cluster-patch-refinement.md#the-objective)), so a colour difference that is a gain or an offset of each channel does not lower either score.
+
+**Archive.** One row per case is in [cluster-patch-refinement-human-review-2026-10-10.csv](cluster-patch-refinement-human-review-2026-10-10.csv): the case id, entry, type (`rescued`, `control_accepted`, `control_rejected`), scale-ratio bin, member and cluster indexes in the cluster-patches files, scale ratio, plain and blur-matched ZNCC, epipolar distance, the ground truth's verdict, the reviewer's answer and the note, verbatim. The command above rewrites the files from the two clusters files; the renders and the review page are not kept.
+
+**What it shows.**
+
+- **Members far below the reference's scale are predominantly wrong correspondences, by both methods.** Below 1/4 the ground truth calls 93.9% and 99.5% of the accepted members wrong and 100% and 98.8% of the rescued ones, and the reviewer called all 9 answered rescued cases wrong. From 1/4 to 1/2 the accepted members are wrong at 60.9% and 62.8% and the rescued at 62.5% and 78.2%; the reviewer called 8 of 9 answered wrong.
+- **Blur matching at the bar admits more wrong members than right ones below a scale ratio of 1/2, and more right than wrong from 1/2 to 1.4.** From 1/2 to 1.4 the rescued members are wrong at 23.1% to 43.1% by the ground truth, more often than the accepted members of the same bin (29.7% against 25.7% and 43.1% against 32.4% from 1/2 to 0.7, 31.0% against 13.6% and 23.1% against 9.2% from 0.7 to 1.4), and the reviewer called 17 of 19 answered right. Over all bins the rescued sets are wrong at 45.2% and 28.1%, against 16.1% and 9.5% of the accepted members.
+- **The reviewer and the epipolar rule agree.** They agree on 44 of 45 answered cases. The one difference is a member 1.5 times the bar from the epipolar line, and every *unsure* answer is wrong by the ground truth.
+- **Spans mostly stay under about 1.5×, because the reference is the largest scale.** Only 15 and 57 measured members exceed the reference's scale by 1.4× or more, so the span is the reference's scale over the smallest accepted member's. 89.3% and 98.1% of the clusters span 1.5 or less plain: 10.7% and 1.9% span more, and 11.8% and 2.0% blur-matched; the blur-matched score adds 7 coarse-to-fine bridges at 10 px on `DnDTabletop`.
