@@ -179,6 +179,92 @@ may reach. `n_local` is the capture budget unless
 `SFMTOOL_SEED_LOCAL_ADMISSION` overrides it. An image set that carries
 nothing eligible leaves the attempt on its own working set.
 
+## Choice among seed groups
+
+A pass explores its admission as a ladder of ATTEMPTS, one per working set
+(the admission itself, then successively thinned ones). An attempt takes up
+to 8 seed groups in covisibility order. On a parallax-poor capture it first
+tries the rotation core, and a rotation core that clears the commit bar is
+the attempt's outcome. Otherwise every seed group is probed at the probe
+focal before any of them is judged:
+
+- A probe is MEASURABLE when its inlier fraction (2 px) reaches
+  `max(15%, 0.5 * best)`, where `best` is the highest inlier fraction over
+  every group's probe in the attempt. The gate therefore does not depend on
+  which groups were probed before it.
+- Every measurable probe whose core parallax clears the near-static gate is
+  finished: widened, photometrically verified, and checked against the
+  commit bar ([Rank](#rank)).
+
+The attempt's outcome is the finished group that the OUTCOME ORDER puts
+first among those that clear the commit bar. When none clears it, the
+outcome is the first by the same order among the reach-healthy but
+focal-blind outcomes (kept frames and reach at the bar, scan spread under
+it), then among the starved ones, then the near-static and the
+unmeasurable fallbacks. The outcome order compares, in turn:
+
+1. exploration reach, higher first: the share of the pass's images the
+   posed set is connected to in the pass's own covisibility graph (8 shared
+   clusters to an edge);
+2. kept frames after the photometric verify, more first;
+3. the median reprojection residual of the posed observations with a
+   triangulated point, at the probe focal, lower first;
+4. the seed group's image names, sorted, compared lexicographically, first
+   first.
+
+Every term is a property of the finished outcome, so the order the groups
+were tried in decides nothing. The cost is the widen and verify of groups a
+first-come rule would not have reached; the probe and finish memos carry a
+group that a later pass repeats at no further cost. The candidates a pass
+commits are still the ladder's finalists (below), pulled from the source
+one pass at a time ([Pull contract](#pull-contract)); the order only decides
+which finished group stands for an attempt.
+
+## Focal scan
+
+The focal scan reads the posed geometry's inlier fraction at a series of
+fixed focals, and its results set the commit bar's scan spread, the focal
+the release starts from, and the `flat_scan` and `edge_scan` flags.
+
+**Lattice.** The scan's focals are rungs of one lattice per capture,
+`max(w, h) * 1.15^k` px for integer `k`, kept inside the scan band (the
+field-of-view band of [focal-vote.md](focal-vote.md) under an equidistant
+context; the pinhole plausibility floor `0.3 * max(w, h)` and no upper bound
+otherwise). The structure-free focal (the pinhole vote, the equidistant
+verdict, or the nominal probe focal when there is no vote) chooses only the
+WINDOW: the 5 rungs nearest it, shifted to stay inside the band. A vote that
+moves by less than half a step from its nearest rung moves no scanned focal,
+and two votes either side of a midpoint scan windows that share 4 rungs.
+The commit bar's spread is measured over this window.
+
+**Extension.** The release's scan evaluates the window at a light
+adjustment budget. When the best rung is at an end of the window, the scan
+adds the next rung past that end and repeats, until the best rung is
+interior, 3 rungs have been added on that side, or the band ends. A window
+that only sat too low or too high is extended past its peak this way.
+
+**Winner.** The REFIT BAND is every rung of the extended scan within 5
+points of inlier fraction of the best rung and at most 2 rungs from it, so
+at most 5 rungs. Each is refit at a heavier adjustment budget, and the best
+refit wins. The structure-free focal breaks a tie only: among the refits
+within half a point of the best one, the rung nearest it in log-focal wins.
+Because the tied rungs are lattice rungs, the vote moves the winner only by
+crossing the log-midpoint of two of them.
+
+**Release.** The release walks the focal from the winner with a free-focal
+adjustment, at most three rounds, and stops when the focal moves by under
+1% or leaves 15% of the winner. It keeps the latest round whose inlier
+fraction is within half a point of the best seen, the winner's own
+included. The winner is a lattice rung rather than an optimum in focal, so
+on a flat-topped scan a walk that ties it is kept, and a walk that loses to
+it by more than the tie is not.
+
+**`edge_scan`.** The flag is set when the extended scan still peaks at its
+top rung and rises to it monotonically (no drop of more than half a point),
+which is the upward affine escape: the inlier fraction keeps improving as
+the focal grows, so the structure does not bound the focal from above. A
+peak at the bottom rung sets no flag.
+
 ## Ladder dedup
 
 A pass runs its exploration over successively thinned working sets and
@@ -230,14 +316,19 @@ The rank does not cause it: the first candidate is the first pass's, and the
 change enters that candidate's own exploration and reaches every later pass
 through the complement queue
 ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09)).
-Member order, the vote's single draw per pair and the commit bar equal to the
-core cap no longer reach it (sections above). On the 22 perturbed files of
-the two ground-truth captures, the first candidate still changes on 9 and
-fails the ground truth on 3, through the scan grid centred on the vote and the
-`edge_scan` verdict read off it, the reach floor of the commit bar, the
-rotation-locked resection's survivor floor, and the first-tried choice among
-tied outcomes ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)). Changes for those are proposed
-in [seed-pick-stability.md](../../drafts/seed-pick-stability.md).
+Member order, the vote's single draw per pair, the commit bar equal to the
+core cap, a scan grid centred on the vote, the first-tried choice among seed
+groups and a resection floor read on every trim round no longer reach it
+(sections above). On the 22 perturbed files of the two ground-truth captures
+the first candidate passes the ground truth on every file, but it still
+changes on 10 of them
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)):
+on `KerryPark480` the dropped members change which skeleton images the
+rotation core resects and which frames the widen admits, and on `SeoulBull`
+they move one seed group under the commit bar's 60% reach floor. Those
+stages read the evidence the dropped members carried, and a first candidate
+that never moves under a 0.3% change of the cluster file is not a goal of
+this stage.
 
 None of the signals qualification and the rank read compares a candidate's
 photographs resampled into its patches. A photometric candidate score that

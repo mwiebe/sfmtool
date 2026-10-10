@@ -578,21 +578,24 @@ def run_release_suite():
     check(F.fisheye_stage1(), "the fisheye stage-1 gate is armed")
 
     lo, hi = F.fisheye_focal_band()
-    grid = F.fisheye_focal_grid(F_EQUI)
+    grid = F.lattice_window(F_EQUI)
+    k_mid = F.lattice_index(F_EQUI)
     check(
         len(grid) == 5
         and grid.min() >= lo
         and grid.max() <= hi
-        and abs(grid[2] - F_EQUI) < 1e-9,
-        "the scan grid is five candidates centred on the verdict, in band",
+        and abs(grid[2] - F.lattice_focal(k_mid)) < 1e-9
+        and abs(np.log(grid[2] / F_EQUI)) <= 0.5 * np.log(F.SCAN_RATIO) + 1e-12,
+        "the scan window is the five lattice rungs nearest the verdict, in band",
         f"[{', '.join(f'{v:.1f}' for v in grid)}] in [{lo:.1f}, {hi:.1f}]",
     )
-    # Log-symmetric: no upward skew (the equidistant column has no measured
-    # directional bias, unlike the pinhole vote the pinhole grid corrects for).
-    lr = np.log(grid / F_EQUI)
+    # The rungs are the capture's, not the verdict's: a verdict moved by less
+    # than half a step from its nearest rung scans the same window.
+    shifted = F.lattice_window(F.lattice_focal(k_mid) * F.SCAN_RATIO**0.4)
     check(
-        abs(lr[0] + lr[4]) < 1e-12 and abs(lr[1] + lr[3]) < 1e-12,
-        "the scan grid is log-symmetric about the verdict focal",
+        np.array_equal(grid, shifted)
+        and np.allclose(np.diff(np.log(grid)), np.log(F.SCAN_RATIO)),
+        "the scan window sits on the capture's fixed log lattice",
     )
     # The floor a release must clear sits BELOW the capture's own focal — the
     # pinhole 0.3 x max(w, h) would reject it (kerry: 138 px against 144).

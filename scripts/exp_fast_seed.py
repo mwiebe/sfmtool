@@ -183,7 +183,6 @@ FAR_DOMINANT_POVERTY = 0.85
 #     sit at ratio 1.00 (Daegu) and 0.83 (vid2) of their attempt's max.
 PROBE_GATE_ABS = 0.15
 PROBE_GATE_REL = 0.5
-F_GRID = [0.55, 0.7, 0.9, 1.2, 1.6]  # focal candidates, units of max(w, h)
 
 # ── Camera-model escalation (specs/core/geometry/estimate-intrinsics.md) ─────
 #
@@ -378,6 +377,20 @@ FISHEYE_BAND = (0.075, 3.0)
 # column carries no such measured directional bias, so its grid is log-symmetric
 # about the verdict.  The span (0.756x .. 1.323x) matches the pinhole grid's.
 FISHEYE_SCAN_RATIO = 1.15
+# The focal scan's LATTICE (specs/core/geometry/seed-hypothesis-loop.md, Focal
+# scan): rungs ``max(w, h) * SCAN_RATIO**k`` for integer ``k``, one set per
+# capture under either camera model.  A scan evaluates the SCAN_POINTS rungs
+# nearest the structure-free focal, and when its peak sits at an end of that
+# window it adds rungs past that end, up to SCAN_EXTEND_MAX on each side.
+SCAN_RATIO = FISHEYE_SCAN_RATIO
+SCAN_POINTS = 5
+SCAN_EXTEND_MAX = 3
+# Refit margin (inlier fraction): the rungs within it of the best coarse rung,
+# and no more than SCAN_BAND_RUNGS rungs from it, are refit, and the refits
+# within it of the best refit tie, the structure-free focal breaking the tie.
+SCAN_TIE = 0.05
+SCAN_BAND_RUNGS = 2
+REFIT_TIE = float(os.environ.get("SFMTOOL_REFIT_TIE", "0.005"))
 
 # Floor on the structure-free vote's PRECISION BAND (log-focal), the band the
 # finalization's arbitration reads (Phase 6, Item 2).  The band itself is the
@@ -400,6 +413,12 @@ VOTE_BAND_FLOOR_LOG = float(np.log(1.02))
 # the bar is worth re-measuring rather than inheriting.  Default unchanged.
 RESECT_MAX_PX = float(os.environ.get("SFMTOOL_RESECT_MAX_PX", "8.0"))
 RESECT_TRACE = os.environ.get("SFMTOOL_RESECT_TRACE", "0") == "1"
+# Survivor floor of that resection, read by the kernel on its converged kept
+# set rather than on every trim round, and the factor its one retry widens the
+# trim gate by before an image is dropped from the skeleton
+# (specs/core/geometry/rotation-locked-resection.md, Callers).
+RESECT_MIN_INLIERS = 10
+RESECT_RETRY_WIDEN = 2.0
 
 
 def fisheye_focal_band():
@@ -416,12 +435,42 @@ def focal_floor():
     return 0.3 * max(seed_camera._CAM_WH)
 
 
-def fisheye_focal_grid(f_center, n=5):
-    """The equidistant scan grid: ``n`` log-spaced candidates centred on
-    ``f_center``, clipped to the FOV-derived band."""
-    lo, hi = fisheye_focal_band()
-    k = np.arange(n) - (n - 1) // 2
-    return np.clip(f_center * FISHEYE_SCAN_RATIO**k, lo, hi)
+def scan_band():
+    """The `(lo, hi)` px band the focal scan's lattice rungs lie in: the
+    FOV-derived band under an equidistant context, the pinhole plausibility
+    floor and no upper bound otherwise."""
+    if fisheye_stage1():
+        return fisheye_focal_band()
+    return focal_floor(), np.inf
+
+
+def lattice_focal(k):
+    """Rung ``k`` of the focal scan's lattice, px: ``max(w, h) * 1.15**k``.
+
+    The lattice is a property of the capture's image size alone, so every
+    scan of a capture reads its focals off one set of rungs whatever the vote
+    says; the vote only chooses which rungs are scanned."""
+    return float(max(seed_camera._CAM_WH)) * SCAN_RATIO**k
+
+
+def lattice_index(f):
+    """Index of the lattice rung nearest ``f`` (nearest in log-focal)."""
+    return int(
+        np.round(np.log(f / float(max(seed_camera._CAM_WH))) / np.log(SCAN_RATIO))
+    )
+
+
+def lattice_window(f_center, n=SCAN_POINTS):
+    """The ``n`` lattice rungs nearest ``f_center`` inside the scan band, in
+    increasing focal.  A centre that moves by less than half a step from a
+    rung moves no rung."""
+    lo, hi = scan_band()
+    k0 = lattice_index(f_center) - (n - 1) // 2
+    while lattice_focal(k0) < lo:
+        k0 += 1
+    while lattice_focal(k0 + n - 1) > hi and lattice_focal(k0 - 1) >= lo:
+        k0 -= 1
+    return np.array([lattice_focal(k) for k in range(k0, k0 + n)])
 
 
 def bootstrap_module():
@@ -2128,6 +2177,41 @@ def rotation_spanning_tree(edges, n_img, gauge=None):
     return rvec, abs_rot
 
 
+def resect_locked(cam, q_wxyz, points, uv):
+    """Rotation-locked translation of one skeleton image, or None.
+
+    The kernel judges its survivor floor (``RESECT_MIN_INLIERS``) on the
+    converged kept set.  An image that still fails is tried once more with a
+    trim gate ``RESECT_RETRY_WIDEN`` times wider, which lets the first solve
+    start from a broader set when a few strays pull it out of the basin; the
+    retry is accepted only when its translation keeps at least the floor's
+    count of observations within the ordinary gate, so the wider gate finds
+    the translation and the ordinary gate still judges it.  The retry's
+    ``inliers`` are those ordinary-gate survivors."""
+    from sfmtool.geometry import resect_translation
+
+    q = [float(x) for x in q_wxyz]
+    x = np.ascontiguousarray(points, dtype=np.float64)
+    uv = np.ascontiguousarray(uv, dtype=np.float64)
+    out = resect_translation(cam, q, x, uv, RESECT_MAX_PX, RESECT_MIN_INLIERS)
+    if out is not None:
+        return out
+    wide = resect_translation(
+        cam, q, x, uv, RESECT_RETRY_WIDEN * RESECT_MAX_PX, RESECT_MIN_INLIERS
+    )
+    if wide is None:
+        return None
+    keep = np.asarray(wide["residual_norms"], dtype=np.float64) < RESECT_MAX_PX
+    if int(keep.sum()) < RESECT_MIN_INLIERS:
+        return None
+    if RESECT_TRACE:
+        print(
+            f"    [resect retry: {int(keep.sum())} within {RESECT_MAX_PX:g} px "
+            f"after a {RESECT_RETRY_WIDEN * RESECT_MAX_PX:g} px trim]"
+        )
+    return dict(wide, inliers=keep)
+
+
 def rotation_core_rays(obs_c, obs_i, u, n_img, n_cl, f, max_pairs=120):
     """Fisheye rotation core: a far-field skeleton from ray-rotation fits.
 
@@ -2150,7 +2234,6 @@ def rotation_core_rays(obs_c, obs_i, u, n_img, n_cl, f, max_pairs=120):
 
     Returns ``rotation_core``'s tuple (inlier fraction, parallax, rvec, tvec,
     points, posed mask, median inlier fraction), or None."""
-    from sfmtool.geometry import resect_translation
 
     found = ray_rotation_edges(obs_c, obs_i, u, n_img, n_cl, f, max_pairs)
     if found is None:
@@ -2187,15 +2270,10 @@ def rotation_core_rays(obs_c, obs_i, u, n_img, n_cl, f, max_pairs=120):
             break
         s = (obs_i == j) & ~np.isnan(pts[obs_c, 0])
         q = Rotation.from_rotvec(rvec[j]).as_quat()[[3, 0, 1, 2]]
-        out = resect_translation(
-            make_cam(f),
-            [float(x) for x in q],
-            np.ascontiguousarray(pts[obs_c[s]], dtype=np.float64),
-            np.ascontiguousarray(u[s], dtype=np.float64),
-            RESECT_MAX_PX,
-            10,
-        )
+        out = resect_locked(make_cam(f), q, pts[obs_c[s]], u[s])
         if out is None:
+            if RESECT_TRACE:
+                print(f"    [resect img {j}: failed, dropped from the skeleton]")
             del abs_rot[j]
             continue
         if RESECT_TRACE:
@@ -5095,7 +5173,6 @@ def capture_context():
         # near-truth releases).  Raw-vote arm: accepted-focal error median
         # 3.7% -> 2.7% vs references, human-reviewed.
         f_probe = float(f_vote)
-        f_grid = f_vote * FISHEYE_SCAN_RATIO ** (np.arange(5) - 2)
         print(
             f"pairwise focal vote: f ~ {f_vote:.1f} ({n_votes} votes) "
             f"[{elapsed():.1f}s]"
@@ -5103,7 +5180,6 @@ def capture_context():
     else:
         f_vote = None
         f_probe = 0.9 * max(seed_camera._CAM_WH)
-        f_grid = np.asarray(F_GRID) * max(seed_camera._CAM_WH)
         print(f"no focal vote (sparse pairs); probing at {f_probe:.1f}")
     if fisheye_stage1():
         # Under a confirmed, opted-in fisheye verdict stage 1 probes at the
@@ -5113,14 +5189,16 @@ def capture_context():
         # grid is the same log-symmetric one, about the verdict and clipped
         # inside the FOV-derived band.
         f_probe = float(rung.intrinsics["fisheye"]["focal_px"])
-        f_grid = fisheye_focal_grid(f_probe)
         lo, hi = fisheye_focal_band()
         print(
             f"fisheye seed: probing at the verdict's equidistant focal "
-            f"{f_probe:.1f} px; scan grid "
-            f"[{', '.join(f'{v:.1f}' for v in f_grid)}] px "
-            f"inside the FOV band [{lo:.1f}, {hi:.1f}]"
+            f"{f_probe:.1f} px inside the FOV band [{lo:.1f}, {hi:.1f}]"
         )
+    # The scan window: the lattice rungs nearest the structure-free focal (the
+    # pinhole vote, the equidistant verdict, or the nominal probe without a
+    # vote).  The rungs are the capture's; only the window follows the vote.
+    f_grid = lattice_window(f_probe)
+    print(f"focal scan window [{', '.join(f'{v:.1f}' for v in f_grid)}] px")
     cap = min(n_img, SCAN_CAP)
 
     # The capture-level covisibility graph, built ONCE from the full admission
@@ -5866,6 +5944,13 @@ def run_pipeline(
                 posed,
             )
             pi = np.nonzero(posed)[0]
+            # The outcome's median reprojection residual at the probe focal,
+            # over the rows it holds: the last continuous term of
+            # `outcome_key`, which ranks outcomes that tie on reach and kept
+            # frames.
+            med_res = stage_metrics(o_c, o_i, o_u, rvec, tvec, pts, posed, f_probe)[
+                "median_px"
+            ]
             return {
                 "wk": cur["wk"],
                 # The attempt's GLOBAL working set, kept beside the solved one:
@@ -5882,6 +5967,7 @@ def run_pipeline(
                 "pts": pts,
                 "posed": posed,
                 "kept": int(posed.sum()),
+                "med_res": None if med_res is None else float(med_res),
                 # Exploration reach (this pass's graph) and QUALIFICATION reach
                 # (the capture's).  The exploration compares working sets of
                 # one admission; the rank compares hypotheses across
@@ -5945,10 +6031,11 @@ def run_pipeline(
             """Below-bar outcome: report it and keep it as a fallback.
 
             Reach-healthy but focal-blind outcomes are held apart from
-            starved ones and arbitrated by the level loop's own comparator
-            (spread first, coverage as tiebreak); a widened, verified,
-            reach-healthy solve outranks any starved one, so the flat slot
-            wins over the starved slot at the end of the attempt."""
+            starved ones; a widened, verified, reach-healthy solve outranks any
+            starved one, so the flat slot wins over the starved slot at the end
+            of the attempt.  Within each slot the outcomes are ordered by
+            ``outcome_key``, the same key that orders healthy outcomes, so
+            the order the groups were tried in decides no slot."""
             nonlocal best, flat
             if "spread" in outcome:
                 print(
@@ -5957,12 +6044,12 @@ def run_pipeline(
                 )
                 evo_note(outcome.get("evo"), spread=outcome["spread"])
                 evo_reason(outcome.get("evo"), "deferred_flat_scan")
-                if flat is None or score(outcome) > score(flat):
+                if flat is None or outcome_key(outcome) < outcome_key(flat):
                     flat = outcome
             else:
                 print(f"widen starved; trying {nxt}")
                 evo_reason(outcome.get("evo"), "deferred_starved_widen")
-                if best is None or outcome["kept"] > best["kept"]:
+                if best is None or outcome_key(outcome) < outcome_key(best):
                     best = outcome
 
         def try_rotation_core():
@@ -6106,16 +6193,23 @@ def run_pipeline(
             return w
 
         def try_group_list(group_list):
-            """Probe -> widen -> verify each seed group, one group per
-            working set; return a HEALTHY outcome or None.
+            """Probe -> widen -> verify EVERY seed group, one group per working
+            set; return the best HEALTHY outcome or None.
 
-            Each sub-healthy result folds into the enclosing ``best`` /
-            ``low_par`` fallbacks the attempt arbitrates at its end.
+            The groups are probed first and gated against the best probe
+            consensus over all of them, so a group's gate does not depend on
+            which groups happened to be probed before it.  Every group the gate
+            passes is then finished, and among the outcomes that clear the
+            commit bar the one ``outcome_key`` ranks first is returned: which
+            group was tried first decides nothing.  Each sub-healthy result
+            folds into the enclosing ``best`` / ``flat`` / ``low_par``
+            fallbacks the attempt arbitrates at its end, by the same key.
 
             Under a group-local re-admission the chunk is ONE group: the whole
             point is a working set derived for the images being seeded, and two
             groups in one chunk would split N_local between them."""
             nonlocal best, low_par, probe_max
+            probed = []
             for group in group_list:
                 grp = [group]
                 gk = tuple(
@@ -6228,7 +6322,18 @@ def run_pipeline(
                         rung.probe_memo[p_key] = copy_probe(cand)
                 if cand is None:
                     continue
-                probe_max = max(probe_max, cand[0])
+                probed.append(
+                    (gk, cand, workset(), cur["seed"], cur["nbr_key"], p_key, memo)
+                )
+            if not probed:
+                return None
+            # The measurability gate's reference: the best probe over EVERY
+            # group of this attempt, not over the groups probed so far.
+            probe_max = max(probe_max, max(r[1][0] for r in probed))
+            healthy = []
+            for gk, cand, ws, seed, nbr_key, p_key, memo in probed:
+                use_workset(*ws, seed=seed)
+                cur["nbr_key"] = nbr_key
                 gate = max(PROBE_GATE_ABS, PROBE_GATE_REL * probe_max)
                 serial = open_evo(
                     cand,
@@ -6300,9 +6405,22 @@ def run_pipeline(
                             for k, v in outcome.items()
                         }
                 if committable(outcome):
-                    return outcome
+                    healthy.append(outcome)
+                    continue
                 defer(outcome, "next seed groups")
-            return None
+            if not healthy:
+                return None
+            ranked = sorted(healthy, key=outcome_key)
+            if len(ranked) > 1:
+                print(
+                    f"{len(ranked)} seed groups clear the commit bar; committing "
+                    f"{[int(k) for k in ranked[0]['seed_frames']]} (reach "
+                    f"{100 * ranked[0]['reach']:.0f}%, kept {ranked[0]['kept']}, "
+                    f"median residual {ranked[0]['med_res']:.2f} px)"
+                )
+            for o in ranked[1:]:
+                evo_reason(o.get("evo"), "outranked_in_attempt")
+            return ranked[0]
 
         outcome = try_group_list(groups)
         if outcome is not None:
@@ -6452,6 +6570,30 @@ def run_pipeline(
     def score(att):
         spread = att["spread"] if att["spread"] >= 0.05 else 0.0
         return (spread, coverage(att))
+
+    def outcome_key(o):
+        """Order of one attempt's finished outcomes, best first (a sort key).
+
+        Exploration reach first (the share of the pass's images the posed set
+        is covisibility-connected to), then kept frames, then the median
+        reprojection residual at the probe focal, lower first; a tie on all
+        three goes to the seed group whose image names, sorted, come first.
+        Every term is a property of the outcome, so the order the seed groups
+        were tried in decides nothing (specs/core/geometry/seed-hypothesis-loop.md,
+        Choice among seed groups)."""
+        med = o.get("med_res")
+        sf = o.get("seed_frames")
+        names = (
+            ()
+            if sf is None
+            else tuple(sorted(str(data["names"][int(k)]) for k in np.asarray(sf)))
+        )
+        return (
+            -float(o["reach"]),
+            -int(o["kept"]),
+            np.inf if med is None or not np.isfinite(med) else float(med),
+            names,
+        )
 
     # The focal the ladder's far fits are measured at: the capture-level vote,
     # in the solve's own parameterization.  Fixed for the whole pass, so two
@@ -6784,46 +6926,87 @@ def run_pipeline(
             inl = float((res < 2.0).sum() / max(int(denom.sum()), 1))
             return inl, f_try, rv_t, tv_t, p_t
 
-        coarse = []
+        # The coarse pass over the scan window (the lattice rungs nearest the
+        # structure-free focal), in increasing focal.
+        grid = []
         for f_try in f_grid:
-            cand = scan_candidate(f_try, 25)
-            coarse.append(cand)
+            grid.append(scan_candidate(f_try, 25))
             print(
-                f"f={cand[1]:6.1f}: inlier<2px {100 * cand[0]:5.1f}% [{elapsed():.1f}s]"
+                f"f={grid[-1][1]:6.1f}: inlier<2px "
+                f"{100 * grid[-1][0]:5.1f}% [{elapsed():.1f}s]"
             )
-        inls_grid = [c[0] for c in coarse]  # grid order, for the edge-scan check
-        coarse.sort(key=lambda t: -t[0])
-        pick = [coarse[0], coarse[1]]
-        if f_indep is not None:
-            # A flat scan is f-degenerate structure with no opinion of its own
-            # — marginal captures then flip basins on run-to-run noise.  The
-            # structure-free vote is an INDEPENDENT measurement, so the
-            # candidate nearest it always earns a refit slot when it ranks
-            # within noise of the leader, and it wins outright when the
-            # refits tie.
-            near = min(coarse, key=lambda t: abs(np.log(t[1] / f_indep)))
-            if (
-                near[1] not in (pick[0][1], pick[1][1])
-                and near[0] >= coarse[0][0] - 0.05
-            ):
-                pick[1] = near
-        finals = [scan_candidate(c[1], 60) for c in pick]
+        # A peak at an end of the window says the window is in the wrong
+        # place, not that the structure has no optimum: extend it along the
+        # lattice past that end, one rung at a time, until the peak is
+        # interior, SCAN_EXTEND_MAX rungs have been added on that side, or the
+        # scan band ends.  What stays at the top end after that is the upward
+        # affine escape `edge_scan` exists for.
+        lo_band, hi_band = scan_band()
+        n_ext = {"lo": 0, "hi": 0}
+        while True:
+            at = int(np.argmax([c[0] for c in grid]))
+            if at == len(grid) - 1 and n_ext["hi"] < SCAN_EXTEND_MAX:
+                f_next = lattice_focal(lattice_index(grid[-1][1]) + 1)
+                if f_next > hi_band:
+                    break
+                n_ext["hi"] += 1
+                grid.append(scan_candidate(f_next, 25))
+                c = grid[-1]
+            elif at == 0 and n_ext["lo"] < SCAN_EXTEND_MAX:
+                f_next = lattice_focal(lattice_index(grid[0][1]) - 1)
+                if f_next < lo_band:
+                    break
+                n_ext["lo"] += 1
+                grid.insert(0, scan_candidate(f_next, 25))
+                c = grid[0]
+            else:
+                break
+            print(
+                f"f={c[1]:6.1f} (extension): inlier<2px {100 * c[0]:5.1f}% "
+                f"[{elapsed():.1f}s]"
+            )
+        f_scan = [c[1] for c in grid]  # grid order, for the record
+        inls_grid = [c[0] for c in grid]  # grid order, for the edge-scan check
+        # The refits decide.  The REFIT BAND is every rung within SCAN_TIE of
+        # the best coarse rung and within SCAN_BAND_RUNGS rungs of it (at most
+        # five rungs); each is refit at the heavier budget -- neighbouring
+        # rungs can rank within a point of each other and the light pass is
+        # not reliable at that margin -- and the best refit wins.  The
+        # structure-free focal breaks a tie only: among the refits within
+        # SCAN_TIE of the best refit, the rung nearest it in log-focal wins.
+        # The rungs are the lattice's, so the vote moves the winner only by
+        # crossing the log-midpoint of two tied rungs.
+        top = max(range(len(grid)), key=lambda i: (grid[i][0], -i))
+        band = [
+            c
+            for i, c in enumerate(grid)
+            if abs(i - top) <= SCAN_BAND_RUNGS and c[0] >= grid[top][0] - SCAN_TIE
+        ]
+        finals = [scan_candidate(c[1], 60) for c in band]
         for c in finals:
             print(
                 f"f={c[1]:6.1f} (refit): inlier<2px {100 * c[0]:5.1f}% [{elapsed():.1f}s]"
             )
-        best = max(finals, key=lambda t: t[0])
-        if f_indep is not None and abs(finals[0][0] - finals[1][0]) < 0.05:
-            best = min(finals, key=lambda t: abs(np.log(t[1] / f_indep)))
+        lead = max(c[0] for c in finals)
+        tied = [c for c in finals if c[0] >= lead - REFIT_TIE]
+        if f_indep is not None:
+            best = min(tied, key=lambda t: (abs(np.log(t[1] / f_indep)), t[1]))
+        else:
+            best = max(tied, key=lambda t: (t[0], -t[1]))
 
         inl0, f, rvec, tvec, pts = best
         print(f"scan winner: f = {f:.1f} [{elapsed():.1f}s]; releasing f")
         # Iterated release: full schedule (the wide first trim + inter-round
         # retriangulation is what lets f keep walking — the structure absorbs a
-        # wrong f and must be re-formed as f moves).  Stop when f stabilizes;
-        # keep the best-fit state seen.
+        # wrong f and must be re-formed as f moves).  Stop when f stabilizes.
+        # The kept state is the LATEST step whose inlier fraction is within
+        # REFIT_TIE of the best seen (the scan winner's included): the winner is
+        # a lattice rung, not an optimum in f, so a walk that ties it is the
+        # better estimate of where the optimum lies, and a walk that loses to
+        # it by more than the tie is not kept.
         inl, f_prev = inl0, f
         kept = (inl0, f, rvec, tvec, pts)
+        inl_best = inl0
         for _ in range(3):
             live = ba_rows(bam & ~np.isnan(pts[obs_c, 0]), obs_i)
             f, rvec, tvec, pts, res, _ = bundle_adjust(
@@ -6857,7 +7040,9 @@ def run_pipeline(
             if not (best[1] / 1.15 <= f <= 1.15 * best[1]) or f < focal_floor():
                 print(f"release left the scan basin (f = {f:.0f}); keeping previous")
                 break
-            if inl > kept[0]:
+            print(f"  release round: f = {f:.1f}, inlier<2px {100 * inl:.1f}%")
+            inl_best = max(inl_best, inl)
+            if inl >= inl_best - REFIT_TIE:
                 kept = (inl, f, rvec, tvec, pts)
             if abs(f - f_prev) < 0.01 * f_prev:
                 break
@@ -6875,7 +7060,7 @@ def run_pipeline(
             pts,
             posed,
             wk=chosen["wk"],
-            scan_grid_f=[float(v) for v in f_grid],
+            scan_grid_f=[float(v) for v in f_scan],
             scan_grid_inliers=[float(v) for v in inls_grid],
             scan_winner_f=float(best[1]),
             released_inlier_2px=float(inl),
@@ -7122,7 +7307,10 @@ def run_pipeline(
         # 72->83% rising into the edge; the release then tried f=4800).  Spread
         # cannot see this (it measures variation, not peakedness).  Flag it: the
         # released f is a guard artifact, and the structure-free vote is the
-        # reliable estimate.
+        # reliable estimate.  Read on the EXTENDED grid: a window that merely
+        # sat too low (SeoulBull's vote, 16% under its focal) has been extended
+        # past its peak by now, so only a rise that outlasts SCAN_EXTEND_MAX
+        # more rungs, or reaches the scan band's end, is flagged.
         if (
             "flat_scan" not in flags
             and int(np.argmax(inls_grid)) == len(inls_grid) - 1
