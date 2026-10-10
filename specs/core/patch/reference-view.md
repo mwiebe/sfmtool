@@ -368,13 +368,16 @@ into the point's own track, in `tracks/reference_observations`.
 names, per point, the observation its bitmap is, or is to be, rendered from,
 with or without stored bitmaps. Where a reconstruction stores a point's bitmap
 beside a reference `≥ 0`, the bitmap is that observation's tile as of the last
-render. `-1` means the point has no reference observation in its track, and
-a stored bitmap beside it is not the render of one of its observations: a
-fused mean, or the render of an observation that an edit has since removed
-from the point (an image subset or filter keeps the bitmap and writes `-1`).
-The next render picks a new reference by the rule. Dropping the bitmaps keeps
-the column, and moving geometry
-(keypoints, the frame, a bundle adjustment) keeps it too
+render. `-1` means the point has no reference observation in use -- none in
+its track, or a stored one that a writer aligning keypoints and rendering
+bitmaps could no longer render usefully and had no pick to replace (below) --
+and a stored bitmap beside it is not the render of
+one of its observations: a fused mean, or the render of an observation that
+an edit has since removed from the point (an image subset or filter keeps the
+bitmap and writes `-1`). The next render picks a new reference by the rule.
+Dropping the bitmaps keeps the column, and moving geometry
+(keypoints, the frame, a bundle adjustment) keeps it too, except in a writer
+that aligns keypoints and renders the bitmaps from them
 ([sfmr-file-format.md](../../formats/sfmr-file-format.md) § "9. Tracks").
 
 **A render reads the reference.** `render_patch_cloud_bitmaps` renders each
@@ -386,10 +389,21 @@ not pick another view for it. Only a point at `-1` runs the rule
 (`UnreferencedPoints::Pick`), and its pick is recorded;
 `UnreferencedPoints::Skip` gives such a point a zero row and `-1`, for a
 caller that has bitmaps for those points already (Python:
-`PatchCloud.render_bitmaps(..., referenced_only=True)`). The refiners render
-every point by the rule over the views they keep; the `xform` steps and `sfm
-embed-patches` that write their bitmaps keep each point's stored reference and
-give only a point at `-1` the refiner's pick, then render every point with a
+`PatchCloud.render_bitmaps(..., referenced_only=True)`). The keypoint
+refiners align every view to a given reference, the point's stored one, and
+run the rule over the views they keep only where there is none or it cannot
+be used. `xform --refine-keypoints` with `bitmaps` and `sfm embed-patches`
+record the reference the views were aligned to, so the keypoints, the bitmap
+and the reference agree: a point keeps its stored reference wherever it
+renders usefully, and a stored reference whose core does not render at its
+keypoint (out of frame), or that is past the obliquity cut (`embed-patches`'
+`--max-obliquity-deg`, or the localizer's grazing pre-filter), is replaced by
+the rule's pick, which is recorded, or by `-1` with the fused mean where the
+rule picks no view it would store, though the observation stays in the track.
+A writer that aligns keypoints and writes no bitmap (`xform
+--localize-keypoints`, `--refine-keypoints bitmaps=false`) keeps each stored
+reference instead, since no bitmap is written for it to disagree with. The
+writers that render then render every point with a
 reference again from that observation through the stored value, through
 `render_from_references` in
 [`_patch_compaction.py`](../../../src/sfmtool/_patch_compaction.py). That
@@ -439,11 +453,14 @@ Every operation that renders the stored bitmap renders it this way:
 | The viewer's display patch bitmaps | `render_patch_cloud_bitmaps`, through `render_patch_bitmap_column`: each point from the file's reference; a point at `-1` gets the render's pick, held in the value's references and marked `PointSet::display_only_references`, so Track View marks the row the display bitmap is the tile of, while a save writes neither the bitmaps nor those picks (it writes the file's `-1`) |
 | SfM Explorer's conversion to embedded patches | `render_patch_cloud_bitmaps`, through `render_patch_bitmap_column`; `to_embedded_patches` keeps the input's references (a display-only pick goes back to `-1`; an input without the column gets every row `-1`) and drops the old bitmaps; a point with a reference is rendered from it, a point at `-1` gets the rule's pick, and the bitmaps are the converted value's own, so the references are written with them |
 
-The templates the localizer, the sub-pixel refiner, congealing and normal
-refinement align views to are not changed by this: they read their own
-consensus of the views. Which template the localizer aligns to is a
-separate decision ([../../drafts/sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md)
-Part 5).
+The localizer, the sub-pixel refiner and Add Image to Tracks align each view
+to the same reference render: the tile of the point's reference observation
+at its keypoint, or the rule's pick where the point stores none, and the fused
+mean where the rule picks none it would store
+([patch-keypoint-localization.md](patch-keypoint-localization.md)). Normal
+refinement keeps its own weighted consensus of the views, since it chooses a
+normal rather than placing views
+([patch-normal-refinement.md](patch-normal-refinement.md)).
 
 **The culls read a sharper bitmap.** `embed-patches`' and
 `--filter-by-zncc-self-similarity-radius`' cull on a point's bitmap reads its
@@ -647,11 +664,9 @@ and
 
 ## Non-goals
 
-The templates the localizer, the sub-pixel refiner, congealing and normal
-refinement align views to stay their own consensus of the views; which
-template the localizer aligns to is decided separately
-([../../drafts/sharper-patch-bitmap.md](../../drafts/sharper-patch-bitmap.md)
-Part 5). Replacing a point's defined reference when a sharper observation is
+Normal refinement's template stays its own weighted consensus of the views;
+the kernels that place views align them to the reference render (§ "The
+stored bitmap"). Replacing a point's defined reference when a sharper observation is
 added or fitted is not done: a render renders from the defined reference, an
 operation that only adds an observation (Add Image to Tracks) keeps the bitmap
 and its reference, and the refiners keep a stored reference. Only the bench

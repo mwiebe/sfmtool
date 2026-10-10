@@ -12,7 +12,9 @@ from .._cli_utils import timed_command
 from ._sfmr_path import check_sfmr_path
 
 
-@click.command("embed-patches")
+# Extra positional arguments are collected rather than refused by click, so a
+# count left over from `--subpixel N` is reported as that in any position.
+@click.command("embed-patches", context_settings={"allow_extra_args": True})
 @timed_command
 @click.help_option("--help", "-h")
 @click.argument("input_path", type=click.Path(exists=True))
@@ -23,9 +25,9 @@ from ._sfmr_path import check_sfmr_path
     default=0.7,
     show_default=True,
     help=(
-        "Minimum ZNCC a view must reach, as a fraction of the reference's own "
-        "agreement — admits candidate views and drops poorly-registering ones "
-        "during congealing."
+        "Minimum ZNCC a view must reach, as a fraction of its peers' — admits "
+        "candidate views and drops poorly-registering ones when the views are "
+        "aligned to the reference render."
     ),
 )
 @click.option(
@@ -34,12 +36,8 @@ from ._sfmr_path import check_sfmr_path
     default=0.5,
     show_default=True,
     help=(
-        "Refuse an observation whose leave-one-out ZNCC is below this absolute "
-        "floor, however few views the point has left. --min-relative-zncc asks "
-        "whether a view agrees as well as its peers, so on a two-view point it "
-        "compares the single pairwise correlation against a fraction of itself "
-        "and always passes; this floor is what refuses a pair of unrelated "
-        "surfaces. 0 disables it."
+        "Refuse an observation whose ZNCC against the point's reference render "
+        "is below this absolute floor. 0 disables it."
     ),
 )
 @click.option(
@@ -58,18 +56,14 @@ from ._sfmr_path import check_sfmr_path
     ),
 )
 @click.option(
-    "--max-iters",
-    type=int,
-    default=5,
-    show_default=True,
-    help="Max congealing rounds per point (stops early at convergence).",
-)
-@click.option(
     "--search",
     type=float,
     default=6.0,
     show_default=True,
-    help="Max total per-view in-plane drift, in patch-grid pixels.",
+    help=(
+        "The reach of each view's search around its starting keypoint, in "
+        "patch-grid pixels."
+    ),
 )
 @click.option(
     "--max-shift-px",
@@ -100,29 +94,14 @@ from ._sfmr_path import check_sfmr_path
     ),
 )
 @click.option(
-    "--search-resolution-multiplier",
-    "search_resolution_multiplier",
-    type=float,
-    default=1.0,
+    "--subpixel/--no-subpixel",
+    default=True,
     show_default=True,
     help=(
-        "Multiplier m for the discrete cross-view search: it runs at resolution "
-        "round(m·R). 1.0 is the no-op; >1 (the supersampled grid) resolves "
-        "sub-pixel offsets at a cost that grows ~m². See "
-        "specs/core/patch/keypoint-localization-search-cache.md."
-    ),
-)
-@click.option(
-    "--subpixel",
-    type=click.IntRange(min=0),
-    default=1,
-    show_default=True,
-    help=(
-        "Number of LK / ECC Gauss-Newton outer sweeps for the photometric "
-        "sub-pixel keypoint refinement (always the per-sweep consensus variant). "
-        "`0` disables the sub-pixel pass (the localizer's keypoints are used as "
-        "is); `N >= 1` runs the refiner with `max_outer_sweeps = N`. Applied once "
-        "per round (see --rounds). See specs/core/patch/keypoint-subpixel-refinement.md."
+        "Run the photometric sub-pixel keypoint refinement (LK / ECC "
+        "Gauss-Newton against the point's reference render) once per round "
+        "(see --rounds). --no-subpixel uses the localizer's keypoints as they "
+        "are. See specs/core/patch/keypoint-subpixel-refinement.md."
     ),
 )
 @click.option(
@@ -145,11 +124,12 @@ from ._sfmr_path import check_sfmr_path
     default=80.0,
     show_default=True,
     help=(
-        "After round 1, drop each observation that views its surfel more than this "
-        "many degrees off the (refined) patch normal — a grazing view renders as a "
-        "cross-view-consistent but degenerate smear that biases the consensus and "
-        "pulls the normal toward grazing over subsequent rounds. `90` keeps all "
-        "views (disables the filter)."
+        "In every round, before the sub-pixel keypoint refinement, drop each "
+        "observation that views its surfel more than this many degrees off the "
+        "(refined) patch normal, the reference observation included — a grazing "
+        "view renders as a cross-view-consistent but degenerate smear that biases "
+        "the consensus and pulls the normal toward grazing over subsequent rounds. "
+        "`90` keeps all views (disables the filter)."
     ),
 )
 @click.option(
@@ -213,34 +193,16 @@ from ._sfmr_path import check_sfmr_path
 @click.option(
     "--localize-search-strategy",
     "localize_search_strategy",
-    type=click.Choice(["plus_descent", "exhaustive"]),
-    default="plus_descent",
+    type=click.Choice(["exhaustive", "plus_descent"]),
+    default="exhaustive",
     show_default=True,
     help=(
-        "How the keypoint localizer searches the grid of candidate shifts for "
-        "each view. 'plus_descent' moves to the best of the four axis "
-        "neighbors until none scores higher, so it can stop at a local best. "
-        "'exhaustive' scores every shift in the grid; it is slower and always "
-        "finds the best shift. See "
-        "specs/core/patch/keypoint-localization-search-cache.md."
-    ),
-)
-@click.option(
-    "--localize-basis-views",
-    "localize_basis_views",
-    type=click.IntRange(min=0),
-    default=8,
-    show_default=True,
-    help=(
-        "Cap the keypoint localizer's consensus basis at N views per point: N "
-        "congeal against each other (ranked by the select-views ZNCC, track views "
-        "seated first) and every remaining view registers once against the "
-        "finished basis template. Bounds the O(V^2) consensus terms on the "
-        "expanded view sets, whose tail reaches hundreds of views on a long "
-        "capture. Every observation is still localized and reported — only the "
-        "consensus membership shrinks. 0 congeals all views (the cleanest error "
-        "metrics; prefer it for ground-truth cleanup). See "
-        "specs/core/patch/keypoint-localization-consensus-basis.md."
+        "How the keypoint localizer searches each view's shift window for the "
+        "best match to the reference render. 'exhaustive' (default) scores "
+        "every shift in the window and takes the highest peak. 'plus_descent' "
+        "climbs from the starting keypoint to the nearest peak, scoring fewer "
+        "shifts, and stops at a side peak more often when the start is 2 px or "
+        "more off. See specs/core/patch/patch-keypoint-localization.md."
     ),
 )
 @click.option(
@@ -269,12 +231,10 @@ def embed_patches_command(
     min_relative_zncc,
     min_absolute_zncc,
     max_member_zncc_self_similarity_radius,
-    max_iters,
     search,
     max_shift_px,
     min_views,
     patch_size,
-    search_resolution_multiplier,
     subpixel,
     rounds,
     max_obliquity_deg,
@@ -283,14 +243,14 @@ def embed_patches_command(
     refine_max_views,
     max_zncc_self_similarity_radius,
     localize_search_strategy,
-    localize_basis_views,
     sampler,
 ):
     """Convert a sift_files reconstruction to embedded_patches.
 
     Builds a patch frame for each point (mean-viewing normal, refined
-    photometrically), expands and vets each point's view set, congeals the
-    per-view keypoints to sub-pixel, then writes a NEW embedded_patches .sfmr that
+    photometrically), expands and vets each point's view set, aligns the
+    per-view keypoints to each point's reference render and refines them to
+    sub-pixel, then writes a NEW embedded_patches .sfmr that
     loads and verifies with no .sift companion. The input is never modified.
 
     INPUT_PATH is a sift_files reconstruction (e.g. straight from `sfm solve`);
@@ -303,9 +263,11 @@ def embed_patches_command(
     generally differ from the input.
 
     An input that is already embedded_patches and stores reference
-    observations keeps them: each such point's bitmap is rendered from its own
-    reference observation at the final keypoints, where its track still holds
-    that image, and only a point with none takes the reference-view rule's pick.
+    observations keeps them: each such point's views are aligned to its own
+    reference observation and its bitmap is rendered from it at the final
+    keypoints. A point takes the reference-view rule's pick where it stores
+    none, where the obliquity cut or the localizer drops its reference, or
+    where its reference does not render at its keypoint.
 
     \b
     Examples:
@@ -315,7 +277,7 @@ def embed_patches_command(
     \b
         # Explicit output, tighter budgets.
         sfm embed-patches solve.sfmr out.sfmr \\
-            --max-iters 3 --search 4 --min-relative-zncc 0.75
+            --search 4 --min-relative-zncc 0.75
     """
     from .._embed_patches import embed_patches
     from .._sfmtool.patches import DEFAULT_ANISOTROPIC_THRESHOLD
@@ -324,6 +286,20 @@ def embed_patches_command(
     from ..xform._arg_parser import auto_output_path
 
     input_path = check_sfmr_path(input_path, "Input path")
+
+    # `--subpixel N` from before the flag became a switch: the count is read
+    # as the output path, or as an extra argument after it.
+    extra = list(click.get_current_context().args)
+    count = next(
+        (a for a in [output_path, *extra] if a is not None and a.isdigit()), None
+    )
+    if count is not None:
+        raise click.UsageError(
+            f"--subpixel no longer takes a count (got {count}); use "
+            "--subpixel or --no-subpixel, and --rounds for the number of rounds."
+        )
+    if extra:
+        raise click.UsageError(f"Got unexpected extra arguments ({' '.join(extra)})")
 
     if output_path is not None:
         output_path = check_sfmr_path(output_path, "Output path")
@@ -384,9 +360,7 @@ def embed_patches_command(
             patch_size=patch_size,
             max_shift_px=max_shift_px,
             min_views=min_views,
-            max_iters=max_iters,
             search=search,
-            search_resolution_multiplier=search_resolution_multiplier,
             subpixel=subpixel,
             rounds=rounds,
             max_obliquity_deg=max_obliquity_deg,
@@ -395,7 +369,6 @@ def embed_patches_command(
             max_refine_views=refine_max_views,
             max_zncc_self_similarity_radius=max_zncc_self_similarity_radius,
             localize_search_strategy=localize_search_strategy,
-            localize_basis_views=localize_basis_views,
             sampler=sampler,
             progress=click.echo,
         )
@@ -415,9 +388,7 @@ def embed_patches_command(
                 "rounds": rounds,
                 "subpixel": subpixel,
                 "min_views": min_views,
-                "max_iters": max_iters,
                 "search": search,
-                "search_resolution_multiplier": search_resolution_multiplier,
                 "max_shift_px": max_shift_px,
                 "min_relative_zncc": min_relative_zncc,
                 "min_absolute_zncc": min_absolute_zncc,
@@ -428,7 +399,6 @@ def embed_patches_command(
                 "fronto_prior_weight": fronto_prior_weight,
                 "refine_max_views": refine_max_views,
                 "localize_search_strategy": localize_search_strategy,
-                "localize_basis_views": localize_basis_views,
                 "sampler": sampler,
                 # The sampler rule's threshold the renders were made under,
                 # from which a reader works out each render's sampler from its

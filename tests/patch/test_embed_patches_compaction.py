@@ -259,6 +259,72 @@ def test_compact_writes_references_naming_observations_of_the_compacted_tracks(
             kept += 1
     assert kept > 0 and dropped
 
+    # The reference the views were aligned to wins over the stored one, so the
+    # keypoints, the bitmap and the reference agree: a localization naming
+    # another image of the track records that image, one naming None (a fused
+    # mean, or nothing aligned) records -1, and one that does not say keeps
+    # the stored reference.
+    relocs = _localizations_from_recon(new)
+    want: dict[int, int] = {}
+    for loc in relocs:
+        pid = int(loc["point_index"])
+        if pid not in old_image:
+            continue
+        others = [int(v) for v in np.asarray(loc["views"]) if v != old_image[pid]]
+        if pid % 3 == 0 and others:
+            loc["reference_image"] = others[0]
+            want[pid] = others[0]
+        elif pid % 3 == 1:
+            loc["reference_image"] = None
+            want[pid] = -1
+        else:
+            del loc["reference_image"]
+            want[pid] = int(old_image[pid])
+    third = compact_to_embedded_patches(
+        new, new.patches, relocs, list(new.image_file_hashes), min_views=2
+    )
+    refs3 = np.asarray(third.reference_observations)
+    counts3 = np.asarray(third.observation_counts)
+    offsets3 = np.concatenate([[0], np.cumsum(counts3)[:-1]]).astype(int)
+    timg3 = np.asarray(third.track_image_indexes)
+    got = {
+        p: (int(timg3[offsets3[p] + refs3[p]]) if refs3[p] >= 0 else -1) for p in want
+    }
+    assert got == want
+    assert any(w not in (-1, old_image[p]) for p, w in want.items())
+
+    # A writer that writes no bitmap (`--localize-keypoints`) keeps the stored
+    # reference wherever its image is still in the track, whatever the views
+    # were aligned to, and records the aligned one only where the stored
+    # image left the track.
+    moved: dict[int, int] = {}
+    for loc in relocs:
+        pid = int(loc["point_index"])
+        views = np.asarray(loc["views"])
+        others = [int(v) for v in views if v != old_image.get(pid, -1)]
+        if pid in want and pid % 3 == 0 and len(others) >= 2 and len(moved) < 5:
+            keep = views != old_image[pid]
+            loc["views"] = views[keep]
+            loc["keypoints"] = np.asarray(loc["keypoints"])[keep]
+            moved[pid] = int(loc["reference_image"])
+    assert moved
+    fourth = compact_to_embedded_patches(
+        new,
+        new.patches,
+        relocs,
+        list(new.image_file_hashes),
+        min_views=2,
+        keep_stored_references=True,
+    )
+    refs4 = np.asarray(fourth.reference_observations)
+    counts4 = np.asarray(fourth.observation_counts)
+    offsets4 = np.concatenate([[0], np.cumsum(counts4)[:-1]]).astype(int)
+    timg4 = np.asarray(fourth.track_image_indexes)
+    got4 = {
+        p: (int(timg4[offsets4[p] + refs4[p]]) if refs4[p] >= 0 else -1) for p in want
+    }
+    assert got4 == {p: moved.get(p, int(old_image[p])) for p in want}
+
 
 def _normal_frame_angles_deg(recon) -> np.ndarray:
     """Per finite patched point, the angle (degrees) between the stored
@@ -400,7 +466,7 @@ def test_compact_preserves_points_at_infinity(seoul_bull_workspace: Path):
             "views": np.asarray(inf_views, dtype=np.uint32),
             "keypoints": np.asarray(inf_kpts, dtype=np.float64),
             "offsets_px": np.zeros(len(inf_views)),
-            "loo_zncc": np.full(len(inf_views), np.nan),
+            "zncc": np.full(len(inf_views), np.nan),
         }
     ]
     for p in [q for q in (0, 1, 2) if q != pi][:2]:
@@ -415,7 +481,7 @@ def test_compact_preserves_points_at_infinity(seoul_bull_workspace: Path):
                 "views": views.astype(np.uint32),
                 "keypoints": kpts,
                 "offsets_px": np.zeros(len(views)),
-                "loo_zncc": np.full(len(views), np.nan),
+                "zncc": np.full(len(views), np.nan),
             }
         )
     hashes = [b"\x00" * 16] * recon.image_count
@@ -423,7 +489,7 @@ def test_compact_preserves_points_at_infinity(seoul_bull_workspace: Path):
     # The sub-pixel refiner renders the stored bitmaps + validity — the pipeline
     # source for both (points at infinity go through the same path).
     locs, bitmaps, valid = _refine_subpixel(
-        cloud, recon, images, locs, sweeps=1, resolution=12, render_bitmaps=True
+        cloud, recon, images, locs, refine=True, resolution=12, render_bitmaps=True
     )
     assert valid is not None and bool(valid[pi]), (
         "the well-observed infinity point must produce a stored bitmap"

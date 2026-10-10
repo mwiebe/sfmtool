@@ -12,7 +12,7 @@ use crate::geometry::RigidTransform;
 // (looking down world +z) viewing a textured plane at z = PLANE_Z. The parent
 // patch sits on that plane with its normal pointing back at the cameras; a
 // candidate at an in-plane offset therefore lies on the same textured plane and
-// must congeal onto it.
+// must be localized onto it.
 //
 // Every camera renders the SAME texture with no per-view offset, so a correctly
 // placed candidate is photometrically consistent across views and its true 3D
@@ -181,7 +181,7 @@ fn candidate_on_the_textured_plane_spawns() {
     let truth = expected_center(&cloud, 2.0, 0.0);
     // The requested centre is exact arithmetic on the parent's frame.
     assert!(distance(out.requested_centers[0], truth) < 1e-12);
-    // The congealed position lands on the plane, well inside a patch half-extent.
+    // The localized position is on the plane, well inside a patch half-extent.
     assert!(
         distance(out.positions[0], truth) < 0.25 * HALF_EXTENT,
         "spawned at {:?}, truth {truth:?}",
@@ -299,12 +299,12 @@ fn unreachable_reprojection_gate_reports_high_reproj() {
 
 #[test]
 fn discrete_only_still_spawns() {
-    // `subpixel_sweeps = 0` skips refinement entirely; the discrete keypoints go
+    // `refine_subpixel = false` skips refinement entirely; the discrete keypoints go
     // straight to triangulation and still clear the gates.
     let scene = scene();
     let cloud = parent_cloud();
     let discrete = SpawnParams {
-        subpixel_sweeps: 0,
+        refine_subpixel: false,
         ..params()
     };
     let out = spawn_candidate_tracks(

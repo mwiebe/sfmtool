@@ -265,7 +265,7 @@ class TestSpawnBehaviour:
         assert len(out["obs_view_indexes"]) == 4
 
     def test_discrete_only_still_spawns(self, scene):
-        out = _spawn(scene, [[2.0, 0.0]], subpixel_sweeps=0)
+        out = _spawn(scene, [[2.0, 0.0]], refine_subpixel=False)
         assert out["status"][0] == 0
         truth = _true_center(2.0, 0.0)
         assert np.linalg.norm(out["positions"][0] - truth) < 0.5 * HALF_EXTENT
@@ -421,7 +421,7 @@ class TestLocalizeStartingKeypoints:
     def test_seeds_recover_a_point_whose_cloud_position_is_displaced(self, scene):
         """The case the default seeding cannot reach: the cloud row's centre is
         wrong, but the caller's seeds point at the true image locations. Seeded,
-        localization stays on the evidence; unseeded, it congeals around the
+        localization stays on the evidence; unseeded, it is localized around the
         wrong projection instead."""
         truth = np.array([0.0, 0.0, PLANE_Z])
         displaced = truth + U_AXIS * (DISPLACE_GRID_PX * WPP)

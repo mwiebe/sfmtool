@@ -190,8 +190,12 @@ impl From<EditError> for CommitError {
 /// The record is the track's payload plus its `in` observations' keypoints: the
 /// coordinate it carries, the frame it stands on, the patch bitmap, the
 /// colour read from that bitmap's centre, the normal the frame states, and one
-/// observation per `in` observation with its keypoint and its leave-one-out
-/// ZNCC in `observation_confidence` where the column exists.
+/// observation per `in` observation with its keypoint and, in
+/// `observation_confidence` where the column exists, its plain score against
+/// the stored bitmap
+/// ([`TrackMeasurement::zncc`](super::track::TrackMeasurement::zncc)),
+/// clamped to `0 ..= 1` and scaled to a byte (`0` where the row has no score,
+/// `255` for the reference observation).
 ///
 /// **A bearing commits as a bearing.** The point's `w` is the frame's, so a
 /// track the classification put at infinity is written as the `w = 0` row it is:
@@ -303,13 +307,12 @@ pub fn commit(
             image_index: image,
             feature_index: None,
             keypoint_xy: edited.has_keypoints().then_some(keypoint),
+            // `0` is reserved for "unmeasured"; a measured score, however low,
+            // is stored in `1..=255`, by the function Add Image to Tracks uses.
             confidence: edited.has_observation_confidence().then(|| {
-                let zncc = measurement.loo_zncc.unwrap_or(0.0);
-                if zncc.is_nan() {
-                    0
-                } else {
-                    (zncc.clamp(0.0, 1.0) * f64::from(u8::MAX)).round() as u8
-                }
+                measurement
+                    .zncc
+                    .map_or(0, crate::reconstruction::data::observation_confidence_byte)
             }),
         });
     }

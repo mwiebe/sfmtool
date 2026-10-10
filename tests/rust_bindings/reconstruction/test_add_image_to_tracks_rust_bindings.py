@@ -103,6 +103,33 @@ def test_existing_observations_are_untouched(without_image, pyramids):
     assert int(np.sum(~new)) - int(np.sum(~old)) == report["accepted"]
 
 
+def test_candidates_report_the_template_and_the_reference(without_image, pyramids):
+    """Each candidate says what the image was aligned to and which of its
+    references is the reference observation, whose own score against a
+    template rendered from it is 1."""
+    recon, _ = without_image
+    _, report = EditedReconstruction(recon).add_image_to_tracks(IMAGE, pyramids)
+    cands = report["candidates"]
+    n = len(cands["point"])
+    assert len(cands["template"]) == n
+    assert cands["reference_observation"].shape == (n,)
+    assert cands["reference_observation"].dtype == np.int64
+    assert len(cands["reference_zncc"]) == n
+    kinds = {"stored_bitmap", "reference_observation", "fused_mean", None}
+    seen_reference = False
+    for k in range(n):
+        template = cands["template"][k]
+        assert template in kinds
+        refs, scores = cands["references"][k], cands["reference_zncc"][k]
+        assert len(scores) in (0, len(refs))
+        r = int(cands["reference_observation"][k])
+        assert -1 <= r < max(len(refs), 1)
+        if template == "reference_observation" and r >= 0 and scores:
+            assert scores[r] == 1.0
+            seen_reference = True
+    assert seen_reference
+
+
 def test_every_rule_and_gate_is_accepted(without_image, pyramids):
     edited = EditedReconstruction(without_image[0])
     for kwargs in [
@@ -132,6 +159,19 @@ def test_every_rule_and_gate_is_accepted(without_image, pyramids):
             "too_far",
             "shared_keypoint",
         }
+
+
+def test_the_default_pooled_bar_is_two_scaled_deviations(without_image, pyramids):
+    """The default pooled bar is the median minus two scaled MADs: the same
+    bar as ``basis_k=2`` and, where the references spread at all, higher than
+    ``basis_k=3``."""
+    edited = EditedReconstruction(without_image[0])
+    _, default = edited.add_image_to_tracks(IMAGE, pyramids)
+    _, two = edited.add_image_to_tracks(IMAGE, pyramids, basis_k=2.0)
+    _, three = edited.add_image_to_tracks(IMAGE, pyramids, basis_k=3.0)
+    assert default["pooled_bar"] is not None
+    assert default["pooled_bar"] == two["pooled_bar"]
+    assert default["pooled_bar"] >= three["pooled_bar"]
 
 
 def test_the_self_similarity_gate_refuses_what_is_over_its_bar(without_image, pyramids):

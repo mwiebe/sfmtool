@@ -6,8 +6,13 @@
 Like ``RefineNormalsTransform``, ``RefineKeypointsTransform`` is a *modifier*:
 it removes no points, drops no views, and moves no 3D geometry — it only
 rewrites the per-observation ``keypoints_xy`` values to the sub-pixel locations
-that maximize cross-view photometric consensus (forward-additive ECC
-Gauss–Newton against a frozen robust consensus; never worse than the seed).
+that best match the point's reference render (forward-additive ECC
+Gauss–Newton, one pass; never worse than the seed). The reference observation
+is the one the point stores, or the reference-view rule's pick where it stores
+none, and its keypoint is not moved; a point that stored none records the pick.
+With ``bitmaps`` each refined point records the reference its views were
+aligned to, so a stored one that does not render at its keypoint gives way to
+``-1`` and the fused mean; without, a point keeps the reference it stores.
 The track structure (``track_image_indexes`` / ``track_point_indexes`` /
 ``observation_counts``) is untouched. Because the refinement is photometric it
 reads the workspace's source images (``workspace_dir / image_name``), the same
@@ -28,12 +33,12 @@ import numpy as np
 from .._sfmtool.reconstruction import SfmrReconstruction
 from ._images import load_workspace_images
 from .._patch_compaction import (
+    reference_images_by_point,
     reference_observations_from_images,
     render_from_references,
+    stored_reference_images,
 )
 from ._patch_params import validate_patch_params
-
-_CONSENSUS_REFRESH = ("per_sweep", "per_move")
 
 
 class RefineKeypointsTransform:
@@ -68,35 +73,21 @@ class RefineKeypointsTransform:
         window_sigma: float = 0.6,
         sampler: str = "per_view",
         robust_iters: int = 3,
-        max_outer_sweeps: int = 1,
-        outer_convergence_px: float = 0.005,
         max_gn_steps: int = 10,
         convergence_px: float = 0.01,
         max_offset_px: float = 2.0,
-        consensus_refresh: str = "per_sweep",
     ):
         if resolution < 2:
             raise ValueError(f"resolution must be >= 2, got {resolution}")
         validate_patch_params(window=window, window_sigma=window_sigma, sampler=sampler)
         if robust_iters < 1:
             raise ValueError(f"robust_iters must be >= 1, got {robust_iters}")
-        if max_outer_sweeps < 1:
-            raise ValueError(f"max_outer_sweeps must be >= 1, got {max_outer_sweeps}")
-        if outer_convergence_px <= 0:
-            raise ValueError(
-                f"outer_convergence_px must be positive, got {outer_convergence_px}"
-            )
         if max_gn_steps < 1:
             raise ValueError(f"max_gn_steps must be >= 1, got {max_gn_steps}")
         if convergence_px <= 0:
             raise ValueError(f"convergence_px must be positive, got {convergence_px}")
         if max_offset_px <= 0:
             raise ValueError(f"max_offset_px must be positive, got {max_offset_px}")
-        if consensus_refresh not in _CONSENSUS_REFRESH:
-            raise ValueError(
-                f"consensus_refresh must be one of {_CONSENSUS_REFRESH}, "
-                f"got {consensus_refresh!r}"
-            )
         if not isinstance(bitmaps, bool):
             raise ValueError(f"bitmaps must be a bool, got {bitmaps!r}")
 
@@ -106,12 +97,9 @@ class RefineKeypointsTransform:
         self.window_sigma = window_sigma
         self.sampler = sampler
         self.robust_iters = robust_iters
-        self.max_outer_sweeps = max_outer_sweeps
-        self.outer_convergence_px = outer_convergence_px
         self.max_gn_steps = max_gn_steps
         self.convergence_px = convergence_px
         self.max_offset_px = max_offset_px
-        self.consensus_refresh = consensus_refresh
 
     def apply(self, recon: SfmrReconstruction) -> SfmrReconstruction:
         images = load_workspace_images(recon)
@@ -120,7 +108,8 @@ class RefineKeypointsTransform:
         # the patch frame is already stored — read it back as the cloud rather than
         # rebuilding it. With view_sets=None and starting_keypoints=None the binding
         # seeds every view from the recon's stored inline keypoint and refines each
-        # point's full track — "refine the keypoints already here, in place".
+        # point's full track — "refine the keypoints already here, in place" —
+        # against its stored reference observation where it has one.
         cloud = recon.patches
         if cloud is None:
             raise ValueError(
@@ -141,13 +130,11 @@ class RefineKeypointsTransform:
             window_sigma=self.window_sigma,
             sampler=self.sampler,
             robust_iters=self.robust_iters,
-            max_outer_sweeps=self.max_outer_sweeps,
-            outer_convergence_px=self.outer_convergence_px,
             max_gn_steps=self.max_gn_steps,
             convergence_px=self.convergence_px,
             max_offset_px=self.max_offset_px,
-            consensus_refresh=self.consensus_refresh,
             render_bitmaps=self.bitmaps,
+            reference_images=reference_images_by_point(recon),
         )
 
         # The refiner changes no view membership, so write back by copying the
@@ -206,41 +193,62 @@ class RefineKeypointsTransform:
 
         self._print_summary(result)
 
+        # The reference observation each point's views were aligned to: its
+        # stored one where that is in the track and renders, else the
+        # reference-view rule's pick, or none (-1) where they were aligned to
+        # a fused mean or to nothing. Each refined point records that one, so
+        # its keypoints, bitmap and reference agree; a point the refiner did
+        # not return keeps what it stores. A stored reference the refiner
+        # used keeps its own observation, even in an image the point is
+        # observed twice in.
+        reference_images = np.full(recon.point_count, -1, dtype=np.int64)
+        refined = np.zeros(recon.point_count, dtype=bool)
+        for d in result:
+            pid = int(d["point_index"])
+            refined[pid] = True
+            if d.get("reference_image") is not None:
+                reference_images[pid] = int(d["reference_image"])
+        aligned = reference_observations_from_images(recon, reference_images)
+        stored = recon.reference_observations
+        if stored is None:
+            references = aligned
+        else:
+            stored = np.asarray(stored, dtype=np.int32)
+            same = ~refined | (reference_images == stored_reference_images(recon))
+            references = np.where(same, stored, aligned).astype(np.int32)
+
         # With `bitmaps`, also persist the per-point stored bitmaps rendered at
-        # the final refined keypoints, each the tile of the view the
-        # reference-view rule picked, and which observation that is. The stored
-        # frame is unchanged (keypoints moved, not the surfel), so re-persisting
-        # it keeps the recon consistent and lets the bitmaps attach to it.
+        # the final refined keypoints, each the tile of the reference
+        # observation its views were aligned to. The stored frame is unchanged
+        # (keypoints moved, not the surfel), so re-persisting it keeps the
+        # recon consistent and lets the bitmaps attach to it.
         if self.bitmaps:
             npoints = recon.point_count
             bitmaps = np.zeros(
                 (npoints, self.resolution, self.resolution, 4), dtype=np.uint8
             )
-            reference_images = np.full(npoints, -1, dtype=np.int64)
             n_filled = 0
             for d in result:
                 bmp = d.get("bitmap")
                 if bmp is not None:
                     pid = int(d["point_index"])
                     bitmaps[pid] = np.asarray(bmp, dtype=np.uint8)
-                    if d.get("reference_image") is not None:
-                        reference_images[pid] = int(d["reference_image"])
                     n_filled += 1
             print(
                 f"  Saving {len(result)} patches and {n_filled} bitmaps "
                 f"to the reconstruction"
             )
-            # A point that already names a reference observation keeps it,
-            # and only a point at -1 takes the refiner's pick. Every bitmap
-            # with a reference is rendered again from the stored (f32)
-            # keypoints, so dropping and adding the bitmaps later gives the
-            # same bytes.
-            moved = recon.clone_with_changes(keypoints_xy=kxy, patches=cloud)
+            # Every bitmap with a reference is rendered again from the stored
+            # (f32) keypoints, so dropping and adding the bitmaps later gives
+            # the same bytes; a point at -1 keeps the refiner's fused mean.
+            moved = recon.clone_with_changes(
+                keypoints_xy=kxy, patches=cloud, reference_observations=references
+            )
             bitmaps, references = render_from_references(
                 moved,
                 images,
                 bitmaps,
-                reference_observations_from_images(recon, reference_images),
+                references,
                 resolution=self.resolution,
                 sampler=self.sampler,
             )
@@ -248,20 +256,31 @@ class RefineKeypointsTransform:
                 patch_bitmaps=bitmaps, reference_observations=references
             )
         # Stored bitmaps were rendered at the old keypoints, so they go, as
-        # ``--refine-normals bitmaps=false`` drops them; the references stay.
-        return recon.clone_with_changes(keypoints_xy=kxy, patch_bitmaps=None)
+        # ``--refine-normals bitmaps=false`` drops them. With no bitmap written
+        # there is nothing for the reference to agree with, so a point that
+        # stores a reference keeps it, even one nothing was aligned to, and a
+        # point at -1 takes the one its views were aligned to.
+        stored = recon.reference_observations
+        if stored is not None:
+            stored = np.asarray(stored, dtype=np.int32)
+            references = np.where(stored >= 0, stored, aligned).astype(np.int32)
+        else:
+            references = aligned
+        return recon.clone_with_changes(
+            keypoints_xy=kxy, patch_bitmaps=None, reference_observations=references
+        )
 
     def _print_summary(self, result: list[dict]) -> None:
         """One-line ``xform``-style summary over the views actually scored.
 
-        A point with fewer than two views has no consensus, so its views carry
-        NaN scores (their keypoints kept the seed); the statistics are over the
-        finitely-scored views. ``offsets_px`` is in patch-grid px — a relative
-        signal of how far the refiner moved each keypoint.
+        A view that could not be scored carries a NaN score (its keypoint kept
+        the seed); the statistics are over the finitely-scored views, the
+        reference observation's included. ``offsets_px`` is in patch-grid px, a
+        relative signal of how far the refiner moved each keypoint.
         """
         offsets: list[np.ndarray] = []
         for d in result:
-            scores = np.asarray(d["scores"], dtype=np.float64)
+            scores = np.asarray(d["zncc"], dtype=np.float64)
             off = np.asarray(d["offsets_px"], dtype=np.float64)
             scored = np.isfinite(scores)
             offsets.append(off[scored])
@@ -270,7 +289,7 @@ class RefineKeypointsTransform:
         )
         n = int(all_offsets.size)
         if n == 0:
-            print("  Refined 0 keypoints (no points had a cross-view consensus)")
+            print("  Refined 0 keypoints (no view could be scored)")
             return
         mean_offset = float(np.abs(all_offsets).mean())
         print(
@@ -281,7 +300,4 @@ class RefineKeypointsTransform:
         # This string is also reused as the operation name in the precondition
         # error. `bitmaps` gates whether the RGBA textures are rendered.
         bitmaps = ", bitmaps" if self.bitmaps else ""
-        return (
-            f"Refine keypoints (sweeps={self.max_outer_sweeps}, "
-            f"sampler={self.sampler}{bitmaps})"
-        )
+        return f"Refine keypoints (sampler={self.sampler}{bitmaps})"

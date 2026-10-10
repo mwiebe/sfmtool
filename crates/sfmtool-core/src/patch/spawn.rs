@@ -1,13 +1,13 @@
 // Copyright The SfM Tool Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Candidate track spawning: congeal a new track at an in-plane offset from an
+//! Candidate track spawning: localize a new track at an in-plane offset from an
 //! existing patched point.
 //!
 //! A **candidate** is a synthetic patch placed at `X_p + du·hu_p + dv·hv_p` —
 //! the parent's frame translated along its own half-extent vectors, so a request
 //! speaks the patch's own scale and stays in its plane. The candidate is then put
-//! through exactly the machinery a real track is congealed with: discrete
+//! through exactly the machinery a real track is localized with: discrete
 //! cross-view [localization](super::keypoint_localize), [sub-pixel
 //! refinement](super::keypoint_subpixel), triangulation of the refined keypoints'
 //! rays, and the same acceptance gates. What comes back is a vetted
@@ -50,10 +50,11 @@ pub struct SpawnParams {
     /// default: a candidate is a hypothesis, and the offset that produced it is
     /// exactly the displacement the search has to be free to walk back.
     pub max_shift_px: f64,
-    /// Sub-pixel refinement outer sweeps
-    /// ([`KeypointSubpixelParams::max_outer_sweeps`]). `0` skips refinement, so
-    /// the discrete keypoints go straight to triangulation.
-    pub subpixel_sweeps: u32,
+    /// Run the sub-pixel refinement ([`refine_patch_cloud_keypoints`]) on the
+    /// localized keypoints, against the reference the localizer aligned them
+    /// to. `false` skips it, so the discrete keypoints go straight to
+    /// triangulation.
+    pub refine_subpixel: bool,
     /// Surviving-view floor: a candidate with fewer surviving views is
     /// [`SpawnStatus::TooFewViews`].
     pub min_views: u32,
@@ -68,7 +69,7 @@ impl Default for SpawnParams {
             resolution: 24,
             search: 6.0,
             max_shift_px: 8.0,
-            subpixel_sweeps: 1,
+            refine_subpixel: true,
             min_views: 3,
             max_reproj_rms_px: 2.0,
         }
@@ -102,7 +103,7 @@ pub struct SpawnedTracks {
     /// not [`SpawnStatus::Spawned`].
     pub positions: Vec<[f64; 3]>,
     /// Per candidate, the requested centre `X_c` — always filled, so a caller can
-    /// measure how far the congealed position moved from what it asked for.
+    /// measure how far the localized position moved from what it asked for.
     pub requested_centers: Vec<[f64; 3]>,
     /// Per candidate, the RMS reprojection error of [`positions`](Self::positions)
     /// against the refined keypoints. `NaN` for a candidate that died before the
@@ -215,9 +216,6 @@ pub fn spawn_candidate_tracks(
         resolution: params.resolution,
         search: params.search,
         max_shift_px: params.max_shift_px,
-        // A candidate carries its parent's view set, which is small; every view
-        // congeals against every other (the uncapped consensus).
-        basis_max_views: 0,
         ..KeypointLocalizeParams::default()
     };
     let localized = localize_patch_cloud_keypoints(
@@ -245,7 +243,7 @@ pub fn spawn_candidate_tracks(
         .zip(&alive)
         .map(|(l, &ok)| if ok { l.views.clone() } else { Vec::new() })
         .collect();
-    let observations: Vec<(Vec<u32>, Vec<[f64; 2]>)> = if params.subpixel_sweeps > 0 {
+    let observations: Vec<(Vec<u32>, Vec<[f64; 2]>)> = if params.refine_subpixel {
         let seeds: Vec<Vec<Option<[f64; 2]>>> = localized
             .iter()
             .zip(&alive)
@@ -257,9 +255,17 @@ pub fn spawn_candidate_tracks(
                 }
             })
             .collect();
+        // The reference the localizer aligned each candidate's views to, so the
+        // refinement aligns them to the same render.
+        let references: Vec<Option<usize>> = localized
+            .iter()
+            .map(|l| {
+                l.reference
+                    .and_then(|r| l.views.iter().position(|&v| v == r))
+            })
+            .collect();
         let refine_params = KeypointSubpixelParams {
             resolution: params.resolution,
-            max_outer_sweeps: params.subpixel_sweeps,
             ..KeypointSubpixelParams::default()
         };
         refine_patch_cloud_keypoints(
@@ -267,6 +273,7 @@ pub fn spawn_candidate_tracks(
             views,
             &refine_sets,
             Some(&seeds),
+            Some(&references),
             &refine_params,
             &Progress::none(),
         )

@@ -6,7 +6,9 @@
 is, or is to be, rendered from. A refinement that moves keypoints or frames
 keeps it, and renders each point that has one from the ``f32`` values the
 file stores, so dropping and adding the bitmaps gives the same bytes. A
-filter that removes the reference observation itself writes ``-1``.
+writer that aligns keypoints and renders bitmaps replaces a stored reference
+it cannot use; one that writes no bitmap keeps it. A filter that removes the
+reference observation itself writes ``-1``.
 """
 
 from pathlib import Path
@@ -64,6 +66,24 @@ def _other_references(recon: SfmrReconstruction) -> np.ndarray:
     return stored
 
 
+def _leaves_the_photograph(recon: SfmrReconstruction, stored: np.ndarray) -> np.ndarray:
+    """Per point, whether its stored reference's tile at its keypoint has a
+    sample off the photograph (alpha 0). Only such a reference can fail to
+    render its core, which is when a writer that aligns keypoints and renders
+    bitmaps replaces it, so a test holds the writers to keeping every other
+    one. Which observations sit at the frame's edge depends on the fixture's
+    SIFT tracks, and those differ between platforms."""
+    picked = recon.clone_with_changes(reference_observations=stored)
+    bitmaps, _ = picked.patches.render_bitmaps(
+        picked,
+        load_workspace_images(picked),
+        resolution=RESOLUTION,
+        referenced_only=True,
+    )
+    off = (np.asarray(bitmaps)[..., 3] == 0).any(axis=(1, 2))
+    return off & (np.asarray(stored) >= 0)
+
+
 def _reference_images(recon: SfmrReconstruction, refs=None) -> np.ndarray:
     """The image each point's reference observation is in, -1 for none."""
     refs = np.asarray(recon.reference_observations if refs is None else refs).astype(
@@ -87,14 +107,19 @@ def _assert_references_follow_their_images(
     out: SfmrReconstruction,
     *,
     picks: bool,
+    unusable: np.ndarray | None = None,
 ) -> tuple[int, int]:
     """Each output point, found by its position among ``recon``'s (the
     compaction does not move it), names the image its stored reference was
     in where its new track still holds that image. Where it does not, the
     point names no reference, or with ``picks`` (a pass that renders bitmaps)
-    may name the observation its new bitmap is the tile of. Returns how many
+    may name the observation its new bitmap is the tile of. A point flagged in
+    ``unusable`` (a stored reference that may not render, see
+    :func:`_leaves_the_photograph`) is not checked. Returns how many
     references were kept and how many images were dropped."""
     want = _reference_images(recon, stored)
+    if unusable is not None:
+        want = np.where(unusable, -1, want)
     got = _reference_images(out)
     src = np.asarray(recon.positions)
     kept = lost = 0
@@ -139,17 +164,27 @@ def test_refine_keypoints_keeps_stored_references(embedded):
     recon = embedded.clone_with_changes(reference_observations=stored)
     out = RefineKeypointsTransform(resolution=RESOLUTION, max_gn_steps=2).apply(recon)
     refs = np.asarray(out.reference_observations)
-    np.testing.assert_array_equal(refs[stored >= 0], stored[stored >= 0])
+    # A stored reference whose core does not render is replaced; every one
+    # whose tile stays on the photograph renders, and is kept.
+    usable = (stored >= 0) & ~_leaves_the_photograph(recon, stored)
+    assert usable.sum() > (stored >= 0).sum() * 0.9
+    np.testing.assert_array_equal(refs[usable], stored[usable])
     assert (refs[stored < 0] >= 0).any(), "a point at -1 takes the refiner's pick"
     _assert_drop_then_add_reproduces(out)
 
-    # Without bitmaps the old ones, rendered at the old keypoints, go; the
-    # references stay for a later render.
+    # Without bitmaps the old ones, rendered at the old keypoints, go. The
+    # stored references stay, and a point at -1 takes the reference its views
+    # were aligned to, as with bitmaps, so a later render uses the reference
+    # the keypoints were refined against.
     bare = RefineKeypointsTransform(
         resolution=RESOLUTION, max_gn_steps=2, bitmaps=False
     ).apply(recon)
     assert bare.patch_bitmaps is None
-    np.testing.assert_array_equal(np.asarray(bare.reference_observations), stored)
+    bare_refs = np.asarray(bare.reference_observations)
+    np.testing.assert_array_equal(bare_refs[stored >= 0], stored[stored >= 0])
+    assert (bare_refs[stored < 0] >= 0).any(), "a point at -1 takes the refiner's pick"
+    np.testing.assert_array_equal(bare_refs[usable], refs[usable])
+    np.testing.assert_array_equal(bare_refs[stored < 0], refs[stored < 0])
 
 
 def test_refine_normals_keeps_stored_references(embedded):
@@ -176,22 +211,162 @@ def test_embed_patches_on_an_embedded_input_keeps_stored_references(embedded, ro
     out = embed_patches(
         recon, load_workspace_images(recon), resolution=RESOLUTION, rounds=rounds
     )
-    _assert_references_follow_their_images(recon, stored, out, picks=True)
+    unusable = _leaves_the_photograph(recon, stored)
+    assert unusable.sum() < (stored >= 0).sum() * 0.1
+    _assert_references_follow_their_images(
+        recon, stored, out, picks=True, unusable=unusable
+    )
     _assert_drop_then_add_reproduces(out)
 
 
+def _spy_final_references(monkeypatch, *, forget_every: int = 0) -> dict:
+    """Record, by point position, the image of the reference each sub-pixel
+    pass of ``embed_patches`` reports its views were aligned to (``-1`` for
+    none), keeping the last pass's. With ``forget_every``, every so many points
+    reach the pass with no reference named, as where the localizer could not
+    render a stored reference and aligned nothing."""
+    import sfmtool._embed_patches as ep
+
+    real = ep._refine_subpixel
+    reported: dict = {}
+
+    def spy(cloud, recon, images, localizations, **kwargs):
+        if forget_every:
+            localizations = [
+                dict(loc, reference_image=None)
+                if int(loc["point_index"]) % forget_every == 0
+                else loc
+                for loc in localizations
+            ]
+        out = real(cloud, recon, images, localizations, **kwargs)
+        positions = [tuple(p) for p in np.asarray(recon.positions)]
+        # Points are matched by position, so a position two points share (two
+        # tracks triangulated to one place) is left out.
+        shared = {p for p in positions if positions.count(p) > 1}
+        reported.clear()
+        for loc in out[0]:
+            position = positions[int(loc["point_index"])]
+            if position not in shared:
+                image = loc.get("reference_image")
+                reported[position] = -1 if image is None else int(image)
+        return out
+
+    monkeypatch.setattr(ep, "_refine_subpixel", spy)
+    return reported
+
+
+def _assert_output_records_the_reported_references(out, reported) -> int:
+    """Every output point records the reference its views were aligned to.
+    Returns how many points were checked."""
+    got = _reference_images(out)
+    checked = 0
+    for k, position in enumerate(np.asarray(out.positions)):
+        want = reported.get(tuple(position))
+        if want is None:
+            continue
+        assert got[k] == want, (k, got[k], want)
+        checked += 1
+    assert checked > out.point_count // 2, (checked, out.point_count)
+    return checked
+
+
+def test_embed_patches_records_the_reference_the_views_were_aligned_to(
+    embedded, monkeypatch
+):
+    """Where the localizer reports no reference for a point (its stored
+    reference did not render at its keypoint, so it aligned nothing), the
+    sub-pixel pass aligns the views to the reference-view rule's pick. The
+    output records that pick, whose tile the bitmap is, not the stored
+    reference the views were never aligned to, and dropping and adding the
+    bitmaps gives the same bytes."""
+    stored = _other_references(embedded)
+    recon = embedded.clone_with_changes(reference_observations=stored)
+    reported = _spy_final_references(monkeypatch, forget_every=3)
+    out = embed_patches(
+        recon, load_workspace_images(recon), resolution=RESOLUTION, rounds=1
+    )
+    _assert_output_records_the_reported_references(out, reported)
+    # Some of those points record another image than the stored one.
+    want = _reference_images(recon, stored)
+    positions = {tuple(p): i for i, p in enumerate(np.asarray(recon.positions))}
+    got = _reference_images(out)
+    moved = sum(
+        1
+        for k, p in enumerate(np.asarray(out.positions))
+        if positions[tuple(p)] % 3 == 0
+        and want[positions[tuple(p)]] in _point_images(out, k)
+        and got[k] != want[positions[tuple(p)]]
+    )
+    assert moved > 0
+    _assert_drop_then_add_reproduces(out)
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+def test_embed_patches_records_a_new_reference_where_the_obliquity_cut_drops_it(
+    embedded, monkeypatch, rounds
+):
+    """The obliquity cut runs before each round's sub-pixel pass and drops a
+    reference like any other view, so the pass's reference-view rule picks
+    again from the views left and the output records that pick. No bitmap is
+    left as a removed observation's render under ``-1``, and dropping and
+    adding the bitmaps gives the same bytes."""
+    reported = _spy_final_references(monkeypatch)
+    out = embed_patches(
+        embedded,
+        load_workspace_images(embedded),
+        resolution=RESOLUTION,
+        rounds=rounds,
+        max_obliquity_deg=30.0,
+    )
+    assert out.observation_count < embedded.observation_count
+    _assert_output_records_the_reported_references(out, reported)
+    _assert_drop_then_add_reproduces(out)
+
+
+def test_embed_patches_rounds_keep_the_references_without_bitmaps(
+    embedded, monkeypatch
+):
+    """With the self-similarity cull off, round 1's sub-pixel pass renders no
+    bitmaps. The references its views were aligned to are still recorded in
+    the intermediate compaction, so round 2 refines against the same ones."""
+    import sfmtool._embed_patches as ep
+
+    compacted: list[SfmrReconstruction] = []
+    real = ep.compact_to_embedded_patches
+
+    def spy(*args, **kwargs):
+        out = real(*args, **kwargs)
+        compacted.append(out)
+        return out
+
+    monkeypatch.setattr(ep, "compact_to_embedded_patches", spy)
+    embed_patches(
+        embedded,
+        load_workspace_images(embedded),
+        resolution=RESOLUTION,
+        rounds=2,
+        max_zncc_self_similarity_radius=0,
+    )
+    # The first compaction is round 2's input; the last is the final result.
+    assert len(compacted) >= 2
+    intermediate = np.asarray(compacted[0].reference_observations)
+    assert (intermediate >= 0).mean() > 0.9, (intermediate >= 0).mean()
+
+
 def test_localize_keypoints_remaps_stored_references(embedded):
-    """The localizer rebuilds the tracks and drops the bitmaps; each point keeps
-    its reference where its track still holds that image, and -1 where the
-    localizer dropped it."""
+    """The localizer rebuilds the tracks and drops the bitmaps. It aligns each
+    point's views to its stored reference observation, which it keeps, so each
+    point keeps its reference where its track still holds that image; a point
+    that stored none, or whose reference the grazing pre-filter turned away,
+    records the reference-view rule's pick its views were aligned to."""
     stored = _other_references(embedded)
     recon = embedded.clone_with_changes(reference_observations=stored)
     out = LocalizeKeypointsTransform().apply(recon)
     assert out.patch_bitmaps is None
-    _, lost = _assert_references_follow_their_images(recon, stored, out, picks=False)
-    # The localizer drops some reference images on this fixture, so the -1
-    # branch is exercised.
-    assert lost > 0
+    kept, lost = _assert_references_follow_their_images(recon, stored, out, picks=True)
+    assert lost <= kept // 10, (kept, lost)
+    # The points that stored none now name the reference they were aligned to.
+    assert (np.asarray(out.reference_observations) >= 0).mean() > 0.9
 
 
 def test_bundle_adjust_keeps_stored_references(embedded):
@@ -250,3 +425,64 @@ def test_a_filter_that_removes_the_reference_observation_writes_minus_one(embedd
     image_map = {int(old): new for new, old in enumerate(keep)}
     for p in np.flatnonzero((refs >= 0) & ~lost):
         assert sub_images[sub_offsets[p] + sub_refs[p]] == image_map[ref_image[p]]
+
+
+def _unrenderable_references(recon: SfmrReconstruction) -> tuple:
+    """``recon`` with the reference observation of every third point that
+    stores one moved to the image's corner, where its core does not render, so
+    nothing can be aligned to it. Returns the new reconstruction and the
+    points moved."""
+    refs = np.asarray(recon.reference_observations).astype(np.int64)
+    counts = np.asarray(recon.observation_counts).astype(np.int64)
+    offsets = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    kxy = np.asarray(recon.keypoints_xy, dtype=np.float32).copy()
+    points = [p for p in np.flatnonzero((refs >= 0) & (counts >= 3)) if p % 3 == 0]
+    assert points
+    for p in points:
+        kxy[offsets[p] + refs[p]] = (0.5, 0.5)
+    return recon.clone_with_changes(keypoints_xy=kxy), points
+
+
+def test_writers_without_bitmaps_keep_a_reference_nothing_was_aligned_to(embedded):
+    """A stored reference whose core does not render at its keypoint aligns
+    nothing. A writer that writes no bitmap keeps it all the same:
+    ``--refine-keypoints bitmaps=false`` keeps every stored reference, and
+    ``--localize-keypoints`` keeps it wherever its image is still in the
+    rebuilt track. ``--refine-keypoints`` with bitmaps replaces it by the
+    reference its views were aligned to, or ``-1`` with the fused mean."""
+    recon, points = _unrenderable_references(embedded)
+    stored = np.asarray(recon.reference_observations)
+
+    bare = RefineKeypointsTransform(
+        resolution=RESOLUTION, max_gn_steps=2, bitmaps=False
+    ).apply(recon)
+    np.testing.assert_array_equal(
+        np.asarray(bare.reference_observations)[stored >= 0], stored[stored >= 0]
+    )
+
+    rendered = RefineKeypointsTransform(resolution=RESOLUTION, max_gn_steps=2).apply(
+        recon
+    )
+    refs = np.asarray(rendered.reference_observations)
+    assert all(refs[p] != stored[p] for p in points), "an unusable one is replaced"
+    # Elsewhere the stored references stay.
+    others = (stored >= 0) & ~np.isin(np.arange(len(stored)), points)
+    assert (refs[others] == stored[others]).mean() > 0.9
+
+    # A wide shift bar, so the moved reference, which no search places, is
+    # not dropped for its distance from the projection and stays in the track.
+    out = LocalizeKeypointsTransform(max_shift_px=1e6).apply(recon)
+    want = _reference_images(recon, stored)
+    got = _reference_images(out)
+    src = np.asarray(recon.positions)
+    kept = 0
+    for k, position in enumerate(np.asarray(out.positions)):
+        distances = np.linalg.norm(src - position, axis=1)
+        nearest, second = np.partition(distances, 1)[:2]
+        s = int(np.argmin(distances))
+        if second <= nearest or s not in points:
+            continue
+        if want[s] in _point_images(out, k):
+            assert got[k] == want[s], k
+            kept += 1
+    assert kept > 0

@@ -154,9 +154,11 @@ Against the first default rule at the resected pose:
   truth is a minimal file with no bitmaps): recall 86.9% against 88.0% rendered,
   10 rejoined keypoints over 2 px against 13, 1247 extra tracks against 1356.
   Slightly lower ZNCC throughout, as a bitmap quantised to bytes and fused with
-  its own weights is a different reference. The rendered consensus stays the
-  default; the references have to be rendered for their leave-one-out ZNCCs in
-  any case, so the bitmap saves no rendering.
+  its own weights is a different reference. The rendered consensus stayed the
+  default then (before 2026-10-09); the references had to be rendered for their
+  leave-one-out ZNCCs in any case, so the bitmap saved no rendering. The
+  template is now the stored bitmap where the point has one (§ "The bars once
+  the new view is aligned to the reference render").
 
 ## Readings
 
@@ -243,3 +245,63 @@ default. The ascent recovers a few `peak_at_edge` sightings on kerry_park and
 none on seoul_bull, and adds a bad extra observation, so it stays an option,
 off. The `too_far` class is left alone: loosening the positional bound (a 2 px
 floor, above) recovers some of it and lets in as many far keypoints.
+
+## The bars once the new view is aligned to the reference render
+
+Recorded 2026-10-09, after the sub-pixel step became a 2-D quadratic fit over
+the 3×3 neighbourhood of the correlation peak (it was a parabola per axis).
+The operation aligns the new view to the bitmap the point would store, its
+reference observation's render, and the references are scored against that
+render rather than leave-one-out against the consensus of the others; the
+bars read those scores with the reference observation's own left out. The
+default rule is the pooled bar (median − 2 scaled MADs) or the track's own bar
+(0.9 × median), the pair rule at 0.9, the floor at 0.5, and the image-MAD
+positional gate. The pooled bar was median − 3 scaled MADs until this date. An
+earlier measurement of the aligned operation, with the per-axis sub-pixel
+step, showed k = 2 reducing kerry_park's bad extra observations from 5 to 2
+and its worse tracks from 25 to 14 for 2 points of recall on each capture,
+and the maintainer chose k = 2 after it.
+
+Resected pose, default measurement. The first row is the k = 3 rule on the
+build before the alignment change (leave-one-out bars, per-axis sub-pixel
+step), as measured then. The README's earlier tables predate the
+self-similarity gate, which refuses 112 seoul_bull observations either way.
+
+| rule | seoul recall | err med / p90 px | >2 px | extra | x bad | x worse | kerry recall | err med / p90 px | >2 px | extra | x bad | x worse |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| default, before the change | 82.8% | 0.061 / 0.215 | 16 | 115 | 0 | 1 | 79.2% | 0.060 / 0.346 | 13 | 1107 | 0 | 8 |
+| **default (pooled bar k = 2)** | **79.8%** | **0.099 / 0.341** | **13** | **106** | **0** | **0** | **77.8%** | **0.089 / 0.464** | **25** | **1143** | **1** | **13** |
+| pooled bar k = 3 (the default before 2026-10-09) | 81.5% | 0.101 / 0.364 | 13 | 139 | 0 | 1 | 79.7% | 0.092 / 0.472 | 28 | 1327 | 6 | 28 |
+| pooled bar k = 4 | 81.9% | 0.101 / 0.371 | 15 | 152 | 0 | 2 | 80.9% | 0.094 / 0.474 | 28 | 1519 | 9 | 42 |
+| track bar 0.85 × median | 80.2% | 0.099 / 0.345 | 13 | 107 | 0 | 0 | 78.7% | 0.090 / 0.469 | 25 | 1202 | 3 | 15 |
+| track bar 0.95 × median | 79.6% | 0.098 / 0.341 | 13 | 105 | 0 | 0 | 76.7% | 0.089 / 0.461 | 26 | 1121 | 1 | 12 |
+| pair rule 0.8 | 79.9% | 0.099 / 0.341 | 13 | 106 | 0 | 0 | 78.3% | 0.090 / 0.471 | 26 | 1167 | 2 | 16 |
+| pair rule 1.0 | 79.8% | 0.099 / 0.341 | 13 | 106 | 0 | 0 | 77.6% | 0.089 / 0.465 | 25 | 1130 | 1 | 13 |
+| floor 0.4 | 79.8% | 0.099 / 0.341 | 13 | 106 | 0 | 0 | 77.8% | 0.089 / 0.463 | 25 | 1144 | 1 | 13 |
+| floor 0.6 | 78.2% | 0.098 / 0.337 | 13 | 105 | 0 | 0 | 77.4% | 0.088 / 0.458 | 24 | 1128 | 1 | 15 |
+
+- **k = 2 against k = 3.** On seoul_bull the default rejoins 986 of 1235
+  known observations (79.8%) against 1007 (81.5%) at k = 3, and adds 106 extra
+  observations against 139, with no bad extra observation at either and 0
+  against 1 that make their track's largest residual more than 1 px worse. On
+  kerry_park it rejoins 1730 of 2225 (77.8%) against 1774 (79.7%), and adds
+  1143 extra observations against 1327, of which 1 against 6 are bad (new
+  residual over 2 px) and 13 against 28 make their track worse. k = 2 gives up
+  1.7 and 1.9 points of recall for 1 fewer worse track on seoul_bull and 5
+  fewer bad and 15 fewer worse ones on kerry_park.
+- **k = 4** adds 0.4 (seoul_bull) and 1.2 (kerry_park) points of recall over
+  k = 3, with 3 more bad and 14 more worse extra observations on kerry_park.
+- **The 2-D fit changes the k = 3 figures little.** Measured with the per-axis
+  step the same rule gave 81.9% and 79.6% recall, 140 and 1330 extra
+  observations, 0 and 5 bad, 1 and 25 worse.
+- **The rejoined keypoints sit further from the originals** than before the
+  alignment change, 0.09 to 0.10 px at the median rather than 0.06. The ground
+  truth's keypoints were placed by congealing, and a view aligned to one
+  reference carries whatever offset the reference's own keypoint has. The new
+  observations of rejoined tracks retriangulate at 0.26 (seoul_bull) and
+  0.24 px (kerry_park) at the median, against 0.25 and 0.22 before.
+- **The track bar, the pair rule and the floor change little** at k = 2.
+  Between 0.85 and 0.95 the track bar moves recall by under 1 point on
+  seoul_bull and 2 on kerry_park; at 0.85 kerry_park gains 59 extra
+  observations, 2 more of them bad. A floor of 0.6 costs 1.6 points of recall
+  on seoul_bull and 0.4 on kerry_park, with no fewer bad extra observations.
