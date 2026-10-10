@@ -1357,6 +1357,15 @@ on a healthier solve rather than a new defect.
   verdict now routes to the fisheye branch by default; the annotation
   path remains as the fallback for unconfirmed verdicts.
 
+`KerryPark480` and `SeoulBull` are scored against the checked-in
+`test-data/images/kerry_park/kerry_park_ground_truth.sfmr` and
+`test-data/images/seoul_bull_sculpture/seoul_bull_sculpture_ground_truth.sfmr`,
+named by absolute path in `C:/DataSets/workspace-prep/approved-gts.tsv`, and
+`SeoulBull` is a fleet entry (`C:/DataSets/SeoulBull`). The seed-pick
+acceptance suite over the eight approved entries is
+`C:/DataSets/workspace-prep/pick_suite.py`; see the preamble of
+`specs/core/geometry/seed-hypothesis-loop-measurements.md`.
+
 ### Phase 6 outcome (2026-08-10) — DONE
 
 The branch is default-on, the fleet columns mean what they say, and the two
