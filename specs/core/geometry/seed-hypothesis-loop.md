@@ -278,9 +278,17 @@ it by more than the tie is not. The release reads the same
 
 The half-point tie and the release's tying-step rule were set on the two
 ground-truth captures, `SeoulBull` and `KerryPark480`
-([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)),
-and are validated against the fleet's references in the next fleet
-measurement.
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)).
+Across the eight captures with an approved ground truth, the seed's pick
+with these rules and the other pick-stability changes agrees with the
+ground truth on 8 of 8, against 4 of 8 for the scripts before the changes
+on the same files
+([measurements](seed-hypothesis-loop-measurements.md#pick-against-the-ground-truth-captures-2026-10-09)).
+The scan takes part in one of the four changed verdicts: on `DnDTabletop`,
+where the choice among seed groups also changes the first candidate, the
+pick released 5.8% over the true focal before, from the vote's refit point,
+and 1.3% under it after, from a lattice rung. No pick fails on its focal
+after.
 
 **`edge_scan`.** The flag is set when the extended scan still peaks at its
 top rung and rises to it monotonically (no drop of more than half a point),
