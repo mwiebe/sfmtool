@@ -372,10 +372,10 @@ fisheye_stage1 = seed_camera.fisheye_stage1
 # own FOV-derived one (specs/core/geometry/focal-vote.md, Camera-Model Columns), reused
 # verbatim so the scan cannot rank a focal the vote would not have scanned.
 FISHEYE_BAND = (0.075, 3.0)
-# Per-step ratio of the five-point equidistant scan grid.  The pinhole grid
-# skews UPWARD because Bougnoux votes run consistently low; the equidistant
-# column carries no such measured directional bias, so its grid is log-symmetric
-# about the verdict.  The span (0.756x .. 1.323x) matches the pinhole grid's.
+# Per-step ratio of the focal scan's lattice (SCAN_RATIO below), shared by the
+# pinhole and the equidistant scan: one rung is a 15% step in focal, and the
+# window of SCAN_POINTS rungs spans 1.15**4 = 1.75x.  Neither model's window is
+# centred on its structure-free focal; it is the SCAN_POINTS rungs nearest it.
 FISHEYE_SCAN_RATIO = 1.15
 # The focal scan's LATTICE (specs/core/geometry/seed-hypothesis-loop.md, Focal
 # scan): rungs ``max(w, h) * SCAN_RATIO**k`` for integer ``k``, one set per
@@ -385,12 +385,17 @@ FISHEYE_SCAN_RATIO = 1.15
 SCAN_RATIO = FISHEYE_SCAN_RATIO
 SCAN_POINTS = 5
 SCAN_EXTEND_MAX = 3
-# Refit margin (inlier fraction): the rungs within it of the best coarse rung,
-# and no more than SCAN_BAND_RUNGS rungs from it, are refit, and the refits
-# within it of the best refit tie, the structure-free focal breaking the tie.
+# Refit band margin (inlier fraction, 5 points): the rungs within it of the
+# best coarse rung, and no more than SCAN_BAND_RUNGS rungs from it, are refit.
 SCAN_TIE = 0.05
 SCAN_BAND_RUNGS = 2
+# Refit tie (inlier fraction, half a point, `SFMTOOL_REFIT_TIE`): the refits
+# within it of the best refit tie, and the structure-free focal breaks that tie;
+# a release step within it of the best fraction seen is kept.
 REFIT_TIE = float(os.environ.get("SFMTOOL_REFIT_TIE", "0.005"))
+# Largest drop (inlier fraction, half a point) between consecutive scanned
+# rungs that still counts as a monotonic rise for the `edge_scan` flag.
+EDGE_SCAN_DROP = 0.005
 
 # Floor on the structure-free vote's PRECISION BAND (log-focal), the band the
 # finalization's arbitration reads (Phase 6, Item 2).  The band itself is the
@@ -413,8 +418,8 @@ VOTE_BAND_FLOOR_LOG = float(np.log(1.02))
 # the bar is worth re-measuring rather than inheriting.  Default unchanged.
 RESECT_MAX_PX = float(os.environ.get("SFMTOOL_RESECT_MAX_PX", "8.0"))
 RESECT_TRACE = os.environ.get("SFMTOOL_RESECT_TRACE", "0") == "1"
-# Survivor floor of that resection, read by the kernel on its converged kept
-# set rather than on every trim round, and the factor its one retry widens the
+# Survivor floor of that resection, read by the kernel on its final kept set
+# rather than on every trim round, and the factor its one retry widens the
 # trim gate by before an image is dropped from the skeleton
 # (specs/core/geometry/rotation-locked-resection.md, Callers).
 RESECT_MIN_INLIERS = 10
@@ -2181,8 +2186,9 @@ def resect_locked(cam, q_wxyz, points, uv):
     """Rotation-locked translation of one skeleton image, or None.
 
     The kernel judges its survivor floor (``RESECT_MIN_INLIERS``) on the
-    converged kept set.  An image that still fails is tried once more with a
-    trim gate ``RESECT_RETRY_WIDEN`` times wider, which lets the first solve
+    final kept set, and returns the translation fitted over that set.  An
+    image that still fails is tried once more with a trim gate
+    ``RESECT_RETRY_WIDEN`` times wider, which lets the first solve
     start from a broader set when a few strays pull it out of the basin; the
     retry is accepted only when its translation keeps at least the floor's
     count of observations within the ordinary gate, so the wider gate finds
@@ -5995,7 +6001,8 @@ def run_pipeline(
         # OUTCOMES already carry theirs on the outcome dict.)
         low_par = None  # max-parallax probe fallback if no chunk clears 1 deg
         gated = []  # probes rejected as unmeasurable (last-resort fallback)
-        probe_max = 0.0  # running max group-chunk probe consensus this attempt
+        # Best probe inlier fraction of every group probed in this attempt.
+        probe_max = 0.0
         tried_rc = False
 
         def workset():
@@ -6412,11 +6419,15 @@ def run_pipeline(
                 return None
             ranked = sorted(healthy, key=outcome_key)
             if len(ranked) > 1:
+                # An outcome with no triangulated posed observation has no
+                # median residual (None); outcome_key ranks it last on that term.
+                med = ranked[0]["med_res"]
+                med_txt = "n/a" if med is None else f"{med:.2f} px"
                 print(
                     f"{len(ranked)} seed groups clear the commit bar; committing "
                     f"{[int(k) for k in ranked[0]['seed_frames']]} (reach "
                     f"{100 * ranked[0]['reach']:.0f}%, kept {ranked[0]['kept']}, "
-                    f"median residual {ranked[0]['med_res']:.2f} px)"
+                    f"median residual {med_txt})"
                 )
             for o in ranked[1:]:
                 evo_reason(o.get("evo"), "outranked_in_attempt")
@@ -6973,7 +6984,8 @@ def run_pipeline(
         # rungs can rank within a point of each other and the light pass is
         # not reliable at that margin -- and the best refit wins.  The
         # structure-free focal breaks a tie only: among the refits within
-        # SCAN_TIE of the best refit, the rung nearest it in log-focal wins.
+        # REFIT_TIE (half a point, against SCAN_TIE's 5 points for the band) of
+        # the best refit, the rung nearest it in log-focal wins.
         # The rungs are the lattice's, so the vote moves the winner only by
         # crossing the log-midpoint of two tied rungs.
         top = max(range(len(grid)), key=lambda i: (grid[i][0], -i))
@@ -7314,7 +7326,7 @@ def run_pipeline(
         if (
             "flat_scan" not in flags
             and int(np.argmax(inls_grid)) == len(inls_grid) - 1
-            and np.all(np.diff(inls_grid) >= -0.005)
+            and np.all(np.diff(inls_grid) >= -EDGE_SCAN_DROP)
         ):
             flags.append("edge_scan")
             print(

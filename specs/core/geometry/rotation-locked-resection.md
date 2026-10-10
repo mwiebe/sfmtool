@@ -143,7 +143,18 @@ keeps an image whose resection fails among its candidates, so the image is
 tried again after the next round of growth adds structure. Its growth loop
 calls this kernel directly, so the round-survivor minimum, the extra solve
 over a set that did not stabilise and the floor read on the final kept set
-apply to the skeleton.
+apply to the skeleton exactly as to the seed's rotation core.
+
+The fisheye seed's rotation core (`resect_locked` in
+[exp_fast_seed.py](../../../scripts/exp_fast_seed.py)) grows one skeleton
+image at a time and drops an image from the skeleton when its resection
+fails. Its trim gate is `RESECT_MAX_PX` (8 px by default) and its floor
+`RESECT_MIN_INLIERS` (10). Before dropping an image, it tries it once more with
+the trim gate `RESECT_RETRY_WIDEN` times as wide (16 px against 8 px, floor
+unchanged), and accepts that translation only when at least 10 observations
+lie within `RESECT_MAX_PX` of it: the wider gate lets the first solve start
+from a broader set, and the ordinary gate still judges the answer. The
+retry's survivor mask is the set within `RESECT_MAX_PX`.
 
 ## Testing requirements
 
