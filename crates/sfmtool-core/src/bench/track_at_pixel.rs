@@ -184,14 +184,14 @@ pub struct FinishOptions {
     pub clean_rounds: usize,
     /// Gate: the fewest `in` views.
     pub min_in_views: usize,
-    /// Gate: the lowest median plain score against the stored bitmap
-    /// ([`TrackMeasurement::plain_zncc`](super::track::TrackMeasurement::plain_zncc)) over
-    /// the `in` views other than the reference observation, which scores `1`
-    /// against its own render. The default `0.7` refuses about as many
-    /// ground-truth tracks after a fit (5.1% of 450 from seoul_bull,
-    /// kerry_park and a dino_dog_toy reconstruction) as `0.8` on the
-    /// leave-one-out score it replaced (5.8%), and passes 0.7% of the same
-    /// tracks with every keypoint moved 15 to 30 px off.
+    /// Gate: the lowest median blur-matched score against the stored bitmap
+    /// ([`TrackMeasurement::blur_matched_zncc`](super::track::TrackMeasurement::blur_matched_zncc)),
+    /// the score the bench's bars judge, over the `in` views other than the
+    /// reference observation, which scores `1` against its own render. The
+    /// default `0.7` was swept on the seoul_bull and Kerry Park ground truths
+    /// on both scores; on the blur-matched one Kerry Park's precision is
+    /// highest there, and it keeps 22 more of Kerry Park's correct tracks than
+    /// the plain one did. See specs/core/bench/track-at-pixel.md.
     pub min_zncc_median: f64,
     /// Gate: how far the queried sighting's keypoint may sit from the pixel, in
     /// px.
@@ -612,8 +612,8 @@ pub enum StageRecord {
         at_infinity: bool,
         /// Why the classification came out as it did.
         reason: Option<ClassificationReason>,
-        /// The median plain score against the stored bitmap
-        /// (`TrackMeasurement::plain_zncc`) over the `in` views after it, the
+        /// The median blur-matched score against the stored bitmap
+        /// (`TrackMeasurement::blur_matched_zncc`) over the `in` views after it, the
         /// reference observation left out.
         zncc_median: f64,
     },
@@ -623,9 +623,9 @@ pub enum StageRecord {
     Anchor {
         /// How many views are `in` after it.
         in_views: usize,
-        /// The median plain score against the stored bitmap
-        /// (`TrackMeasurement::plain_zncc`) over them after it, the reference
-        /// observation left out.
+        /// The median blur-matched score against the stored bitmap
+        /// (`TrackMeasurement::blur_matched_zncc`) over them after it, the
+        /// reference observation left out.
         zncc_median: f64,
     },
     /// The finish's tilt toward the neighbours' normal.
@@ -641,12 +641,12 @@ pub enum StageRecord {
     Final {
         /// How many views are `in`.
         in_views: usize,
-        /// The median plain score against the stored bitmap over them
-        /// (`TrackMeasurement::plain_zncc`), the reference observation left out:
-        /// the reading the median gate judges.
+        /// The median blur-matched score against the stored bitmap over them
+        /// (`TrackMeasurement::blur_matched_zncc`), the reference observation
+        /// left out: the reading the median gate judges.
         zncc_median: f64,
-        /// The median plain middle score against the stored bitmap over the
-        /// same views (`TrackMeasurement::zncc_middle`), `NaN` when none
+        /// The median blur-matched middle score against the stored bitmap over
+        /// the same views (`TrackMeasurement::blur_matched_zncc_middle`), `NaN` when none
         /// carries one. Shown beside `zncc_median`; no gate reads it.
         zncc_middle_median: f64,
         /// How far the queried sighting's keypoint sits from the pixel, in px.
