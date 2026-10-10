@@ -64,7 +64,8 @@ round. The solve is trimmed iteratively reweighted least squares:
 Reading the floor on every round dropped resections that converge well. On
 `KerryPark480`'s seed with its mover members dropped, image 31 failed on an
 intermediate round although its final round kept 31 observations; read on
-the final set it resects with 31.
+the final set it resects with 31
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)).
 
 Working in ray space makes the equations camera-model-agnostic: fisheye
 and equirectangular observations resect through the same rows,
