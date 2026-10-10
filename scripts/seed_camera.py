@@ -484,6 +484,39 @@ def relative_warps(shapes, obs_c, reference_members):
     return out
 
 
+def canonical_member_order(cluster_starts, member_images, positions, reference_members):
+    """The permutation that puts every cluster's members in content order.
+
+    Within each cluster (clusters keep their own order): the cluster's stored
+    reference member first, then the others by image index, then by keypoint
+    x and y.  Apply it to every member-parallel column; the cluster column of a
+    cluster-major layout is unchanged by it.
+
+    The order a file lists a cluster's members in is not evidence, and a seed
+    that read it changed its candidates when only that order changed: the
+    first-listed member was the reference ray of the rotation-only layers and
+    of `core_parallax`, and the bundle adjustments, which stop at an
+    evaluation cap, summed their rows in it
+    (specs/core/geometry/seed-hypothesis-loop-measurements.md).  Fixing the
+    order here makes the first row of each cluster its reference member, and
+    every row order downstream a function of the content.
+
+    ``reference_members`` is the per-cluster global member index, with
+    ``0xFFFFFFFF`` for a cluster that carries none (whose members then order
+    by image and position alone).
+    """
+    starts = np.asarray(cluster_starts, dtype=np.int64)
+    n = int(starts[-1]) if len(starts) else 0
+    cl = np.repeat(np.arange(len(starts) - 1, dtype=np.int64), np.diff(starts))
+    img = np.asarray(member_images, dtype=np.int64)
+    pos = np.asarray(positions, dtype=np.float64).reshape(n, 2)
+    refs = np.asarray(reference_members, dtype=np.int64)
+    refs = refs[(refs >= 0) & (refs < n)]
+    not_ref = np.ones(n, bool)
+    not_ref[refs] = False
+    return np.lexsort((pos[:, 1], pos[:, 0], img, not_ref, cl))
+
+
 def load_clusters(matches_data=None, preselected=False):
     """Patch clusters as flat observation arrays with refined positions.
 
@@ -538,10 +571,16 @@ def load_clusters(matches_data=None, preselected=False):
     n_cl = len(sizes)
     # The backbone's own geometry, stored float32 and widened here because
     # everything downstream solves in float64.
-    m_uv = np.asarray(sel.member_positions(), dtype=np.float64)
+    m_uv_raw = np.asarray(sel.member_positions(), dtype=np.float64)
     m_shape = np.asarray(sel.member_affine_shapes(), dtype=np.float64)
+    # Member order fixed by content (`canonical_member_order`); every
+    # member-parallel column below is read through it.
+    perm = canonical_member_order(
+        starts, sel.member_images, m_uv_raw, sel.reference_members
+    )
+    m_uv = m_uv_raw[perm]
 
-    obs_i = np.asarray(sel.member_images, dtype=np.int64)
+    obs_i = np.asarray(sel.member_images, dtype=np.int64)[perm]
     if preselected:
         n2r = int((sizes == 2).sum())
         print(
@@ -572,13 +611,13 @@ def load_clusters(matches_data=None, preselected=False):
         "dims": dims,
         "obs_c": obs_c,
         "obs_i": obs_i,
-        "obs_f": np.asarray(sel.member_features, dtype=np.int64),
+        "obs_f": np.asarray(sel.member_features, dtype=np.int64)[perm],
         "obs_uv": np.ascontiguousarray(m_uv),
         "obs_warp": np.ascontiguousarray(
-            relative_warps(m_shape, obs_c, sel.reference_members),
+            relative_warps(m_shape, obs_c, sel.reference_members)[perm],
             dtype=np.float64,
         ),
-        "obs_ref": np.asarray(sel.member_status) == 0,
+        "obs_ref": (np.asarray(sel.member_status) == 0)[perm],
         "adm_rank": adm_rank,
         # Worst (max) finite warp-consistency residual over the selected
         # members — lower is better; clusters where no member entered the

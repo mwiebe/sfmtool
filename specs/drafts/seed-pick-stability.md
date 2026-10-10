@@ -4,7 +4,14 @@
 - the seed's candidate set and first candidate should change only when the evidence changes, not when a RANSAC seed, a member's position in its cluster, or a try order changes;
 - the changes below are accepted when the perturbation suite of [seed-hypothesis-loop-measurements.md](../core/geometry/seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09) gives bit-identical results under member reordering, and unchanged first candidates (seed frames, posed frames, qualification, ground-truth verdict) under the random and non-mover drops on `SeoulBull` and `KerryPark480`.
 
-Not decided: the number of RANSAC draws per pair vote; whether the probe focal snaps to the scan lattice or the probe runs at two focals; the score that orders deferred outcomes. See [Open questions](#open-questions).
+Built (described in [seed-hypothesis-loop.md](../core/geometry/seed-hypothesis-loop.md) § "Member order", § "Capture-level measurements" and § "Rank", measured in [the post-fix section](../core/geometry/seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)):
+- [Member order fixed at load](#member-order-fixed-at-load): the reorder files now give bit-identical products;
+- [A vote measured over several draws](#a-vote-measured-over-several-draws), at `K = 5` (`SFMTOOL_VOTE_DRAWS`);
+- [Commit bar below the cap](#commit-bar-below-the-cap).
+
+Remaining, and the reason this draft stays: [readings of the vote that do not move with it](#readings-of-the-vote-that-do-not-move-with-it), [choice among outcomes by a continuous score](#choice-among-outcomes-by-a-continuous-score), and [locked resection judged on its converged set](#locked-resection-judged-on-its-converged-set). The acceptance test is not yet met: with the three built changes the first candidate still changes on 2 of the 6 drop files on `SeoulBull` and 4 of 6 on `KerryPark480`.
+
+Not decided: the number of RANSAC draws per pair vote (5 is built; see [Open questions](#open-questions)); whether the probe focal snaps to the scan lattice or the probe runs at two focals; the score that orders deferred outcomes. See [Open questions](#open-questions).
 
 Amends:
 - [core/geometry/seed-hypothesis-loop.md](../core/geometry/seed-hypothesis-loop.md) § "Rank", and the exploration it records the outcome of (§ "Capture-level measurements", § "Ladder dedup")
@@ -26,11 +33,11 @@ This draft removes each of them without changing what the exploration measures.
 
 ### Member order fixed at load
 
-The loader sorts each cluster's members by image index before any stage reads them, so the file's member order cannot reach a solver. Every reading that takes "the first observation" of a cluster instead takes the cluster's reference member, which the file names: `core_parallax` measures the widest angle over every pair of a point's posed views, and the ladder's far-field reading and the rotation-only layers take the reference member's ray. Measured by the reorder files: the outputs are bit-identical to the base file's.
+**Built.** The loader sorts each cluster's members by content before any stage reads them: the cluster's stored reference member first, then the others by image index, then by keypoint position, so the file's member order cannot reach a solver. Every reading that took "the first observation" of a cluster now takes the cluster's reference member when its frame is posed (else the posed member of lowest image index): `core_parallax` measures each point's widest angle from that ray, and the ladder's far-field reading and the rotation-only layers take its ray. The bundle adjustments sum their rows in that one order. Measured by the reorder files: the products are bit-identical to the base file's on both captures.
 
 ### A vote measured over several draws
 
-Each pair's Bougnoux and rotation votes are estimated over `K` RANSAC seeds and the pair contributes the median of its `K` estimates. On `SeoulBull` one draw per pair moves the pooled vote between 251 and 323 px across seeds 0 to 9 on one unchanged file, which is the whole range the dropped members produced; the median of `K` draws removes the seed from the reading without changing what is measured. The rotation core's gauge pair is chosen the same way: its parallax and cheiral count are the medians over `K` seeds, so pair (0, 1) on `KerryPark480`, at 1.48° under 11 of 12 seeds, keeps its place.
+**Built** at `K = 5` (`SFMTOOL_VOTE_DRAWS`), inside the vote kernel (`FocalVoteOptions::draws`). Each pair's Bougnoux and rotation votes are estimated over `K` RANSAC seeds and the pair contributes the median of its `K` estimates. On `SeoulBull` one draw per pair moves the pooled vote between 251 and 323 px across seeds 0 to 9 on one unchanged file, which is the whole range the dropped members produced; the median of `K` draws removes the seed from the reading without changing what is measured. The rotation core's gauge pair is chosen the same way: its parallax and cheiral count are the medians over `K` seeds, so pair (0, 1) on `KerryPark480`, at 1.48° under 11 of 12 seeds, keeps its place.
 
 ### Readings of the vote that do not move with it
 
@@ -44,7 +51,7 @@ The probe focal is the lattice point nearest the vote, so it shares the grid's s
 
 ### Commit bar below the cap
 
-The commit bar's kept count is read against the core cap: an outcome commits on at least `min(8, cap − 1)` kept frames, so one frame lost in growth at the cap does not fail the bar. On `SeoulBull` the bar and the cap are both 8, and a probe focal of 264.7 px instead of 258.3 px grows group 0 to 4 to 7 frames and moves the first candidate to another group.
+**Built.** The commit bar's kept count is read against the core cap: an outcome commits on at least `min(8, cap − 1)` kept frames, so one frame lost in growth at the cap does not fail the bar. On `SeoulBull` the bar and the cap are both 8, and a probe focal of 264.7 px instead of 258.3 px grows group 0 to 4 to 7 frames and moves the first candidate to another group.
 
 ### Choice among outcomes by a continuous score
 
@@ -56,7 +63,7 @@ An attempt finishes every seed group it tries (it already stops at 8 groups, and
 
 ## Open questions
 
-- **`K`.** The vote's cost is linear in it. The question is the smallest `K` at which the `SeoulBull` vote's spread over seed sets is under its pool's own interquartile range.
+- **`K`.** The vote's cost is linear in it. The question is the smallest `K` at which the `SeoulBull` vote's spread over seed sets is under its pool's own interquartile range. Measured over ten disjoint seed sets on the base file, that criterion holds already at `K = 1` (a log range of 0.25 against a pool log-IQR of 0.40), so it does not choose `K`. The spread falls slowly: 251 to 323 px at `K = 1`, 245 to 298 px at 5, 254 to 290 px at 9, 247 to 281 px at 17 and 259 to 276 px at 33 ([measurements](../core/geometry/seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)). The median settles near 268 px, 20% under the ground truth's 336 px, so a vote that no longer moves with the draw sits lower than the seed-0 draw (309.6 px) did, and `edge_scan` now fires on every `SeoulBull` `h00`; the [lattice grid](#readings-of-the-vote-that-do-not-move-with-it) is what answers that.
 - **Probe focal.** Snapping to the lattice removes small vote movements but still flips at a step's midpoint. Probing at the two lattice points that bracket the vote and keeping the better outcome removes the flip and doubles the probe's cost.
 - **The score among outcomes.** Spread then coverage is the ladder's existing comparator; whether the photometric candidate score of [seed-photometric-candidate-score.md](seed-photometric-candidate-score.md) should order outcomes inside an attempt too is open.
 - **Iteration caps.** With member order fixed, the capped adjustments are deterministic on one file but still amplify small changes of the input near a gate (the widen ladder's `0.35 · med_inl`). Whether the widen gate needs a margin is measured after the changes above, by the drop files.
