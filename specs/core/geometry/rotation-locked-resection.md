@@ -151,11 +151,22 @@ The fisheye seed's rotation core (`resect_locked` in
 image at a time and drops an image from the skeleton when its resection
 fails. Its trim gate is `RESECT_MAX_PX` (8 px by default) and its floor
 `RESECT_MIN_INLIERS` (10). Before dropping an image, it tries it once more with
-the trim gate `RESECT_RETRY_WIDEN` times as wide (16 px against 8 px, floor
-unchanged), and accepts that translation only when at least 10 observations
-lie within `RESECT_MAX_PX` of it: the wider gate lets the first solve start
-from a broader set, and the ordinary gate still judges the answer. The
-retry's survivor mask is the set within `RESECT_MAX_PX`.
+the trim gate `RESECT_RETRY_WIDEN` times as wide (16 px against 8 px). The
+wider gate lets the first solve start from a broader set when a few stray
+observations pull it out of its basin, and the ordinary gate still judges the
+answer: the retry is accepted when the observations within `RESECT_MAX_PX` of
+its translation number at least the retry floor, a tenth of the observations
+the image offers (`RESECT_RETRY_MIN_SHARE`) and never fewer than 4
+(`RESECT_RETRY_MIN_COUNT`, twice the two observations that determine a
+translation). The same floor is the wide solve's `min_inliers`. The retry's
+survivor mask is the set within `RESECT_MAX_PX`.
+
+The retry floor guards against a translation the wide gate fits to a handful
+of observations that agree with it by construction: a wrong retry keeps only
+the few observations its own fit absorbed, while a retry that recovers the
+image keeps a share of what the image offers. Read as a share, the floor asks
+more of an image that offers more observations, and it does not sit on the
+ordinary floor's count, which a recovered image's survivors can equal.
 
 ## Testing requirements
 
