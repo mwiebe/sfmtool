@@ -317,18 +317,30 @@ Each committed candidate records its released focal, released inlier
 fraction, capture-level coverage reach, scan spread, confidence flags,
 and the log-focal distance between its release and the bias-corrected
 capture-level vote. A candidate QUALIFIES when the structure-trust gates
-all hold: the commit bar (posed count, reach, scan spread), the release
+all hold: the commit bar's posed count and scan spread, the release
 inside the corrected vote band, and no flat-scan, edge-scan or
 near-static-seed verdict. The commit bar's posed count is
 `min(8, cap - 1)` kept frames for the core cap `SFMTOOL_SCAN_CAP`
 (default 8, so 7 frames): the probe grows a seed group to the cap, and a
-bar equal to the cap fails on the first frame lost in growth. The same
-bar decides whether an attempt's outcome commits and whether the ladder
-stops early. Coverage reach is measured on the
-CAPTURE-LEVEL covisibility graph, the full admission's, for every
-candidate alike: reach asks how much of the capture a solve connects to,
-and a complement's smaller admission must not deflate the answer for a
-solve that genuinely spans it.
+bar equal to the cap fails on the first frame lost in growth.
+
+The commit bar that decides whether an attempt's outcome commits and whether
+the ladder stops early also asks for an exploration reach of 60% on the pass's
+own covisibility graph. That part steers exploration only: an outcome under it
+is not refused but kept as one of the attempt's fallbacks, which the outcome
+order compares by reach first, and the pass goes on to thinner working sets.
+Qualification does not read reach. Reach says how much of the capture a solve
+connects to, not whether the solve is right: a focal-blind window and a sound
+one can connect to the same share of a capture, and the scan spread is what
+tells them apart. A seed window of a few frames on a capture of a few hundred
+images connects to a tenth of it or less, and on smaller captures the
+candidates' readings spread across the range, so a bar on reach would refuse
+every candidate of a large capture and sit beside some candidate's reading on
+the others. The recorded coverage reach, which the manifest carries and the
+`narrow_reach` flag reads (set under 30%, and not a blocking flag), is measured
+on the CAPTURE-LEVEL covisibility graph, the full admission's, for every candidate
+alike, so a complement's smaller admission does not deflate the answer for a
+solve that genuinely spans the capture.
 
 The rank is the recorded order of the set: the first qualified candidate
 first, commit order otherwise. It is ADVISORY and decides nothing.
@@ -352,12 +364,13 @@ core cap, a scan grid centred on the vote, the first-tried choice among seed
 groups and a resection floor read on every trim round do not reach it: each is
 replaced by the rule its section above states, the last by the trim rule of
 [rotation-locked-resection.md](rotation-locked-resection.md#mechanism). On the
-22 perturbed files of the two ground-truth captures the first candidate passes the ground truth on every file, but it still
-changes on 10 of them
-([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)):
+22 perturbed files of the two ground-truth captures the first candidate
+changes on 10
+([measurements](seed-hypothesis-loop-measurements.md#reach-and-retry-floors-without-a-fixed-count-2026-10-10)):
 on `KerryPark480` the dropped members change which skeleton images the
 rotation core resects and which frames the widen admits, and on `SeoulBull`
-they move one seed group under the commit bar's 60% reach floor. Those
+they cost one seed group a frame, which leaves its reach under another
+group's, and the outcome order puts that group first. Those
 stages read the evidence the dropped members carried, and a first candidate
 that never moves under a 0.3% change of the cluster file is not a goal of
 this stage.
