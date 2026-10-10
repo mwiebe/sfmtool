@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Scalar primitives that must compute the same number everywhere: the
-//! crate's one median, and the one RNG step behind its deterministic sampling.
+//! crate's one median, its one quantile, and the one RNG step behind its
+//! deterministic sampling.
 //!
 //! Crate-level rather than filed under one group because the callers are not
 //! related: the growth and pose-verification kernels ([`crate::geometry`]),
@@ -60,6 +61,19 @@
 //! enforces that mechanically: it scans the crates for `fn …median…`
 //! definitions and fails on any that is not in its allowlist of the few that
 //! are genuinely a different operation. Add a caller, not a copy.
+//!
+//! ## The quantile
+//!
+//! The same holds for quantiles. `quantile_of_sorted`, `quantile_in_place`
+//! and `quantile` follow the median's rules — [`f64::total_cmp`] ordering
+//! and `NaN` for empty input — and interpolate linearly between order
+//! statistics with numpy's own arithmetic, so a trim threshold computed here
+//! matches the numpy prototype it was ported from bit for bit. They replaced
+//! five private copies, which with the earlier shared one used three
+//! different arithmetic forms; one of them sorted with
+//! `partial_cmp().unwrap_or(Ordering::Equal)` and returned `0.0` for an empty
+//! slice. The same scan in `numeric/tests.rs`
+//! covers `fn …quantile…` and `fn …percentile…`.
 
 /// Length at or above which quickselect beats a full sort.
 ///
@@ -129,18 +143,81 @@ pub fn median(values: &[f64]) -> f64 {
     median_in_place(&mut scratch)
 }
 
-/// Linear-interpolated quantile of an ascending, non-empty slice.
+/// Linearly interpolated `q`-quantile of an ascending slice; `NaN` when empty.
 ///
-/// The convention `numpy.quantile` takes, so a number printed beside a median
-/// means what a reader checking it in a notebook would get. Crate-level
-/// because two edits report a 90th percentile beside a median: Move Camera and
-/// the camera-model switch.
+/// `q` is in `[0, 1]`. This is `numpy.quantile`'s default (`linear`) method,
+/// computed with numpy's own interpolation arithmetic (`_lerp`): from the lower
+/// order statistic `a` when the fraction `t` is under one half, `a + (b − a)·t`,
+/// and from the upper one `b` otherwise, `b − (b − a)·(1 − t)`. Both forms give
+/// the same real number, but they round differently, and the second is the
+/// one that returns `b` exactly at `t = 1`. Matching numpy to the last bit
+/// means a threshold computed here equals the one a reference prototype in
+/// numpy computed, and a number printed beside a median is what a reader
+/// checking it in a notebook gets.
+///
+/// The empty-input rule is the median's: `NaN`, never an invented number. A
+/// slice sorted with [`f64::total_cmp`] carries its NaNs at the top, so a NaN
+/// quantile means NaN reached that rank of the population.
+///
+/// When `a` or `b` is infinite, numpy's arithmetic can give NaN from `∞ − ∞`
+/// where the answer is a number, so that case is decided directly: at `t = 0`
+/// the result is `a`; between two equal infinities it is that infinity;
+/// between a finite value and an infinity it is the infinity for any `t > 0`.
+/// Only `−∞` against `+∞`, or a NaN input, gives NaN. A residual of `∞` marks
+/// a point outside the camera's domain, so a trim bound that falls between a
+/// finite residual and an infinite one is `∞` and keeps every residual.
+/// Whenever `b − a` is finite the result is numpy's, bit for bit. Two finite
+/// values whose difference overflows are interpolated as `a·(1 − t) + b·t`,
+/// which stays finite, where numpy's arithmetic would give an infinity.
 pub(crate) fn quantile_of_sorted(sorted: &[f64], q: f64) -> f64 {
-    let position = q * (sorted.len() - 1) as f64;
-    let low = position.floor() as usize;
-    let high = position.ceil() as usize;
+    let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    let position = q * (n - 1) as f64;
+    let low = (position.floor() as usize).min(n - 1);
+    let high = (low + 1).min(n - 1);
     let t = position - low as f64;
-    sorted[low] * (1.0 - t) + sorted[high] * t
+    let (a, b) = (sorted[low], sorted[high]);
+    let gap = b - a;
+    if gap.is_finite() {
+        if t >= 0.5 {
+            b - gap * (1.0 - t)
+        } else {
+            a + gap * t
+        }
+    } else if a.is_finite() && b.is_finite() {
+        // `b − a` overflowed. `a` and `b` then have opposite signs, so the
+        // weighted sum cannot overflow.
+        a * (1.0 - t) + b * t
+    } else if t == 0.0 || a == b || b.is_finite() {
+        // The rank itself, two equal infinities, or `−∞` below a finite `b`.
+        a
+    } else if a.is_finite() {
+        // `+∞` above a finite `a`, with `t > 0`.
+        b
+    } else {
+        // `−∞` below `+∞`, or a NaN.
+        f64::NAN
+    }
+}
+
+/// [`quantile_of_sorted`] of `values`, sorting it in place with
+/// [`f64::total_cmp`]; `NaN` when empty.
+///
+/// `values` is left sorted.
+pub(crate) fn quantile_in_place(values: &mut [f64], q: f64) -> f64 {
+    values.sort_unstable_by(f64::total_cmp);
+    quantile_of_sorted(values, q)
+}
+
+/// [`quantile_of_sorted`] of `values`, copying to sort; `NaN` when empty.
+///
+/// The borrowing counterpart to [`quantile_in_place`], for callers holding a
+/// shared slice they cannot disturb.
+pub(crate) fn quantile(values: &[f64], q: f64) -> f64 {
+    let mut scratch = values.to_vec();
+    quantile_in_place(&mut scratch, q)
 }
 
 /// SplitMix64 step: advance `state` and return the mixed output.
