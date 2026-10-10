@@ -654,6 +654,10 @@ fn a_bench_observation_target_selects_its_own_camera_image() {
     let image = track["observations"][1]["camera_image"]
         .as_u64()
         .expect("an image index");
+    assert_ne!(
+        image, 0,
+        "the sighting is in photograph 0, so nothing below tests a move"
+    );
     // The panel is standing on some *other* photograph, so the target has to
     // move the selection for the view to mean anything.
     let first = crate::scene::ImageRef::new(state.scene[0].id, 0);
@@ -685,6 +689,30 @@ fn a_bench_observation_target_selects_its_own_camera_image() {
         state.selected_image.map(|image| image.index() as u64),
         Some(image),
         "the target did not select its own photograph"
+    );
+
+    // A camera_image beside it wins: the sighting's pixel is looked at in the
+    // photograph the call named.
+    let elsewhere = call(
+        &mut state,
+        &mut viewer,
+        "set_image_detail_view",
+        json!({
+            "reconstruction_label": "run_a",
+            "camera_image": 0,
+            "bench_observation": 1,
+            "track": item,
+        }),
+    );
+    assert_eq!(
+        elsewhere["image_detail_view"]["camera_image"],
+        json!(0),
+        "{elsewhere}"
+    );
+    assert_eq!(
+        state.selected_image.map(|image| image.index()),
+        Some(0),
+        "the named camera image was not selected"
     );
 
     let past_the_end = refused_call(
