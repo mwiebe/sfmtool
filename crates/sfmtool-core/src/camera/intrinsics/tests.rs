@@ -248,7 +248,11 @@ fn sfmtool_pinhole() -> CameraIntrinsics {
     }
 }
 
-fn all_cameras() -> Vec<CameraIntrinsics> {
+/// One camera of every registered model, which
+/// `all_cameras_covers_every_registered_model` checks. Crate-visible so a test
+/// elsewhere that must classify every model, such as the bundle adjustment's
+/// focal release set, can walk the same corpus.
+pub(crate) fn all_cameras() -> Vec<CameraIntrinsics> {
     vec![
         pinhole(),
         simple_pinhole(),
@@ -1834,4 +1838,36 @@ fn only_the_spline_models_are_flagged_beta() {
         .collect();
     assert_eq!(notes[0], notes[1], "the two beta notes have drifted apart");
     assert!(notes[0].starts_with("Beta:"));
+}
+
+/// `with_focal` moves the focal on every model with a single focal and leaves
+/// a model with two focals unchanged.
+#[test]
+fn with_focal_moves_only_a_single_focal() {
+    for cam in all_cameras() {
+        let name = cam.model_name();
+        let (fx, fy) = cam.focal_lengths();
+        let single_focal = !matches!(
+            cam.model,
+            CameraModel::Pinhole { .. }
+                | CameraModel::OpenCV { .. }
+                | CameraModel::OpenCVFisheye { .. }
+                | CameraModel::ThinPrismFisheye { .. }
+                | CameraModel::RadTanThinPrismFisheye { .. }
+                | CameraModel::FullOpenCV { .. }
+                | CameraModel::Equirectangular { .. }
+        );
+        if single_focal {
+            assert_eq!(fx, fy, "{name}");
+        }
+
+        let moved = cam.with_focal(fx * 1.5);
+        if single_focal {
+            assert_eq!(moved.focal_lengths(), (fx * 1.5, fx * 1.5), "{name}");
+            // Nothing but the focal moved.
+            assert_eq!(moved.with_focal(fx), cam, "{name}");
+        } else {
+            assert_eq!(moved, cam, "{name}");
+        }
+    }
 }

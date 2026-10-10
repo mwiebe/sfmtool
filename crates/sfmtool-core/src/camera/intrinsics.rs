@@ -723,25 +723,27 @@ impl CameraIntrinsics {
         self.model.has_distortion()
     }
 
-    /// This camera at focal `f` — a clone for every model but the five the
-    /// focal release admits: `SIMPLE_PINHOLE`, `EQUIDISTANT_FISHEYE`,
-    /// `SIMPLE_RADIAL_FISHEYE`, `SFMTOOL_FISHEYE` and `SFMTOOL_PINHOLE`, whose
-    /// projections all multiply `f` onto a distorted coordinate that does not
-    /// itself read `f` (for the last two, the dimensionless radial spline rides
-    /// on the ray's own radial coordinate).
-    ///
-    /// Focal optimization is gated on exactly those five models, so no other
-    /// camera ever sees a moved focal; this matches the bundle adjustment's
-    /// focal handling.
+    /// This camera at focal `f`. Every model with a single `focal_length`
+    /// takes `f`; a model with two focals (`focal_length_x`,
+    /// `focal_length_y`) comes back as an unchanged clone.
     pub(crate) fn with_focal(&self, f: f64) -> CameraIntrinsics {
         let mut out = self.clone();
         match &mut out.model {
             CameraModel::SimplePinhole { focal_length, .. }
-            | CameraModel::EquidistantFisheye { focal_length, .. }
+            | CameraModel::SimpleRadial { focal_length, .. }
+            | CameraModel::Radial { focal_length, .. }
             | CameraModel::SimpleRadialFisheye { focal_length, .. }
+            | CameraModel::RadialFisheye { focal_length, .. }
+            | CameraModel::EquidistantFisheye { focal_length, .. }
             | CameraModel::SfmtoolFisheye { focal_length, .. }
             | CameraModel::SfmtoolPinhole { focal_length, .. } => *focal_length = f,
-            _ => {}
+            CameraModel::Pinhole { .. }
+            | CameraModel::OpenCV { .. }
+            | CameraModel::OpenCVFisheye { .. }
+            | CameraModel::ThinPrismFisheye { .. }
+            | CameraModel::RadTanThinPrismFisheye { .. }
+            | CameraModel::FullOpenCV { .. }
+            | CameraModel::Equirectangular { .. } => {}
         }
         out
     }
@@ -788,4 +790,4 @@ impl CameraIntrinsics {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
