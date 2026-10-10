@@ -163,6 +163,10 @@ struct DeferredChanges {
     /// is "was the kwarg passed", the inner one "with an array, or with `None`
     /// to drop the column".
     reference_observations: Option<Option<Vec<i32>>>,
+    /// `observation_readings`, settled after the tracks and the references:
+    /// the outer `Option` is "was the kwarg passed", the inner one "with a
+    /// dict, or with `None` to drop the columns".
+    observation_readings: Option<Option<sfmtool_core::reconstruction::ObservationReadings>>,
 }
 
 /// Apply one per-point keyword argument (positions, colors, errors, normals,
@@ -589,6 +593,12 @@ fn apply_observation_field(
                 recon.point_set.observation_confidence = Some(s.to_vec());
             }
         }
+        "observation_readings" => {
+            // `None` drops the columns, a dict replaces them, and omitting the
+            // kwarg carries the rows ([`settle_observation_readings`]). The row
+            // count is checked once the tracks are settled.
+            deferred.observation_readings = Some(crate::readings::readings_from_py(value, None)?);
+        }
         "keypoints_xy" if value.is_none() => {
             // Drop the optional inline copy a `sift_files` value carries; an
             // `embedded_patches` value's keypoints are its observations.
@@ -685,6 +695,7 @@ fn finalize(
         constraint_distances,
         constraint_reference_images,
         reference_observations,
+        observation_readings,
     } = deferred;
 
     apply_image_count_changes(&mut recon, image_names, camera_indexes)?;
@@ -739,6 +750,13 @@ fn finalize(
         old_point_count,
         replacing_tracks,
         reference_observations,
+    )?;
+    settle_observation_readings(
+        inner,
+        &mut recon,
+        old_point_count,
+        replacing_tracks,
+        observation_readings,
     )?;
 
     // The track arrays and the observation-source columns can be supplied in the
@@ -1026,6 +1044,118 @@ fn settle_reference_observations(
     // A point left with a zero frame keeps its reference: the frame is the
     // point's geometry, and the reference observation is still in its track,
     // so a later render that gives the point a frame renders from it.
+    Ok(())
+}
+
+/// Settle the observation readings once the tracks and the references are.
+///
+/// A passed value replaces them (`None` drops them); its row count is checked
+/// with the other per-observation columns, and a value taken at another
+/// resolution than the stored bitmaps' is refused. Otherwise the rows travel with
+/// their observations. Where the tracks are replaced and the point count is
+/// unchanged, each new observation takes the row of the observation of
+/// `inner` with the same point index and the same image name, and an
+/// observation `inner` does not have is not measured; where the point count
+/// changed, no observation can be matched, and the columns are dropped. Where
+/// the tracks are kept, every row is kept. Then, in either case, the columns
+/// are dropped where the value now stores bitmaps at another resolution than
+/// the readings were taken at, and a point whose reference observation is
+/// another observation than before has its scores cleared, since they were
+/// read against the bitmap of another reference.
+fn settle_observation_readings(
+    inner: &SfmrReconstruction,
+    recon: &mut SfmrReconstruction,
+    old_point_count: usize,
+    replacing_tracks: bool,
+    passed: Option<Option<sfmtool_core::reconstruction::ObservationReadings>>,
+) -> PyResult<()> {
+    use sfmtool_core::reconstruction::{ObservationReading, ObservationReadings};
+    let bitmap_resolution = |recon: &SfmrReconstruction| {
+        recon
+            .point_set
+            .patch_bitmaps_y_x_rgba
+            .as_ref()
+            .filter(|_| !recon.point_set.patch_bitmaps_for_display)
+            .map(|b| b.shape()[1] as u32)
+    };
+    if let Some(passed) = passed {
+        // Passed readings describe renders at their resolution, so they must
+        // be the stored bitmaps' resolution where there are bitmaps.
+        if let (Some(readings), Some(r)) = (passed.as_ref(), bitmap_resolution(recon)) {
+            if readings.options.resolution != r {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "clone_with_changes(): observation_readings were taken at resolution {} \
+                     but the patch bitmaps are {r}x{r}; read them again at {r}, or pass \
+                     observation_readings=None",
+                    readings.options.resolution
+                )));
+            }
+        }
+        recon.point_set.observation_readings = passed;
+        return Ok(());
+    }
+    let Some(old) = inner.point_set.observation_readings.as_ref() else {
+        return Ok(());
+    };
+    if replacing_tracks {
+        if recon.point_set.points.len() != old_point_count {
+            recon.point_set.observation_readings = None;
+            return Ok(());
+        }
+        let name = |r: &SfmrReconstruction, image: u32| -> String {
+            r.image_table.images[image as usize].name.clone()
+        };
+        let by_key: HashMap<(u32, String), ObservationReading> = inner
+            .point_set
+            .tracks
+            .iter()
+            .zip(&old.rows)
+            .map(|(t, &row)| ((t.point_index, name(inner, t.image_index)), row))
+            .collect();
+        let rows = recon
+            .point_set
+            .tracks
+            .iter()
+            .map(|t| {
+                by_key
+                    .get(&(t.point_index, name(recon, t.image_index)))
+                    .copied()
+                    .unwrap_or(ObservationReading::NOT_MEASURED)
+            })
+            .collect();
+        recon.point_set.observation_readings = Some(ObservationReadings {
+            rows,
+            options: old.options,
+        });
+    }
+    // Every row describes a render at the readings' resolution; bitmaps now
+    // stored at another one say the renders the file names are at that R, so
+    // no row describes them, and the columns are dropped.
+    if bitmap_resolution(recon).is_some_and(|r| r != old.options.resolution) {
+        recon.point_set.observation_readings = None;
+        return Ok(());
+    }
+    // A point whose reference observation is another observation than before
+    // (by image name, so it holds when the tracks were replaced too) has its
+    // scores cleared: they were read against the bitmap of the old reference.
+    // With the tracks and the references both as they were, no reference
+    // moved, so nothing is compared (and a renamed image clears nothing).
+    let references_moved = replacing_tracks
+        || inner.point_set.reference_observations != recon.point_set.reference_observations;
+    if references_moved && recon.point_set.points.len() == old_point_count {
+        let reference_image = |r: &SfmrReconstruction, p: usize| -> Option<String> {
+            r.point_set.reference_observation_row(p).map(|row| {
+                r.image_table.images[r.point_set.tracks[row].image_index as usize]
+                    .name
+                    .clone()
+            })
+        };
+        for p in 0..old_point_count {
+            if reference_image(inner, p) != reference_image(recon, p) {
+                recon.point_set.clear_observation_scores(p);
+            }
+        }
+    }
     Ok(())
 }
 

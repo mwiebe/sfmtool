@@ -27,6 +27,18 @@ const CENTERS: [[f64; 3]; 5] = [
 ];
 const TARGET: usize = 4;
 
+/// An accepted candidate for point `p`, at `(1, 1)` with a score of `0.9` and
+/// nothing read.
+fn accepted(p: u32) -> Accepted {
+    Accepted {
+        point: p,
+        keypoint: [1.0, 1.0],
+        zncc: 0.9,
+        reading: ObservationReading::NOT_MEASURED,
+        reading_options: None,
+    }
+}
+
 fn pinhole() -> CameraIntrinsics {
     CameraIntrinsics {
         model: CameraModel::Pinhole {
@@ -473,6 +485,78 @@ fn the_confidence_column_is_extended_in_lockstep() {
         assert_eq!(conf[start + 4], observation_confidence_byte(c.zncc));
         assert!(conf[start + 4] >= 1);
     }
+}
+
+#[test]
+fn the_new_views_readings_are_written_with_its_observation() {
+    // The base has no readings, so the column is created: every existing row
+    // is not measured, and each added observation carries the readings of its
+    // tile at the keypoint written, with the score it was judged on where the
+    // template is the stored bitmap.
+    let points: Vec<(Point3<f64>, &[u32])> = grid_points().into_iter().map(|p| (p, FOUR)).collect();
+    let cap = capture(&points);
+    let (next, report) = run(&cap, &fixed());
+    let rows = &next
+        .point_set
+        .observation_readings
+        .as_ref()
+        .expect("a measured row adds the column")
+        .rows;
+    assert_eq!(rows.len(), next.point_set.tracks.len());
+    let mut added = 0;
+    for (p, c) in report.candidates.iter().enumerate() {
+        let start = next.point_set.observation_offsets[p];
+        assert!(rows[start..start + 4].iter().all(|r| !r.is_measured()));
+        if c.refusal.is_some() {
+            continue;
+        }
+        added += 1;
+        let row = rows[start + 4];
+        assert_eq!(row, c.reading);
+        assert!(row.is_measured());
+        assert!(row.zoom[0] > 0.0 && row.cos_view_angle > 0.0);
+        let z = row.blur_matched_bitmap_zncc;
+        assert!(z.is_nan() || z == c.zncc as f32, "{z} against {}", c.zncc);
+    }
+    assert!(added > 0);
+}
+
+#[test]
+fn the_new_rows_stand_under_the_options_they_were_read_with() {
+    // A base without readings takes the options the new views were read
+    // under; a base whose readings stand under another resolution keeps its
+    // own, and the new rows are not measured rather than mixed in.
+    let points: Vec<(Point3<f64>, &[u32])> = grid_points().into_iter().map(|p| (p, FOUR)).collect();
+    let cap = capture(&points);
+    let (next, report) = run(&cap, &fixed());
+    let options = next
+        .point_set
+        .observation_readings
+        .as_ref()
+        .expect("created")
+        .options;
+    let read = report
+        .candidates
+        .iter()
+        .find_map(|c| c.reading_options)
+        .expect("a candidate was read");
+    assert_eq!(options, read);
+    assert_eq!(
+        options.sampler,
+        crate::reconstruction::ReadingSampler::PerView
+    );
+
+    let mut cap = capture(&points);
+    let mut other = read;
+    other.resolution += 8;
+    cap.recon.point_set.observation_readings = Some(ObservationReadings::not_measured(
+        cap.recon.point_set.tracks.len(),
+        other,
+    ));
+    let (next, _report) = run(&cap, &fixed());
+    let readings = next.point_set.observation_readings.as_ref().expect("kept");
+    assert_eq!(readings.options, other);
+    assert!(readings.rows.iter().all(|r| !r.is_measured()));
 }
 
 #[test]
@@ -1089,7 +1173,7 @@ fn an_added_observation_moves_the_reference_index_past_it() {
             .map(|row| r.point_set.tracks[row].image_index)
     };
     // Image 0 lands before both observations of points 2 and 3.
-    let out = insert_observations(&recon, 0, &[(2, [1.0, 1.0], 0.9), (3, [1.0, 1.0], 0.9)]);
+    let out = insert_observations(&recon, 0, &[accepted(2), accepted(3)]);
     assert_eq!(
         out.point_set.reference_observations,
         Some(vec![-1, -1, 2, 1])
@@ -1097,7 +1181,7 @@ fn an_added_observation_moves_the_reference_index_past_it() {
     assert_eq!(image_of(&out, 2), Some(3));
     assert_eq!(image_of(&out, 3), Some(3));
     // Image 7 lands after them.
-    let out = insert_observations(&recon, 7, &[(2, [1.0, 1.0], 0.9)]);
+    let out = insert_observations(&recon, 7, &[accepted(2)]);
     assert_eq!(
         out.point_set.reference_observations,
         Some(vec![-1, -1, 1, 0])

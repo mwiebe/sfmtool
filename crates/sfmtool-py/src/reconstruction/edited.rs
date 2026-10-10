@@ -120,6 +120,13 @@ fn record_from_dict(d: &Bound<'_, PyDict>) -> PyResult<PointRecord> {
         .map(|v| v.extract())
         .transpose()?;
     let k = image_indexes.len();
+    // Optional whatever the base carries, with its "options": a record without
+    // it adds rows with nothing measured, as does one read under other options
+    // than the value's.
+    let readings = match get(d, "observation_readings")? {
+        Some(v) => crate::readings::readings_from_py(&v, Some(k))?,
+        None => None,
+    };
     for (name, len) in [
         ("feature_indexes", feature_indexes.as_ref().map(|v| v.len())),
         ("keypoints_xy", keypoints.as_ref().map(|v| v.len())),
@@ -146,6 +153,7 @@ fn record_from_dict(d: &Bound<'_, PyDict>) -> PyResult<PointRecord> {
                     .map(|kp| fixed::<2, f32>(kp[i].clone(), "keypoints_xy"))
                     .transpose()?,
                 confidence: confidence.as_ref().map(|c| c[i]),
+                reading: readings.as_ref().map(|r| r.rows[i]),
             })
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -179,6 +187,9 @@ fn record_from_dict(d: &Bound<'_, PyDict>) -> PyResult<PointRecord> {
         // Only the viewer's display render marks a pick, and a reconstruction
         // Python holds never carries the marks.
         display_only_reference: false,
+        // The options the readings were taken under; the value turns rows read
+        // under other options than its own into rows with nothing measured.
+        reading_options: readings.as_ref().map(|r| r.options),
     })
 }
 
@@ -235,6 +246,27 @@ fn record_to_dict<'py>(py: Python<'py>, r: &PointRecord) -> PyResult<Bound<'py, 
             .map(|o| o.confidence.unwrap_or_default())
             .collect();
         d.set_item("observation_confidence", PyArray1::from_vec(py, v))?;
+    }
+    // Labelled with the options the record's readings stand under, so a
+    // record handed back keeps them, and a value whose readings stand under
+    // others takes its rows as not measured.
+    if let Some(options) = r
+        .reading_options
+        .filter(|_| r.observations.iter().any(|o| o.reading.is_some()))
+    {
+        let rows = r
+            .observations
+            .iter()
+            .map(|o| {
+                o.reading
+                    .unwrap_or(sfmtool_core::reconstruction::ObservationReading::NOT_MEASURED)
+            })
+            .collect();
+        let readings = sfmtool_core::reconstruction::ObservationReadings { rows, options };
+        d.set_item(
+            "observation_readings",
+            crate::readings::readings_to_py(py, &readings)?,
+        )?;
     }
     if let Some(u) = r.patch_u_halfvec {
         d.set_item("patch_u_halfvec", PyArray1::from_vec(py, u.to_vec()))?;
@@ -438,6 +470,10 @@ impl PyEditedReconstruction {
         d.set_item(
             "observation_confidence",
             self.inner.has_observation_confidence(),
+        )?;
+        d.set_item(
+            "observation_readings",
+            self.inner.has_observation_readings(),
         )?;
         d.set_item("patch_frames", self.inner.has_patch_frames())?;
         d.set_item("patch_bitmaps", self.inner.has_patch_bitmaps())?;

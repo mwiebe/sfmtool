@@ -641,7 +641,13 @@ sfm xform in.sfmr out.sfmr --minimal [wspath=<path>]
 
 An `--add-*` step is a no-op, with one printed line, on a reconstruction that
 already carries the column. To re-render at a different resolution, drop first:
-`--drop-patch-bitmaps --add-patch-bitmaps resolution=32`.
+`--drop-patch-bitmaps --add-patch-bitmaps resolution=32`. Bitmaps added at
+another resolution, or with another sampler, than the stored
+[observation readings](../../../formats/sfmr-file-format.md#observation-readings-optional-version-12)
+were taken at drop those readings, which no longer describe the renders the
+file names; added at the same ones, the readings stay, with the scores of any
+point whose reference the render picked cleared. `--drop-patch-bitmaps` keeps
+them.
 
 **Drop, add and remove** are three different verbs here (see
 [GLOSSARY.md](../../../GLOSSARY.md)): *drop* discards an optional column and
@@ -862,8 +868,9 @@ What it clears and what it keeps:
 | `points3d/patch_u_halfvec_xyz`, `patch_v_halfvec_xyz`, `normals_xyz` | kept | Geometry: the patches keep their placement, so bitmaps can be rendered back onto them. |
 | positions, colours, reprojection errors, tracks, keypoints, poses, cameras, image names | kept | The reconstruction itself. |
 
-The other optional columns (`normal_confidence`, `observation_confidence` and
-the point-constraint triple) are measurements or solve state and are kept when
+The other optional columns (`normal_confidence`, `observation_confidence`, the
+observation readings and the point-constraint triple) are measurements or solve
+state and are kept when
 present. Nothing beyond the table is cleared: `--minimal` removes the columns
 that are the size and the metadata that describes a machine or a history, not
 every byte that could be recomputed. The same input written by `--minimal`

@@ -77,12 +77,14 @@ pub(super) fn new_record(seed: u32, image_count: u32) -> PointRecord {
                 feature_index: Some(1000 + seed),
                 keypoint_xy: Some([seed as f32, 7.0]),
                 confidence: Some(200),
+                reading: None,
             },
             RecordObservation {
                 image_index: second,
                 feature_index: Some(2000 + seed),
                 keypoint_xy: Some([3.0, seed as f32]),
                 confidence: Some(201),
+                reading: None,
             },
         ],
         patch_u_halfvec: Some([1.0, 0.0, 0.0]),
@@ -94,6 +96,7 @@ pub(super) fn new_record(seed: u32, image_count: u32) -> PointRecord {
         constraint: Some((POINT_CONSTRAINT_FREE, f64::NAN, NO_REFERENCE_IMAGE)),
         reference_observation: Some(1),
         display_only_reference: false,
+        reading_options: None,
     }
 }
 

@@ -438,6 +438,20 @@ pub struct TrackMeasurement {
     /// [`MIN_TILT_ANGLE_DEG`](crate::patch::normal_refine::MIN_TILT_ANGLE_DEG)
     /// of facing the patch.
     pub tilt_direction_deg: Option<f64>,
+    /// The **zoom** of the observation's own tile, `[least, most]`, in grid px
+    /// per photograph px: `[1/σ_major, 1/σ_minor]` of the Jacobian of the
+    /// tile's warp at its centre
+    /// ([`zoom_of_jacobian`](crate::patch::observation_reading::zoom_of_jacobian)).
+    /// `None` wherever the tile could not be rendered or its centre does not
+    /// project.
+    pub zoom: Option<[f64; 2]>,
+    /// The options the row's tile was rendered and read under: its
+    /// resolution, sampler, the window its scores were read over and the
+    /// self-similarity reading's settings, which a commit stores the row's
+    /// readings under. `None` wherever the tile could not be rendered; on a
+    /// row read back from a committed point, the options the point's
+    /// readings were stored under.
+    pub reading_options: Option<crate::reconstruction::ObservationReadingOptions>,
     /// The **coverage** of the observation's own `R×R` tile: the share of its
     /// samples the warp places on the photograph, `0 ..= 1`. `None` wherever
     /// the tile could not be rendered.

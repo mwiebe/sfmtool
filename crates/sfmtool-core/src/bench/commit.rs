@@ -11,6 +11,8 @@
 
 use nalgebra::Vector3;
 
+use crate::patch::observation_reading::observation_reading;
+
 use crate::reconstruction::data::Point3D;
 use crate::reconstruction::edited::{
     EditError, EditedReconstruction, PointMap, PointRecord, RecordObservation,
@@ -287,6 +289,17 @@ pub fn commit(
         .map(|&i| (track.observations[i].image, i))
         .collect();
     rows.sort_by_key(|&(image, i)| (image, i));
+    // The rows' readings are the evaluation's, under the options each row's
+    // tile was rendered and read with. The record stands under the value's
+    // options where it has readings, else under the first row's; a row read
+    // under other options is written with nothing measured, so no column
+    // mixes them. The scores are against the bitmap the evaluation read,
+    // which is the one written only where the commit writes a bitmap.
+    let record_options = edited.observation_reading_options().or_else(|| {
+        kept.iter()
+            .find_map(|&i| track.observations[i].track.as_ref()?.reading_options)
+    });
+    let scores_stored = edited.has_patch_bitmaps() && payload.committable_bitmap().is_some();
     let mut observations = Vec::with_capacity(rows.len());
     for &(image, i) in &rows {
         if image as usize >= image_count {
@@ -314,6 +327,13 @@ pub fn commit(
                     .blur_matched_zncc
                     .map_or(0, crate::reconstruction::data::observation_confidence_byte)
             }),
+            reading: Some(
+                if record_options.is_some() && measurement.reading_options == record_options {
+                    measurement_reading(measurement, scores_stored)
+                } else {
+                    crate::reconstruction::ObservationReading::NOT_MEASURED
+                },
+            ),
         });
     }
 
@@ -387,6 +407,7 @@ pub fn commit(
                 .map_or(sfmtool_sfmr_format::NO_REFERENCE_OBSERVATION, |k| k as i32)
         }),
         display_only_reference: false,
+        reading_options: record_options,
     };
 
     // ---- The edit ----
@@ -528,4 +549,37 @@ fn mean_reprojection_error(track: &EditableTrack, kept: &[usize]) -> f32 {
 /// A world half-vector as the column's `f32` triple.
 fn halfvec(v: Vector3<f64>) -> [f32; 3] {
     [v.x as f32, v.y as f32, v.z as f32]
+}
+
+/// The row of readings a commit stores for an observation: what its last
+/// evaluation read on its render at the keypoint the commit writes, the
+/// self-similarity ellipse, the viewing angle, the tilt direction and the zoom
+/// ([`observation_reading`]), with its plain and blur-matched scores against
+/// the stored bitmap where `with_scores`, `NaN` where the row has none.
+///
+/// A row put on the bench from a committed point carries the readings the
+/// point stored until its first evaluation, so committing it again writes the
+/// same row.
+pub fn measurement_reading(
+    measurement: &super::track::TrackMeasurement,
+    with_scores: bool,
+) -> crate::reconstruction::ObservationReading {
+    let scores = (with_scores
+        && (measurement.plain_zncc.is_some() || measurement.blur_matched_zncc.is_some()))
+    .then(|| {
+        (
+            measurement.plain_zncc.unwrap_or(f64::NAN),
+            measurement.blur_matched_zncc.unwrap_or(f64::NAN),
+        )
+    });
+    observation_reading(
+        measurement
+            .zncc_self_similarity_ellipse
+            .as_ref()
+            .map(|e| &e.grid_px),
+        measurement.viewing_angle_deg,
+        measurement.tilt_direction_deg,
+        measurement.zoom,
+        scores,
+    )
 }
