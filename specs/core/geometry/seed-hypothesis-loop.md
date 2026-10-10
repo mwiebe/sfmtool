@@ -188,6 +188,16 @@ and which pass against the ground truth, and two such files that differ in a
 few dozen members give a first qualified candidate that fails and one that
 passes
 ([measurements](../patch/cluster-patch-refinement-measurements.md#subset-with-the-loop-as-the-default-2026-10-09)).
+The rank does not cause it: the first candidate is the first pass's, and the
+change enters that candidate's own exploration (the pairwise vote's single
+fixed-seed RANSAC draw per pair, the commit bar equal to the core cap, the
+rotation-locked resection's survivor floor, the first-tried choice among tied
+outcomes, member order) and reaches every later pass through the complement
+queue
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09)).
+Changes that make the set and the pick independent of draws, orders and ties
+are proposed in
+[seed-pick-stability.md](../../drafts/seed-pick-stability.md).
 
 None of the signals qualification and the rank read compares a candidate's
 photographs resampled into its patches. A photometric candidate score that
