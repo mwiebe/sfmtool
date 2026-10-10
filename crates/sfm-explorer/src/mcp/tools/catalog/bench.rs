@@ -808,7 +808,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             description: "Fit a bench track at the stage it is in — the step that MOVES it. At \
                           the track stage it localizes every sighting against the patch, \
                           refines each to sub-pixel, re-triangulates the in ones, re-centres \
-                          the frame there and renders the patch bitmap again, the reference \
+                          the patch there and renders the patch bitmap again, the reference \
                           view's tile; at the cluster \
                           stage it is the refinement, which is what a reading is too. Nothing \
                           is dropped by a gate: a sighting that does not belong is turned out \
