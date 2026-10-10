@@ -186,7 +186,12 @@ A pass explores its admission as a ladder of ATTEMPTS, one per working set
 to 8 seed groups in covisibility order. On a parallax-poor capture it first
 tries the rotation core, and a rotation core that clears the commit bar is
 the attempt's outcome. Otherwise every seed group is probed at the probe
-focal before any of them is judged:
+focal before any of them is judged. The probe focal is the raw pairwise
+focal vote, with no bias correction; under an equidistant context it is the
+verdict's equidistant focal, and with no vote it is `0.9 * max(w, h)`. It is
+not a rung of the [focal scan's lattice](#focal-scan); snapping it to the
+nearest rung is proposed in
+[seed-probe-lattice-amendment.md](../../drafts/seed-probe-lattice-amendment.md).
 
 - A probe is MEASURABLE when its inlier fraction (2 px) reaches
   `max(15%, 0.5 * best)`, where `best` is the highest inlier fraction over
@@ -213,7 +218,18 @@ unmeasurable fallbacks. The outcome order compares, in turn:
    first.
 
 Every term is a property of the finished outcome, so the order the groups
-were tried in decides nothing. The cost is the widen and verify of groups a
+were tried in decides nothing.
+
+The rotation core is also the fallback of the ladder's first attempt (the
+admission itself; thinned working sets never try it). When no seed group
+clears the commit bar and none has left a starved outcome, that attempt
+tries the rotation core after the seed groups if it has not tried it
+already, on any capture rather than only a parallax-poor one. A rotation
+core that clears the commit bar is the attempt's outcome; otherwise its
+finished outcome, or its probe when its parallax is under the near-static
+gate, joins the fallbacks above.
+
+The cost of the outcome order is the widen and verify of groups a
 first-come rule would not have reached; the probe and finish memos carry a
 group that a later pass repeats at no further cost. The candidates a pass
 commits are still the ladder's finalists (below), pulled from the source
@@ -247,9 +263,9 @@ that only sat too low or too high is extended past its peak this way.
 points of inlier fraction of the best rung and at most 2 rungs from it, so
 at most 5 rungs. Each is refit at a heavier adjustment budget, and the best
 refit wins. The structure-free focal breaks a tie only: among the refits
-within half a point of the best one, the rung nearest it in log-focal wins.
-Because the tied rungs are lattice rungs, the vote moves the winner only by
-crossing the log-midpoint of two of them.
+within half a point of the best one (`SFMTOOL_REFIT_TIE`, default 0.005), the
+rung nearest it in log-focal wins. Because the tied rungs are lattice rungs,
+the vote moves the winner only by crossing the log-midpoint of two of them.
 
 **Release.** The release walks the focal from the winner with a free-focal
 adjustment, at most three rounds, and stops when the focal moves by under
@@ -257,7 +273,14 @@ adjustment, at most three rounds, and stops when the focal moves by under
 fraction is within half a point of the best seen, the winner's own
 included. The winner is a lattice rung rather than an optimum in focal, so
 on a flat-topped scan a walk that ties it is kept, and a walk that loses to
-it by more than the tie is not.
+it by more than the tie is not. The release reads the same
+`SFMTOOL_REFIT_TIE`.
+
+The half-point tie and the release's tying-step rule were set on the two
+ground-truth captures, `SeoulBull` and `KerryPark480`
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)),
+and are validated against the fleet's references in the next fleet
+measurement.
 
 **`edge_scan`.** The flag is set when the extended scan still peaks at its
 top rung and rises to it monotonically (no drop of more than half a point),
@@ -318,9 +341,10 @@ through the complement queue
 ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09)).
 Member order, the vote's single draw per pair, the commit bar equal to the
 core cap, a scan grid centred on the vote, the first-tried choice among seed
-groups and a resection floor read on every trim round no longer reach it
-(sections above). On the 22 perturbed files of the two ground-truth captures
-the first candidate passes the ground truth on every file, but it still
+groups and a resection floor read on every trim round do not reach it: each is
+replaced by the rule its section above states, the last by the trim rule of
+[rotation-locked-resection.md](rotation-locked-resection.md#mechanism). On the
+22 perturbed files of the two ground-truth captures the first candidate passes the ground truth on every file, but it still
 changes on 10 of them
 ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-milestone-b-2026-10-09)):
 on `KerryPark480` the dropped members change which skeleton images the
