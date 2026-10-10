@@ -1,0 +1,49 @@
+case,dataset,type,ratio_bin,member,cluster,scale_ratio,plain_zncc,blur_matched_zncc,epipolar_px,gt_verdict,human_choice,note
+c01,KerryPark480,rescued,1/4-1/2,32339,10128,0.4531,0.837559,0.853292,95.632,wrong,wrong,"This is grass vs a dirt path. The color is different -- are we using RGB photometric or did we collapse to greyscale? We've converted to color elsewhere, maybe this part was missed."
+c02,KerryPark480,rescued,<1/4,22282,5538,0.2455,0.834594,0.865379,159.819,wrong,wrong,"A person and their shado, compared to part of a car and a shadow."
+c03,KerryPark480,rescued,<1/4,24616,6428,0.1790,0.825159,0.861514,132.010,wrong,wrong,"A person and their shadow, compared to the shadow of a hedge"
+c04,DnDTabletop,rescued,1/2-0.7,818029,101438,0.6209,0.754239,0.850344,3822.575,wrong,unsure,"This is more plausible, but the member is too blurry to tell."
+c05,KerryPark480,control_accepted,0.7-1.4,37021,12469,0.9960,0.936742,0.936742,0.451,right,right,
+c06,DnDTabletop,rescued,1/2-0.7,35821,3680,0.6555,0.823653,0.915669,2.047,right,right,This looks like a sharper vs blurry version of the same subject
+c07,DnDTabletop,rescued,1/4-1/2,396578,43806,0.3881,0.837484,0.855348,607.142,wrong,unsure,"These are probably different, but it's easy to see why they would match photometrically."
+c08,KerryPark480,rescued,0.7-1.4,16795,3547,0.7419,0.836684,0.870051,0.435,right,right,
+c09,DnDTabletop,rescued,1/2-0.7,884157,112148,0.6213,0.846203,0.909446,1.066,right,right,
+c10,KerryPark480,rescued,0.7-1.4,37527,12722,0.7673,0.834315,0.870118,0.123,right,right,
+c11,DnDTabletop,rescued,0.7-1.4,38510,3956,0.8779,0.836206,0.933135,0.585,right,right,
+c12,KerryPark480,rescued,0.7-1.4,10885,1877,0.7702,0.845124,0.936046,81.218,wrong,wrong,manhole cover vs part of a round shadow
+c13,KerryPark480,rescued,1/4-1/2,18801,4247,0.2926,0.792915,0.854660,154.189,wrong,wrong,"The member has almost no texture detail, probably some kind of contrast factor should be eliminating it?"
+c14,DnDTabletop,control_rejected,0.7-1.4,1443605,223315,0.9976,0.844330,0.844330,2.107,right,right,
+c15,KerryPark480,rescued,<1/4,21711,5325,0.1293,0.801307,0.857098,33.090,wrong,unsure,"Both are vegetation with some sky peeking through, but likely different subjects"
+c16,DnDTabletop,rescued,1/4-1/2,1480503,232171,0.3409,0.841544,0.888607,1130.796,wrong,wrong,"The color is quite different, even though the pattern is similar. Maybe same RGB vs greyscale question"
+c17,KerryPark480,rescued,<1/4,25365,6712,0.2102,0.845486,0.855684,79.933,wrong,wrong,Two different shadows of very different things
+c18,KerryPark480,control_rejected,0.7-1.4,18236,4038,0.9885,0.529130,0.583438,211.425,wrong,wrong,Similar texture though differing brightness. Likely this is something that we might accept and need to filter out statistically/geometrically later
+c19,KerryPark480,rescued,1/4-1/2,16032,3317,0.3569,0.840502,0.871099,266.453,wrong,wrong,"Part of a hedge vs hair on a head. The colors don't match at all, though the brightness pattern is similar"
+c20,KerryPark480,rescued,1/2-0.7,20532,4885,0.6409,0.799767,0.870439,0.050,right,right,
+c21,DnDTabletop,rescued,1/2-0.7,207560,21667,0.6779,0.834854,0.879194,4.497,right,right,
+c22,KerryPark480,rescued,1/2-0.7,9002,1427,0.6421,0.842976,0.856803,1.318,right,right,
+c23,DnDTabletop,rescued,0.7-1.4,1760727,309564,0.8309,0.841951,0.874301,6.924,wrong,right,
+c24,DnDTabletop,rescued,1/4-1/2,299321,31576,0.4835,0.821599,0.862558,752.647,wrong,wrong,They're likely two different parts of a surface that has a consistent texturing.
+c25,KerryPark480,rescued,0.7-1.4,7440,1106,0.8584,0.849864,0.862821,0.172,right,right,
+c26,DnDTabletop,control_accepted,0.7-1.4,1913985,360577,0.8772,0.932561,0.932561,0.048,right,right,
+c27,KerryPark480,rescued,1/2-0.7,9395,1518,0.6901,0.838675,0.864491,0.290,right,right,
+c28,DnDTabletop,rescued,<1/4,1359133,201765,0.0715,0.805013,0.853748,16.003,wrong,wrong,
+c29,DnDTabletop,rescued,<1/4,1838938,335578,0.1503,0.710184,0.876505,459.969,wrong,wrong,This is one where the color could eliminate it easily
+c30,DnDTabletop,rescued,1/4-1/2,2188117,481709,0.3188,0.733534,0.866765,18.799,wrong,wrong,
+c31,DnDTabletop,rescued,0.7-1.4,563982,65157,0.7724,0.839754,0.884272,1.854,right,right,
+c32,DnDTabletop,rescued,0.7-1.4,677954,79779,0.7281,0.836374,0.920718,1.425,right,right,
+c33,DnDTabletop,control_accepted,0.7-1.4,1538438,246238,0.9372,0.988512,0.988512,0.935,right,right,
+c34,KerryPark480,control_rejected,0.7-1.4,12756,2370,0.7821,0.772728,0.772728,0.340,right,right,
+c35,KerryPark480,rescued,1/2-0.7,31031,9474,0.5918,0.825175,0.880636,0.029,right,right,
+c36,DnDTabletop,rescued,0.7-1.4,1291065,187766,1.0090,0.822802,0.885424,1.872,right,right,
+c37,KerryPark480,rescued,1/4-1/2,23384,5958,0.4338,0.841268,0.857171,296.855,wrong,wrong,A person vs some different colored vegetation
+c38,DnDTabletop,rescued,<1/4,1755241,307842,0.2020,0.837602,0.887835,367.210,wrong,wrong,Very different colors
+c39,DnDTabletop,rescued,<1/4,1655050,279006,0.1314,0.824000,0.855295,825.107,wrong,wrong,
+c40,KerryPark480,rescued,1/2-0.7,1742,193,0.6816,0.828040,0.856482,0.007,right,right,
+c41,DnDTabletop,rescued,1/2-0.7,1677561,285300,0.6962,0.830526,0.866042,4.532,right,right,
+c42,KerryPark480,control_accepted,0.7-1.4,23329,5937,0.9176,0.897526,0.897526,29.411,wrong,wrong,
+c43,KerryPark480,rescued,0.7-1.4,25875,6906,0.8799,0.826833,0.853065,116.851,wrong,wrong,lawn/sidewalk vs tree/car
+c44,DnDTabletop,rescued,<1/4,1463789,228157,0.1541,0.826669,0.859074,1591.447,wrong,wrong,
+c45,KerryPark480,rescued,<1/4,21709,5325,0.1375,0.803731,0.867417,30.839,wrong,wrong,"This is vegetation with sky peeking through, but likely different ones. Similar to previous one of the same category"
+c46,DnDTabletop,control_rejected,0.7-1.4,1075445,143564,1.0158,0.764274,0.764274,4152.997,wrong,wrong,
+c47,DnDTabletop,rescued,1/4-1/2,1998647,393542,0.2631,0.791369,0.872686,935.127,wrong,wrong,The contrast is very different between these
+c48,KerryPark480,rescued,1/4-1/2,20188,4756,0.4547,0.815624,0.892632,0.032,right,right,

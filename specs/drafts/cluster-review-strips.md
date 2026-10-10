@@ -159,11 +159,13 @@ random order per case, and the answers are A, B, *same* and *both wrong*.
 The reviewer opens `index.html` and does not open `cases.csv` until every case
 is answered; no answer is changed after the key is opened. The two files are
 then joined on the case id into one archive CSV,
-`<spec>-human-review-<date>.csv`, beside the measurements file it supports,
-with the key's columns followed by `choice` and `note`, as
-[cluster-patch-refinement-human-review-2026-10-09.csv](../core/patch/cluster-patch-refinement-human-review-2026-10-09.csv)
-is. The images and the page are not kept; the archive keeps enough (member
-index, position and shape) to render any case again from its file.
+`<spec>-human-review-<date>.csv`, beside the measurements file it supports:
+the case id, dataset, population, scale-ratio bin, member and cluster
+indexes, scale ratio, plain and blur-matched scores, epipolar distance and the
+ground truth's verdict from the key, then the reviewer's answer and note, as
+[cluster-patch-refinement-human-review-2026-10-10.csv](../core/patch/cluster-patch-refinement-human-review-2026-10-10.csv)
+is. The images and the page are not kept; the member index, with the
+cluster-patches file the measurements section names, renders any case again.
 
 ## Folding a review into the measurements
 
@@ -184,7 +186,10 @@ bears on, in the form of
   by the ground truth.
 - **What this decides**, in plain terms, or what result would settle it.
 
-The section links the archive CSV.
+The section links the archive CSV. The first review drawn with the prototype
+is folded in this way as
+[Blur-matched scores across scales](../core/patch/cluster-patch-refinement-measurements.md#blur-matched-scores-across-scales-2026-10-10),
+with the statistics of the next section beside it.
 
 ## The statistics beside a review
 
