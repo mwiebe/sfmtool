@@ -105,6 +105,22 @@ _LOAD_CTX = {}
 # collapsed its factorization outright).
 MAX_CL = int(os.environ.get("SFMTOOL_MAX_CL", "3000"))
 SCAN_CAP = int(os.environ.get("SFMTOOL_SCAN_CAP", "8"))  # core images per try
+# The commit bar's kept-frame count: an outcome commits (and a committed
+# hypothesis qualifies) on at least this many kept frames.  It sits ONE BELOW
+# the core cap rather than at it: the probe grows a seed group to SCAN_CAP
+# frames, so a bar equal to the cap fails on the first frame lost in growth,
+# and on SeoulBull the probe focal's ordinary noise (258 vs 265 px) decided
+# whether group 0-4 grew to 8 or 7 and so which group seeded the first
+# candidate (specs/core/geometry/seed-hypothesis-loop-measurements.md).  8 is
+# the bar the commit used before the cap was considered; it still applies
+# when SFMTOOL_SCAN_CAP raises the cap past 9.
+COMMIT_MIN_KEPT = min(8, SCAN_CAP - 1)
+# RANSAC draws behind each pair's focal vote and each ray-space pair init's
+# parallax and cheiral reading.  The pair reads the median of its draws, so a
+# single draw's sample sequence does not decide a vote or a gauge pair: on
+# SeoulBull one draw per pair moves the pooled vote between 251 and 323 px
+# across seeds 0 to 9 of one unchanged file.
+VOTE_DRAWS = max(1, int(os.environ.get("SFMTOOL_VOTE_DRAWS", "5")))
 # Wide-baseline shell: after the covisibility-driven core, resect up to this
 # many far images (widest viewpoint angles).  The focal is unobservable on a
 # near-affine core — a sliver of a long orbit fits ANY focal at high inlier
@@ -448,17 +464,25 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
     # unit frame onto this member's image pixels.  Only the warp passthrough
     # reads it; the geometry the seed solves on is the position, so no `.sift`
     # file is opened here at all.
-    uv_s = np.asarray(sel_h.member_positions(), dtype=np.float64)
-    shapes = np.asarray(sel_h.member_affine_shapes(), dtype=np.float64)
+    uv_raw = np.asarray(sel_h.member_positions(), dtype=np.float64)
+    shapes_raw = np.asarray(sel_h.member_affine_shapes(), dtype=np.float64)
     obs_c = np.repeat(np.arange(n_sel, dtype=np.int64), sizes)
+    # MEMBER ORDER IS FIXED HERE, by content: every stage downstream reads the
+    # observation rows in this order, so the order the file lists a cluster's
+    # members in never reaches a solver (see `seed_camera.canonical_member_order`).
+    perm = seed_camera.canonical_member_order(
+        starts_s, sel_h.member_images, uv_raw, sel_h.reference_members
+    )
+    uv_s = uv_raw[perm]
+    shapes = shapes_raw[perm]
     out = {
         "names": names,
         "dims": dims,
         "obs_c": obs_c,
         # The selection keeps the file's own image table, so its member
         # image indexes are already in the loader's frame.
-        "obs_i": np.asarray(sel_h.member_images, dtype=np.int64),
-        "obs_f": np.asarray(sel_h.member_features, dtype=np.int64),
+        "obs_i": np.asarray(sel_h.member_images, dtype=np.int64)[perm],
+        "obs_f": np.asarray(sel_h.member_features, dtype=np.int64)[perm],
         "obs_uv": np.ascontiguousarray(uv_s),
         "adm_rank": rank,
         "cl_quality": np.asarray(sel_h.cluster_worst_consistency(), dtype=np.float64),
@@ -480,11 +504,13 @@ def repackage_selection(sel_h, names, dims, want_warp=False, refine_radius=None)
         # and B.load_clusters cannot drift apart).
         import seed_camera as B
 
+        # In the file's member order, where `reference_members` indexes, then
+        # carried into the canonical order with every other member column.
         out["obs_warp"] = np.ascontiguousarray(
-            B.relative_warps(shapes, obs_c, sel_h.reference_members),
+            B.relative_warps(shapes_raw, obs_c, sel_h.reference_members)[perm],
             dtype=np.float64,
         )
-        out["obs_ref"] = np.asarray(sel_h.member_status) == 0
+        out["obs_ref"] = (np.asarray(sel_h.member_status) == 0)[perm]
         out["refine_radius"] = refine_radius
     return out
 
@@ -1135,12 +1161,16 @@ def load_clusters():
         # of the negated radii is exactly that, so the kept set is a
         # function of the file and N alone.
         keep = np.sort(np.argsort(-cl_radius, kind="stable")[: rung.n])
+        # The referee's arrays in the same canonical member order every
+        # repackaged selection carries (the cluster column is unchanged by it).
+        pos_v = np.asarray(sel_h.member_positions(), dtype=np.float64)
+        perm_v = seed_camera.canonical_member_order(
+            starts_s, m_img, pos_v, sel_h.reference_members
+        )
         rung.vote_obs = (
             m_cl,
-            m_img,
-            np.ascontiguousarray(
-                np.asarray(sel_h.member_positions(), dtype=np.float64)
-            ),
+            m_img[perm_v],
+            np.ascontiguousarray(pos_v[perm_v]),
         )
         # Restrict the HANDLE, not the file: `restrict_cluster_ids` names
         # ids of the file it is called on, and the radii above are in
@@ -1378,6 +1408,7 @@ def estimate_intrinsics(obs_c, obs_i, u):
         int(w),
         int(h),
         seed=0,
+        draws=VOTE_DRAWS,
         columns="auto",
     )
     # Stage 1's own pinhole numbers: the vote the kernel screened on when it
@@ -1766,11 +1797,39 @@ def ray_pair_parallax(x1, x2, f, seed=0):
     return pose["parallax_deg"], int(np.asarray(pose["inliers"]).sum())
 
 
-def _best_ray_pair(index, pairs, f, seed=0):
+def ray_pair_pose_draws(x1, x2, f, draws=None):
+    """``ray_pair_pose`` read over ``draws`` RANSAC seeds (``VOTE_DRAWS`` by
+    default), or None.
+
+    Draw ``k`` runs at seed ``k``.  The pair's reading is the median over the
+    draws that produced a pose -- its parallax and its cheiral count, each the
+    median of its own column -- and is None unless more than half of the draws
+    produced one.  The pose returned is the draw at the lower middle of the
+    parallaxes (ties by draw index), so its rotation and translation are one
+    estimate's, and it carries the medians as ``parallax_med`` and
+    ``n_cheiral_med``.  A pair whose translation direction is poorly
+    constrained reads 0.71 deg under one seed and 1.48 deg under eleven others
+    (KerryPark480's pair (0, 1)); the median keeps the reading the seeds agree
+    on.  Bit-identical for a fixed draw count."""
+    k = VOTE_DRAWS if draws is None else max(1, int(draws))
+    poses = [(s, ray_pair_pose(x1, x2, f, seed=s)) for s in range(k)]
+    got = [(s, p) for s, p in poses if p is not None]
+    if 2 * len(got) <= k:
+        return None
+    by_par = sorted(got, key=lambda sp: (sp[1]["parallax_deg"], sp[0]))
+    rep = dict(by_par[(len(by_par) - 1) // 2][1])
+    rep["parallax_med"] = float(np.median([p["parallax_deg"] for _s, p in got]))
+    rep["n_cheiral_med"] = float(np.median([p["n_cheiral"] for _s, p in got]))
+    return rep
+
+
+def _best_ray_pair(index, pairs, f):
     """Best ray-space pair init over ``pairs``, or None.
 
     Ranking, in order: clears the parallax floor, then cheiral support, then
-    parallax.  A pair with real baseline and broad support is what seeds
+    parallax, each read as the median over ``VOTE_DRAWS`` RANSAC draws
+    (``ray_pair_pose_draws``), so which pair leads does not depend on one
+    draw.  A pair with real baseline and broad support is what seeds
     structure; a pair below the floor is taken only when nothing else exists
     (the caller's own low-parallax fallbacks then arbitrate)."""
     best = None
@@ -1779,13 +1838,13 @@ def _best_ray_pair(index, pairs, f, seed=0):
         if len(x1) < FISHEYE_PAIR_MIN_CORR:
             continue
         px1, px2 = _cap_corr(x1, x2)
-        pose = ray_pair_pose(px1, px2, f, seed=seed)
+        pose = ray_pair_pose_draws(px1, px2, f)
         if pose is None:
             continue
         key = (
-            pose["parallax_deg"] >= FISHEYE_PAIR_PARALLAX_DEG,
-            pose["n_cheiral"],
-            pose["parallax_deg"],
+            pose["parallax_med"] >= FISHEYE_PAIR_PARALLAX_DEG,
+            pose["n_cheiral_med"],
+            pose["parallax_med"],
         )
         if best is None or key > best[0]:
             best = (key, a, b, pose)
@@ -2891,6 +2950,11 @@ def grow_to_cap(seed, f0, obs_c, obs_i, u, n_img, n_cl, cap, rank, snap=None):
 def core_parallax(rvec, tvec, pts, posed, obs_c, obs_i):
     """Median over triangulated points of the widest ray angle between the
     posed views observing them, in degrees.
+
+    Each point's angles are measured from its first posed observation, which
+    is the cluster's reference member whenever its frame is posed: the loader
+    puts the reference first in every cluster (`repackage_selection`), so the
+    reading does not depend on the order the file lists members in.
 
     A covisibility-picked seed can be a zero-baseline segment (a video's
     most-mutually-covisible frames are where the camera moved LEAST —
@@ -4665,8 +4729,10 @@ def rotation_only_hypothesis(
     cam = make_cam(f_rot)
 
     # One direction per cluster: the world-frame ray of its REFERENCE
-    # observation (the first one a posed frame carries; the observation arrays
-    # are cluster-major, so that is well defined and order-free).
+    # observation -- the cluster's stored reference member when its frame is
+    # posed, else the posed member of lowest image index.  The loader orders
+    # each cluster's members reference first, then by image index
+    # (`repackage_selection`), so the first posed row is exactly that.
     live = posed[obs_i]
     rows = np.nonzero(live)[0]
     d_loc = cam.pixel_to_ray_batch(np.ascontiguousarray(u[rows]))
@@ -4820,7 +4886,7 @@ def qualifies(res):
     reads: the commit bar (posed count, coverage reach, focal observability), a
     release inside the corrected vote band, and no flat-scan / edge-scan /
     near-static-seed verdict."""
-    if res["kept"] < 8 or res["reach"] < 0.60 or res["spread"] < 0.05:
+    if res["kept"] < COMMIT_MIN_KEPT or res["reach"] < 0.60 or res["spread"] < 0.05:
         return False
     blocking = {
         "vote_divergence",
@@ -5866,7 +5932,7 @@ def run_pipeline(
             window while observable alternatives were never tried).  The
             spread is measured here and kept on the outcome, so the level
             loop reuses the measurement instead of repeating it."""
-            if outcome["kept"] < 8 or outcome["reach"] < 0.60:
+            if outcome["kept"] < COMMIT_MIN_KEPT or outcome["reach"] < 0.60:
                 return False
             outcome["spread"] = scan_spread(outcome)
             print(
@@ -6444,6 +6510,9 @@ def run_pipeline(
         d_loc = cam.pixel_to_ray_batch(np.ascontiguousarray(o_u[rows]))
         d_w = np.einsum("nji,nj->ni", rot[o_i[rows]], d_loc)
         d_w /= np.maximum(np.linalg.norm(d_w, axis=1, keepdims=True), 1e-12)
+        # The reference ray of each cluster: its first posed row, which the
+        # loader's canonical member order makes the stored reference member
+        # whenever that member's frame is posed.
         uniq, first = np.unique(o_c[rows], return_index=True)
         dirs = np.full((n_cl_w, 3), np.nan)
         dirs[uniq] = d_w[first]
@@ -6615,7 +6684,9 @@ def run_pipeline(
         if att is not None:
             att["level"] = level
             if "spread" not in att:  # attempts measure their own commit bar
-                att["spread"] = scan_spread(att) if att["kept"] >= 8 else 0.0
+                att["spread"] = (
+                    scan_spread(att) if att["kept"] >= COMMIT_MIN_KEPT else 0.0
+                )
             # This level's outcome was RETURNED, whatever fallback slot it came
             # out of, so any drop reason a defer stamped on it is withdrawn.
             evo_clear(att.get("evo"))
@@ -6639,7 +6710,11 @@ def run_pipeline(
                 + f", scan spread {100 * att['spread']:.1f}pp [{elapsed():.1f}s]"
             )
             atts.append(att)
-            if att["kept"] >= 8 and att["reach"] >= 0.60 and att["spread"] >= 0.05:
+            if (
+                att["kept"] >= COMMIT_MIN_KEPT
+                and att["reach"] >= 0.60
+                and att["spread"] >= 0.05
+            ):
                 # Stop exploring: observable + ample coverage.  Under the rung
                 # this is the only reason the ladder stops early, and it stops
                 # a GENERATOR rather than a search for one answer -- the
