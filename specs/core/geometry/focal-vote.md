@@ -589,7 +589,8 @@ A pair's vote is the reading of one RANSAC fit, and on a real capture one fit
 is not a stable reading of the pair: on `SeoulBull`'s cluster file, changing
 only the seed from 0 to 9 moves single pair votes by up to a factor of two and
 the pooled vote between 251 and 323 px. Over the same ten seeds the pooled
-vote spans 245 to 298 px at 5 draws per pair and 254 to 290 px at 9.
+vote spans 245 to 298 px at 5 draws per pair and 254 to 290 px at 9
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09)).
 `draws` reads each pair over several fits. Draw `k` of a pair runs its
 estimators at seed `seed + k`, so draw 0 is the single-draw vote and
 `draws = 1` is that vote bit for bit.
