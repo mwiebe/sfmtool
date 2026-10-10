@@ -135,6 +135,8 @@ This is a read-only survey of the whole tree at `18b1f970`, which is branch `hyg
 - Proposed fix: re-export the format crate's enum and constant, or at minimum add a `const _: () = assert!(…)` for each variant.
 - Effort: low. Risk: low.
 
+> _Status (2026-10-09): **Done** — already fixed by the cluster-patch piecewise refinement work: `params.rs` imports `ClusterMemberStatus` and `CLUSTER_REFERENCE_UNREFINABLE`, a `const _` block asserts each of the nine discriminants against the format enum and that `ClusterMemberStatus::ALL` has nine entries, `REFERENCE_UNREFINABLE` is defined as `CLUSTER_REFERENCE_UNREFINABLE`, and the false "does not depend" comment is gone, PR #870._
+
 **Correct the `translate_patch_to_pixel` docstring and stop restating bench steps in four layers**
 - Location: `crates/sfmtool-py/src/bench.rs:1008-1032` against `crates/sfmtool-core/src/bench/steps.rs:1520-1553`. The other copies are in `mcp/bench.rs:682` and `mcp/tools/catalog/bench.rs:271`.
 - Problem:
@@ -647,7 +649,7 @@ These figures were measured at `18b1f970` on 2026-10-08. They are not permanent 
 
 ## Top 3
 
-> _Status (2026-10-08): item 1 is done by PR #868._
+> _Status (2026-10-09): item 1 is done by PR #868, and item 3 by PR #870._
 
 1. **Unbind the colliding root names before #866 merges.** It is low effort, and it prevents an API hazard that this round's own rename created.
 2. **Turn on `unreachable_pub` in `sfm-explorer`.** One lint and one `cargo fix` turn an 839-site prose rule into one that CI enforces.
