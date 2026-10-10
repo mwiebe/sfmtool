@@ -424,6 +424,18 @@ RESECT_TRACE = os.environ.get("SFMTOOL_RESECT_TRACE", "0") == "1"
 # (specs/core/geometry/rotation-locked-resection.md, Callers).
 RESECT_MIN_INLIERS = 10
 RESECT_RETRY_WIDEN = 2.0
+# The retry's floor is relative to the observations the image offers: the
+# share of them its translation must keep within the ordinary gate, and an
+# absolute minimum of twice the two observations that determine a translation.
+RESECT_RETRY_MIN_SHARE = 0.10
+RESECT_RETRY_MIN_COUNT = 4
+
+
+def resect_retry_floor(n_offered):
+    """Fewest observations within ``RESECT_MAX_PX`` that accept the retry of
+    an image offering ``n_offered`` observations: a tenth of them, and never
+    fewer than ``RESECT_RETRY_MIN_COUNT``."""
+    return max(RESECT_RETRY_MIN_COUNT, int(np.ceil(RESECT_RETRY_MIN_SHARE * n_offered)))
 
 
 def fisheye_focal_band():
@@ -2189,11 +2201,12 @@ def resect_locked(cam, q_wxyz, points, uv):
     final kept set, and returns the translation fitted over that set.  An
     image that still fails is tried once more with a trim gate
     ``RESECT_RETRY_WIDEN`` times wider, which lets the first solve
-    start from a broader set when a few strays pull it out of the basin; the
-    retry is accepted only when its translation keeps at least the floor's
-    count of observations within the ordinary gate, so the wider gate finds
-    the translation and the ordinary gate still judges it.  The retry's
-    ``inliers`` are those ordinary-gate survivors."""
+    start from a broader set when a few strays pull it out of the basin.  The
+    retry is accepted when its translation keeps at least
+    ``resect_retry_floor`` of the offered observations within the ordinary
+    gate, so the wider gate finds the translation and the ordinary gate still
+    judges it, on a floor relative to what the image offers rather than a
+    count.  The retry's ``inliers`` are those ordinary-gate survivors."""
     from sfmtool.geometry import resect_translation
 
     q = [float(x) for x in q_wxyz]
@@ -2202,18 +2215,18 @@ def resect_locked(cam, q_wxyz, points, uv):
     out = resect_translation(cam, q, x, uv, RESECT_MAX_PX, RESECT_MIN_INLIERS)
     if out is not None:
         return out
-    wide = resect_translation(
-        cam, q, x, uv, RESECT_RETRY_WIDEN * RESECT_MAX_PX, RESECT_MIN_INLIERS
-    )
+    floor = resect_retry_floor(len(uv))
+    wide = resect_translation(cam, q, x, uv, RESECT_RETRY_WIDEN * RESECT_MAX_PX, floor)
     if wide is None:
         return None
     keep = np.asarray(wide["residual_norms"], dtype=np.float64) < RESECT_MAX_PX
-    if int(keep.sum()) < RESECT_MIN_INLIERS:
+    if int(keep.sum()) < floor:
         return None
     if RESECT_TRACE:
         print(
-            f"    [resect retry: {int(keep.sum())} within {RESECT_MAX_PX:g} px "
-            f"after a {RESECT_RETRY_WIDEN * RESECT_MAX_PX:g} px trim]"
+            f"    [resect retry: {int(keep.sum())} of {len(uv)} within "
+            f"{RESECT_MAX_PX:g} px after a {RESECT_RETRY_WIDEN * RESECT_MAX_PX:g} px "
+            f"trim, floor {floor}]"
         )
     return dict(wide, inliers=keep)
 
