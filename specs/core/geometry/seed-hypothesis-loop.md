@@ -32,6 +32,27 @@ internally clean and can outnumber the true one. A feature wider than
 the repeat period cannot alias that way, so the coarse admission is the
 admission on which basin structure is legible.
 
+## Member order
+
+The loader fixes the order of every cluster's members by content before
+any stage reads them: the cluster's stored reference member first, then
+the others by image index, then by keypoint position. Every selection the
+loop solves on (the coarse cut, a coverage complement, a group-local
+re-admission) is repackaged in that order, and the referee's observation
+arrays carry it too. The order a file lists members in is therefore never
+read by a solver:
+
+- a stage that takes one observation per cluster as its reference ray
+  (the rotation-only layers, the ladder's far-field reading, and
+  `core_parallax`, which measures each point's widest angle from that ray)
+  takes the stored reference member when its frame is posed, and otherwise
+  the posed member of lowest image index;
+- the bundle adjustments, which stop at an evaluation cap and sum their
+  rows in observation order, see one row order for one file content.
+
+Permuting the members of every cluster of a file leaves the product
+bit-identical ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)).
+
 ## Capture-level measurements
 
 The pairwise focal vote, and where escalation confirms one the
@@ -41,6 +62,18 @@ pass runs. Every candidate reads the same vote. The vote is a property
 of the capture, not of a candidate: it is the independent referee each
 release is measured against, so no pass re-derives it from its own
 restricted pair graph.
+
+Each pair's vote is read over `SFMTOOL_VOTE_DRAWS` RANSAC draws (default
+5) and is the log-space median of its draws
+([focal-vote.md](focal-vote.md#draws-per-pair)), so the referee does not
+follow one draw's sample sequence. The ray-space pair inits that choose
+the rotation core's gauge pair and each fisheye seed group's starting
+pair read the same way: a pair's parallax and cheiral count are the
+medians over that many draws, and its pose is the draw at the median
+parallax. One draw per pair moved `SeoulBull`'s vote between 251 and 323
+px over seeds 0 to 9 of one file; five draws move it between 245 and 298
+px, and it settles slowly with more draws (254 to 290 px at nine)
+([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)).
 
 ## Coverage claim
 
@@ -169,7 +202,12 @@ and the log-focal distance between its release and the bias-corrected
 capture-level vote. A candidate QUALIFIES when the structure-trust gates
 all hold: the commit bar (posed count, reach, scan spread), the release
 inside the corrected vote band, and no flat-scan, edge-scan or
-near-static-seed verdict. Coverage reach is measured on the
+near-static-seed verdict. The commit bar's posed count is
+`min(8, cap - 1)` kept frames for the core cap `SFMTOOL_SCAN_CAP`
+(default 8, so 7 frames): the probe grows a seed group to the cap, and a
+bar equal to the cap fails on the first frame lost in growth. The same
+bar decides whether an attempt's outcome commits and whether the ladder
+stops early. Coverage reach is measured on the
 CAPTURE-LEVEL covisibility graph, the full admission's, for every
 candidate alike: reach asks how much of the capture a solve connects to,
 and a complement's smaller admission must not deflate the answer for a
@@ -189,15 +227,17 @@ few dozen members give a first qualified candidate that fails and one that
 passes
 ([measurements](../patch/cluster-patch-refinement-measurements.md#subset-with-the-loop-as-the-default-2026-10-09)).
 The rank does not cause it: the first candidate is the first pass's, and the
-change enters that candidate's own exploration (the pairwise vote's single
-fixed-seed RANSAC draw per pair, the commit bar equal to the core cap, the
-rotation-locked resection's survivor floor, the first-tried choice among tied
-outcomes, member order) and reaches every later pass through the complement
-queue
+change enters that candidate's own exploration and reaches every later pass
+through the complement queue
 ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09)).
-Changes that make the set and the pick independent of draws, orders and ties
-are proposed in
-[seed-pick-stability.md](../../drafts/seed-pick-stability.md).
+Member order, the vote's single draw per pair and the commit bar equal to the
+core cap no longer reach it (sections above). On the 22 perturbed files of
+the two ground-truth captures, the first candidate still changes on 9 and
+fails the ground truth on 3, through the scan grid centred on the vote and the
+`edge_scan` verdict read off it, the reach floor of the commit bar, the
+rotation-locked resection's survivor floor, and the first-tried choice among
+tied outcomes ([measurements](seed-hypothesis-loop-measurements.md#pick-stability-after-the-deterministic-fixes-2026-10-09)). Changes for those are proposed
+in [seed-pick-stability.md](../../drafts/seed-pick-stability.md).
 
 None of the signals qualification and the rank read compares a candidate's
 photographs resampled into its patches. A photometric candidate score that

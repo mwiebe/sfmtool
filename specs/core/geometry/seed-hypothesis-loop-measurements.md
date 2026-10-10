@@ -92,3 +92,82 @@ The rank never reorders the set: `ladder_first` is `0` in all 26 runs, either be
 - **The amplification is upstream of the rank.** The rank's rule (first qualified, commit order) reorders nothing on these two entries; the first candidate's own exploration changes, and the complement queue carries the change through the rest of the set.
 - **It is mostly a defect, not the evidence.** 21 of the 22 perturbed runs differ from the base in at least one committed candidate; only the swap of `SeoulBull`'s 5 moved shapes changes nothing. The first stage that differs was located in all 21. In 16 the mechanism was reproduced (the vote over RANSAC seeds, the forced probe focal, the scan readings, the gauge pair over seeds, the survivor counts of the locked resections, and the member-order readings), and each is a hard threshold the baseline sits within a few counts or percent of, a tie broken by try order, a single fixed-seed RANSAC draw, or member order. The other 5 (`KerryPark480` random drop s1 and s3, drop non-movers s2, ungated and reorder s1) first differ at the rotation core's posed count or at a complement pass's widen, stages governed by rules 4, 6 and 7, but their individual mechanism was not reproduced; reorder s1 changes no member and is order dependence by construction. None of the 16 needed a load-bearing member to explain it. The swap of the 56 moved shapes on `KerryPark480` changes the outcome only through rule 5, a RANSAC draw on a pair whose other seeds agree with the base.
 - **What to change** is proposed in [seed-pick-stability.md](../../drafts/seed-pick-stability.md): a vote measured over several RANSAC draws, a scan grid and probe focal that do not move with every change of the vote, a commit bar below the cap, choice among outcomes by a continuous score with a tie-break on content, a locked resection that judges its converged set and retries a failed image, and member order fixed at load. The perturbation suite here is its acceptance test.
+
+## Pick stability after the deterministic fixes (2026-10-09)
+
+**Question.** Three of the changes proposed in [seed-pick-stability.md](../../drafts/seed-pick-stability.md) remove causes that are not evidence at all: member order fixed at load, each pair vote and each ray-space pair init read as the median of several RANSAC draws, and the commit bar's kept count one below the core cap. With them built, does the [perturbation suite](#pick-stability-under-small-changes-to-the-cluster-file-2026-10-09) give bit-identical products under member reordering, which of its runs still change the first candidate, and does either capture's base `h00` stop passing its ground truth?
+
+**Method.**
+
+- **Code.** Branch `bootstrap-core-migration` with the three changes: [seed-hypothesis-loop.md](seed-hypothesis-loop.md) § "Member order", § "Capture-level measurements" (draws, `SFMTOOL_VOTE_DRAWS` at its default 5) and § "Rank" (commit bar `min(8, cap - 1)`, so 7 kept frames). Everything else in the seed is as in the section above.
+- **Files, seed runs and scoring.** The same 26 files per the section above (12 per capture plus a repeat of each base file), the same seed command, environment and instrumentation, and the same ground-truth scorer and pass bar.
+- **Identity.** Two products are called bit-identical when their manifests match with the run stamp and the timing fields removed, and every entry of every release file matches except `written.json`, `metadata.json` and `content_hash.json`, which carry the write time.
+- **Attribution.** As in the section above, with the rotation core's gauge pair and locked resections reproduced offline from the module functions on each run's own workspace (`_best_ray_pair` now reads its median over draws).
+- **Vote spread.** On the unchanged `SeoulBull` base file, the vote at `K` draws over ten disjoint seed sets (base seeds `0, K, …, 9K`), for `K` in 1, 5, 9, 17 and 33, measured through `geometry.estimate_intrinsics` on the full admission in the canonical member order.
+
+**Result: reordering is solved and the vote no longer follows one draw; the first candidate changes on as many drop files as before, through causes the remaining proposals address.**
+
+Vote spread on the `SeoulBull` base file:
+
+| `K` | vote range over 10 seed sets (px) | log range | log s.d. | pool log-IQR (median) |
+|---|---|---|---|---|
+| 1 | 251.2 to 323.4 | 0.253 | 0.096 | 0.397 |
+| 5 | 245.0 to 298.0 | 0.196 | 0.063 | 0.366 |
+| 9 | 254.3 to 289.9 | 0.131 | 0.037 | 0.338 |
+| 17 | 247.0 to 281.2 | 0.130 | 0.035 | 0.372 |
+| 33 | 258.5 to 276.3 | 0.067 | 0.023 | 0.390 |
+
+`K = 1` reproduces the 251 to 323 px of the section above. The spread over seed sets falls roughly as the square root of `K`, and at every `K` it is under the pool's own log-IQR, so that criterion does not choose `K`. The vote settles near 268 px. The ground truth's equivalent focal is 336 px, so the vote is 20% low once the draw is averaged out, and the single seed-0 draw (309.6 px) had been reading high by chance. At `K = 5` the base file's vote is 283.0 px.
+
+`SeoulBull`, pre-fix (from the section above) against post-fix. The base `h00` is seeded from frames 0 to 4, poses 8 frames and releases 338.9 px in both.
+
+| class | run | vote f post (pre) | `h00` seed changed (pre → post) | `h00` pass (pre → post) | qualified in set (pre → post) | set differs from base (pre → post) | first stage that differs (pre → post) |
+|---|---|---|---|---|---|---|---|
+| base | repeat | 283.0 (309.6) | no → no | PASS → PASS | 2 → 0 | no → no | none → none |
+| random drop | s1 | 247.0 (317.5) | no → no | PASS → PASS | 2 → 0 | yes → yes | `h01` focal scan → `h00` flags (`vote_divergence`) |
+| random drop | s2 | 263.5 (280.7) | no → no | PASS → PASS | 0 → 0 | yes → yes | `h00` flags → `h00` focal scan |
+| random drop | s3 | 263.5 (258.3) | yes → yes | PASS → PASS | 0 → 0 | yes → yes | `h00` probe → `h00` probe (reach) |
+| drop movers | | 283.0 (313.2) | no → no | PASS → PASS | 2 → 0 | yes → yes | `h00` release → `h00` release (spline accepted) |
+| drop non-movers | s1 | 269.8 (316.6) | no → no | PASS → PASS | 2 → 0 | yes → yes | `h01` focal scan → `h00` focal scan |
+| drop non-movers | s2 | 264.0 (264.7) | yes → yes | **fail** (focal −9.4%) → **fail** (focal −5.1%) | 0 → 0 | yes → yes | `h00` probe → `h00` probe (reach) |
+| drop non-movers | s3 | 283.0 (283.0) | no → no | PASS → PASS | 0 → 0 | yes → no | `h00` flags → none |
+| swap movers | | 283.0 (309.6) | no → no | PASS → PASS | 2 → 0 | no → no | none → none |
+| ungated | | 279.6 (298.6) | no → no | PASS → PASS | 1 → 0 | yes → yes | `h00` release → `h00` release (spline accepted) |
+| reorder | s1, s2 | 283.0 (309.6) | no → no | PASS → PASS | 2 → 0 | yes → no (bit-identical) | `h02` release → none |
+
+Every finite `SeoulBull` candidate post-fix: `h00` passes in 12 of 13 runs (all but drop non-movers s2), `h01` in 12 of 13 (all but drop non-movers s1, released at 310.3 px), and `h02`, a 3-frame flat-scan window, in none. No candidate qualifies in any run.
+
+`KerryPark480`, pre-fix against post-fix. Post-fix the vote is 144.0 px in every run but the ungated file (160.3 px); pre-fix it read 176.3, 215.7, 166.3 and 216.1 px on random drops s1 and s2, drop non-movers s2 and the ungated file. The equidistant verdict focal is 138.3 px in every run; the base `h00` is the rotation core of the first pass, poses 28 frames and passes, pre and post.
+
+| class | run | `h00` posed (pre → post) | `h00` pass (pre → post) | complement candidates passing (pre → post) | seed frames of `h01` to `h06` changed (pre → post) | first stage that differs (pre → post) |
+|---|---|---|---|---|---|---|
+| base | repeat | 28 → 28 | PASS → PASS | 0 → 0 | 0 → 0 | none → none |
+| random drop | s1 | 28 → 28 | PASS → PASS | 1 → 1 | 5 → 5 | `h01` widen → `h01` widen |
+| random drop | s2 | 28 → 28 | PASS → PASS | 0 → 0 | 4 → 4 | `h00` probe (gauge pair) → `h00` probe (gauge pair) |
+| random drop | s3 | 29 → 29 | PASS → PASS | 1 → 2 | 6 → 6 | `h00` probe → `h00` probe (core of 23) |
+| drop movers | | 23 → 23 | PASS → **fail** (centre 11.9%) | 1 → 2 | 6 → 6 | `h00` probe (locked resection) → same |
+| drop non-movers | s1 | 15 → 15 | PASS → PASS | 2 → 2 | 6 → 6 | `h00` probe (locked resection) → same |
+| drop non-movers | s2 | 28 → 28 | PASS → PASS | 0 → 0 | 4 → 4 | `h01` widen → `h01` widen |
+| drop non-movers | s3 | 19 → 19 | **fail** (centre 10.4%) → **fail** (centre 10.6%, rotation 1.81°) | 3 → 3 | 6 → 5 | `h00` probe (locked resection) → same |
+| swap movers | | 28 → 28 | PASS → PASS | 0 → 1 | 6 → 6 | `h00` probe (gauge pair) → `h00` widen |
+| ungated | | 26 → 26 | PASS → PASS | 1 → 1 | 6 → 6 | `h00` probe → `h00` probe (core of 20) |
+| reorder | s1 | 28 → 28 | PASS → PASS | 0 → 0 | 2 → 0 | `h03` widen → none (bit-identical) |
+| reorder | s2 | 28 → 28 | PASS → PASS | 1 → 0 | 4 → 0 | `h02` widen → none (bit-identical) |
+
+The seed-frame counts here compare the `h01` to `h06` seed groups position by position with the base run's, the same reading for both columns. Qualified candidates in the base set go from 7 to 6.
+
+**What changed and what did not.**
+
+1. **Member order.** Both reorder files of both captures give products bit-identical to the base file's. Before the change, every one of the four differed from the base in at least one candidate.
+2. **The vote.** The `SeoulBull` vote now moves between 247 and 283 px across the perturbed files, against 258 to 318 px before, and its base reading is 283.0 px rather than 309.6 px. Five draws narrow the spread over seed sets by about a third, not to nothing: on random drop s1 the vote reads 247.0 px, 12.7% under the base file's, which is inside the spread five draws still have on one file (245 to 298 px).
+3. **The gauge pair.** With the parallax read over five draws, pair (0, 1) on `KerryPark480`'s swapped-mover file keeps its 1.48° reading and stays the gauge; its rotation core is the base run's, and the run first differs at `h00`'s widen, which admits frame 23 where the base admits frame 39. Random drop s2 still moves the gauge to (3, 4): there pair (0, 1) reads 0.69° under every seed, so that change follows the evidence.
+4. **The commit bar.** On `SeoulBull`, random drop s3 and drop non-movers s2 still seed `h00` from frames 12 to 16. Group 0 to 4 grows to 7 frames as before and now clears the kept count, but at 7 frames its capture-level reach is 59%, under the bar's 60%, so it still fails the bar. The reach floor is the next hard threshold the baseline sits next to.
+5. **`edge_scan`.** At 283 px the vote is 16% under the ground truth, so the scan grid centred on it ends at about 374 px and the inlier fraction rises to its top point on every `SeoulBull` file: `edge_scan` fires on every `h00` and no candidate qualifies, although every `h00` but drop non-movers s2's passes against the ground truth. The single draw had hidden this by reading 309.6 px on the base file; it is the reading the [lattice grid and grid extension](../../drafts/seed-pick-stability.md#readings-of-the-vote-that-do-not-move-with-it) address.
+6. **The locked resection.** On `KerryPark480`, drop movers and drop non-movers s1 and s3 lose the same resections as before (images 31, 6 and 28, with 31, 9 and 12 survivors at the last round). Drop movers' `h00` again poses 23 frames, with frame 39 where the pre-fix run posed frame 37, and now fails against the ground truth with an 11.9% centre error where the pre-fix run passed. Its core lost image 31 and the frames resected after it in both runs, and it is a run the [converged-set resection](../../drafts/seed-pick-stability.md#locked-resection-judged-on-its-converged-set) addresses.
+
+**What this decides.**
+
+- **Reorder acceptance is met.** Member order no longer reaches any decision on either capture.
+- **Drop acceptance is not met yet.** The first candidate still changes on 2 of 6 drop files on `SeoulBull` (as before) and 4 of 6 on `KerryPark480` (as before). On the 22 perturbed files it changes on 9, against 9 before, and the first candidate fails the ground truth on 3, against 2 before. Every remaining change of the first candidate enters at a stage the draft's unbuilt changes cover: the probe through the reach floor (`SeoulBull`), the scan grid and `edge_scan` read off a vote 16% low (`SeoulBull`), the rotation-locked resection's survivor floor (`KerryPark480`), and the gauge pair where every draw agrees (`KerryPark480` random drop s2, a change in the evidence).
+- **Neither base `h00` regresses.** Both base files' `h00` pass against their ground truth with the same seed frames and posed frames as before; `SeoulBull`'s loses its qualification to `edge_scan`.
+- **`K = 5` stands for now.** The vote's remaining log s.d. at five draws, 0.063, is under half of a scan step (ln 1.15 = 0.14); more draws narrow it slowly (a log s.d. of 0.023 at 33 draws), and the lattice grid is what keeps a residual movement from moving a grid point. The seed's run time did not measurably change: at one draw and at five draws, and with the pre-change scripts, a `KerryPark480` base run takes 53 to 67 s on the same machine on the same day.
