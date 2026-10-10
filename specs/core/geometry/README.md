@@ -10,6 +10,7 @@ Pose estimation, epipolar geometry, and optimization. Implemented in
 | [baseline-direction.md](baseline-direction.md) | The direction between two centres from ray coplanarity, with the rotations held, batched over a graph. |
 | [translation-averaging.md](translation-averaging.md) | Camera centres from pairwise baseline directions and relative lengths, read off the null space of the angular form; the orientation bit from cheirality. |
 | [seed-hypothesis-loop.md](seed-hypothesis-loop.md) | Developing and committing the whole set of seed candidates a capture's cluster evidence supports; the set is the product. |
+| [seed-hypothesis-loop-measurements.md](seed-hypothesis-loop-measurements.md) | Measurements for the seed hypothesis loop: how the candidate set and the first candidate respond to small changes of the cluster file, and the stage each change enters at. |
 | [seed-candidate-evaluation.md](seed-candidate-evaluation.md) | The gauge-free battery every committed seed candidate is measured by before release. |
 | [seed-drive.md](seed-drive.md) | Judging the candidate set while it is still being produced: pull, complete, judge, and form the next complement from the survivors' claims. |
 | [seed-relaxation.md](seed-relaxation.md) | Relaxing a rotation-only member into finite geometry: baselines from its refused rows, fill-in from its source clusters, a lens read on the result. |
