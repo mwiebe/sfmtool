@@ -1,0 +1,41 @@
+case,dataset,type,ratio_bin,member,cluster,scale_ratio,plain_zncc,blur_matched_zncc,colour_residual,gain_residual,epipolar_px,gt_verdict,human_choice,note
+d01,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1736671,302139,1.0238,0.845068,0.845068,0.10353,0.10332,1.130,right,wrong,"this patch crosses two surfaces with parallax, so parts match and others don't. would split left half and right half as two patches"
+d02,KerryPark480,colour_right_zncc_wrong,1/2-0.7,17980,3945,0.6983,0.810228,0.810228,0.07135,0.07088,0.024,right,right,
+d03,DnDTabletop,colour_wrong_zncc_right,1/2-0.7,1165071,161905,0.5587,0.887153,0.887153,0.24278,0.18671,1.080,right,right,
+d04,KerryPark480,colour_wrong_zncc_right,1/2-0.7,38396,13156,0.6716,0.867993,0.887519,0.28998,0.30730,57.115,wrong,wrong,
+d05,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,403120,44638,0.9468,0.820618,0.820618,0.09259,0.09431,0.582,right,right,
+d06,DnDTabletop,colour_wrong_zncc_right,1/4-1/2,1485703,233463,0.3729,0.912477,0.912477,0.31382,0.27764,2043.369,wrong,wrong,"color is different, pattern deceptively similar"
+d07,KerryPark480,colour_right_zncc_wrong,0.7-1.4,38616,13266,0.7157,0.663884,0.663884,0.10998,0.09835,264.730,wrong,wrong,different parts of similar textured surface
+d08,KerryPark480,colour_wrong_zncc_right,0.7-1.4,3722,457,0.8362,0.867505,0.867505,0.29678,0.27854,0.139,right,right,
+d09,KerryPark480,colour_right_zncc_wrong,1/2-0.7,36773,12345,0.6139,0.834366,0.834366,0.11235,0.10219,0.053,right,right,
+d10,KerryPark480,colour_right_zncc_wrong,1/2-0.7,32,3,0.6385,0.779288,0.779288,0.05781,0.05294,0.364,right,right,
+d11,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,603363,70361,0.8139,0.692325,0.767123,0.11954,0.06159,5.752,wrong,right,
+d12,DnDTabletop,colour_wrong_zncc_right,0.7-1.4,922497,118404,0.7091,0.831005,0.865651,0.25440,0.21479,664.210,wrong,right,
+d13,KerryPark480,colour_right_zncc_wrong,0.7-1.4,955,100,0.8151,0.845794,0.845794,0.06070,0.04723,6.697,wrong,right,
+d14,KerryPark480,colour_right_zncc_wrong,0.7-1.4,17472,3761,0.8660,0.829473,0.829473,0.05243,0.05257,2.524,right,right,
+d15,DnDTabletop,colour_wrong_zncc_right,1/4-1/2,1564184,252711,0.4512,0.881231,0.881231,0.36304,0.35231,20.018,wrong,right,
+d16,DnDTabletop,colour_right_zncc_wrong,1/2-0.7,1689936,288719,0.6902,0.811146,0.811146,0.09395,0.07506,0.252,right,right,
+d17,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,849288,106399,0.7236,0.837224,0.837224,0.08756,0.07854,3.137,right,right,
+d18,KerryPark480,colour_wrong_zncc_right,0.7-1.4,28480,8198,0.7601,0.927775,0.927775,0.35665,0.36663,0.031,right,right,
+d19,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1284220,186432,1.0101,0.784266,0.784266,0.06959,0.06960,0.253,right,wrong,similar repeating pattern
+d20,DnDTabletop,colour_wrong_zncc_right,<1/4,2157945,466623,0.1155,0.942128,0.942128,0.28755,0.30892,1877.899,wrong,wrong,
+d21,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1237922,176814,0.9547,0.824654,0.824654,0.07901,0.06391,10.873,wrong,right,
+d22,DnDTabletop,colour_wrong_zncc_right,0.7-1.4,2166201,470751,0.7712,0.817650,0.852599,0.34020,0.20737,2271.843,wrong,right,
+d23,KerryPark480,colour_wrong_zncc_right,1/2-0.7,30281,9099,0.5486,0.890391,0.904699,0.43117,0.40621,3.482,wrong,right,
+d24,DnDTabletop,colour_wrong_zncc_right,1/4-1/2,1779167,315792,0.4075,0.889602,0.889602,0.28302,0.07744,1985.778,wrong,wrong,but the patches match well
+d25,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1642914,275658,0.9925,0.847674,0.847674,0.08558,0.08469,2.601,right,right,
+d26,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1264878,182432,0.9704,0.815906,0.815906,0.06065,0.06035,0.697,right,right,
+d27,KerryPark480,colour_wrong_zncc_right,1/2-0.7,1436,156,0.6898,0.858959,0.858959,0.34251,0.33912,0.441,right,right,
+d28,KerryPark480,colour_right_zncc_wrong,0.7-1.4,20003,4687,1.0086,0.791858,0.791858,0.02991,0.02703,0.235,right,right,
+d29,KerryPark480,colour_right_zncc_wrong,1/2-0.7,21820,5367,0.5563,0.609805,0.649656,0.10461,0.06022,255.655,wrong,wrong,similar but low contrast texture 
+d30,KerryPark480,colour_wrong_zncc_right,1/2-0.7,18803,4248,0.6201,0.905820,0.905820,0.26658,0.26251,0.015,right,right,
+d31,KerryPark480,colour_right_zncc_wrong,0.7-1.4,5964,818,0.8440,0.806341,0.806341,0.04409,0.03752,13.200,wrong,right,
+d32,DnDTabletop,colour_wrong_zncc_right,0.7-1.4,1142571,157480,0.9560,0.838686,0.863568,0.22854,0.22895,6.927,wrong,right,
+d33,DnDTabletop,colour_wrong_zncc_right,0.7-1.4,636435,74543,0.9990,0.821145,0.866824,0.28580,0.30103,1.538,right,right,
+d34,KerryPark480,colour_wrong_zncc_right,1/4-1/2,14355,2826,0.4854,0.904520,0.904520,0.37937,0.33981,90.733,wrong,wrong,shadow vs manhole cover
+d35,DnDTabletop,colour_wrong_zncc_right,<1/4,1177910,164491,0.1907,0.806244,0.872865,0.32476,0.32277,737.106,wrong,wrong,
+d36,DnDTabletop,colour_right_zncc_wrong,0.7-1.4,1523430,242591,1.0863,0.782408,0.782408,0.05928,0.05952,12.049,wrong,wrong,maybe different parts of the same shape
+d37,KerryPark480,colour_wrong_zncc_right,1/4-1/2,24736,6474,0.3535,0.834785,0.871314,0.28822,0.28669,5.554,wrong,wrong,color mismatch
+d38,KerryPark480,colour_right_zncc_wrong,0.7-1.4,11859,2121,0.9389,0.839755,0.839755,0.13265,0.05422,12.756,wrong,right,
+d39,KerryPark480,colour_wrong_zncc_right,1/2-0.7,36738,12327,0.6288,0.831933,0.861057,0.27328,0.48103,1.994,right,right,
+d40,KerryPark480,colour_wrong_zncc_right,1/2-0.7,5876,803,0.5657,0.968421,0.968421,0.25177,0.24534,0.042,right,right,

@@ -189,7 +189,13 @@ bears on, in the form of
 The section links the archive CSV. The first review drawn with the prototype
 is folded in this way as
 [Blur-matched scores across scales](../core/patch/cluster-patch-refinement-measurements.md#blur-matched-scores-across-scales-2026-10-10),
-with the statistics of the next section beside it.
+with the statistics of the next section beside it. The second, drawn from
+members where the colour reading of
+[image-photometric-model.md](image-photometric-model.md) and the blur-matched
+ZNCC disagree, is folded in as
+[Measured: step 2](image-photometric-model.md#measured-step-2-2026-10-10), with
+the archive
+[cluster-patch-refinement-human-review-2026-10-10b.csv](../core/patch/cluster-patch-refinement-human-review-2026-10-10b.csv).
 
 ## The statistics beside a review
 
