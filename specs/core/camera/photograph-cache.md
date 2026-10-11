@@ -264,12 +264,16 @@ reopening the same file reuses the pixels, and the budget bounds the memory
   decode. A decode whose slot left the map meanwhile (forgotten, cleared,
   evicted or replaced by a newer file) still returns its pyramid to the caller,
   but the cache neither keeps nor counts it.
-- **The decode must stay serial.** It runs inside a slot's `get_or_init`. If it
-  used rayon, a rayon worker waiting in a nested join could steal another
-  `get_many` item for the same path, re-enter that `OnceLock` on the same
-  thread and deadlock. So the decode is `ImageU8::read_rgb` followed by
-  `ImageU8Pyramid::from_image(image, levels)`, both serial, and the
-  parallelism is across paths in `get_many`. For the same reason a caller
+- **The decode must not use rayon.** It runs inside a slot's `get_or_init`.
+  If it used rayon, a rayon worker waiting in a nested join could steal
+  another `get_many` item for the same path, re-enter that `OnceLock` on the
+  same thread and deadlock. So the decode is `ImageU8::read_rgb` followed by
+  `ImageU8Pyramid::from_image(image, levels)`, neither of which uses rayon,
+  and the rayon parallelism is across paths in `get_many`. `read_rgb` is not
+  single-threaded for a JPEG wider than 128 px: `jpeg-decoder` (built
+  without its `rayon` feature) starts one plain OS thread per colour
+  component and joins them before it returns. Those threads take no rayon
+  work, so they cannot re-enter a slot. For the same reason a caller
   already inside a rayon parallel loop calls `get` rather than `get_many`.
 - **Counters.** A `get` that decoded nothing is a hit, whether the entry was
   there or another thread's decode was waited on; each path of a `get_many`

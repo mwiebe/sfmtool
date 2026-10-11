@@ -367,13 +367,38 @@ pub fn image_has_alpha(path: &std::path::Path) -> Result<bool, ::image::ImageErr
     use ::image::ImageDecoder;
     let reader = ::image::ImageReader::open(path)?.with_guessed_format()?;
     if reader.format() == Some(::image::ImageFormat::Jpeg) {
-        // A JPEG holds no alpha. Its header is read by the decoder
-        // `ImageU8::read_rgb` uses, so the two refuse the same files.
-        let mut decoder = jpeg_decoder::Decoder::new(reader.into_inner());
-        decoder.read_info().map_err(jpeg_error)?;
+        // A JPEG holds no alpha. Its header is read by `jpeg-decoder`, as in
+        // `ImageU8::read_rgb` and `image_dimensions`, so a header one of them
+        // refuses the others refuse too. The reader can still refuse a file
+        // whose header reads, from its pixel data.
+        jpeg_header(reader.into_inner())?;
         return Ok(false);
     }
     Ok(reader.into_decoder()?.color_type().has_alpha())
+}
+
+/// The `(width, height)` stored in the header of the image file at `path`,
+/// read from the header alone, never the pixel data.
+///
+/// The contents, not the extension, choose the decoder, as in
+/// [`ImageU8::read_rgb`], and a JPEG's header is read by the decoder that
+/// reads its pixels. The EXIF orientation is not applied.
+pub fn image_dimensions(path: &std::path::Path) -> Result<(u32, u32), ::image::ImageError> {
+    let reader = ::image::ImageReader::open(path)?.with_guessed_format()?;
+    if reader.format() == Some(::image::ImageFormat::Jpeg) {
+        let info = jpeg_header(reader.into_inner())?;
+        return Ok((u32::from(info.width), u32::from(info.height)));
+    }
+    reader.into_dimensions()
+}
+
+/// Read a JPEG's header with the `jpeg-decoder` crate, up to its frame header.
+fn jpeg_header<R: std::io::Read>(
+    reader: R,
+) -> Result<jpeg_decoder::ImageInfo, ::image::ImageError> {
+    let mut decoder = jpeg_decoder::Decoder::new(reader);
+    decoder.read_info().map_err(jpeg_error)?;
+    Ok(decoder.info().expect("set by a successful read_info"))
 }
 
 /// Decode the JPEG `reader` holds with the `jpeg-decoder` crate, ignoring the
@@ -381,34 +406,64 @@ pub fn image_has_alpha(path: &std::path::Path) -> Result<bool, ::image::ImageErr
 ///
 /// A grey file decodes to grey and a colour one to RGB. A CMYK or YCCK file
 /// becomes RGB with `r = (255 - c) * (255 - k) / 255` and so on, on the
-/// inverted CMYK `jpeg-decoder` returns, as zune-jpeg and OpenCV convert it.
-/// A greyscale JPEG of more than 8 bits (lossless, or 12-bit) is refused as
-/// unsupported. The decoded buffer is held to the `image` crate's default
-/// allocation limit, 512 MiB.
+/// inverted CMYK `jpeg-decoder` returns, which is within one grey level of
+/// OpenCV's conversion. A file that ends early, with no end-of-image marker
+/// or part way through a scan, decodes with the missing part filled as
+/// libjpeg fills it (see [`EndOfImageAtEof`]).
+///
+/// Refused before any pixel data is decoded: a frame whose decoded buffer
+/// would exceed the `image` crate's default allocation limit, 512 MiB, and a
+/// greyscale frame `jpeg-decoder` reports as 16-bit. `jpeg-decoder` itself
+/// refuses a DCT frame (baseline, extended or progressive) of any precision
+/// but 8, so a 12-bit JPEG is refused in colour too. A lossless frame is
+/// accepted only at 8 bits: at any other precision `jpeg-decoder` returns 2
+/// bytes per sample while still naming an 8-bit pixel format, so such a frame
+/// is refused when the decoded buffer's length shows it.
 fn decode_jpeg<R: std::io::Read>(reader: R) -> Result<::image::DynamicImage, ::image::ImageError> {
-    use ::image::error::{ImageFormatHint, UnsupportedError, UnsupportedErrorKind};
-    use ::image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
-    use jpeg_decoder::PixelFormat;
+    use ::image::{DynamicImage, GrayImage, RgbImage};
+    use jpeg_decoder::{CodingProcess, PixelFormat};
 
-    let mut decoder = jpeg_decoder::Decoder::new(reader);
+    let mut decoder = jpeg_decoder::Decoder::new(EndOfImageAtEof::new(reader));
+    decoder.read_info().map_err(jpeg_error)?;
+    let info = decoder.info().expect("set by a successful read_info");
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let channels: u64 = match info.pixel_format {
+        PixelFormat::L8 => 1,
+        PixelFormat::RGB24 => 3,
+        PixelFormat::CMYK32 => 4,
+        PixelFormat::L16 => return Err(jpeg_unsupported("greyscale JPEG of more than 8 bits")),
+    };
+    let lossless = info.coding_process == CodingProcess::Lossless;
+    // A lossless frame of more than 8 bits decodes to 2 bytes per sample, so
+    // the bound counts 2 for every lossless frame.
+    let bytes_per_sample = if lossless { 2 } else { 1 };
+    let expected = u64::from(width) * u64::from(height) * channels;
     if let Some(limit) = ::image::Limits::default().max_alloc {
-        decoder.set_max_decoding_buffer_size(usize::try_from(limit).unwrap_or(usize::MAX));
+        if expected * bytes_per_sample > limit {
+            return Err(::image::ImageError::Limits(
+                ::image::error::LimitError::from_kind(
+                    ::image::error::LimitErrorKind::InsufficientMemory,
+                ),
+            ));
+        }
     }
     let pixels = decoder.decode().map_err(jpeg_error)?;
-    let info = decoder.info().expect("set by a successful decode");
-    let (width, height) = (u32::from(info.width), u32::from(info.height));
-    let malformed = || {
-        jpeg_error(jpeg_decoder::Error::Format(
-            "decoded buffer does not match the image size".to_owned(),
-        ))
-    };
+    if pixels.len() as u64 != expected {
+        return Err(if lossless {
+            jpeg_unsupported("lossless JPEG of a precision other than 8 bits")
+        } else {
+            jpeg_error(jpeg_decoder::Error::Format(
+                "decoded buffer does not match the image size".to_owned(),
+            ))
+        });
+    }
     match info.pixel_format {
-        PixelFormat::L8 => GrayImage::from_raw(width, height, pixels)
-            .map(DynamicImage::ImageLuma8)
-            .ok_or_else(malformed),
-        PixelFormat::RGB24 => RgbImage::from_raw(width, height, pixels)
-            .map(DynamicImage::ImageRgb8)
-            .ok_or_else(malformed),
+        PixelFormat::L8 => Ok(DynamicImage::ImageLuma8(
+            GrayImage::from_raw(width, height, pixels).expect("the buffer length is checked"),
+        )),
+        PixelFormat::RGB24 => Ok(DynamicImage::ImageRgb8(
+            RgbImage::from_raw(width, height, pixels).expect("the buffer length is checked"),
+        )),
         PixelFormat::CMYK32 => {
             let rgb = pixels
                 .as_chunks::<4>()
@@ -420,19 +475,68 @@ fn decode_jpeg<R: std::io::Read>(reader: R) -> Result<::image::DynamicImage, ::i
                     [channel(c), channel(m), channel(y)]
                 })
                 .collect();
-            RgbImage::from_raw(width, height, rgb)
-                .map(DynamicImage::ImageRgb8)
-                .ok_or_else(malformed)
+            Ok(DynamicImage::ImageRgb8(
+                RgbImage::from_raw(width, height, rgb).expect("the buffer length is checked"),
+            ))
         }
-        PixelFormat::L16 => Err(::image::ImageError::Unsupported(
-            UnsupportedError::from_format_and_kind(
-                ImageFormatHint::Exact(ImageFormat::Jpeg),
-                UnsupportedErrorKind::GenericFeature(
-                    "greyscale JPEG of more than 8 bits".to_owned(),
-                ),
-            ),
-        )),
+        PixelFormat::L16 => unreachable!("refused before decoding"),
     }
+}
+
+/// A reader that, once the reader it wraps is exhausted, returns the bytes
+/// `FF D9`, the JPEG end-of-image marker, over and over, as libjpeg's file
+/// source does.
+///
+/// On its own `jpeg-decoder` treats the end of the file as an error, so it
+/// refuses a JPEG that lacks its end-of-image marker, as some cameras write
+/// it, or that was cut part way through a scan, as an interrupted copy leaves
+/// it. libjpeg (and so OpenCV) and zune-jpeg decode such a file: the scan
+/// stops at the marker and the blocks it did not reach decode to grey. With
+/// this reader `jpeg-decoder` does the same, and a file missing only its
+/// end-of-image marker decodes bit for bit as the complete file does.
+struct EndOfImageAtEof<R> {
+    inner: R,
+    /// How many marker bytes have been returned since `inner` ended, or `None`
+    /// while it has not.
+    marker_bytes: Option<usize>,
+}
+
+impl<R> EndOfImageAtEof<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            marker_bytes: None,
+        }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for EndOfImageAtEof<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let count = match &mut self.marker_bytes {
+            Some(count) => count,
+            None => match self.inner.read(buf)? {
+                0 => self.marker_bytes.insert(0),
+                n => return Ok(n),
+            },
+        };
+        for byte in buf.iter_mut() {
+            *byte = if *count % 2 == 0 { 0xFF } else { 0xD9 };
+            *count += 1;
+        }
+        Ok(buf.len())
+    }
+}
+
+/// The `image` crate's error for a JPEG feature the reader does not support.
+fn jpeg_unsupported(feature: &str) -> ::image::ImageError {
+    use ::image::error::{ImageFormatHint, UnsupportedError, UnsupportedErrorKind};
+    ::image::ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+        ImageFormatHint::Exact(::image::ImageFormat::Jpeg),
+        UnsupportedErrorKind::GenericFeature(feature.to_owned()),
+    ))
 }
 
 /// The `image` crate's error for a `jpeg-decoder` error.

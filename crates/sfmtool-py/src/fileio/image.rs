@@ -20,12 +20,8 @@ use sfmtool_core::camera::image::{ImageU8, DEFAULT_JPEG_QUALITY};
 /// the extension, choose the decoder, as in `read_image_rgb`.
 #[pyfunction]
 pub fn image_dimensions(path: PathBuf) -> PyResult<(u32, u32)> {
-    let dimensions = || -> Result<(u32, u32), image::ImageError> {
-        image::ImageReader::open(&path)?
-            .with_guessed_format()?
-            .into_dimensions()
-    };
-    dimensions().map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    sfmtool_core::camera::image::image_dimensions(&path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
 }
 
 /// Whether the image file at `path` stores an alpha channel, from its header

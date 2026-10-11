@@ -64,7 +64,12 @@ write takes one. A caller that writes back what it read picks the pair by
 The reader errors: a missing file raises `FileNotFoundError` and a file that
 cannot be decoded raises `OSError`; both messages name the path.
 `image_has_alpha` reads the file's header alone, beside `image_dimensions`,
-which reads its width and height the same way.
+which reads its width and height the same way (core's `image_has_alpha` and
+`image_dimensions` in [image.rs](../../../crates/sfmtool-core/src/camera/image.rs)).
+Both read a JPEG's header with the decoder that reads its pixels, so they
+refuse the headers the reader refuses; a file whose header reads but whose
+pixels the reader refuses, such as a 12-bit lossless JPEG, has dimensions
+but cannot be read.
 
 The writer errors, each naming the path: `TypeError` for an array that is not
 `uint8`; `ValueError` for an array of the wrong shape or with a side of 0, a
@@ -119,13 +124,26 @@ since OpenCV draws a tuple in whatever channel order the array has.
   without an error for a baseline JPEG that stores each component in a scan
   of its own. `jpeg-decoder` reads those as OpenCV does, and on the
   `test-data` photographs its values differ from OpenCV's by 0.04 to 0.08
-  grey levels on average. It decodes the 85 `dino_dog_toy` photographs in
-  0.9 s on one thread, as zune-jpeg and OpenCV do. A CMYK or YCCK JPEG
-  becomes RGB as OpenCV converts it. The decoders have limits of their own:
-  the `image` crate refuses a WebP 16384 pixels wide, the largest WebP allows
-  and one OpenCV reads, and `jpeg-decoder` a greyscale JPEG of more than 8
-  bits (lossless or 12-bit) and a JPEG that decodes to more than 512 MiB,
-  each with `OSError`.
+  grey levels on average. Called from one thread, it decodes the 85
+  `dino_dog_toy` photographs in 0.9 s, as zune-jpeg and OpenCV do; it does
+  not use rayon, but for an image wider than 128 px it starts one OS thread
+  per colour component. A CMYK or YCCK JPEG becomes RGB within one grey level
+  of OpenCV's conversion. A JPEG that lacks its end-of-image marker, or that
+  was cut part way through a scan, decodes as libjpeg decodes it: the reader
+  supplies the end-of-image marker at the end of the file, the blocks the
+  scan did not reach are grey, and a file missing only the marker decodes as
+  the complete file does. `jpeg-decoder` is in maintenance mode (image-rs is
+  moving to zune-jpeg; its last release is 0.3.2, 2025-06), so the reader
+  goes back to the `image` crate's decoder once a stable zune-jpeg release
+  passes `read_decodes_a_jpeg_with_one_scan_per_component`. The decoders have
+  limits of their own, each raised as `OSError`: the `image` crate refuses a
+  WebP 16384 pixels wide, the largest WebP allows and one OpenCV reads. The
+  JPEG reader refuses, from the header and before decoding any scan, a JPEG
+  that would decode to more than 512 MiB. Of the JPEG precisions it reads
+  only 8 bits: it refuses every DCT frame (baseline, extended or
+  progressive) of any other precision, among them 12-bit colour and grey,
+  and every lossless frame of a precision other than 8. Only an 8-bit
+  lossless JPEG is read.
 - **Formats, writing.** The output path's extension, in any case, chooses the
   encoder. `.jpg` and `.jpeg` write a baseline JPEG; `.png` writes a lossless
   PNG; any other extension whose format the `image` crate encodes 8-bit pixels
