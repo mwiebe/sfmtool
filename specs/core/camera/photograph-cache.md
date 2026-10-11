@@ -268,12 +268,16 @@ reopening the same file reuses the pixels, and the budget bounds the memory
   If it used rayon, a rayon worker waiting in a nested join could steal
   another `get_many` item for the same path, re-enter that `OnceLock` on the
   same thread and deadlock. So the decode is `ImageU8::read_rgb` followed by
-  `ImageU8Pyramid::from_image(image, levels)`, neither of which uses rayon,
-  and the rayon parallelism is across paths in `get_many`. `read_rgb` is not
-  single-threaded for a JPEG wider than 128 px: `jpeg-decoder` (built
-  without its `rayon` feature) starts one plain OS thread per colour
-  component and joins them before it returns. Those threads take no rayon
-  work, so they cannot re-enter a slot. For the same reason a caller
+  `ImageU8Pyramid::from_image(image, levels)`, neither of which uses rayon's
+  global pool, and the rayon parallelism is across paths in `get_many`.
+  `read_rgb` is not always single-threaded, but nothing it starts takes work
+  from the global pool, so nothing can re-enter a slot. For a JPEG wider than
+  128 px, `jpeg-decoder` (built without its `rayon` feature) starts one plain
+  OS thread per colour component and waits for their results before it
+  returns. For a compressed OpenEXR file, the `exr` crate (whose `rayon`
+  feature the `image` crate's default features turn on) builds a thread pool
+  of its own for the decompression and waits on it through a channel, not a
+  rayon join. For the same reason a caller
   already inside a rayon parallel loop calls `get` rather than `get_many`.
 - **Counters.** A `get` that decoded nothing is a hit, whether the entry was
   there or another thread's decode was waited on; each path of a `get_many`

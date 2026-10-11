@@ -28,7 +28,9 @@ jpeg-encoder = { version = "0.7.1", features = ["simd"] }
 # JPEG decoding for `ImageU8::read_rgb` / `read_rgba`. The `image` crate's JPEG
 # decoder, zune-jpeg 0.5.15, returns wrong pixels without an error for a
 # baseline JPEG that stores each component in a scan of its own; this crate
-# decodes those as OpenCV does, at the same speed. It is in maintenance mode:
+# decodes those as OpenCV does, at the same speed. A JPEG that ends before its
+# end-of-image marker is still decoded by zune-jpeg, since this crate does not
+# fill the missing part with grey as libjpeg does. It is in maintenance mode:
 # its README says image-rs is moving to zune-jpeg, and its last release is
 # 0.3.2 (2025-06). Switch back to the `image` crate's decoder once a stable
 # zune-jpeg release passes `read_decodes_a_jpeg_with_one_scan_per_component`.

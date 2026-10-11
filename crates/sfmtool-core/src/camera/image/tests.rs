@@ -677,55 +677,120 @@ fn smooth_rgb(w: u32, h: u32) -> Vec<u8> {
         .collect()
 }
 
-/// A JPEG that lacks its end-of-image marker decodes as the complete file
-/// does, and one cut part way through its scan decodes without an error, as
-/// libjpeg and zune-jpeg decode both: the rows before the cut are the
-/// complete file's, and the rest is filled.
+/// The mean and largest `|a - b|` over two equal-length byte slices.
+fn mean_and_max_difference(a: &[u8], b: &[u8]) -> (f64, u8) {
+    assert_eq!(a.len(), b.len());
+    let sum: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(a, b)| f64::from(a.abs_diff(*b)))
+        .sum();
+    let max = a
+        .iter()
+        .zip(b)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    (sum / a.len() as f64, max)
+}
+
+/// Encode a noisy `w x h` RGB image as a 4:2:0 JPEG: noisy, so the scan data,
+/// not the headers, makes up most of the file.
+fn noisy_jpeg(w: u16, h: u16, progressive: bool, restart_interval: Option<u16>) -> Vec<u8> {
+    let image = gradient(u32::from(w), u32::from(h), 3);
+    let mut bytes = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, DEFAULT_JPEG_QUALITY);
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+    encoder.set_progressive(progressive);
+    if let Some(interval) = restart_interval {
+        encoder.set_restart_interval(interval);
+    }
+    encoder
+        .encode(image.data(), w, h, jpeg_encoder::ColorType::Rgb)
+        .unwrap();
+    assert_eq!(bytes[bytes.len() - 2..], [0xFF, 0xD9]);
+    bytes
+}
+
+/// Check that `cut`, a decode of a baseline file cut part way through its
+/// scan, matches `complete` above the cut and is flat grey (128) below it,
+/// as libjpeg and zune-jpeg fill it, not the texture of zero-bit Huffman
+/// codes. Returns the number of grey rows at the bottom.
+fn assert_cut_decode_is_grey_below_the_cut(cut: &ImageU8, complete: &ImageU8) -> usize {
+    let row = 3 * cut.width() as usize;
+    let rows: Vec<&[u8]> = cut.data().chunks(row).collect();
+    let grey_rows = rows
+        .iter()
+        .rev()
+        .take_while(|r| r.iter().all(|&v| v == 128))
+        .count();
+    let height = rows.len();
+    // The fill starts at most one row (the 4:2:0 chroma upsampling of the
+    // row at the cut) below the decoded part, and covers at least an MCU row.
+    assert!(grey_rows >= 16, "only {grey_rows} grey rows at the bottom");
+    let decoded = height - grey_rows;
+    assert!(decoded >= 32, "only {decoded} rows decoded");
+    // The rows above the cut's MCU row are the complete file's, within the
+    // few grey levels zune-jpeg and jpeg-decoder differ by.
+    let top = (decoded / 16 - 1) * 16 * row;
+    let (mean, max) = mean_and_max_difference(&cut.data()[..top], &complete.data()[..top]);
+    assert!(mean < 1.0 && max <= 10, "mean {mean}, max {max}");
+    grey_rows
+}
+
+/// A JPEG that ends before its end-of-image marker is decoded by the `image`
+/// crate's decoder (zune-jpeg), as libjpeg decodes it: one that lacks only
+/// the marker reads as the complete file does (within the few grey levels the
+/// two decoders differ by), and in one cut part way through its scan the rows
+/// the scan did not reach are flat grey.
 #[test]
 fn read_decodes_a_jpeg_without_its_end_marker_or_cut_mid_scan() {
     let dir = tempfile::tempdir().unwrap();
-    // Noisy, so the scan data, not the headers, makes up most of the file.
     let (w, h) = (160u16, 128u16);
-    let image = gradient(u32::from(w), u32::from(h), 3);
-    let data = image.data();
     for progressive in [false, true] {
-        let mut bytes = Vec::new();
-        let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, DEFAULT_JPEG_QUALITY);
-        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
-        encoder.set_progressive(progressive);
-        encoder
-            .encode(data, w, h, jpeg_encoder::ColorType::Rgb)
-            .unwrap();
-        assert_eq!(bytes[bytes.len() - 2..], [0xFF, 0xD9]);
+        let bytes = noisy_jpeg(w, h, progressive, None);
         let complete_path = dir.path().join("complete.jpg");
         std::fs::write(&complete_path, &bytes).unwrap();
         let complete = ImageU8::read_rgb(&complete_path).unwrap();
 
         let no_eoi = dir.path().join("no_eoi.jpg");
         std::fs::write(&no_eoi, &bytes[..bytes.len() - 2]).unwrap();
-        assert_eq!(
-            ImageU8::read_rgb(&no_eoi).unwrap().data(),
-            complete.data(),
-            "progressive {progressive}"
+        let back = ImageU8::read_rgb(&no_eoi).unwrap();
+        let (mean, max) = mean_and_max_difference(back.data(), complete.data());
+        assert!(
+            mean < 1.0 && max <= 10,
+            "progressive {progressive}: mean {mean}, max {max}"
         );
 
         let cut = dir.path().join("cut.jpg");
         std::fs::write(&cut, &bytes[..bytes.len() * 6 / 10]).unwrap();
         let back = ImageU8::read_rgb(&cut).unwrap();
         assert_eq!((back.width(), back.height()), (u32::from(w), u32::from(h)));
-        let row = 3 * usize::from(w);
-        if progressive {
-            // The cut drops later refinement scans, so every row is coarser
-            // than the complete decode, but none is lost.
-            assert_ne!(back.data(), complete.data());
-        } else {
-            // The first two MCU rows (32 rows at 4:2:0) are before the cut;
-            // their last row is upsampled with the next row's chroma, which
-            // the cut changes, so the comparison stops one row short.
-            assert_eq!(back.data()[..31 * row], complete.data()[..31 * row]);
-            // The rows after the cut are filled, not decoded.
-            assert_ne!(back.data()[100 * row..], complete.data()[100 * row..]);
+        if !progressive {
+            assert_cut_decode_is_grey_below_the_cut(&back, &complete);
         }
+    }
+}
+
+/// A baseline JPEG with restart markers (DRI), cut part way through its scan,
+/// reads as one without them does: `jpeg-decoder` refuses it, finding the end
+/// of the file where a restart marker was due, and zune-jpeg reads it.
+#[test]
+fn read_decodes_a_jpeg_with_restart_markers_cut_mid_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (160u16, 128u16);
+    let bytes = noisy_jpeg(w, h, false, Some(4));
+    assert!(bytes.windows(2).any(|m| m == [0xFF, 0xDD]), "a DRI segment");
+    let complete_path = dir.path().join("complete.jpg");
+    std::fs::write(&complete_path, &bytes).unwrap();
+    let complete = ImageU8::read_rgb(&complete_path).unwrap();
+    // Cuts that leave at least one whole MCU row (16 rows) undecoded.
+    for percent in [30, 60] {
+        let cut = dir.path().join("cut.jpg");
+        std::fs::write(&cut, &bytes[..bytes.len() * percent / 100]).unwrap();
+        let back = ImageU8::read_rgb(&cut).unwrap();
+        assert_eq!((back.width(), back.height()), (u32::from(w), u32::from(h)));
+        assert_cut_decode_is_grey_below_the_cut(&back, &complete);
     }
 }
 
@@ -820,6 +885,49 @@ fn read_accepts_a_lossless_jpeg_only_at_8_bits() {
             assert!(!image_has_alpha(&path).unwrap());
         }
     }
+
+    // The precision is read from the frame header, so a large 16-bit file is
+    // refused before its scan is decoded: this header claims 65500 x 1300
+    // RGB samples, which would take seconds and gigabytes to decode.
+    let mut bytes = lossless_jpeg(16, 3, 8, 8);
+    let sof = bytes.windows(2).position(|m| m == [0xFF, 0xC3]).unwrap();
+    bytes[sof + 5..sof + 9].copy_from_slice(&[0x05, 0x14, 0xFF, 0xDC]);
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(image_dimensions(&path).unwrap(), (65500, 1300));
+    let start = std::time::Instant::now();
+    let result = ImageU8::read_rgb(&path);
+    assert!(
+        matches!(result, Err(::image::ImageError::Unsupported(_))),
+        "{:?}",
+        result.err()
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn jpeg_frame_precision_reads_the_frame_header() {
+    for precision in [6, 8, 12, 16] {
+        assert_eq!(
+            jpeg_frame_precision(&lossless_jpeg(precision, 1, 4, 4)),
+            Some(precision)
+        );
+    }
+    let baseline = encode_jpeg(
+        &smooth_rgb(8, 8),
+        (8, 8),
+        jpeg_encoder::ColorType::Rgb,
+        jpeg_encoder::SamplingFactor::R_4_2_0,
+        DEFAULT_JPEG_QUALITY,
+        false,
+    );
+    assert_eq!(jpeg_frame_precision(&baseline), Some(8));
+    // No frame header before the first scan, or none at all.
+    assert_eq!(jpeg_frame_precision(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
+    assert_eq!(
+        jpeg_frame_precision(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 200]),
+        None
+    );
+    assert_eq!(jpeg_frame_precision(&[0xFF, 0xD8]), None);
 }
 
 /// The header reads, `image_dimensions` and `image_has_alpha`, agree with the
