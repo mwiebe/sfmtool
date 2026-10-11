@@ -131,20 +131,32 @@ since OpenCV draws a tuple in whatever channel order the array has.
   `dino_dog_toy` photographs in 0.9 s, as zune-jpeg and OpenCV do; it does
   not use rayon, but for an image wider than 128 px it starts one OS thread
   per colour component. A CMYK or YCCK JPEG becomes RGB within one grey level
-  of OpenCV's conversion. A JPEG that ends before its end-of-image marker,
-  because it lacks only the marker or was cut part way through a scan, is
-  read by the `image` crate's decoder, zune-jpeg, as every JPEG was before:
-  `jpeg-decoder` does not fill missing data as libjpeg does. Given the end of
-  the file it refuses the file, and given a supplied end-of-image marker it
-  decodes the part the scan did not reach from zero bits, as a dark textured
-  pattern, and still refuses a cut file with restart markers. zune-jpeg, like
-  libjpeg and so OpenCV, fills that part with flat grey (128) and reads
-  restart markers. The reader reads the file into memory once, decodes it
-  with `jpeg-decoder`, and decodes the same bytes with zune-jpeg only when
-  `jpeg-decoder` read past their end, which it never does for a complete
-  file. So a file that lacks only its end-of-image marker reads within a few
-  grey levels of the complete file, and a cut file with one scan per
-  component is misread by zune-jpeg as before. `jpeg-decoder` is in
+  of OpenCV's conversion. The reader reads a JPEG into memory once (a file
+  over 1 GiB is refused, twice the largest decode the limit below allows)
+  and decodes it with `jpeg-decoder`, which reads past the end of the bytes
+  only when the file ends before its end-of-image marker: it lacks only the
+  marker, was cut part way through, or has segment lengths that run past its
+  end. A complete file, including one followed by trailing data or another
+  JPEG, never does. A file that does is decoded again, from the same bytes,
+  by one of two rules. A sequential (baseline or extended) JPEG with a scan
+  that holds fewer components than the frame, such as one with one scan per
+  component, is decoded by `jpeg-decoder` with an end-of-image marker
+  appended, since zune-jpeg misreads such a file even when it is whole. A
+  file of this kind that lacks only its marker reads within a few grey
+  levels of the complete file; in one cut part way through a scan, the part
+  the scan did not reach decodes from zero bits as a dark textured pattern
+  rather than grey. One cut before every component's scan has begun is
+  refused, since `jpeg-decoder` requires data for each component (zune-jpeg
+  returned wrong pixels for it), as is one with restart markers cut part way
+  through a scan. Every other
+  such file is read by the `image` crate's decoder, zune-jpeg, as every
+  JPEG was before, because `jpeg-decoder` does not fill missing data as
+  libjpeg does: it refuses the file at its end, or, given an appended
+  marker, fills the missing part with that texture and still refuses a cut
+  file with restart markers. zune-jpeg, like libjpeg and so OpenCV, fills
+  the missing part with flat grey (128) and reads restart markers, and a
+  file that lacks only its marker reads within a few grey levels of the
+  complete file. `jpeg-decoder` is in
   maintenance mode (image-rs is
   moving to zune-jpeg; its last release is 0.3.2, 2025-06), so the reader
   goes back to the `image` crate's decoder once a stable zune-jpeg release

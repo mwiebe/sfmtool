@@ -818,15 +818,26 @@ fn read_refuses_a_jpeg_too_large_to_decode_before_decoding_it() {
         std::fs::write(&path, &bytes).unwrap();
 
         assert_eq!(image_dimensions(&path).unwrap(), (65500, 65500));
-        let start = std::time::Instant::now();
         let result = ImageU8::read_rgb(&path);
         assert!(
             matches!(result, Err(::image::ImageError::Limits(_))),
             "progressive {progressive}: {:?}",
             result.err()
         );
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        let (result, reached_end) = jpeg_decoder_reads(&bytes);
+        assert!(matches!(result, Err(::image::ImageError::Limits(_))));
+        assert!(!reached_end, "refused before the scan data was read");
     }
+}
+
+/// Decode `bytes` with `jpeg-decoder` as the reader first does, returning the
+/// result and whether the decoder read to the end of the bytes. A refusal
+/// with the end not reached was made from the markers before the scan data:
+/// decoding a scan of these test files reads to their end.
+fn jpeg_decoder_reads(bytes: &[u8]) -> (Result<::image::DynamicImage, ::image::ImageError>, bool) {
+    let mut source = EndTrackingReader::new(bytes);
+    let result = decode_jpeg_with_jpeg_decoder(&mut source, bytes);
+    (result, source.reached_end)
 }
 
 /// A lossless (SOF3) JPEG, `w x h` with `components` components at
@@ -894,25 +905,133 @@ fn read_accepts_a_lossless_jpeg_only_at_8_bits() {
     bytes[sof + 5..sof + 9].copy_from_slice(&[0x05, 0x14, 0xFF, 0xDC]);
     std::fs::write(&path, &bytes).unwrap();
     assert_eq!(image_dimensions(&path).unwrap(), (65500, 1300));
-    let start = std::time::Instant::now();
     let result = ImageU8::read_rgb(&path);
     assert!(
         matches!(result, Err(::image::ImageError::Unsupported(_))),
         "{:?}",
         result.err()
     );
-    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    let (result, reached_end) = jpeg_decoder_reads(&bytes);
+    assert!(matches!(result, Err(::image::ImageError::Unsupported(_))));
+    assert!(!reached_end, "refused before the scan data was read");
 }
 
 #[test]
-fn jpeg_frame_precision_reads_the_frame_header() {
+fn jpeg_layout_reads_the_frame_and_scan_headers() {
     for precision in [6, 8, 12, 16] {
-        assert_eq!(
-            jpeg_frame_precision(&lossless_jpeg(precision, 1, 4, 4)),
-            Some(precision)
-        );
+        let layout = jpeg_layout(&lossless_jpeg(precision, 3, 4, 4));
+        assert_eq!(layout.precision, Some(precision));
+        assert_eq!(layout.frame_components, 3);
+        assert!(!layout.sequential);
+        assert_eq!(layout.scan_components, [3]);
     }
-    let baseline = encode_jpeg(
+    let rgb = smooth_rgb(37, 23);
+    let jpeg = |optimized_huffman| {
+        encode_jpeg(
+            &rgb,
+            (37, 23),
+            jpeg_encoder::ColorType::Rgb,
+            jpeg_encoder::SamplingFactor::R_4_2_0,
+            DEFAULT_JPEG_QUALITY,
+            optimized_huffman,
+        )
+    };
+    let interleaved = jpeg(false);
+    let expected = JpegLayout {
+        precision: Some(8),
+        sequential: true,
+        frame_components: 3,
+        scan_components: vec![3],
+    };
+    assert_eq!(jpeg_layout(&interleaved), expected);
+    let scans = jpeg(true);
+    assert_eq!(jpeg_layout(&scans).scan_components, [1, 1, 1]);
+
+    // Stray bytes between segments and fill bytes before a marker are skipped
+    // as `jpeg-decoder` skips them, and it reads such a file as the plain one.
+    let sof = interleaved
+        .windows(2)
+        .position(|m| m == [0xFF, 0xC0])
+        .unwrap();
+    let insert = |extra: &[u8]| {
+        let mut file = interleaved[..sof].to_vec();
+        file.extend_from_slice(extra);
+        file.extend_from_slice(&interleaved[sof..]);
+        file
+    };
+    let padded = insert(&[0x12, 0x34, 0xFF, 0xFF]);
+    assert_eq!(jpeg_layout(&padded), expected);
+    let (plain, _) = jpeg_decoder_reads(&interleaved);
+    let (decoded, reached_end) = jpeg_decoder_reads(&padded);
+    assert!(!reached_end);
+    assert_eq!(decoded.unwrap().into_rgb8(), plain.unwrap().into_rgb8());
+    // A standalone marker has no length to skip (`jpeg-decoder` refuses a
+    // restart marker outside a scan, but its scan data holds them).
+    assert_eq!(jpeg_layout(&insert(&[0xFF, 0xD3, 0xFF, 0x01])), expected);
+
+    // No frame header, or a segment that runs past the end.
+    assert_eq!(
+        jpeg_layout(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 3, 1]).precision,
+        None
+    );
+    assert_eq!(
+        jpeg_layout(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 200]),
+        JpegLayout::default()
+    );
+    assert_eq!(jpeg_layout(&[0xFF, 0xD8]), JpegLayout::default());
+    assert!(jpeg_layout(&scans[..scans.len() / 2]).scan_components.len() < 3);
+}
+
+/// A file with one scan per component that lacks only its end-of-image
+/// marker, or is cut inside a later scan, stays with `jpeg-decoder`, which
+/// reads it within a few grey levels (zune-jpeg would misread it). A whole
+/// one followed by trailing data, another JPEG or stray bytes never reaches
+/// the end of the bytes, so it decodes as the plain file does.
+#[test]
+fn read_keeps_a_jpeg_with_one_scan_per_component_on_jpeg_decoder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (64u16, 48u16);
+    let rgb = smooth_rgb(u32::from(w), u32::from(h));
+    let bytes = encode_jpeg(
+        &rgb,
+        (w, h),
+        jpeg_encoder::ColorType::Rgb,
+        jpeg_encoder::SamplingFactor::R_4_2_0,
+        DEFAULT_JPEG_QUALITY,
+        true,
+    );
+    assert_eq!(jpeg_scan_count(&bytes), 3);
+    let read = |name: &str, contents: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        ImageU8::read_rgb(&path).unwrap()
+    };
+    let complete = read("complete.jpg", &bytes);
+    let (mean, _) = mean_and_max_difference(complete.data(), &rgb);
+    assert!(mean < 3.0, "complete: mean error {mean}");
+
+    let no_eoi = read("no_eoi.jpg", &bytes[..bytes.len() - 2]);
+    let (mean, max) = mean_and_max_difference(no_eoi.data(), complete.data());
+    assert!(
+        mean < 2.0 && max <= 10,
+        "no end marker: mean {mean}, max {max}"
+    );
+
+    // Cut inside the last (Cr) scan: luma and Cb are whole, so the error
+    // stays far below a misread's.
+    let last_scan = bytes.windows(2).rposition(|m| m == [0xFF, 0xDA]).unwrap();
+    let cut = read("cut.jpg", &bytes[..(last_scan + bytes.len()) / 2]);
+    let (mean, _) = mean_and_max_difference(cut.data(), &rgb);
+    assert!(mean < 30.0, "cut in the last scan: mean error {mean}");
+    // Cut inside the first (luma) scan, so the chroma scans never begin:
+    // refused, since jpeg-decoder needs data for every component, where
+    // zune-jpeg would return wrong pixels.
+    let first_scan = bytes.windows(2).position(|m| m == [0xFF, 0xDA]).unwrap();
+    let path = dir.path().join("cut_first.jpg");
+    std::fs::write(&path, &bytes[..first_scan + 40]).unwrap();
+    assert!(ImageU8::read_rgb(&path).is_err());
+
+    let other = encode_jpeg(
         &smooth_rgb(8, 8),
         (8, 8),
         jpeg_encoder::ColorType::Rgb,
@@ -920,14 +1039,18 @@ fn jpeg_frame_precision_reads_the_frame_header() {
         DEFAULT_JPEG_QUALITY,
         false,
     );
-    assert_eq!(jpeg_frame_precision(&baseline), Some(8));
-    // No frame header before the first scan, or none at all.
-    assert_eq!(jpeg_frame_precision(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
-    assert_eq!(
-        jpeg_frame_precision(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 200]),
-        None
-    );
-    assert_eq!(jpeg_frame_precision(&[0xFF, 0xD8]), None);
+    let trailers: [(&str, &[u8]); 3] = [
+        ("garbage", b"\x00\x01trailing garbage \xFF\xD8 \xFF"),
+        ("concatenated", &other),
+        ("fill", &[0xFF; 64]),
+    ];
+    for (name, trailer) in trailers {
+        let mut file = bytes.clone();
+        file.extend_from_slice(trailer);
+        let (_, reached_end) = jpeg_decoder_reads(&file);
+        assert!(!reached_end, "{name}");
+        assert_eq!(read(name, &file).data(), complete.data(), "{name}");
+    }
 }
 
 /// The header reads, `image_dimensions` and `image_has_alpha`, agree with the
