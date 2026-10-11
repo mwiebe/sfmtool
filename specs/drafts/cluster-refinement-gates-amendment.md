@@ -6,7 +6,7 @@
 - a `NotEvaluated` member records why: no reference in its cluster, or support off the frame. Today the one status covers both;
 - no default changes until each rule is measured again with the member gate at the refined shape on, because that gate catches most of the members the shift gate catches, and the two overlap.
 
-Not decided: whether shrinkage of the refined shape joins the shift as a second reading of a wandering fit; whether coverage also weights the member downstream (member coherence, the normal's agreement weights); whether a member with coverage under 1 can be a reference candidate, and how the reference rule reads coverage and clipping, which the track reference-view rule already does ([core/patch/reference-view.md](../core/patch/reference-view.md)). See [Open questions](#open-questions).
+Not decided: whether shrinkage of the refined shape joins the shift as a second reading of a wandering fit; whether coverage also weights the member downstream (member coherence, the normal's agreement weights); whether a member with coverage under 1 can be a reference candidate, and how the reference rule reads coverage and clipping, which the track reference-view rule already does ([core/patch/reference-view.md](../core/patch/reference-view.md)); whether the ZNCC bar reads the reference's self-similarity radius, in the measured shape of a blur-matched bar near 0.74 at a radius of 0.5 or less, 0.80 at 0.5 to 1, 0.84 at 1 to 2 and 0.86 above 2, lower again at scale ratios of 1/4 to 0.7 for radii under 1 (near 0.70 and 0.79); on held-out ground-truth pairs the bar with the ratio term passes 1.0 to 5.4 points fewer lookalike impostors than a single bar at the same share of right pairs, and the radius-only bar between 0.8 points more and 8.1 fewer ([True pairs across scale](../core/patch/cluster-patch-refinement-measurements.md#true-pairs-across-scale-2026-10-10)). See [Open questions](#open-questions).
 
 Related: [cluster-review-strips.md](cluster-review-strips.md) (the sheet and review method these findings came from), [image-photometric-model.md](image-photometric-model.md) (the colour reading beside the ZNCC).
 
@@ -94,9 +94,10 @@ Two readings beside the shift. Among SeoulBull's shift-rejected members the wron
 - **Coverage downstream.** Whether a member's coverage weights it in member coherence and in the normal's agreement weights, as the self-similarity radius does.
 - **Edge members as references.** Today a candidate whose template cannot be built is skipped silently, and a cluster whose only gate-passing members are at the border is unrefinable (SeoulBull cluster 33). Whether the reference rule reads coverage and clipping as the track rule does, and what floor a reference needs.
 - **The border population.** Accepted border members are wrong about twice as often as kept members at every coverage. Whether that is the detector at the frame edge or the two-member clusters they sit in.
+- **The bar across scale.** Right ground-truth pairs refined as members reach 0.85 less often below a scale ratio of 0.7, most at sharp references and partly through the SIFT seed's rotation, and a bar that reads the reference's self-similarity radius trades right pairs for impostors only slightly better than a single bar ([True pairs across scale](../core/patch/cluster-patch-refinement-measurements.md#true-pairs-across-scale-2026-10-10)).
 - **The DnDTabletop cost.** A scale-relative shift admits 113k members there at an 18% wrong share. Whether the refined-shape gate removes most of them, which decides whether `k = 2` holds across captures.
 
 ## Non-goals
 
-- Changing the ZNCC bar or the self-similarity gates. The measurements read them as they are.
+- Changing the ZNCC bar or the self-similarity gates in this amendment. The measurements read them as they are; a bar that reads the self-similarity radius is listed as not decided above.
 - A format change beyond the two new status names and the stored coverage.

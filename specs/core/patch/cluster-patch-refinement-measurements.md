@@ -2,7 +2,7 @@
 
 This file records the fleet measurements behind the piecewise refinement of [cluster-patch-refinement.md](cluster-patch-refinement.md#piecewise-refinement), and the ground-truth measurements behind [cell-plane-normals.md](cell-plane-normals.md). The piecewise refinement registers each kept member's nine cells against the cluster's template, starting at the member's cascade shape, fits a robust affine map to the cell shifts to find the cells that disagree with the others, and stores the shifts with a status per cell in the `.matches` file. By default it also applies the fitted map as an update of the shape, by a loop that keeps the cascade's ZNCC from falling (`PiecewiseParams::move_shape`, on by default); with `move_shape` off it is a measurement only and leaves the member's shape as the cascade found it. The measurements bear on whether the stage runs by default (`sfm cluster-patches --piecewise`), and on the defaults of `min_cell_zncc` (provisionally `0.8`) and of `min_cell_curvature` (provisionally `0.02`).
 
-The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, the next measures, against the ground truths of two entries and with a blind human review, which members a blur-matched score at the refinement's bar would accept that the plain score rejects, by the scale ratio of member to reference, the next measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three, and the last two measure the [shift gate](cluster-patch-refinement.md#acceptance) in units of the member's scale against the same ground truths, with the gates at the refined shape off and then on. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
+The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, the next measures, against the ground truths of two entries and with a blind human review, which members a blur-matched score at the refinement's bar would accept that the plain score rejects, by the scale ratio of member to reference, the next measures, apart from the matcher, how pairs of observations of one ground-truth point score when refined as a member against its reference, by scale ratio and by the reference's self-similarity radius, against lookalike pairs that are not the same point, the next measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three, and the last two measure the [shift gate](cluster-patch-refinement.md#acceptance) in units of the member's scale against the same ground truths, with the gates at the refined shape off and then on. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
 
 ## Setup of the fleet run (f787be3b)
 
@@ -1259,6 +1259,130 @@ It is the nearest to the epipolar line of the 23 rescued members wrong by the gr
 - **Blur matching at the bar admits more wrong members than right ones below a scale ratio of 1/2, and more right than wrong from 1/2 to 1.4.** From 1/2 to 1.4 the rescued members are wrong at 23.1% to 43.1% by the ground truth, more often than the accepted members of the same bin (29.7% against 25.7% and 43.1% against 32.4% from 1/2 to 0.7, 31.0% against 13.6% and 23.1% against 9.2% from 0.7 to 1.4), and the reviewer called 17 of 19 answered right. Over all bins the rescued sets are wrong at 45.2% and 28.1%, against 16.1% and 9.5% of the accepted members.
 - **The reviewer and the epipolar rule agree.** They agree on 44 of 45 answered cases. The one difference is a member 1.5 times the bar from the epipolar line, and every *unsure* answer is wrong by the ground truth.
 - **Spans mostly stay under about 1.5×, because the reference is the largest scale.** Only 15 and 57 measured members exceed the reference's scale by 1.4× or more, so the span is the reference's scale over the smallest accepted member's. 89.3% and 98.1% of the clusters span 1.5 or less plain: 10.7% and 1.9% span more, and 11.8% and 2.0% blur-matched; the blur-matched score adds 7 coarse-to-fine bridges at 10 px on `DnDTabletop`.
+
+## True pairs across scale (2026-10-10)
+
+**Question.** The [previous section](#blur-matched-scores-across-scales-2026-10-10) found that members far below the reference's scale are mostly wrong, but its members are what the matcher put into clusters, so it cannot say whether a right correspondence at a small scale ratio scores low. This section measures pairs of observations that ground truth says are the same point, refined as the cluster kernel refines a member, at each scale ratio, against lookalike pairs that ground truth says are not. It asks whether right pairs score lower as the ratio falls, whether that is explained by the reference's texture (its self-similarity radius), and whether a bar that reads the radius separates right from wrong pairs better than the fixed `min_zncc` of 0.85. The maintainer's tags on the `SeoulBull` sheet suggested the question: refused members they called right had a self-similarity radius of 0.1 to 0.5 and a blur-matched score of 0.76 to 0.86, at scale ratios of 0.57 to 1.18.
+
+**Method.**
+
+- **Ground truths.** `DnDTabletop` (`sfmr/cleanup/p7/gt-clean-10-obscull-ba.sfmr`) and `MurdoSmallAntiqueCat` (`sfmr/cleanup/gt-clean-07-narrowcull-refine.sfmr`), both approved; `DinoDogToyWS` (`sfmr/20260727-00-solve-dino_dog_toy_1-85.sfmr`, a raw solve, not approved); and the two checked-in ground truths, `kerry_park_ground_truth.sfmr` and `seoul_bull_sculpture_ground_truth.sfmr`, as references with little distance variation. The images and `.sift` files are those of the workspaces `C:/DataSets/<name>`.
+- **Observations as SIFT features.** `DinoDogToyWS` is a `sift_files` reconstruction, so each observation names its feature. The other four are `embedded_patches` reconstructions, whose keypoints are not feature positions (the median distance to the nearest feature is 3 to 7 px). An observation is used there only if a feature lies within 1 px of its keypoint: 15.8% of `DnDTabletop`'s observations, 20.7% of `MurdoSmallAntiqueCat`'s, 9.1% of `KerryPark480`'s and 8.7% of `SeoulBull`'s. Each pair then takes, among the features within 1 px of its two keypoints, the two with the nearest descriptors, as a matcher would. An observation's position and shape are its feature's, and its *scale* is the feature's `√|det A|`; the stored keypoint shape is not used.
+- **True pairs.** Two observations of one ground-truth point in different images, the larger scale as `A`, both with the template's support wholly inside the frame. The *scale ratio* is `B`'s scale over `A`'s, in four bins: `< 1/4`, `1/4–1/2`, `1/2–0.7`, `0.7–1`. A pair is kept only if its ratio agrees with the *geometric ratio* within a factor of `√2`, the geometric ratio being `f/d` of `B`'s camera over `f/d` of `A`'s, with `d` the distance from the camera centre to the point. Without that condition most pairs of `DnDTabletop` and `MurdoSmallAntiqueCat` in the lowest bin are two features of one point whose sizes differ by more than the views do; they are reported separately below. Tracks were taken in a random order (seed `20261010`), one pair per track and bin (up to 10 in the lowest bin), until a bin held 600. The two checked-in ground truths have few usable observations, so they took every pair.
+- **Refinement.** `A` is the reference: its template is sampled at its feature's position and shape on the 25 × 25 grid over 12 keypoint units, and `B` is refined against it by the shift, similarity and affine cascade, seeded at `B`'s feature position and shape, as the kernel seeds a member (`M₀ = A_mem·A_ref⁻¹`). The cascade is the numpy port behind [Coverage](../../drafts/cluster-refinement-gates-amendment.md#coverage-seoulbull-2026-10-10), which reproduces the kernel's stored ZNCC to three decimals; with full support its score is the kernel's. The readings are those of `scripts/cluster_strips.py`: the plain ZNCC, the blur-matched ZNCC (pair rule at 1.25, target capped at 2 grid px), and the self-similarity radius of `A`'s tile at its feature shape and of `B`'s at its refined shape; also the shift, the shift over `B`'s scale, and the refined over the detected scale.
+- **Right by ground truth.** A true pair counts only if `B`'s refined position lies within `max(3, 5·m)` px of the epipolar half-line of `A`'s position, `m` the dataset's median over its true pairs, the rule of [Gates at the refined shape](#gates-at-the-refined-shape-2026-10-09). `m` is 0.92, 0.86, 0.70, 0.14 and 0.28 px, so the bar is 4.59, 4.27, 3.49, 3.00 and 3.00 px. The pairs off the line are counted and left out.
+- **Impostors.** For each true pair, the feature of `B`'s image with the nearest descriptor to `A`'s among those whose scale ratio to `A` falls in the same bin, whose support is inside the frame, and whose position is further than `max(3, 5·m)` px from `A`'s epipolar line under ground truth (`m` here from the true pairs' seed positions). It is refined against `A` in the same way, and counts only if its refined position stays off the line.
+- **Convergence.** For the four `embedded_patches` ground truths, each point's stored patch frame projected into the two images gives the map between `A` and `B` that the ground truth implies. A true pair is *converged* when its refined map is within 10° of rotation and a factor of `2^0.25` in scale of that map. The seed's rotation against the same map is also recorded.
+- **Bars from self-similarity.** Each dataset's points were split into two halves at random (seed 7). On the true pairs of the first half, pooled over the datasets, the 10th percentile of the blur-matched score was taken in each cell of the reference's radius (`≤ 0.5`, `0.5–1`, `1–2`, `> 2`) by ratio bin, and also for each radius bin over all ratios. Each is applied as a bar to the second half's true and impostor pairs.
+- **Separation.** The AUC is the probability that a true pair outscores an impostor of the same dataset and bin.
+- **Code and timing.** Branch `bootstrap-core-migration` at `4f880e95`. Drawing the pairs and impostors took 46, 27, 11, 12 and 1 s; the 13,737 refinements took 54, 62, 48, 8 and 1 s on 24 processes, a median of 0.08 to 0.22 s each. The analysis scripts are not in the repository.
+
+**Result: right pairs, by dataset and scale ratio.** Each cell is plain / blur-matched where two are given; scores are 10th percentile / median / 90th percentile.
+
+| dataset | scale ratio | true (off the line, left out) | impostors | true blur-matched | impostor blur-matched | true reaching 0.85, plain / blur-matched | impostors reaching 0.85, plain / blur-matched | AUC plain / blur-matched |
+|---|---|---|---|---|---|---|---|---|
+| DnDTabletop | 1/4–1/2 | 566 (29) | 594 | 0.754 / 0.915 / 0.962 | 0.599 / 0.746 / 0.869 | 70.1% / 77.2% | 8.8% / 13.1% | 0.867 / 0.871 |
+| DnDTabletop | 1/2–0.7 | 577 (22) | 597 | 0.766 / 0.924 / 0.970 | 0.603 / 0.759 / 0.884 | 75.6% / 79.5% | 14.6% / 17.4% | 0.855 / 0.860 |
+| DnDTabletop | 0.7–1 | 588 (14) | 601 | 0.885 / 0.965 / 0.989 | 0.565 / 0.741 / 0.881 | 93.2% / 93.7% | 14.1% / 16.0% | 0.947 / 0.947 |
+| MurdoSmallAntiqueCat | < 1/4 | 13 (0) | 13 | 0.622 / 0.707 / 0.872 | 0.319 / 0.526 / 0.728 | 23.1% / 23.1% | 0.0% / 0.0% | 0.858 / 0.822 |
+| MurdoSmallAntiqueCat | 1/4–1/2 | 574 (23) | 596 | 0.666 / 0.863 / 0.943 | 0.398 / 0.586 / 0.829 | 54.0% / 56.8% | 6.7% / 7.6% | 0.879 / 0.871 |
+| MurdoSmallAntiqueCat | 1/2–0.7 | 579 (21) | 600 | 0.677 / 0.876 / 0.948 | 0.422 / 0.603 / 0.815 | 59.1% / 61.0% | 5.8% / 7.2% | 0.887 / 0.881 |
+| MurdoSmallAntiqueCat | 0.7–1 | 597 (5) | 602 | 0.848 / 0.943 / 0.979 | 0.459 / 0.621 / 0.819 | 88.6% / 89.8% | 5.6% / 6.1% | 0.970 / 0.969 |
+| DinoDogToyWS | < 1/4 | 597 (3) | 590 | 0.829 / 0.915 / 0.961 | 0.440 / 0.687 / 0.882 | 83.9% / 86.1% | 12.0% / 14.6% | 0.924 / 0.916 |
+| DinoDogToyWS | 1/4–1/2 | 581 (19) | 592 | 0.859 / 0.930 / 0.971 | 0.431 / 0.673 / 0.879 | 90.5% / 91.9% | 12.3% / 14.2% | 0.939 / 0.939 |
+| DinoDogToyWS | 1/2–0.7 | 583 (17) | 588 | 0.858 / 0.931 / 0.972 | 0.457 / 0.679 / 0.855 | 90.4% / 91.3% | 9.2% / 10.4% | 0.941 / 0.941 |
+| DinoDogToyWS | 0.7–1 | 581 (19) | 588 | 0.870 / 0.942 / 0.977 | 0.421 / 0.677 / 0.862 | 92.6% / 93.5% | 10.5% / 12.1% | 0.959 / 0.960 |
+| KerryPark480 | 1/4–1/2 | 41 (2) | 43 | 0.812 / 0.881 / 0.934 | 0.707 / 0.814 / 0.888 | 63.4% / 68.3% | 16.3% / 27.9% | 0.821 / 0.775 |
+| KerryPark480 | 1/2–0.7 | 153 (0) | 152 | 0.670 / 0.866 / 0.955 | 0.584 / 0.727 / 0.849 | 52.9% / 54.9% | 9.2% / 9.9% | 0.790 / 0.780 |
+| KerryPark480 | 0.7–1 | 595 (5) | 598 | 0.699 / 0.873 / 0.959 | 0.566 / 0.711 / 0.839 | 57.3% / 58.3% | 5.4% / 7.9% | 0.865 / 0.842 |
+| SeoulBull | 1/2–0.7 | 1 (1) | 2 | 0.835 | 0.639 / 0.647 / 0.656 | 0% / 0% | 0% / 0% | – |
+| SeoulBull | 0.7–1 | 62 (1) | 62 | 0.720 / 0.932 / 0.976 | 0.521 / 0.702 / 0.870 | 67.7% / 67.7% | 9.7% / 12.9% | 0.861 / 0.857 |
+
+The bins are filled only where the ground truth has the views. Among all observation pairs of the ground-truth tracks, the geometric ratio falls below 1/4 for 0 pairs of `DnDTabletop`, 2,238 of `MurdoSmallAntiqueCat` (698 tracks), 724 of `DinoDogToyWS` (403 tracks), 81 of `KerryPark480` and 0 of `SeoulBull`, and below 1/2 for none of `SeoulBull`'s. With observations restricted to those at a feature, the scale-consistent draw found 13 pairs below 1/4 on `MurdoSmallAntiqueCat`, none on `KerryPark480`, 43 from 1/4 to 1/2 on `KerryPark480`, and 2 below 0.7 on `SeoulBull`. Among the right true pairs of the three large ground truths the median shift is 0.50 to 0.88 px, 0.12 to 0.21 of `B`'s scale (0.27 to 0.48 on `KerryPark480`), and the refined scale is 1.01 to 1.04 of the detected one (0.84 to 0.97 on `KerryPark480`); their impostors' median shift is 1.5 to 3.9 px, 0.48 to 0.97 of `B`'s scale.
+
+**The seed, and convergence.** Against the map the ground truth implies, on the `embedded_patches` ground truths:
+
+| dataset | scale ratio | true | seed rotated more than 20° | converged | blur-matched reaching 0.85: seed within 20° / beyond | converged / not converged | converged blur-matched q10 / median |
+|---|---|---|---|---|---|---|---|
+| DnDTabletop | 1/4–1/2 | 566 | 17.0% | 87.1% | 83.8% / 44.8% | 86.4% / 15.1% | 0.830 / 0.922 |
+| DnDTabletop | 1/2–0.7 | 577 | 19.9% | 80.6% | 87.9% / 46.1% | 91.0% / 32.1% | 0.852 / 0.936 |
+| DnDTabletop | 0.7–1 | 588 | 5.3% | 93.5% | 95.9% / 54.8% | 97.1% / 44.7% | 0.910 / 0.968 |
+| MurdoSmallAntiqueCat | 1/4–1/2 | 574 | 11.5% | 81.4% | 62.0% / 16.7% | 64.7% / 22.4% | 0.741 / 0.874 |
+| MurdoSmallAntiqueCat | 1/2–0.7 | 579 | 13.0% | 76.5% | 66.7% / 22.7% | 71.3% / 27.2% | 0.781 / 0.890 |
+| MurdoSmallAntiqueCat | 0.7–1 | 597 | 5.0% | 91.1% | 91.4% / 60.0% | 93.2% / 54.7% | 0.870 / 0.945 |
+| KerryPark480 | 1/2–0.7 | 153 | 28.1% | 46.4% | 71.8% / 11.6% | 69.0% / 42.7% | 0.758 / 0.909 |
+| KerryPark480 | 0.7–1 | 595 | 23.0% | 62.5% | 69.9% / 19.7% | 75.8% / 29.1% | 0.794 / 0.901 |
+| SeoulBull | 0.7–1 | 62 | 9.7% | 80.6% | 73.2% / 16.7% | 78.0% / 25.0% | 0.796 / 0.955 |
+
+**By the reference's self-similarity radius.** True pairs on the right side of the line, the five ground truths pooled; each cell is pairs / blur-matched q10 / median / share reaching 0.85. The last column is the impostors over all ratios.
+
+| radius of `A` | < 1/4 | 1/4–1/2 | 1/2–0.7 | 0.7–1 | all ratios | impostors, all ratios |
+|---|---|---|---|---|---|---|
+| ≤ 0.5 | 251 / 0.77 / 0.89 / 75.3% | 995 / 0.71 / 0.89 / 68.0% | 870 / 0.67 / 0.89 / 64.8% | 953 / 0.78 / 0.93 / 82.2% | 3,069 / 0.72 / 0.90 / 72.1% | 3,124 / 0.42 / 0.61 / 2.4% |
+| 0.5–1 | 162 / 0.85 / 0.92 / 88.9% | 423 / 0.79 / 0.91 / 80.6% | 510 / 0.77 / 0.92 / 77.6% | 833 / 0.76 / 0.94 / 78.5% | 1,928 / 0.78 / 0.92 / 79.6% | 1,966 / 0.53 / 0.71 / 9.0% |
+| 1–2 | 170 / 0.87 / 0.94 / 93.5% | 279 / 0.84 / 0.93 / 88.5% | 431 / 0.85 / 0.93 / 90.5% | 528 / 0.87 / 0.95 / 91.3% | 1,408 / 0.86 / 0.94 / 90.8% | 1,431 / 0.61 / 0.78 / 25.3% |
+| > 2 | 27 / 0.86 / 0.95 / 92.6% | 65 / 0.87 / 0.96 / 92.3% | 82 / 0.89 / 0.96 / 95.1% | 109 / 0.87 / 0.97 / 91.7% | 283 / 0.87 / 0.96 / 92.9% | 297 / 0.69 / 0.88 / 58.2% |
+
+The pooled table mixes datasets whose shares differ by bin (the `< 1/4` column is almost all `DinoDogToyWS`). Within one dataset, the share reaching 0.85 by radius, from the lowest ratio bin present to `0.7–1`:
+
+| radius of `A` | DnDTabletop 1/4–1/2, 1/2–0.7, 0.7–1 | MurdoSmallAntiqueCat 1/4–1/2, 1/2–0.7, 0.7–1 | DinoDogToyWS < 1/4, 1/4–1/2, 1/2–0.7, 0.7–1 |
+|---|---|---|---|
+| ≤ 0.5 | 76.2% (332), 73.8% (202), 93.9% (131) | 49.5% (416), 57.5% (393), 89.6% (376) | 77.5% (244), 89.3% (243), 84.5% (206), 93.7% (222) |
+| 0.5–1 | 77.6% (165), 75.4% (207), 92.3% (208) | 71.7% (106), 61.5% (117), 89.2% (139) | 90.4% (156), 91.7% (145), 92.9% (169), 92.1% (178) |
+| 1–2 | 80.3% (61), 91.1% (135), 94.5% (219) | 84.6% (39), 79.7% (64), 91.5% (71) | 93.5% (170), 95.3% (149), 96.3% (164), 95.6% (135) |
+| > 2 | 87.5% (8), 93.9% (33), 96.7% (30) | 84.6% (13), 80.0% (5), 90.9% (11) | 92.6% (27), 95.5% (44), 97.7% (44), 91.3% (46) |
+
+Converged true pairs only, the four `embedded_patches` ground truths pooled (pairs / q10 / median / share reaching 0.85): radius ≤ 0.5 gives 641 / 0.76 / 0.89 / 70.0% at 1/4–1/2, 490 / 0.78 / 0.90 / 74.5% at 1/2–0.7 and 636 / 0.83 / 0.94 / 86.6% at 0.7–1; radius 0.5–1 gives 84.0%, 81.5% and 89.1%; radius 1–2 gives 91.3%, 91.2% and 95.9%; radius over 2 reaches 0.85 in all 91 pairs.
+
+The bar moves both shares by radius. Every pair with a right true pair and an impostor, pooled (true / impostors reaching the bar):
+
+| radius of `A` | pairs | 0.85 | 0.80 | 0.75 | 0.70 |
+|---|---|---|---|---|---|
+| ≤ 0.5 | 3,055 | 72.0% / 2.4% | 81.6% / 7.3% | 87.4% / 15.0% | 91.4% / 27.1% |
+| 0.5–1 | 1,917 | 79.6% / 8.7% | 87.5% / 21.0% | 92.1% / 37.0% | 95.7% / 52.7% |
+| 1–2 | 1,388 | 90.7% / 24.9% | 96.1% / 42.8% | 98.1% / 61.8% | 99.1% / 76.8% |
+| > 2 | 280 | 92.9% / 59.3% | 97.5% / 71.4% | 98.6% / 82.5% | 98.6% / 89.3% |
+
+**A bar from self-similarity, held out.** The bars fitted on the first half (pairs in the cell in brackets; the `> 2` by `< 1/4` cell has 7 and takes its row's value):
+
+| radius of `A` | < 1/4 | 1/4–1/2 | 1/2–0.7 | 0.7–1 | all ratios |
+|---|---|---|---|---|---|
+| ≤ 0.5 | 0.806 (126) | 0.708 (492) | 0.696 (428) | 0.798 (457) | 0.743 |
+| 0.5–1 | 0.875 (74) | 0.802 (216) | 0.783 (283) | 0.804 (423) | 0.799 |
+| 1–2 | 0.857 (106) | 0.838 (144) | 0.841 (253) | 0.843 (279) | 0.842 |
+| > 2 | 0.857 (7) | 0.873 (33) | 0.883 (45) | 0.840 (66) | 0.857 |
+
+On the second half, pooled over the datasets (true / impostors reaching the bar). The fourth and sixth columns give the single blur-matched bar that passes the same share of true pairs as the bar to their left, and the impostor share it passes:
+
+| scale ratio | true / impostors | 0.85 plain | 0.85 blur-matched | radius by ratio | single bar at that true share | radius only | single bar at that true share |
+|---|---|---|---|---|---|---|---|
+| < 1/4 | 297 / 296 | 82.5% / 12.5% | 82.5% / 13.9% | 83.8% / 13.5% | 0.844: 14.5% | 91.2% / 18.9% | 0.792: 22.6% |
+| 1/4–1/2 | 877 / 905 | 71.6% / 8.7% | 74.6% / 11.3% | 88.6% / 30.1% | 0.753: 31.7% | 86.7% / 25.6% | 0.780: 24.8% |
+| 1/2–0.7 | 884 / 913 | 69.3% / 8.9% | 71.7% / 10.6% | 88.6% / 30.1% | 0.738: 35.5% | 85.1% / 22.2% | 0.769: 30.3% |
+| 0.7–1 | 1,198 / 1,216 | 81.0% / 9.6% | 81.8% / 10.9% | 86.6% / 16.8% | 0.805: 18.9% | 89.5% / 20.2% | 0.781: 24.5% |
+
+Per dataset on the second half, the radius-by-ratio bar raises the true share from 76.5% to 86.0% at 1/4–1/2 on `DnDTabletop` with impostors from 13.6% to 48.2%, from 56.4% to 82.6% on `MurdoSmallAntiqueCat` with impostors from 6.2% to 18.3%, and from 91.1% to 97.3% on `DinoDogToyWS` with impostors from 13.8% to 23.6%.
+
+**Scale-inconsistent pairs.** The same draw without the agreement condition (2,399, 1,972, 2,400, 833 and 82 pairs) shows what the lowest bin holds when the feature sizes are taken at their word:
+
+| dataset | scale ratio | pairs | inconsistent | their geometric ratio, median | inconsistent: reaching 0.85 / off the line | consistent: reaching 0.85 / off the line |
+|---|---|---|---|---|---|---|
+| DnDTabletop | < 1/4 | 513 | 513 | 1.018 | 12.1% / 41.3% | – |
+| DnDTabletop | 1/4–1/2 | 589 | 300 | 0.776 | 45.3% / 15.3% | 76.1% / 1.0% |
+| MurdoSmallAntiqueCat | < 1/4 | 164 | 151 | 0.994 | 7.3% / 53.6% | 23.1% / 0.0% |
+| MurdoSmallAntiqueCat | 1/4–1/2 | 595 | 91 | 0.746 | 26.4% / 23.1% | 53.4% / 3.0% |
+| DinoDogToyWS | < 1/4 | 600 | 42 | 0.328 | 88.1% / 11.9% | 86.0% / 0.4% |
+| KerryPark480 | < 1/4 | 9 | 9 | 0.952 | 66.7% / 22.2% | – |
+
+**What it shows.**
+
+- **On these ground truths a scale ratio under 1/4 is mostly not a change of viewing distance.** Every `DnDTabletop` pair and 151 of 164 `MurdoSmallAntiqueCat` pairs whose features differ in size by 4 or more see the point at nearly the same scale (median geometric ratio 1.02 and 0.99). They are two features of different sizes on one point; 41.3% and 53.6% refine off the epipolar line and 12.1% and 7.3% reach 0.85. Only `DinoDogToyWS` has many views 4 times further apart.
+- **Right pairs reach 0.85 less often below a ratio of 0.7, after blur matching, on the two approved ground truths.** On `DnDTabletop` 77.2% and 79.5% reach it at 1/4–1/2 and 1/2–0.7 against 93.7% at 0.7–1; on `MurdoSmallAntiqueCat` 56.8% and 61.0% against 89.8%. On `DinoDogToyWS` the share falls only from 93.5% to 91.3%, 91.9% and 86.1% at the ratio of 1/4 and below. Blur matching raises the true share by at most 7.1 points in any bin.
+- **Part of the fall is the seed.** SIFT's orientation is off by more than 20° for 11.5% to 19.9% of the mid-ratio true pairs against 5.0% to 5.3% at 0.7–1, and those pairs reach 0.85 at 16.7% to 46.1%. Of the pairs whose refinement converges to the ground truth's map, 86.4% and 91.0% reach 0.85 on `DnDTabletop` at 1/4–0.7 against 97.1% at 0.7–1, and 64.7% and 71.3% on `MurdoSmallAntiqueCat` against 93.2%.
+- **Sharp texture reads lower, and explains part of the remainder but not all of it.** Pooled, a reference radius of 1 or more reaches 0.85 in 88.5% to 95.1% of right pairs in every ratio bin. At a radius of 1 or less, converged right pairs reach it at 70.0% to 84.0% at 1/4–0.7 against 86.6% and 89.1% at 0.7–1, and over all right pairs of `DnDTabletop` and `MurdoSmallAntiqueCat` at a radius of 1 or less the share at 1/4–0.7 is 14.7 to 40.1 points under that at 0.7–1. So at sharp references the score of a right pair falls with the ratio, and a bar that holds the right pairs' share constant would need a scale term there.
+- **The radius governs the impostors more than the right pairs.** At 0.85 lookalike impostors pass at 2.4% with a reference radius of 0.5 or less and at 59.3% above 2. At a radius of 0.5 or less, a bar of 0.80 passes 81.6% of right pairs and 7.3% of impostors; at a radius of 1 to 2 the same bar passes 96.1% and 42.8%.
+- **A bar fitted to the radius, held out, passes fewer impostors than a single bar at the same share of right pairs, by 1.0 to 5.4 points.** The radius-only bar does better than a single bar in three bins (by 3.7 to 8.1 points) and worse by 0.8 in the fourth. Raising the right pairs' share at 1/4–0.7 from 72% to 75% (0.85 blur-matched) to 85% to 89% costs, under any of these bars, a rise in impostors from 11% to between 22% and 36%.
+- **The maintainer's tags fit the right pairs at sharp references.** At a reference radius of 0.5 or less, right pairs from a ratio of 1/4 to 1 have a blur-matched 10th percentile of 0.67 to 0.78, and 18% to 35% of them score under 0.85, so a right member scoring 0.76 to 0.86 there is common.
 
 ## Rotation multi-start (2026-10-11)
 
