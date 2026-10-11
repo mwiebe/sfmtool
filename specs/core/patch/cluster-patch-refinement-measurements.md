@@ -2,7 +2,7 @@
 
 This file records the fleet measurements behind the piecewise refinement of [cluster-patch-refinement.md](cluster-patch-refinement.md#piecewise-refinement), and the ground-truth measurements behind [cell-plane-normals.md](cell-plane-normals.md). The piecewise refinement registers each kept member's nine cells against the cluster's template, starting at the member's cascade shape, fits a robust affine map to the cell shifts to find the cells that disagree with the others, and stores the shifts with a status per cell in the `.matches` file. By default it also applies the fitted map as an update of the shape, by a loop that keeps the cascade's ZNCC from falling (`PiecewiseParams::move_shape`, on by default); with `move_shape` off it is a measurement only and leaves the member's shape as the cascade found it. The measurements bear on whether the stage runs by default (`sfm cluster-patches --piecewise`), and on the defaults of `min_cell_zncc` (provisionally `0.8`) and of `min_cell_curvature` (provisionally `0.02`).
 
-The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, the next measures, against the ground truths of two entries and with a blind human review, which members a blur-matched score at the refinement's bar would accept that the plain score rejects, by the scale ratio of member to reference, the next measures, apart from the matcher, how pairs of observations of one ground-truth point score when refined as a member against its reference, by scale ratio and by the reference's self-similarity radius, against lookalike pairs that are not the same point, the next measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three, and the last two measure the [shift gate](cluster-patch-refinement.md#acceptance) in units of the member's scale against the same ground truths, with the gates at the refined shape off and then on. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
+The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, the next measures, against the ground truths of two entries and with a blind human review, which members a blur-matched score at the refinement's bar would accept that the plain score rejects, by the scale ratio of member to reference, the next measures, apart from the matcher, how pairs of observations of one ground-truth point score when refined as a member against its reference, by scale ratio and by the reference's self-similarity radius, against lookalike pairs that are not the same point, the next seeds the refinement's rotation on those pairs from rotations other than SIFT's: by scoring the template at evenly spaced rotations of the seed, by correlating angular signatures of the two tiles, and by both, the next measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three, and the last two measure the [shift gate](cluster-patch-refinement.md#acceptance) in units of the member's scale against the same ground truths, with the gates at the refined shape off and then on. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
 
 ## Setup of the fleet run (f787be3b)
 
@@ -1383,6 +1383,143 @@ Per dataset on the second half, the radius-by-ratio bar raises the true share fr
 - **The radius governs the impostors more than the right pairs.** At 0.85 lookalike impostors pass at 2.4% with a reference radius of 0.5 or less and at 59.3% above 2. At a radius of 0.5 or less, a bar of 0.80 passes 81.6% of right pairs and 7.3% of impostors; at a radius of 1 to 2 the same bar passes 96.1% and 42.8%.
 - **A bar fitted to the radius, held out, passes fewer impostors than a single bar at the same share of right pairs, by 1.0 to 5.4 points.** The radius-only bar does better than a single bar in three bins (by 3.7 to 8.1 points) and worse by 0.8 in the fourth. Raising the right pairs' share at 1/4–0.7 from 72% to 75% (0.85 blur-matched) to 85% to 89% costs, under any of these bars, a rise in impostors from 11% to between 22% and 36%.
 - **The maintainer's tags fit the right pairs at sharp references.** At a reference radius of 0.5 or less, right pairs from a ratio of 1/4 to 1 have a blur-matched 10th percentile of 0.67 to 0.78, and 18% to 35% of them score under 0.85, so a right member scoring 0.76 to 0.86 there is common.
+
+## Rotation seeding (2026-10-11)
+
+**Question.** The [previous section](#true-pairs-across-scale-2026-10-10) found that the refinement's seed rotation, taken from the two SIFT orientations through `M₀ = A_mem·A_ref⁻¹`, is more than 20° from the ground truth's map for 11.5% to 19.9% of right pairs at scale ratios of 1/4 to 0.7, and that those pairs reach 0.85 less often. This section seeds the same cascade from other rotations and keeps the result with the highest final ZNCC. It asks how many badly seeded right pairs each seeding brings to the ground truth's map, what that does to the right pairs' and the impostors' pass rates, and what it costs.
+
+**Method.**
+
+- **Pairs.** The true pairs and impostors of the previous section, on all five datasets, with its bins, its epipolar bar per dataset and its convergence test. A rotation `φ` means the member's seed shape `A_mem·R(φ)`, at the seed's position and scale. A pair is *seed-bad* when it is a right true pair of the previous section whose seed rotation is more than 20° from the ground truth's map; that reading exists on the four `embedded_patches` ground truths only. There are 396 seed-bad pairs among 2,491 at 1/4 to 0.7 and 204 among 1,842 at 0.7 to 1.
+- **Multi-start (K, N).** The template is scored at K rotations of the seed spaced 360°/K apart, the seed itself one of them (K = 8 or 12), by one tile render and one ZNCC each, with no optimisation. When the pair rule of the blur-matched reading blurs one side at the seed (the reference in 6.3% to 20.9% of right pairs per `embedded_patches` dataset, the member in 1.1% to 2.9%), the score is blur-matched: the reference is blurred once, or each rotated member tile is blurred; otherwise the score is plain. The cascade runs from the N best-scored rotations (N = 1, 2, 3); the seed is cascaded only if it is among them. Scoring plain throughout picks the same rotations to within 0.5 points of seed-bad coverage.
+- **Angular profile.** Both tiles are sampled on the template grid, the member's at its seed shape, which already carries `M₀`'s scale. Each is resampled in polar form at 96 angles (3.75°) and 12 radii of 1 to 12 grid samples. Three signatures were compared, each in luminance and per channel: raw intensity summed over radius per angle (`int`); the intensity of each ring correlated separately and the ring correlations summed over radius with the template's Gaussian window (`ring`); and a gradient-magnitude-weighted histogram of gradient orientation over the window (`grad`). The circular cross-correlation of the two signatures gives up to N peaks at least 20° apart, refined by a parabola. *Angular profile (N)* cascades from the seed and the N peaks; *peaks only (N)* cascades from the N peaks without the seed.
+- **Combined (K, N).** The seed, the N best `ring` peaks and the N best multi-start rotations, in that order, a candidate dropped when it lies within 10° of one already kept.
+- **Selection.** Of the cascades a variant runs, the one with the highest final ZNCC (the cascade's own plain score) is kept, and its blur-matched score, its refined position against the epipolar bar and its refined map against the ground truth are read as in the previous section. A true pair counts when the kept result lies on the line, an impostor when it stays off it.
+- **Readings.** *Candidates within 20°*: some candidate rotation is within 20° of the ground truth's map. *Final within 20°*: the kept refined map's rotation is. *Converged*: within 10° and `2^0.25` in scale, as before. The impostors' rise is read on the impostors that count under both the current seed and the variant.
+- **Code and timing.** Branch `bootstrap-core-migration` at `71446a5e`, the same numpy port of the cascade, which with the seed alone reproduces the previous section's ZNCC and blur-matched scores exactly. The cascade ran from every candidate any variant names (8.5 to 9.2 per pair) on 24 processes: 31,175, 33,458, 40,962, 14,010 and 1,119 cascades in 251, 305, 309, 92 and 9 s for `DnDTabletop`, `MurdoSmallAntiqueCat`, `DinoDogToyWS`, `KerryPark480` and `SeoulBull`. Each variant's cost is the sum of its own scoring and cascade times per pair, timed separately in the same run. The analysis scripts are not in the repository.
+
+**Result: choosing the angular signature.** Seed-bad pairs with a candidate within 20° of the ground truth's map, the four `embedded_patches` ground truths pooled (396 pairs at 1/4 to 0.7, 204 at 0.7 to 1):
+
+| candidates | N = 1, 1/4–0.7 | N = 2 | N = 3 | N = 1, 0.7–1 | N = 2 | N = 3 |
+|---|---|---|---|---|---|---|
+| `ring`, luminance | 75.0% | 80.3% | 81.3% | 65.7% | 75.0% | 77.0% |
+| `ring`, per channel | 75.3% | 79.8% | 80.8% | 66.2% | 74.5% | 77.0% |
+| `int`, luminance | 69.2% | 77.3% | 80.1% | 51.0% | 58.3% | 60.8% |
+| `int`, per channel | 68.2% | 78.8% | 81.1% | 51.0% | 58.3% | 64.2% |
+| `grad`, luminance | 41.7% | 53.3% | 62.9% | 55.4% | 69.6% | 77.0% |
+| `grad`, per channel | 42.2% | 54.3% | 63.4% | 53.4% | 69.1% | 75.5% |
+| multi-start, K = 8 | 41.4% | 55.3% | 61.6% | 47.1% | 62.7% | 70.1% |
+| multi-start, K = 12 | 65.7% | 81.1% | 88.9% | 59.8% | 78.4% | 88.7% |
+
+The angular profile below uses `ring` in luminance; per channel gives the same within 1 point. `int` in luminance was also run through the cascade.
+
+**Result: reaching the ground truth's map.** Right pairs of the previous section on the four `embedded_patches` ground truths, pooled; each cell is all pairs / seed-bad pairs:
+
+| seeding | cascades per pair | 1/4–0.7: candidates within 20° | final within 20° | converged | 0.7–1: final within 20° | converged |
+|---|---|---|---|---|---|---|
+| SIFT seed (current) | 1.00 | 84.1% / 0% | 90.8% / 50.3% | 78.6% / 37.9% | 92.7% / 42.6% | 82.3% / 29.9% |
+| multi-start K = 8, N = 1 | 1.00 | 89.1% / 41.4% | 93.7% / 75.0% | 81.1% / 58.6% | 95.5% / 75.0% | 84.3% / 49.5% |
+| multi-start K = 8, N = 3 | 3.00 | 93.6% / 61.6% | 94.2% / 80.8% | 82.4% / 63.6% | 95.2% / 72.5% | 84.5% / 50.5% |
+| multi-start K = 12, N = 1 | 1.00 | 92.4% / 65.7% | 94.7% / 80.1% | 81.8% / 61.1% | 94.9% / 70.6% | 84.1% / 49.0% |
+| multi-start K = 12, N = 2 | 2.00 | 96.3% / 81.1% | 95.1% / 82.1% | 83.2% / 64.4% | 95.6% / 73.0% | 84.4% / 47.5% |
+| multi-start K = 12, N = 3 | 3.00 | 97.9% / 88.9% | 94.7% / 81.3% | 83.1% / 64.6% | 95.1% / 73.0% | 84.4% / 49.5% |
+| peaks only, N = 1 | 1.00 | 93.7% / 75.0% | 93.6% / 78.3% | 81.2% / 59.1% | 95.0% / 69.1% | 84.0% / 47.5% |
+| angular profile, N = 1 | 1.93 | 96.0% / 75.0% | 95.1% / 79.3% | 83.0% / 62.1% | 95.2% / 67.2% | 84.1% / 47.1% |
+| angular profile, N = 3 | 3.23 | 97.0% / 81.3% | 94.6% / 80.1% | 83.2% / 64.4% | 95.3% / 70.6% | 84.5% / 49.0% |
+| angular profile `int`, N = 1 | 1.92 | 95.1% / 69.2% | 94.4% / 74.0% | 82.4% / 58.3% | 94.4% / 59.3% | 84.0% / 44.1% |
+| combined K = 12, N = 1 | 1.43 | 96.3% / 76.8% | 95.5% / 81.8% | 82.9% / 63.4% | 95.1% / 68.1% | 84.3% / 47.5% |
+| combined K = 12, N = 2 | 2.89 | 97.8% / 86.1% | 94.7% / 80.3% | 83.2% / 63.9% | 95.3% / 71.6% | 84.5% / 49.0% |
+| combined K = 12, N = 3 | 4.18 | 98.8% / 92.4% | 94.2% / 79.8% | 83.0% / 64.1% | 95.2% / 72.5% | 84.4% / 49.5% |
+
+Seed-bad pairs at 1/4 to 0.7 by dataset (final within 20° / converged):
+
+| dataset | seed-bad | SIFT seed | multi-start K = 12, N = 1 | peaks only, N = 1 | angular profile, N = 1 | combined K = 12, N = 1 | combined K = 12, N = 3 |
+|---|---|---|---|---|---|---|---|
+| DnDTabletop | 211 | 62.1% / 50.2% | 86.3% / 73.0% | 84.8% / 72.0% | 87.2% / 76.3% | 88.2% / 77.3% | 89.1% / 78.7% |
+| MurdoSmallAntiqueCat | 141 | 37.6% / 25.5% | 75.9% / 53.9% | 75.9% / 50.4% | 73.8% / 52.5% | 77.3% / 53.9% | 68.8% / 53.2% |
+| KerryPark480 | 44 | 34.1% / 18.2% | 63.6% / 27.3% | 54.5% / 25.0% | 59.1% / 25.0% | 65.9% / 27.3% | 70.5% / 29.5% |
+
+**Result: right pairs and impostors at 0.85 blur-matched.** The five datasets pooled; each cell is right pairs on the line: right pairs reaching 0.85 / impostors reaching 0.85 / AUC (the pair-weighted mean of the per-dataset AUCs):
+
+| seeding | < 1/4 | 1/4–1/2 | 1/2–0.7 | 0.7–1 |
+|---|---|---|---|---|
+| SIFT seed (current) | 610: 84.8% / 14.3% / 0.916 | 1,762: 75.2% / 12.0% / 0.892 | 1,893: 75.4% / 11.5% / 0.885 | 2,423: 83.3% / 10.6% / 0.927 |
+| multi-start K = 8, N = 1 | 610: 84.8% / 14.1% / 0.917 | 1,784: 75.6% / 12.2% / 0.894 | 1,907: 76.8% / 11.6% / 0.901 | 2,434: 84.3% / 10.8% / 0.937 |
+| multi-start K = 12, N = 1 | 610: 84.9% / 14.4% / 0.916 | 1,789: 75.7% / 12.3% / 0.896 | 1,914: 76.8% / 11.6% / 0.902 | 2,439: 84.1% / 10.8% / 0.936 |
+| multi-start K = 12, N = 2 | 610: 85.9% / 16.1% / 0.914 | 1,792: 77.3% / 13.1% / 0.897 | 1,912: 77.7% / 12.6% / 0.903 | 2,438: 84.7% / 11.5% / 0.936 |
+| multi-start K = 12, N = 3 | 609: 86.0% / 17.6% / 0.910 | 1,789: 77.7% / 13.9% / 0.896 | 1,901: 78.4% / 13.6% / 0.900 | 2,431: 85.2% / 12.2% / 0.934 |
+| peaks only, N = 1 | 611: 85.3% / 13.7% / 0.921 | 1,791: 75.2% / 12.4% / 0.897 | 1,913: 76.3% / 11.1% / 0.902 | 2,436: 83.9% / 10.3% / 0.934 |
+| angular profile, N = 1 | 611: 86.3% / 14.9% / 0.920 | 1,789: 76.9% / 13.0% / 0.900 | 1,917: 77.6% / 12.0% / 0.905 | 2,438: 84.6% / 11.1% / 0.936 |
+| angular profile, N = 3 | 609: 86.4% / 17.7% / 0.912 | 1,781: 77.7% / 14.1% / 0.898 | 1,911: 77.9% / 13.1% / 0.901 | 2,434: 84.9% / 13.0% / 0.932 |
+| combined K = 12, N = 1 | 610: 85.4% / 14.9% / 0.916 | 1,787: 76.8% / 12.7% / 0.902 | 1,915: 77.2% / 11.9% / 0.906 | 2,438: 84.6% / 10.9% / 0.937 |
+| combined K = 12, N = 3 | 607: 86.2% / 19.1% / 0.905 | 1,779: 78.2% / 14.8% / 0.895 | 1,900: 78.6% / 14.2% / 0.899 | 2,428: 85.5% / 13.6% / 0.930 |
+
+By dataset at 1/4 to 0.7 (right pairs reaching 0.85 / impostors reaching 0.85):
+
+| dataset | ratio | SIFT seed | multi-start K = 12, N = 1 | angular profile, N = 1 | combined K = 12, N = 1 | combined K = 12, N = 3 |
+|---|---|---|---|---|---|---|
+| DnDTabletop | 1/4–1/2 | 77.2% / 13.1% | 78.9% / 13.6% | 82.0% / 14.1% | 81.4% / 14.0% | 83.6% / 16.6% |
+| DnDTabletop | 1/2–0.7 | 79.5% / 17.4% | 82.6% / 17.4% | 84.2% / 17.8% | 83.3% / 17.9% | 85.0% / 20.9% |
+| MurdoSmallAntiqueCat | 1/4–1/2 | 56.8% / 7.6% | 57.3% / 7.9% | 57.2% / 8.4% | 57.5% / 7.9% | 58.5% / 9.4% |
+| MurdoSmallAntiqueCat | 1/2–0.7 | 61.0% / 7.2% | 62.4% / 7.2% | 62.9% / 7.3% | 63.1% / 7.2% | 64.2% / 8.0% |
+| DinoDogToyWS | 1/4–1/2 | 91.9% / 14.2% | 91.9% / 14.1% | 92.3% / 15.2% | 92.1% / 14.9% | 92.9% / 16.4% |
+| DinoDogToyWS | 1/2–0.7 | 91.3% / 10.4% | 91.3% / 10.4% | 91.3% / 11.1% | 91.3% / 10.7% | 91.6% / 14.1% |
+| KerryPark480 | 1/4–1/2 | 68.3% / 27.9% | 65.1% / 27.9% | 68.3% / 30.2% | 68.3% / 30.2% | 72.5% / 39.5% |
+| KerryPark480 | 1/2–0.7 | 54.9% / 9.9% | 55.6% / 10.5% | 56.9% / 11.2% | 55.6% / 11.2% | 59.5% / 13.2% |
+
+**Impostors raised by the extra starts.** Impostors that count under both seedings (6,801 to 6,818), the five datasets pooled:
+
+| seeding | median blur-matched, SIFT seed → variant | raised by more than 0.02 | crossing 0.85 | falling below 0.85 |
+|---|---|---|---|---|
+| multi-start K = 8, N = 1 | 0.692 → 0.693 | 4.5% | 0.2% | 0.1% |
+| multi-start K = 12, N = 1 | 0.692 → 0.693 | 6.6% | 0.3% | 0.1% |
+| multi-start K = 12, N = 2 | 0.692 → 0.703 | 17.5% | 1.2% | 0.0% |
+| multi-start K = 12, N = 3 | 0.692 → 0.711 | 25.5% | 2.1% | 0.1% |
+| peaks only, N = 1 | 0.692 → 0.685 | 12.7% | 0.7% | 0.8% |
+| angular profile, N = 1 | 0.692 → 0.702 | 12.3% | 0.7% | 0.0% |
+| angular profile, N = 3 | 0.692 → 0.714 | 23.9% | 2.2% | 0.0% |
+| combined K = 12, N = 1 | 0.692 → 0.700 | 11.2% | 0.5% | 0.0% |
+| combined K = 12, N = 3 | 0.692 → 0.720 | 30.8% | 3.1% | 0.0% |
+
+**By the reference's self-similarity radius.** All ratios, the five datasets pooled (right pairs reaching 0.85 / impostors reaching 0.85):
+
+| seeding | ≤ 0.5 | 0.5–1 | 1–2 | > 2 |
+|---|---|---|---|---|
+| SIFT seed (current) | 72.1% / 2.4% | 79.6% / 9.0% | 90.8% / 25.3% | 92.9% / 58.2% |
+| multi-start K = 12, N = 1 | 73.0% / 2.5% | 80.4% / 9.5% | 91.4% / 25.3% | 93.3% / 57.9% |
+| multi-start K = 12, N = 3 | 74.6% / 3.2% | 82.2% / 11.1% | 92.8% / 29.7% | 93.2% / 61.0% |
+| peaks only, N = 1 | 72.7% / 2.5% | 80.2% / 9.2% | 91.2% / 24.5% | 92.6% / 56.9% |
+| angular profile, N = 1 | 74.1% / 2.7% | 81.2% / 9.8% | 92.0% / 26.4% | 93.7% / 59.3% |
+| combined K = 12, N = 1 | 73.8% / 2.6% | 81.1% / 9.7% | 91.8% / 26.1% | 93.3% / 58.2% |
+| combined K = 12, N = 3 | 74.9% / 4.1% | 82.6% / 12.6% | 93.0% / 30.5% | 93.9% / 61.7% |
+
+At 1/4 to 0.7 alone the radius `≤ 0.5` column reads 66.5% / 2.6% under the SIFT seed, 67.8% / 2.7% under multi-start K = 12, N = 1, 68.8% / 2.9% under the angular profile with N = 1, and 70.0% / 4.1% under combined K = 12, N = 3.
+
+**Cost.** Per pair, true and impostor pairs pooled. Tile renders are those beyond the seed's; the angular profile reads the template and the seed tile the cascade renders anyway.
+
+| seeding | extra tile renders | cascades | scoring s, mean | cascade s, mean | total s, mean | against the SIFT seed |
+|---|---|---|---|---|---|---|
+| SIFT seed (current) | 0 | 1.00 | 0 | 0.156 | 0.156 | 1.00× |
+| multi-start K = 8, N = 1 | 7 | 1.00 | 0.0051 | 0.155 | 0.160 | 1.02× |
+| multi-start K = 12, N = 1 | 11 | 1.00 | 0.0067 | 0.154 | 0.160 | 1.03× |
+| multi-start K = 12, N = 2 | 11 | 2.00 | 0.0067 | 0.328 | 0.335 | 2.15× |
+| multi-start K = 12, N = 3 | 11 | 3.00 | 0.0067 | 0.511 | 0.518 | 3.32× |
+| peaks only, N = 1 | 0 | 1.00 | 0.0031 | 0.151 | 0.154 | 0.99× |
+| angular profile, N = 1 | 0 | 1.93 | 0.0031 | 0.297 | 0.300 | 1.93× |
+| angular profile, N = 3 | 0 | 3.23 | 0.0031 | 0.530 | 0.533 | 3.42× |
+| combined K = 12, N = 1 | 11 | 1.43 | 0.0098 | 0.225 | 0.235 | 1.51× |
+| combined K = 12, N = 3 | 11 | 4.18 | 0.0098 | 0.723 | 0.733 | 4.71× |
+
+The scoring time includes the blur of the reference or of each rotated member where the pair rule blurs.
+
+**What it shows.**
+
+- **The cascade leaves a bad seed about half the time on its own.** Under the SIFT seed, 50.3% of the seed-bad pairs at 1/4 to 0.7 and 42.6% at 0.7 to 1 end within 20° of the ground truth's map, and 37.9% and 29.9% converge.
+- **Multi-start with K = 12 and one cascade brings 80.1% of the seed-bad pairs at 1/4 to 0.7 within 20°, for 3% more time.** Converged seed-bad pairs rise from 37.9% to 61.1%. Its impostor pass rate rises by 0.1 to 0.3 points per bin and the median impostor score does not move. K = 8 with one cascade reaches 75.0%. More cascades raise the candidates' coverage to 81.1% and 88.9% (N = 2 and 3) but the kept result only to 82.1% and 81.3%, because the highest final ZNCC does not always pick the candidate near the ground truth; each further cascade adds 0.7 to 1.7 points of impostors per bin.
+- **The angular profile finds the rotation as often as multi-start does, and is not better once cascaded.** Its first `ring` peak is within 20° for 75.0% of the seed-bad pairs at 1/4 to 0.7 against 65.7% for the best multi-start rotation, but cascaded from that peak alone 78.3% end within 20°, and from the seed and the peak 79.3%, at 1.93 times the time. Raw intensity summed per angle finds it less often (69.2%), and the gradient-orientation histogram much less (41.7%); per channel and luminance agree within 1 point.
+- **Combining the two adds 1.7 points.** Combined K = 12, N = 1 brings 81.8% of the seed-bad pairs within 20° at 1.51 times the time, with impostors 0.1 to 0.5 points above multi-start's per bin. With N = 3 it covers 92.4% in its candidates and keeps 79.8%, at 4.71 times the time and 2.7 to 4.8 points more impostors than the SIFT seed.
+- **The right pairs' pass rate gains little.** At 1/4 to 0.7, right pairs reaching 0.85 rise from 75.2% and 75.4% to 75.7% and 76.8% under multi-start K = 12, N = 1, and to 78.2% and 78.6% under combined K = 12, N = 3, with impostors from 12.0% and 11.5% to 14.8% and 14.2%. The AUC rises by at most 0.021 in any pooled bin, and falls at `< 1/4` under multi-start and combined seeding with N = 2 or 3. Most of the gap below 0.7 that the [previous section](#true-pairs-across-scale-2026-10-10) found remains: of the seed-bad pairs on `MurdoSmallAntiqueCat` 75.9% end within 20° under multi-start K = 12, N = 1, but its right pairs at 1/4 to 0.7 still reach 0.85 in 57.3% and 62.4%.
+- **No radius bin is singled out.** Against the SIFT seed, the variants in the radius table move the right pairs' share by −0.3 to +3.0 points in a radius bin and the impostors' by −1.3 to +5.2 points; the largest impostor rises are at radii above 1, where impostors already pass most often, under the variants with three cascades.
 
 ## Rotation multi-start (2026-10-11)
 
