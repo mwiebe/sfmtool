@@ -2,11 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Image containers shared across the crate: [`ImageU8`], a packed `u8` image
-//! with 1, 3 or 4 interleaved channels; [`ImageU8Pyramid`], a stack of
+//! with 1, 3 or 4 interleaved channels, read from and written to image files;
+//! [`ImageU8Pyramid`], a stack of
 //! successive 2x box-filtered downsamples of one; and [`ImageF32WithGrad`], a
 //! float image carrying its per-channel `x` and `y` gradients. The resampling
 //! functions in [`remap`](super::remap) read and write them, and the patch,
 //! spherical-tile, bench and photograph-cache code hold them.
+
+/// The JPEG quality a caller of [`ImageU8::write`] passes when it has no
+/// reason to choose another. It is 95, the default of OpenCV's
+/// `cv2.imwrite`, so a JPEG keeps the quality OpenCV gives it.
+pub const DEFAULT_JPEG_QUALITY: u8 = 95;
 
 /// A multi-channel image stored as packed u8 values.
 ///
@@ -75,6 +81,149 @@ impl ImageU8 {
         ::image::ImageReader::open(path)?
             .with_guessed_format()?
             .decode()
+    }
+
+    /// Encode the image to the file at `path`, in the format the path's
+    /// extension names (case does not matter).
+    ///
+    /// `.jpg` / `.jpeg` write a baseline JPEG with 4:2:0 chroma subsampling
+    /// at `jpeg_quality`; callers pass [`DEFAULT_JPEG_QUALITY`] unless they
+    /// choose otherwise. `.png` writes a lossless PNG at the `png` crate's
+    /// fast compression with adaptive filtering. Any other extension whose
+    /// format the `image` crate encodes 8-bit pixels to (`.tif`, `.bmp`,
+    /// `.webp`, ...) is written with that crate's defaults, which leave a
+    /// TIFF uncompressed. `jpeg_quality` must be 1 to 100 whatever the
+    /// format, though only a JPEG uses it. The channels are written as they
+    /// are held: 1 is grey, 3 is RGB and 4 is RGBA. Every format is written
+    /// at 8 bits per channel.
+    ///
+    /// The file is encoded in memory, written to a temporary file beside
+    /// `path` and renamed into place, so a failed encode or write leaves
+    /// neither a partial file nor a changed old one. Where the rename is
+    /// refused because another process holds `path` open (Windows reports
+    /// this as permission denied), the bytes are written to `path` directly
+    /// instead, as a plain `std::fs::write` would, and a failure part way
+    /// through that write can leave a partial file.
+    ///
+    /// The errors are
+    /// [`ImageError::Unsupported`](::image::ImageError::Unsupported) for an
+    /// extension that names no format the crate encodes, or a channel count
+    /// the format cannot hold, among them 4 channels to JPEG, whose alpha is
+    /// refused rather than dropped;
+    /// [`ImageError::Parameter`](::image::ImageError::Parameter) for a
+    /// `jpeg_quality` outside 1 to 100, a channel count other than 1, 3 or 4,
+    /// a side of 0, or a side over 65535 in a JPEG;
+    /// [`ImageError::Encoding`](::image::ImageError::Encoding) when the
+    /// format's encoder refuses the image, such as a WebP side over 16384;
+    /// and [`ImageError::IoError`](::image::ImageError::IoError) when the
+    /// file cannot be written.
+    pub fn write(
+        &self,
+        path: &std::path::Path,
+        jpeg_quality: u8,
+    ) -> Result<(), ::image::ImageError> {
+        use ::image::error::{
+            EncodingError, ImageFormatHint, ParameterError, ParameterErrorKind, UnsupportedError,
+            UnsupportedErrorKind,
+        };
+        use ::image::{ExtendedColorType, ImageEncoder, ImageError, ImageFormat};
+
+        let parameter_error = |message: String| {
+            ImageError::Parameter(ParameterError::from_kind(ParameterErrorKind::Generic(
+                message,
+            )))
+        };
+        let format = ImageFormat::from_path(path)?;
+        if !(1..=100).contains(&jpeg_quality) {
+            return Err(parameter_error(format!(
+                "JPEG quality {jpeg_quality} is outside 1 to 100"
+            )));
+        }
+        if self.width == 0 || self.height == 0 {
+            return Err(parameter_error(format!(
+                "a {} x {} image has no pixels to write",
+                self.width, self.height
+            )));
+        }
+        let color = match self.channels {
+            1 => ExtendedColorType::L8,
+            3 => ExtendedColorType::Rgb8,
+            4 => ExtendedColorType::Rgba8,
+            n => {
+                return Err(parameter_error(format!(
+                    "an image to write has 1, 3 or 4 channels, not {n}"
+                )))
+            }
+        };
+        let mut bytes = Vec::new();
+        match format {
+            ImageFormat::Jpeg => {
+                if self.channels == 4 {
+                    return Err(ImageError::Unsupported(
+                        UnsupportedError::from_format_and_kind(
+                            ImageFormatHint::Exact(ImageFormat::Jpeg),
+                            UnsupportedErrorKind::Color(color),
+                        ),
+                    ));
+                }
+                let (Ok(width), Ok(height)) =
+                    (u16::try_from(self.width), u16::try_from(self.height))
+                else {
+                    return Err(parameter_error(format!(
+                        "a {} x {} image is too large for a JPEG, whose sides are \
+                         at most 65535",
+                        self.width, self.height
+                    )));
+                };
+                let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, jpeg_quality);
+                // 4:2:0 with each chroma sample the average of its 2x2 block,
+                // as libjpeg and so OpenCV write it, whatever the quality.
+                encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+                encoder
+                    .set_chroma_subsampling_method(jpeg_encoder::ChromaSubsamplingMethod::Average);
+                // Optimized Huffman tables stay off, though off is the
+                // default, to record the choice: with them the encoder writes
+                // each component in a scan of its own. Those files are valid
+                // and OpenCV decodes them, but our reader (image 0.25.10 with
+                // zune-jpeg 0.5.15) returns wrong pixels for them without an
+                // error; see the ignored test
+                // `read_decodes_a_jpeg_with_one_scan_per_component`.
+                encoder.set_optimized_huffman_tables(false);
+                let color_type = if self.channels == 1 {
+                    jpeg_encoder::ColorType::Luma
+                } else {
+                    jpeg_encoder::ColorType::Rgb
+                };
+                encoder
+                    .encode(&self.data, width, height, color_type)
+                    .map_err(|e| {
+                        ImageError::Encoding(EncodingError::new(
+                            ImageFormatHint::Exact(ImageFormat::Jpeg),
+                            e,
+                        ))
+                    })?;
+            }
+            ImageFormat::Png => {
+                ::image::codecs::png::PngEncoder::new_with_quality(
+                    &mut bytes,
+                    ::image::codecs::png::CompressionType::Fast,
+                    ::image::codecs::png::FilterType::Adaptive,
+                )
+                .write_image(&self.data, self.width, self.height, color)?;
+            }
+            _ => {
+                ::image::write_buffer_with_format(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    &self.data,
+                    self.width,
+                    self.height,
+                    color,
+                    format,
+                )?;
+            }
+        }
+        write_via_temporary(path, &bytes)?;
+        Ok(())
     }
 
     /// Create a zeroed image with the given dimensions and channel count.
@@ -168,6 +317,34 @@ impl ImageU8 {
             data: out_data,
         }
     }
+}
+
+/// Write `bytes` to `path` through a temporary file beside it that is renamed
+/// into place, so a failed write leaves neither a partial file at `path` nor a
+/// changed old one. The temporary file is removed whether or not the write
+/// succeeds.
+///
+/// On Windows a file another process holds open cannot be replaced by a
+/// rename, which fails with permission denied, though it can still be
+/// written. In that case the bytes are written to `path` directly, as
+/// `std::fs::write` alone would.
+fn write_via_temporary(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The process id and a per-process count keep two writers apart, whether
+    // they are threads of one process or separate processes.
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temporary = path.with_file_name(format!(".{name}.{}-{count}.tmp", std::process::id()));
+    let written = std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .or_else(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied if !path.is_dir() => std::fs::write(path, bytes),
+            _ => Err(e),
+        });
+    // Gone already after a rename; still there after a failure or the direct
+    // write.
+    let _ = std::fs::remove_file(&temporary);
+    written
 }
 
 /// Whether the image file at `path` stores an alpha channel, read from its

@@ -567,9 +567,11 @@ def dump_disagreements(records, images, out_dir: Path, limit: int):
     something the solve missed; if they do not, the candidate is wrong.
     """
     try:
-        import cv2
+        # Only checks that OpenCV is installed: `crop` imports it again to
+        # resample, and without it the crops are skipped below.
+        import cv2  # noqa: F401
 
-        from sfmtool.fileio import read_image_rgb
+        from sfmtool.fileio import read_image_rgb, write_image_rgb
     except ImportError:
         print("opencv unavailable; skipping crops")
         return []
@@ -579,11 +581,8 @@ def dump_disagreements(records, images, out_dir: Path, limit: int):
     for record in records:
         if len(written) >= limit:
             break
-        # Drawn and written with OpenCV, which takes BGR.
         try:
-            left_image = cv2.cvtColor(
-                read_image_rgb(images[record["image"]]), cv2.COLOR_RGB2BGR
-            )
+            left_image = read_image_rgb(images[record["image"]])
         except OSError:
             continue
         cx, cy = record["centre"]
@@ -596,9 +595,7 @@ def dump_disagreements(records, images, out_dir: Path, limit: int):
             if len(written) >= limit:
                 break
             try:
-                right_image = cv2.cvtColor(
-                    read_image_rgb(images[other]), cv2.COLOR_RGB2BGR
-                )
+                right_image = read_image_rgb(images[other])
             except OSError:
                 continue
             a = np.asarray(affine, dtype=np.float64)
@@ -624,7 +621,7 @@ def dump_disagreements(records, images, out_dir: Path, limit: int):
                 f"false-{record['image']}-vs-{other}"
                 f"-n{record['features']}-in{inliers}-scale{scale:.2f}.jpg"
             )
-            cv2.imwrite(str(out_dir / name), np.hstack(crops))
+            write_image_rgb(out_dir / name, np.hstack(crops))
             written.append(
                 {
                     "file": name,

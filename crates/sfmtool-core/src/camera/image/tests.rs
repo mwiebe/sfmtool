@@ -271,3 +271,270 @@ fn image_has_alpha_reads_the_header() {
     assert!(!image_has_alpha(&rgb).unwrap());
     assert!(image_has_alpha(&dir.path().join("missing.png")).is_err());
 }
+
+// -----------------------------------------------------------------------
+// Writing image files
+// -----------------------------------------------------------------------
+
+/// A `width x height` image whose bytes vary in every channel, so a swapped or
+/// dropped channel changes the data.
+fn gradient(width: u32, height: u32, channels: u32) -> ImageU8 {
+    let data = (0..width * height * channels)
+        .map(|i| ((i * 37 + i / channels * 11) % 256) as u8)
+        .collect();
+    ImageU8::new(width, height, channels, data)
+}
+
+#[test]
+fn write_png_round_trips_grey_rgb_and_rgba_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    for channels in [1, 3, 4] {
+        let image = gradient(17, 9, channels);
+        let path = dir.path().join(format!("c{channels}.png"));
+        image.write(&path, DEFAULT_JPEG_QUALITY).unwrap();
+        let back = match channels {
+            4 => ImageU8::read_rgba(&path).unwrap(),
+            _ => ImageU8::read_rgb(&path).unwrap(),
+        };
+        assert_eq!((back.width(), back.height()), (17, 9));
+        if channels == 1 {
+            let grey: Vec<u8> = back.data().chunks(3).map(|p| p[0]).collect();
+            assert_eq!(grey, image.data());
+        } else {
+            assert_eq!(back.data(), image.data(), "{channels} channels");
+        }
+    }
+}
+
+#[test]
+fn write_jpeg_is_close_and_its_quality_sets_its_size() {
+    let dir = tempfile::tempdir().unwrap();
+    // A smooth image, as a photograph is, so the JPEG error stays small.
+    let (w, h) = (64u32, 48u32);
+    let data = (0..h)
+        .flat_map(|y| (0..w).flat_map(move |x| [(x * 4) as u8, (y * 5) as u8, 128]))
+        .collect();
+    let image = ImageU8::new(w, h, 3, data);
+
+    let q95 = dir.path().join("q95.jpg");
+    let q30 = dir.path().join("q30.JPEG");
+    image.write(&q95, DEFAULT_JPEG_QUALITY).unwrap();
+    image.write(&q30, 30).unwrap();
+
+    let back = ImageU8::read_rgb(&q95).unwrap();
+    let max_error = back
+        .data()
+        .iter()
+        .zip(image.data())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(max_error <= 6, "max error {max_error} at quality 95");
+    let size = |p: &std::path::Path| std::fs::metadata(p).unwrap().len();
+    assert!(size(&q30) < size(&q95));
+}
+
+#[test]
+fn write_refuses_what_it_cannot_encode_and_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rgba = gradient(4, 4, 4);
+    let rgb = gradient(4, 4, 3);
+
+    let jpeg = dir.path().join("alpha.jpg");
+    assert!(matches!(
+        rgba.write(&jpeg, DEFAULT_JPEG_QUALITY),
+        Err(::image::ImageError::Unsupported(_))
+    ));
+    assert!(!jpeg.exists());
+
+    let unknown = dir.path().join("image.xyz");
+    assert!(matches!(
+        rgb.write(&unknown, DEFAULT_JPEG_QUALITY),
+        Err(::image::ImageError::Unsupported(_))
+    ));
+    assert!(!unknown.exists());
+
+    let bad_quality = dir.path().join("q0.jpg");
+    assert!(matches!(
+        rgb.write(&bad_quality, 0),
+        Err(::image::ImageError::Parameter(_))
+    ));
+    assert!(!bad_quality.exists());
+
+    let missing_dir = dir.path().join("missing").join("image.png");
+    assert!(matches!(
+        rgb.write(&missing_dir, DEFAULT_JPEG_QUALITY),
+        Err(::image::ImageError::IoError(_))
+    ));
+
+    // A quality outside 1 to 100 is refused for every format.
+    let png = dir.path().join("q0.png");
+    assert!(matches!(
+        rgb.write(&png, 0),
+        Err(::image::ImageError::Parameter(_))
+    ));
+
+    let empty = ImageU8::new(0, 4, 3, Vec::new());
+    let two_channels = ImageU8::new(2, 2, 2, vec![0; 8]);
+    let too_wide = ImageU8::new(65536, 1, 1, vec![0; 65536]);
+    for (image, name) in [
+        (&empty, "empty.png"),
+        (&two_channels, "two.png"),
+        (&too_wide, "wide.jpg"),
+    ] {
+        let path = dir.path().join(name);
+        assert!(
+            matches!(
+                image.write(&path, DEFAULT_JPEG_QUALITY),
+                Err(::image::ImageError::Parameter(_))
+            ),
+            "{name}"
+        );
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn a_failed_write_leaves_no_temporary_file_and_a_good_one_replaces_the_old() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should go: the rename into place fails.
+    std::fs::create_dir(dir.path().join("taken.png")).unwrap();
+    assert!(matches!(
+        gradient(4, 4, 3).write(&dir.path().join("taken.png"), DEFAULT_JPEG_QUALITY),
+        Err(::image::ImageError::IoError(_))
+    ));
+    let names = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(), ["taken.png"]);
+
+    let path = dir.path().join("image.png");
+    gradient(4, 4, 3)
+        .write(&path, DEFAULT_JPEG_QUALITY)
+        .unwrap();
+    let second = gradient(6, 2, 3);
+    second.write(&path, DEFAULT_JPEG_QUALITY).unwrap();
+    assert_eq!(ImageU8::read_rgb(&path).unwrap().data(), second.data());
+    assert_eq!(names(), ["image.png", "taken.png"]);
+}
+
+/// The `(horizontal, vertical)` sampling factors of each component in the
+/// baseline frame header (SOF0) of `jpeg`.
+fn jpeg_sampling_factors(jpeg: &[u8]) -> Vec<(u8, u8)> {
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("a baseline JPEG has an SOF0 marker");
+    let components = jpeg[sof + 9] as usize;
+    (0..components)
+        .map(|i| {
+            let factors = jpeg[sof + 10 + 3 * i + 1];
+            (factors >> 4, factors & 0x0F)
+        })
+        .collect()
+}
+
+#[test]
+fn write_jpeg_subsamples_chroma_420_and_decodes_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    // Odd sides, so the last chroma block covers a partial 2 x 2 block.
+    let (w, h) = (37u32, 23u32);
+    let data = (0..h)
+        .flat_map(|y| (0..w).flat_map(move |x| [200, (x * 6) as u8, (y * 10) as u8]))
+        .collect();
+    let image = ImageU8::new(w, h, 3, data);
+    let path = dir.path().join("rgb.jpg");
+    image.write(&path, DEFAULT_JPEG_QUALITY).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(jpeg_sampling_factors(&bytes), [(2, 2), (1, 1), (1, 1)]);
+    let back = ImageU8::read_rgb(&path).unwrap();
+    assert_eq!((back.width(), back.height()), (w, h));
+    let mean_error = back
+        .data()
+        .iter()
+        .zip(image.data())
+        .map(|(a, b)| f64::from(a.abs_diff(*b)))
+        .sum::<f64>()
+        / image.data().len() as f64;
+    assert!(mean_error < 2.0, "mean error {mean_error}");
+
+    // A grey image is written as a one-component JPEG and reads back close.
+    let grey = gradient(19, 11, 1);
+    let grey_path = dir.path().join("grey.jpg");
+    grey.write(&grey_path, DEFAULT_JPEG_QUALITY).unwrap();
+    assert_eq!(
+        jpeg_sampling_factors(&std::fs::read(&grey_path).unwrap()).len(),
+        1
+    );
+    let grey_back = ImageU8::read_rgb(&grey_path).unwrap();
+    assert_eq!((grey_back.width(), grey_back.height()), (19, 11));
+}
+
+/// A file another process holds open, without letting it be deleted, as
+/// Python's `open` does on Windows, cannot be replaced by a rename; the write
+/// falls back to writing it in place.
+#[cfg(windows)]
+#[test]
+fn write_replaces_a_file_held_open_without_delete_sharing() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held.png");
+    gradient(4, 4, 3)
+        .write(&path, DEFAULT_JPEG_QUALITY)
+        .unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&path)
+        .unwrap();
+
+    let second = gradient(5, 3, 3);
+    second.write(&path, DEFAULT_JPEG_QUALITY).unwrap();
+    drop(held);
+    assert_eq!(ImageU8::read_rgb(&path).unwrap().data(), second.data());
+    let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(names.len(), 1, "the temporary file is removed");
+}
+
+/// With optimized Huffman tables, `jpeg-encoder` writes a 4:2:0 JPEG with each
+/// component in a scan of its own. The file is valid, and OpenCV decodes it,
+/// but our reader (`image` 0.25.10 with zune-jpeg 0.5.15) returns wrong pixels
+/// for it without an error. `ImageU8::write` keeps those tables off for that
+/// reason; this test passes once the reader decodes such files.
+#[test]
+#[ignore = "image 0.25.10 / zune-jpeg 0.5.15 misdecode a JPEG with one scan per component"]
+fn read_decodes_a_jpeg_with_one_scan_per_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (64u16, 64u16);
+    let data: Vec<u8> = (0..u32::from(h))
+        .flat_map(|y| (0..u32::from(w)).flat_map(move |x| [200, (x * 4) as u8, (y * 4) as u8]))
+        .collect();
+    let mut bytes = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, DEFAULT_JPEG_QUALITY);
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+    encoder.set_optimized_huffman_tables(true);
+    encoder
+        .encode(&data, w, h, jpeg_encoder::ColorType::Rgb)
+        .unwrap();
+    let path = dir.path().join("scans.jpg");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let back = ImageU8::read_rgb(&path).unwrap();
+    let mean_error = back
+        .data()
+        .iter()
+        .zip(&data)
+        .map(|(a, b)| f64::from(a.abs_diff(*b)))
+        .sum::<f64>()
+        / data.len() as f64;
+    assert!(mean_error < 6.0, "mean error {mean_error}");
+}
