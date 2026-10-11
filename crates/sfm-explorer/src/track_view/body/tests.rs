@@ -281,9 +281,9 @@ fn the_reference_column_marks_the_row_the_rule_picks() {
 }
 
 /// A standing of the reference-view rule for the Track View tests: the pick,
-/// at a cost of 0.5 grid px, on the patch's front.
+/// at a cost of 0.5 grid px.
 fn picked_standing() -> sfmtool_core::patch::reference_view::ReferenceStanding {
-    use sfmtool_core::patch::reference_view::{PatchSide, ReferenceCost, ReferenceStanding};
+    use sfmtool_core::patch::reference_view::{ReferenceCost, ReferenceStanding};
     ReferenceStanding {
         cost: Ok(ReferenceCost {
             radius: 0.5,
@@ -298,7 +298,6 @@ fn picked_standing() -> sfmtool_core::patch::reference_view::ReferenceStanding {
         reference: true,
         pick_cost: Some(0.5),
         costliest_term: None,
-        side: Some(PatchSide::Front),
     }
 }
 
@@ -325,7 +324,7 @@ fn costlier_standing(
 fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
     use sfmtool_core::bench::{Observation, Provenance, TrackMeasurement};
     use sfmtool_core::patch::reference_view::{
-        PatchSide, ReferenceExclusion, ReferenceStanding, ReferenceTerm,
+        ReferenceExclusion, ReferenceStanding, ReferenceTerm,
     };
 
     let row = |standing: ReferenceStanding| Observation {
@@ -422,7 +421,7 @@ fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
         assert!(hover.contains("Coverage \u{d7}1.00: 1 from 99%"), "{hover}");
     }
 
-    // An infinite cost, of a row edge on to the patch.
+    // An infinite cost over the pick's.
     let edge_on = cell(&row(costlier_standing(f64::INFINITY, ReferenceTerm::Angle)));
     assert!(
         edge_on.text.starts_with("\u{d7}\u{221e} oblique\n"),
@@ -430,15 +429,13 @@ fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
         edge_on.text
     );
 
-    // A radius that is not the row's own, and angles measured from behind.
+    // A radius that is not the row's own.
     let mut standing = costlier_standing(0.625, ReferenceTerm::Sharpness);
     if let Ok(cost) = standing.cost.as_mut() {
         cost.radius_read = false;
     }
-    standing.side = Some(PatchSide::Back);
     let hover = cell(&row(standing)).hover.expect("a hover");
     assert!(hover.contains("not the row's own"), "{hover}");
-    assert!(hover.contains("flipped normal"), "{hover}");
 
     // The rows the rule left out.
     for (exclusion, word, why) in [
@@ -449,9 +446,9 @@ fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
             "85.0% of its tile is on the photograph, under the 90%",
         ),
         (
-            ReferenceExclusion::OtherSide,
-            "other side",
-            "sees the patch from behind",
+            ReferenceExclusion::BackFacing,
+            "back facing",
+            "sees the patch at 120.0\u{b0}, edge on or from behind",
         ),
     ] {
         let standing = ReferenceStanding {
@@ -459,7 +456,12 @@ fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
             reference: false,
             ..picked_standing()
         };
-        let left_out = cell(&row(standing));
+        let mut excluded = row(standing);
+        if exclusion == ReferenceExclusion::BackFacing {
+            let slot = excluded.track.as_mut().expect("a track slot");
+            slot.viewing_angle_deg = Some(120.0);
+        }
+        let left_out = cell(&excluded);
         assert!(
             left_out.text.starts_with(&format!("{word}\n")),
             "{}",
@@ -502,8 +504,8 @@ fn the_reference_cell_names_the_cost_and_the_term_that_adds_most_to_it() {
 
 /// The *Reference* column's marks: green for a reference the rule picks too,
 /// red for one it does not with the pick marked grey in its own cell, and only
-/// the pick where the track has no reference, whether its bitmap is a fused
-/// mean or it has none yet.
+/// the pick where the track has no reference, whether its bitmap is the
+/// render of no row or it has none yet.
 #[test]
 fn the_reference_column_marks_the_reference_and_the_rule_s_pick() {
     use super::reference::{reference_cell, ReferenceMark, ReferenceRows};
@@ -647,7 +649,8 @@ fn the_reference_column_marks_the_reference_and_the_rule_s_pick() {
     let hover = drawn[0].hover.as_deref().expect("a hover");
     assert!(hover.contains("picks no row"), "{hover}");
 
-    // No reference: a fused mean, or no bitmap yet, marks only the pick.
+    // No reference: a bitmap that is the render of no row, or no bitmap yet,
+    // marks only the pick.
     for has_bitmap in [true, false] {
         let none = ReferenceRows {
             reference: None,
@@ -667,19 +670,20 @@ fn the_reference_column_marks_the_reference_and_the_rule_s_pick() {
         );
         let hover = drawn[2].hover.as_deref().expect("a hover");
         let says = if has_bitmap {
-            "mean of the rows"
+            "render of no row"
         } else {
             "no patch bitmap yet"
         };
         assert!(hover.contains(says), "{hover}");
     }
-    // A fused mean moves to the pick at the next evaluation that renders.
-    let fused = ReferenceRows {
+    // A bitmap that is the render of no row moves to the pick at the next
+    // evaluation that renders.
+    let unnamed = ReferenceRows {
         reference: None,
         reference_image: None,
         ..agreed
     };
-    let hover = cells(&fused)[2].hover.clone().expect("a hover");
+    let hover = cells(&unnamed)[2].hover.clone().expect("a hover");
     assert!(hover.contains("renders it from this row"), "{hover}");
     // A bitmap for judging: only the pick is marked, and its hover says the
     // bitmap is not one the track keeps.
@@ -2393,7 +2397,7 @@ fn the_headline_leaves_the_condition_number_off_a_bearing() {
 }
 
 /// The track's own patch sits left of the toolbar, under the header, and the
-/// controls start to its right. Before a fit fuses the observations the
+/// controls start to its right. Before a fit renders its bitmap the
 /// demo's track, from a reconstruction that stores no bitmaps, has none and
 /// the slot is empty; after it the slot shows the patch bitmap.
 #[test]
@@ -2417,7 +2421,7 @@ fn the_track_s_patch_sits_left_of_the_toolbar() {
         .start_bench_fit(id, &label)
         .expect("a framed track with three sightings fits");
     state.finish_background_task();
-    assert!(bitmap(&state), "the fit fused no bitmap");
+    assert!(bitmap(&state), "the fit rendered no bitmap");
     let painted = crate::test_support::painted_text_rects(&ctx, input(Vec::new()), |ui| {
         panel.show(ui, &state);
     });

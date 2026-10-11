@@ -24,14 +24,12 @@ use crate::camera::{PhotographCache, WarpMap};
 use crate::geometry::RigidTransform;
 use crate::patch::cloud::{OrientedPatch, PatchCloud};
 use crate::patch::keypoint_localize::{localize_patch_keypoints, KeypointLocalizeParams};
-use crate::patch::keypoint_subpixel::{
-    fuse_patch_bitmap, refine_patch_keypoints, KeypointSubpixelParams,
-};
+use crate::patch::keypoint_subpixel::{refine_patch_keypoints, KeypointSubpixelParams};
 use crate::patch::member_coherence::{member_zncc_matrix, MemberCoherenceParams};
 use crate::patch::normal_refine::{refine_patch_normal, NormalRefineParams};
 use crate::patch::normal_refine::{PatchWindow, ProjectedImage};
 use crate::patch::reference_view::{
-    finite_middle, render_view_tile, PatchSide, ReferenceViewOptions, ViewTile,
+    finite_middle, render_view_tile, ReferenceExclusion, ReferenceViewOptions, ViewTile,
 };
 use crate::patch::self_similarity::{
     zncc_self_similarity_parts, PatchTile, SelfSimilarityEllipseUnits, SelfSimilarityParams,
@@ -157,7 +155,6 @@ fn an_evaluation_picks_the_lowest_cost_view_on_a_ground_truth_track() {
         assert!(m.clipped_share.is_some(), "row {i}");
         assert!(m.pair_zncc_grid.is_some(), "row {i}");
         let standing = m.reference_view.expect("an in row has a standing");
-        assert_eq!(standing.side, Some(PatchSide::Front));
         if standing.is_reference() {
             picked.push(i);
         }
@@ -319,8 +316,8 @@ fn tile_of_row(
     )
 }
 
-/// A track whose bitmap names no reference observation (a fused mean, or a
-/// bitmap from before the reference was recorded) scores every row against
+/// A track whose bitmap names no reference observation (a fused mean an older
+/// file stores, or a bitmap from before the reference was recorded) scores every row against
 /// that bitmap, plain and blur-matched, as the scorer does directly.
 #[test]
 fn every_row_is_scored_against_the_stored_bitmap() {
@@ -601,7 +598,7 @@ fn committing_an_unedited_display_pick_saves_it() {
 /// A ground-truth point no view of which has its tile wholly on the
 /// photograph with little clipped: under a rule of gates, no view passed the
 /// coverage and clipping tests, and the point stored a fused mean. The rule
-/// now picks a view with a coverage or clipping penalty, and it is stored.
+/// picks a view with a coverage or clipping penalty, and it is stored.
 const PARTIAL_POINT: usize = 53;
 
 /// Point `p`'s patch, its images and its stored keypoints.
@@ -662,7 +659,7 @@ fn a_point_no_view_covers_whole_stores_the_rule_s_pick() {
         &Progress::none(),
     )
     .expect("a bitmap");
-    assert_eq!(stored.reference, Some(pick));
+    assert_eq!(stored.reference, pick);
     assert_eq!(stored.rgba, bitmap_from_tile(&render.tiles[pick]));
 }
 
@@ -1356,9 +1353,41 @@ fn unpinning_the_held_reference_waits_for_the_new_bitmap() {
     assert!(!report.bitmap_pending);
 }
 
+/// The mean of `patch`'s tiles in `images` at `keypoints`, as an `R·R·4` RGBA
+/// bitmap: a stand-in for the fused mean an older file can store, which is
+/// the render of no one view.
+fn mean_of_tiles(
+    patch: &OrientedPatch,
+    views: &[ProjectedImage<'_>],
+    images: &[u32],
+    keypoints: &[[f64; 2]],
+    r: usize,
+) -> Vec<u8> {
+    let tiles: Vec<Vec<u8>> = images
+        .iter()
+        .zip(keypoints)
+        .map(|(&i, &k)| {
+            bitmap_from_tile(&render_view_tile(
+                patch,
+                &views[i as usize],
+                Some(k),
+                r,
+                KeypointSubpixelParams::default().sampler,
+                &Progress::none(),
+            ))
+        })
+        .collect();
+    (0..r * r * 4)
+        .map(|k| {
+            let sum: usize = tiles.iter().map(|t| usize::from(t[k])).sum();
+            (sum / tiles.len()) as u8
+        })
+        .collect()
+}
+
 /// The ground truth with point `p` stored at `-1`: its reference observation
-/// names no row and its stored bitmap is the fused mean of its views, as a
-/// file stored before the reference was recorded holds it. The point's track
+/// names no row and its stored bitmap is a mean of its views' tiles, as a
+/// file stored before the reference was recorded can hold. The point's track
 /// put on the bench, and the reconstruction.
 fn track_at_minus_one(truth: &GroundTruth, p: usize) -> (EditableTrack, EditedReconstruction) {
     let views = truth.views();
@@ -1371,20 +1400,15 @@ fn track_at_minus_one(truth: &GroundTruth, p: usize) -> (EditableTrack, EditedRe
     references[p] = -1;
     recon.point_set.reference_observations = Some(references);
     // The ground truth stores no bitmaps: a column of blank ones, with the
-    // fused mean in point `p`'s row.
+    // mean in point `p`'s row.
     let r = EvaluateOptions::default().patch_resolution(&truth.recon) as usize;
     let mut bitmaps = ndarray::Array4::<u8>::zeros((recon.point_count(), r, r, 4));
     let (patch, images, keypoints) = point_inputs(&truth.recon, p);
-    let params = KeypointSubpixelParams {
-        resolution: r as u32,
-        ..Default::default()
-    };
-    let fused = fuse_patch_bitmap(&patch, &views, &images, &keypoints, &params)
-        .expect("a fused mean renders");
+    let mean = mean_of_tiles(&patch, &views, &images, &keypoints, r);
     for (stored, value) in bitmaps
         .index_axis_mut(ndarray::Axis(0), p)
         .iter_mut()
-        .zip(fused)
+        .zip(mean)
     {
         *stored = value;
     }
@@ -1409,7 +1433,7 @@ fn long_track_point(truth: &GroundTruth) -> usize {
         .expect("the ground truth has a long track")
 }
 
-/// A track at `-1` comes on with its stored fused mean and no reference.
+/// A track at `-1` comes on with its stored mean and no reference.
 /// Pins play no part: a reading that renders nothing scores the rows against
 /// the mean, and unpinning and pinning rows hands nothing on, while the
 /// first evaluation that renders renders the bitmap from the rule's pick and
@@ -1464,7 +1488,7 @@ fn a_track_at_minus_one_is_rendered_from_the_rule_s_pick_at_its_first_evaluation
 }
 
 /// A track at `-1` whose views are all cut by the photograph's border or
-/// clipped still has its fused mean moved to the rule's pick at the first
+/// clipped still has its stored mean moved to the rule's pick at the first
 /// evaluation that renders, whatever the pins; a pick with no keypoint is a
 /// row no render takes the tile of, so the mean stands there.
 #[test]
@@ -1497,7 +1521,7 @@ fn a_track_at_minus_one_no_view_covers_whole_is_rendered_from_the_pick() {
 /// A track built on the bench whose bitmap names no row follows the same
 /// rule as a point at `-1`: the first evaluation renders from the pick.
 #[test]
-fn a_bench_built_track_with_a_fused_mean_is_rendered_from_the_pick() {
+fn a_bench_built_track_with_a_bitmap_naming_no_row_is_rendered_from_the_pick() {
     let truth = GroundTruth::load();
     let views = truth.views();
     let (mut track, edited) = track_at_minus_one(&truth, long_track_point(&truth));
@@ -1508,6 +1532,144 @@ fn a_bench_built_track_with_a_fused_mean_is_rendered_from_the_pick() {
     let first = render_with(&track, &edited, &views);
     let pick = rule_pick(&first).expect("the rule picks one");
     assert_rendered_from(&first, &views, &edited, pick, "a bench-built track");
+}
+
+/// `track` with its track-stage patch turned to face away from every camera
+/// that sees it (negating `v` negates the normal `u × v`), and nothing else
+/// changed: its bitmap, reference and pins stay.
+fn turned_away(track: &EditableTrack) -> EditableTrack {
+    let mut turned = track.clone();
+    if let crate::bench::Stage::Track(payload) = &mut turned.stage {
+        let placement = payload.placement.as_mut().expect("a placed track");
+        placement.v_axis = -placement.v_axis;
+    }
+    turned
+}
+
+/// A track whose bitmap names a row, with every row unpinned so no pin holds
+/// the reference, whose `in` rows all become back-facing: the rule finds no
+/// eligible row, so no render would replace the bitmap, and it stands with
+/// its reference (`bitmap_target`).
+#[test]
+fn a_bitmap_naming_a_row_stands_where_no_in_row_is_eligible() {
+    let truth = GroundTruth::load();
+    let views = truth.views();
+    let (track, edited, _, _) = track_with_another_reference(&truth);
+    let every: Vec<usize> = (0..track.observations.len()).collect();
+    let (unpinned, _) = unpin_verdicts(&track, &every).expect("live rows");
+    let unpinned = render_with(&unpinned, &edited, &views);
+    let reference = unpinned.track().unwrap().reference.expect("a reference");
+    let bitmap = unpinned.track().unwrap().bitmap.clone();
+    assert!(bitmap.is_some());
+    assert!(!unpinned.observations[reference].pinned);
+
+    let turned = turned_away(&unpinned);
+    let (read, _) = evaluate(
+        &turned,
+        &edited,
+        &views,
+        &EvaluateOptions::default(),
+        &Progress::none(),
+    )
+    .expect("the track reads");
+    assert_eq!(rule_pick(&read), None, "no row is eligible");
+    // The repaint turns most rows `out` against the unturned bitmap; at least
+    // one stays `in`, so the check below is not vacuous.
+    assert!(!read.in_observations().is_empty());
+    for o in read
+        .observations
+        .iter()
+        .filter(|o| o.verdict == Verdict::In)
+    {
+        let standing = o.track.as_ref().unwrap().reference_view.unwrap();
+        assert_eq!(standing.cost, Err(ReferenceExclusion::BackFacing));
+    }
+    assert_eq!(read.track().unwrap().reference, Some(reference));
+    assert_eq!(bitmap_target(&read), None, "the bitmap stands");
+    // The rendering evaluation renders nothing over it.
+    let rendered = render_with(&turned, &edited, &views);
+    let payload = rendered.track().unwrap();
+    assert_eq!(payload.reference, Some(reference));
+    assert_eq!(payload.bitmap, bitmap);
+    assert!(!payload.bitmap_for_judging);
+}
+
+/// A track with no bitmap whose rows are all back-facing gets no bitmap from
+/// its `in` rows, and no bitmap for judging either: the rule finds no row
+/// eligible among every row with a keypoint, so no row is scored.
+#[test]
+fn a_track_with_no_eligible_row_gets_no_bitmap_for_judging() {
+    let truth = GroundTruth::load();
+    let views = truth.views();
+    let (read, edited) = truth.evaluated_track();
+    let mut turned = turned_away(&read);
+    if let crate::bench::Stage::Track(payload) = &mut turned.stage {
+        payload.drop_bitmap();
+    }
+    assert!(turned.in_observations().len() >= 2);
+    let rendered = render_with(&turned, &edited, &views);
+    let payload = rendered.track().unwrap();
+    assert!(payload.bitmap.is_none(), "no bitmap");
+    assert!(!payload.bitmap_for_judging);
+    assert_eq!(payload.reference, None);
+    assert_eq!(rule_pick(&rendered), None);
+    assert!(unscored(&rendered), "no row is scored");
+}
+
+/// A track with no bitmap whose `in` rows are all back-facing while some
+/// `out` rows are not gets no bitmap from its `in` rows, and a bitmap for
+/// judging from the rule's pick among every row with a keypoint: an `out`
+/// row's tile, naming no reference, with every row scored against it.
+#[test]
+fn a_track_whose_in_rows_are_ineligible_is_judged_against_an_out_row() {
+    let truth = GroundTruth::load();
+    let views = truth.views();
+    let (read, edited) = truth.evaluated_track();
+    assert!(read.observations.len() >= 8);
+    // Turn the normal 80° about `u`, so rows 0-3 still face the patch and
+    // rows 4-7 see it from behind.
+    let mut track = read.clone();
+    if let crate::bench::Stage::Track(payload) = &mut track.stage {
+        let placement = payload.placement.as_mut().expect("a placed track");
+        let (n, theta) = (placement.normal(), 80f64.to_radians());
+        placement.v_axis = placement.v_axis * theta.cos() + n * theta.sin();
+        payload.drop_bitmap();
+    }
+    for i in 0..8 {
+        let verdict = if i < 4 { Verdict::Out } else { Verdict::In };
+        track = set_verdict(&track, i, verdict).expect("a live row").0;
+    }
+    let rendered = render_with(&track, &edited, &views);
+    let payload = rendered.track().unwrap();
+    assert!(payload.bitmap_for_judging, "a bitmap for judging");
+    assert_eq!(payload.reference, None);
+    assert_eq!(rule_pick(&rendered), None, "no in row is eligible");
+    for o in rendered
+        .observations
+        .iter()
+        .filter(|o| o.verdict == Verdict::In)
+    {
+        let standing = o.track.as_ref().unwrap().reference_view.unwrap();
+        assert_eq!(standing.cost, Err(ReferenceExclusion::BackFacing));
+    }
+    // The bitmap is the tile of the out row that scores about 1 against it:
+    // that row is scored as any other, not set aside as a held reference's.
+    let score = |i: usize| {
+        let m = rendered.observations[i].track.as_ref().unwrap();
+        m.plain_zncc.unwrap_or(f64::NEG_INFINITY)
+    };
+    let from = (0..4)
+        .max_by(|&a, &b| score(a).total_cmp(&score(b)))
+        .unwrap();
+    assert!(score(from) > 0.999, "an out row's tile is the bitmap");
+    let resolution = EvaluateOptions::default().patch_resolution(&edited.base) as usize;
+    let tile = bitmap_from_tile(&tile_of_row(&rendered, &views, from, resolution));
+    let stored: Vec<u8> = payload.bitmap.as_ref().unwrap().iter().copied().collect();
+    assert_eq!(stored, tile);
+    assert!(rendered
+        .observations
+        .iter()
+        .all(|o| o.track.as_ref().is_some_and(|m| m.plain_zncc.is_some())));
 }
 
 /// Unpinning the held reference, pinning it again and unpinning it once more
@@ -1613,9 +1775,12 @@ fn a_repaint_that_moves_the_pick_rerenders_and_rejudges_in_the_same_evaluation()
             assert_eq!(rule_pick(&read), Some(row));
             assert_rendered_from(&read, &views, &edited, row, "moved within the call");
         }
-        // The rule picked no row among the rows left, so the bitmap is the
-        // fused mean.
-        None => assert_eq!(rule_pick(&read), None),
+        // The rule picked no row among the rows left, so no render from them
+        // gives a bitmap, and the bitmap is one for judging.
+        None => {
+            assert_eq!(rule_pick(&read), None);
+            assert!(payload.bitmap_for_judging);
+        }
     }
     let scored = read.observations[pick].track.as_ref().unwrap().plain_zncc;
     assert!(

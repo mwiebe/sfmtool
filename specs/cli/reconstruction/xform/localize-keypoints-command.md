@@ -20,8 +20,9 @@ point's **reference render**: the `R×R` render of the point's reference
 observation at its stored keypoint. The reference observation is the one the
 point stores in `tracks/reference_observations`, and where it stores none, the
 reference-view rule's pick from the views' renders at their stored keypoints
-(where the rule picks none it would store, the template is the views' fused
-mean and no view is the reference). The reference's keypoint is not moved.
+(where the rule finds no eligible view, there is no reference render: no view
+is the reference, and every view keeps its stored keypoint, unscored). The
+reference's keypoint is not moved.
 Every other view renders one tile around its stored keypoint and searches the
 shift, within `±search` patch-grid px, at which it best matches the reference
 render. Views that drift too far, leave the frame, graze the patch plane
@@ -57,7 +58,8 @@ in-place `--refine-keypoints`, with a fundamentally different shape:
   nothing was aligned. A point that stores none, or whose stored reference was
   dropped (a grazing one is dropped with the other grazing views), records
   the reference its views were aligned to, the rule's pick, or `-1` where they
-  were aligned to the fused mean. A later render renders the point from the
+  were aligned to nothing because the rule found no eligible view. A later
+  render renders the point from the
   reference it then stores. Re-run
   `sfm xform --refine-keypoints bitmaps=true` (or
   `--refine-normals bitmaps=true`) to regenerate them (a frames-without-bitmaps
@@ -155,7 +157,7 @@ the binding's own default. The "Default" column lists those binding defaults.
 | `window`                       | `gaussian_disk` | `localize_keypoints` (`gaussian_disk`/`gaussian`/`uniform`) |
 | `window_sigma`                 | `0.6`           | `localize_keypoints`                           |
 | `sampler`                      | `per_view`      | `localize_keypoints` (`per_view`/`bilinear`/`bilinear_mip`/`anisotropic`; `per_view` picks `anisotropic` or `bilinear_mip` for each view by the rule in [image-warping.md](../../../core/camera/image-warping.md#choosing-the-sampler-per-view), which also gives each sampler's cost) |
-| `robust_iters`                 | `3`             | `localize_keypoints` (IRLS passes for the fused mean, where it is the template) |
+
 | `search_strategy`              | `exhaustive`    | `localize_keypoints` (`exhaustive`/`plus_descent`) |
 
 Unknown keys, malformed `key=value` tokens (no `=`, empty key), duplicate keys,
