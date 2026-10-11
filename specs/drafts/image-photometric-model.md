@@ -253,7 +253,65 @@ Two accepted `KerryPark480` pairs had fewer than 20 unmasked samples and no read
 
 **Timing.** One pair, both γ, rendering excluded, on one thread: median 24.2 ms and 90th percentile 111 ms on `KerryPark480`, 14.3 ms and 88 ms on `DnDTabletop`, at weight 1. The fit's median at γ 2.2 by rank: 2.0, 5.3 and 39.5 ms on `KerryPark480`, 2.0, 6.4 and 32.3 ms on `DnDTabletop`. At weight 0 a rank-2 fit takes a median of 152 ms and 143 ms. The blur takes a median under 0.1 ms.
 
-**Step-2 set.** `scripts/colour_reading.py review`, seed `20261011`, at γ 2.2 and weight 1, drew 20 members whose colour residual is above the median of the entry's epipolar-wrong accepted and rescued members (0.236 and 0.213) while their blur-matched ZNCC reaches 0.85, from pools of 1,397 and 2,465, and 20 whose colour residual is at most the median of the epipolar-right ones (0.137 and 0.120) while their blur-matched ZNCC misses 0.85, from pools of 263 and 168. The second kind comes from a further `measure --rejected` run over rejected low-ZNCC members that pass the later gates and whose blur-matched score also misses the bar (up to 500 per bin: 1,716 and 1,993 members). Ten of each kind per entry; none is one of the 48 reviewed cases. By the epipolar rule, 12 of the first kind are wrong and 8 right, and 8 of the second kind wrong and 12 right. The cases are rendered in the cluster-strips convention, with `cases.csv` the key; no answer has been recorded.
+**Step-2 set.** `scripts/colour_reading.py review`, seed `20261011`, at γ 2.2 and weight 1, drew 20 members whose colour residual is above the median of the entry's epipolar-wrong accepted and rescued members (0.236 and 0.213) while their blur-matched ZNCC reaches 0.85, from pools of 1,397 and 2,465, and 20 whose colour residual is at most the median of the epipolar-right ones (0.137 and 0.120) while their blur-matched ZNCC misses 0.85, from pools of 263 and 168. The second kind comes from a further `measure --rejected` run over rejected low-ZNCC members that pass the later gates and whose blur-matched score also misses the bar (up to 500 per bin: 1,716 and 1,993 members). Ten of each kind per entry; none is one of the 48 reviewed cases. By the epipolar rule, 12 of the first kind are wrong and 8 right, and 8 of the second kind wrong and 12 right. The cases are rendered in the cluster-strips convention, with `cases.csv` the key; the answers are in [Measured: step 2](#measured-step-2-2026-10-10).
+
+### Measured: step 2 (2026-10-10)
+
+**Data.** The 40 cases of the step-2 set drawn in step 1, answered blind by the maintainer on the cluster-strips page, *right*, *wrong* or *unsure* with an optional note, before the key was opened. The joined record is [cluster-patch-refinement-human-review-2026-10-10b.csv](../core/patch/cluster-patch-refinement-human-review-2026-10-10b.csv): case, dataset, type, scale-ratio bin, member and cluster, scale ratio, plain and blur-matched ZNCC, colour and gain-only residual (γ 2.2, prior weight 1), epipolar distance, the epipolar verdict (bar 3.00 px and 4.68 px), the answer and the note. *Colour wrong, ZNCC right* is a colour residual above the entry's epipolar-wrong median with blur-matched ZNCC at least 0.85; *colour right, ZNCC wrong* is a colour residual at most the epipolar-right median with blur-matched ZNCC below 0.85. No case was answered *unsure*.
+
+**Answers by type and entry**, right / wrong:
+
+| type | `KerryPark480` | `DnDTabletop` | both | epipolar verdict, both |
+|---|---|---|---|---|
+| colour wrong, ZNCC right | 7 / 3 | 6 / 4 | 13 / 7 | 8 / 12 |
+| colour right, ZNCC wrong | 8 / 2 | 7 / 3 | 15 / 5 | 12 / 8 |
+
+The reviewer sides with the ZNCC on 13 of the 20 *colour wrong, ZNCC right* cases and with the colour reading on 7; on the 20 *colour right, ZNCC wrong* cases, with the colour reading on 15 and with the ZNCC on 5. Over the 40, the colour reading on 22 and the ZNCC on 18. The epipolar verdict sides with the colour reading on 24 of the 40 (12 and 12).
+
+**Against the epipolar verdict**, cases, epipolar verdict by answer:
+
+| | answered right | answered wrong |
+|---|---|---|
+| all 40: epipolar right | 18 | 2 |
+| all 40: epipolar wrong | 10 | 10 |
+| colour wrong, ZNCC right: epipolar right | 8 | 0 |
+| colour wrong, ZNCC right: epipolar wrong | 5 | 7 |
+| colour right, ZNCC wrong: epipolar right | 10 | 2 |
+| colour right, ZNCC wrong: epipolar wrong | 5 | 3 |
+
+Agreement is 28 of 40: 15 of 20 and 13 of 20 by type. Per entry, epipolar right / wrong among the answered-right and answered-wrong cases: `KerryPark480` *colour wrong, ZNCC right* 6 / 1 and 0 / 3, *colour right, ZNCC wrong* 5 / 3 and 0 / 2; `DnDTabletop` 2 / 4 and 0 / 4, 5 / 2 and 2 / 1.
+
+**The gain-only residual at the same split.** The gain-only residual is read against its own medians over the same members (γ 2.2): above the epipolar-wrong median (0.2203 and 0.1652) it says wrong, at most the epipolar-right median (0.1292 and 0.0837) it says right, and between them it says neither. On the *colour wrong, ZNCC right* cases it says wrong on 19 (answered right 13, wrong 6) and right on 1 (d24, answered wrong). On the *colour right, ZNCC wrong* cases it says right on 17 (answered right 13, wrong 4) and neither on 3 (d01, d05 and d25, all `DnDTabletop`, answered wrong, right and right). The gain-only and colour verdicts differ on these 4 cases and agree on the other 36.
+
+**Ordering within a type**, ordering quality as in step 1 (a ZNCC orders a wrong member lower):
+
+| reading | colour wrong, ZNCC right: human (13 / 7) | epipolar (8 / 12) | colour right, ZNCC wrong: human (15 / 5) | epipolar (12 / 8) |
+|---|---|---|---|---|
+| colour residual | 0.604 | 0.656 | 0.613 | 0.625 |
+| gain-only residual | 0.505 | 0.458 | 0.667 | 0.302 |
+| blur-matched ZNCC | 0.297 | 0.490 | 0.773 | 0.667 |
+| plain ZNCC | 0.418 | 0.573 | 0.773 | 0.667 |
+
+**Cases where the answer and the epipolar verdict differ:**
+
+| case | entry | type | bin | member | cluster | blur-matched ZNCC | colour residual | gain-only residual | epipolar px | epipolar | answer | note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| d01 | `DnDTabletop` | colour right, ZNCC wrong | 0.7–1.4 | 1736671 | 302139 | 0.845 | 0.104 | 0.103 | 1.130 | right | wrong | this patch crosses two surfaces with parallax, so parts match and others don't. would split left half and right half as two patches |
+| d19 | `DnDTabletop` | colour right, ZNCC wrong | 0.7–1.4 | 1284220 | 186432 | 0.784 | 0.070 | 0.070 | 0.253 | right | wrong | similar repeating pattern |
+| d11 | `DnDTabletop` | colour right, ZNCC wrong | 0.7–1.4 | 603363 | 70361 | 0.767 | 0.120 | 0.062 | 5.752 | wrong | right | |
+| d12 | `DnDTabletop` | colour wrong, ZNCC right | 0.7–1.4 | 922497 | 118404 | 0.866 | 0.254 | 0.215 | 664.210 | wrong | right | |
+| d13 | `KerryPark480` | colour right, ZNCC wrong | 0.7–1.4 | 955 | 100 | 0.846 | 0.061 | 0.047 | 6.697 | wrong | right | |
+| d15 | `DnDTabletop` | colour wrong, ZNCC right | 1/4–1/2 | 1564184 | 252711 | 0.881 | 0.363 | 0.352 | 20.018 | wrong | right | |
+| d21 | `DnDTabletop` | colour right, ZNCC wrong | 0.7–1.4 | 1237922 | 176814 | 0.825 | 0.079 | 0.064 | 10.873 | wrong | right | |
+| d22 | `DnDTabletop` | colour wrong, ZNCC right | 0.7–1.4 | 2166201 | 470751 | 0.853 | 0.340 | 0.207 | 2271.843 | wrong | right | |
+| d23 | `KerryPark480` | colour wrong, ZNCC right | 1/2–0.7 | 30281 | 9099 | 0.905 | 0.431 | 0.406 | 3.482 | wrong | right | |
+| d31 | `KerryPark480` | colour right, ZNCC wrong | 0.7–1.4 | 5964 | 818 | 0.806 | 0.044 | 0.038 | 13.200 | wrong | right | |
+| d32 | `DnDTabletop` | colour wrong, ZNCC right | 0.7–1.4 | 1142571 | 157480 | 0.864 | 0.229 | 0.229 | 6.927 | wrong | right | |
+| d38 | `KerryPark480` | colour right, ZNCC wrong | 0.7–1.4 | 11859 | 2121 | 0.840 | 0.133 | 0.054 | 12.756 | wrong | right | |
+
+**Notes.** Nine cases carry a note, all answered wrong; the three other wrong answers (d04, d20, d35) and every right answer carry none. Two notes name colour (d06, d37), one a surface boundary with parallax (d01), four a similar or repeating texture (d07, d19, d29, d36), one two different objects (d34), and one says the patches match well (d24). None names glare or blur.
+
+**What it shows.** When the colour reading says wrong and the ZNCC says right, the reviewer takes the ZNCC's side on 13 of 20, and 5 of those 13 are wrong by the epipolar rule; when the colour reading says right and the ZNCC says wrong, the reviewer takes the colour reading's side on 15 of 20, and 5 of those 15 are wrong by the epipolar rule. Within each type the colour residual still orders the reviewer's wrong answers above the right ones at 0.60 to 0.61, against 0.85 to 0.88 on the step-1 cases. The gain-only residual gives the same verdict as the colour residual on 36 of 40 cases, so these cases do not separate the homography from per-channel gains. Two of the twelve wrong answers are explained by colour in the note, both on *colour wrong, ZNCC right* cases; the others name texture, surface boundaries or different objects, and none names glare or blur. Of the 12 cases where the reviewer and the epipolar verdict differ, 10 are answered right against an epipolar distance above the bar, 4 of them within 2.5 times the bar and 6 at 10 px or more.
 
 ## Open questions
 
