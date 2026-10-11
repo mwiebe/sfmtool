@@ -203,6 +203,7 @@ value.
 impl AppState {
     pub fn delete_selected_point(&mut self) -> Result<(), String>;
     pub fn delete_point(&mut self, point: PointRef) -> Result<(), String>;
+    pub fn delete_points(&mut self, recon: ReconId, points: &[u32]) -> Result<(), String>;
     pub fn delete_image(&mut self, image: ImageRef) -> Result<(), String>;
     pub fn undo(&mut self, id: ReconId) -> Result<(), String>;
     pub fn redo(&mut self, id: ReconId) -> Result<(), String>;
@@ -216,6 +217,20 @@ the overlay and shares the base pointer -- calls
 `EditedReconstruction::delete_point`, and pushes the result. The base is the same
 `Arc`, every other index still means what it meant, and the version's unshared
 cost is one `u32`.
+
+**Deleting many points is the same edit, once.** `delete_points` deletes a list
+of one reconstruction's points as one version through
+`EditedReconstruction::delete_points`, which checks every index before it
+deletes any, so a list naming a point that is out of range or already deleted
+pushes nothing. The list need not be sorted or unique; the version's map is
+`PointMap::Removed` of the sorted list with duplicates dropped, which is the
+order the map's lookup needs. `delete_point` is its one-element call, so the two
+cannot come to differ in their labels, their maps or how they move the
+selection. The label names the point when there is one (`Deleted point 7 in
+run_a`) and counts them otherwise (`Deleted 3412 points in run_a`). A version of
+`N` deleted points costs `4N` bytes beyond the overlay it shares. MCP reaches it
+as `delete_points` ([mcp-server.md](mcp-server.md) § "`delete_point` /
+`delete_points` / `delete_camera_image`").
 
 **A point edit that creates is the same shape.** A commit of a bench track reads
 the point's whole record, rewrites its track, and calls
@@ -236,9 +251,9 @@ same indexes: an observation in the deleted image is dropped, and an item left
 with none is discarded ([bench.md](bench.md) § "One history for the pair").
 
 An edit that cannot run changes nothing and returns the sentence saying why: no
-point selected, a point already deleted, an image already gone, or the node's
-last image, which cannot be deleted because a reconstruction with no images is
-not one.
+point selected, an empty list of points, a point already deleted, an image
+already gone, or the node's last image, which cannot be deleted because a
+reconstruction with no images is not one.
 
 ### What a bulk edit owes the rest of the viewer
 
@@ -299,7 +314,7 @@ if renderer.base_changed(id, &base) {
     renderer.upload_patches(device, queue, id, recon);
     renderer.set_uploaded_base(id, base);
 }
-renderer.update_deleted_mask(queue, id, &node.edited().deleted_points);
+renderer.update_point_mask(queue, id, &node.edited().deleted_points, marks);
 ```
 
 `base_changed` is a pointer comparison against the stored `Arc`
@@ -335,13 +350,25 @@ sizing that reads it, where the user put it.
 
 **The deleted set reaches the shaders as a mask.** Each bundle carries, beside
 its point instance buffer, a second instance buffer of one `u32` per point: `1`
-alive, `0` deleted. `update_deleted_mask` writes only the entries the set moved,
-so an edit costs four bytes per point it touched rather than a rewrite of the
-node. The point shader emits a clipped vertex for a masked point, so it draws
-nothing, occludes nothing and answers no pick. Patches carry the same mask, one
-entry per surfel; because the patch instances and the atlas are compacted over
-the points that carry a bitmap, the bundle keeps the point-index-to-slot map the
-mask write needs.
+alive, `0` deleted, and `2` to `4` alive and called out by the viewport
+(`marks`, a `PointMarks`: the points a camera being moved observes, and the delete
+brush's painted points and the points under its circle; the words and their
+colours are in [point-cloud-rendering.md](point-cloud-rendering.md) § "Per-Point
+Data"). `update_point_mask` writes only the entries that the deleted set or a
+mark moved, so an edit costs four bytes per point it touched rather than a
+rewrite of the node. The point shader emits a clipped vertex for a masked point,
+so it draws nothing, occludes nothing and answers no pick. Patches carry the same
+mask, one entry per surfel; because the patch instances and the atlas are
+compacted over the points that carry a bitmap, the bundle keeps the
+point-index-to-slot map the mask write needs.
+
+The changed entries of each buffer are written as runs of consecutive
+positions, one `write_buffer` per run, rather than one 4-byte write per entry. A
+stroke of the delete brush can change thousands of entries in a frame, and those
+indexes are scattered through the point order, since the order is not spatial,
+so many runs are one entry long. Two alternatives were not measured: bridging a
+short gap between runs by rewriting the unchanged words in it, and rewriting the
+whole buffer once the changes exceed some fraction of it.
 
 **The overlay's additions are a second set of buffers.** A point the overlay adds
 has no instance in the base's buffers, and putting one there would mean
@@ -476,7 +503,8 @@ the type lives, in `crates/sfmtool-core/src/reconstruction/edited/tests.rs`.
 
 `crates/sfm-explorer/src/state/edits/tests.rs` covers the two edits end to end --
 that a point edit leaves the base the same `Arc` and moves the count by one, that
-a bulk edit produces a new base with an empty overlay under the same `ReconId`,
+a many-point delete is one version whose map is the sorted unique list and which
+one undo reverses, that a bulk edit produces a new base with an empty overlay under the same `ReconId`,
 that a refused edit leaves the history alone, and what the Action Log records.
 
 `crates/sfm-explorer/src/display_transform/tests.rs` covers the third half: that

@@ -198,11 +198,12 @@ pub(crate) enum Command {
         request: ImageDetailViewRequest,
     },
     /// The 3D viewport's display controls, the HUD's checkboxes and sliders,
-    /// as one flat document.
+    /// and the tool strip's tool, as one flat document.
     GetViewer3dDisplay,
     /// The fields the call named, each already checked against its slider's
     /// range and rounded to the decimals the slider shows, so
-    /// [`apply_with_window`] only writes and records.
+    /// [`apply_with_window`] writes and records, refusing only the delete
+    /// brush while a camera is in hand.
     SetViewer3dDisplay {
         change: Viewer3dDisplayChange,
     },
@@ -266,6 +267,11 @@ pub(crate) enum Command {
     DeletePoint {
         reconstruction_label: String,
         point: crate::goto_point::PointQuery,
+    },
+    /// Delete many points of one reconstruction as one version.
+    DeletePoints {
+        reconstruction_label: String,
+        points: Vec<u32>,
     },
     /// Re-solve one point from its own observations, at the poses and the
     /// lenses the reconstruction already holds.
@@ -625,7 +631,7 @@ pub(crate) enum Command {
         panel: Option<crate::dock::Tab>,
         crop: Option<[u32; 4]>,
     },
-    /// Pointer or keyboard input into the window: `click`, `hover`,
+    /// Pointer or keyboard input into the window: `click`, `hover`, `drag`,
     /// `press_key` and `type_text`, delivered over the next few frames as the
     /// events a real mouse and keyboard make.
     Input(input::InputCommand),
@@ -698,13 +704,15 @@ pub(crate) struct ImageDetailDisplayChange {
 }
 
 /// A `set_viewer_3d_display` request: the fields it named with the value for
-/// each, in the document's order. A field the call did not name is not in it.
+/// each, in the document's order, and the tool when it named one. A field the
+/// call did not name is not in it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Viewer3dDisplayChange {
     pub(crate) fields: Vec<(
         crate::viewer_3d::display::Field,
         crate::viewer_3d::display::FieldValue,
     )>,
+    pub(crate) tool: Option<crate::viewer_3d::brush::Tool>,
 }
 
 /// A `set_image_detail_view` request: which photograph to look at, the one
@@ -1089,7 +1097,7 @@ pub(crate) enum Outcome {
 
 /// A command whose answer cannot exist yet.
 ///
-/// Four tools are in here, waiting on different things, and the four input
+/// Four tools are in here, waiting on different things, and the five input
 /// tools. `App` holds the first four until the readback phase and answers them
 /// there, after the frame they were waiting on has been drawn and presented --
 /// which is also where the `wgpu::Device` already is, and so what keeps
@@ -1427,6 +1435,10 @@ pub(crate) fn apply_with_window(
             reconstruction_label,
             point,
         } => done(edit::delete_point(state, &reconstruction_label, &point)),
+        Command::DeletePoints {
+            reconstruction_label,
+            points,
+        } => done(edit::delete_points(state, &reconstruction_label, &points)),
         Command::RetriangulatePoint {
             reconstruction_label,
             point,
@@ -1908,12 +1920,15 @@ pub(crate) fn apply_with_window(
             }
             // Against the size the target was last laid out at; the frame the
             // pointer is aimed in checks again.
-            if let Some(at) = command.at_px() {
+            let points = command.points_px();
+            if !points.is_empty() {
                 let source = panel.map_or(ScreenshotSource::Window, ScreenshotSource::Panel);
                 let size = screenshot_size(state, viewer, source, None);
                 if size[0] > 0 && size[1] > 0 {
-                    if let Err(error) = input::check_inside(at, size, panel) {
-                        return done(Err(error));
+                    for at in points {
+                        if let Err(error) = input::check_inside(at, size, panel) {
+                            return done(Err(error));
+                        }
                     }
                 }
             }

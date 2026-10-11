@@ -113,12 +113,13 @@ place.
 
 ## The tool surface
 
-Eighty-nine tools. Seventeen read -- sixteen that answer with JSON, and
-`screenshot`, which closes the loop by handing back a picture -- sixty-seven
-write, four send input, and one writes a file. `get_widgets` and the four
-input tools, `click`, `hover`, `press_key` and `type_text`, read and press the
-viewer's widgets the way a person's eyes, mouse and keyboard do (§ "`get_widgets`", § "`click` /
-`hover`", § "`press_key` / `type_text`").
+Ninety-one tools. Seventeen read -- sixteen that answer with JSON, and
+`screenshot`, which closes the loop by handing back a picture -- sixty-eight
+write, five send input, and one writes a file. `get_widgets` and the five
+input tools, `click`, `hover`, `drag`, `press_key` and `type_text`, read and
+press the viewer's widgets the way a person's eyes, mouse and keyboard do
+(§ "`get_widgets`", § "`click` / `hover`", § "`drag`", § "`press_key` /
+`type_text`").
 
 | Tool | Kind | What it does |
 |------|------|--------------|
@@ -158,6 +159,7 @@ viewer's widgets the way a person's eyes, mouse and keyboard do (§ "`get_widget
 | `undo` / `redo` | write | Step one reconstruction's history back or forward a version |
 | `jump_to_version` | write | Move its cursor straight to a version |
 | `delete_point` | write | Delete one 3D point and its track |
+| `delete_points` | write | Delete many 3D points of one reconstruction and their tracks, as one version |
 | `retriangulate_point` | write | Re-solve one 3D point from its own observations at the poses and lenses the reconstruction holds |
 | `retriangulate_all_points` | write | Re-solve every 3D point the same way, on a worker thread |
 | `prune_covered_observations` | write | Retire every observation a finer tracked one covers, and drop the points left with fewer than two, on a worker thread |
@@ -208,33 +210,34 @@ viewer's widgets the way a person's eyes, mouse and keyboard do (§ "`get_widget
 | `get_widgets` | read | Every widget drawn in the window or one panel, with its rectangle, role, name and state, and the dialogs and menus open above the dock |
 | `click` | input | Press and release a mouse button at a point of the window or a panel, or on a widget from a listing, as a person's mouse does, and report what was under the pointer and the dialogs and menus open after it |
 | `hover` | input | Move the pointer to a point or a widget and leave it there |
+| `drag` | input | Press a mouse button at the first point of a path, move through the rest one point per frame with the button held, and release at the last |
 | `press_key` | input | Press and release one key, with modifiers, optionally with the pointer moved over a panel first |
 | `type_text` | input | Type a string into the focused text input, or into one named by its widget id |
 
 Every tool is annotated: the sixteen reads and `screenshot` carry
-`readOnlyHint: true`, the sixty-seven writes `destructiveHint: false` (none of
+`readOnlyHint: true`, the sixty-eight writes `destructiveHint: false` (none of
 them touches a file on disk: `close_reconstruction` unloads, it does not
 delete; `set_window_layout` changes the window and the dock, not the layout file
 the menu saves; an **edit** makes a new version of a loaded value, which the
 human can undo), and every one of them `openWorldHint: false`. Every
 `inputSchema` is closed (`additionalProperties: false`).
 
-**Five tools are annotated `destructiveHint: true`**, and a client that treats
+**Six tools are annotated `destructiveHint: true`**, and a client that treats
 a destructive tool differently, with a confirmation or a stricter policy,
-should treat these five differently and none of the others:
+should treat these six differently and none of the others:
 
 - **`save_reconstruction`**, the one tool whose `ToolKind` is `Save`. It is the
   only call that names a file and can overwrite what no undo brings back.
-- **The four input tools**, `click`, `hover`, `press_key` and `type_text`, whose
-  `ToolKind` is `Input`. Each does no more than press what a person could
-  press, but what it presses is decided by the widget it lands on, and that
-  includes the viewer's own destructive items: a click on File ▸ Save writes
-  the file as a person's click does, File ▸ Quit closes the viewer, and an item
-  that opens a file chooser (`Open...`, `Save As...`, the Panels menu's `Save
-  Layout...` and `Load Layout...`) stops the GUI thread until the human answers
-  it, so every call waits behind it (§ "Non-goals"). A sequence of them can
-  reach anything the menus can, so the annotation is on each call rather than
-  on the few that land on those items.
+- **The five input tools**, `click`, `hover`, `drag`, `press_key` and
+  `type_text`, whose `ToolKind` is `Input`. Each does no more than press what a
+  person could press, but what it presses is decided by the widget it lands
+  on, and that includes the viewer's own destructive items: a click on File ▸
+  Save writes the file as a person's click does, File ▸ Quit closes the viewer,
+  and an item that opens a file chooser (`Open...`, `Save As...`, the Panels
+  menu's `Save Layout...` and `Load Layout...`) stops the GUI thread until the
+  human answers it, so every call waits behind it (§ "Non-goals"). A sequence
+  of them can reach anything the menus can, so the annotation is on each call
+  rather than on the few that land on those items.
 
 ### The wire vocabulary
 
@@ -1317,7 +1320,8 @@ toggles are master switches over every node, and the per-node eyes stay with
     "target_size_multiplier": 0.3,    //           0.05 to 5, 2 decimals
     "target_fog_multiplier": 10.0,    //           0.5 to 100, 1 decimal
     "show_controls_help": true,       // Debug
-    "show_fps": true
+    "show_fps": true,
+    "tool": "navigate"                // the tool strip: "navigate" or "delete_brush"
   }
 }
 ```
@@ -1329,6 +1333,7 @@ omitted one alone:
 { "point_size_log2": 1.5, "show_target_indicator": true }
 { "show_grid": false, "show_camera_images": false }
 { "maintain_z_up": true }
+{ "tool": "delete_brush" }
 ```
 
 The reply is the whole document, exactly as `get_viewer_3d_display` would return
@@ -1362,12 +1367,21 @@ does when the checkbox is ticked
 view is looking through a camera, whose own up is kept. A screenshot taken
 straight after the call can therefore show the view part way through the turn.
 
+**`tool` is the tool strip's choice**, what an unmodified left drag in the
+viewport does: `"navigate"` or `"delete_brush"`
+([edits/delete-brush.md](edits/delete-brush.md)). It is here rather than in a
+tool of its own because it is viewport state an agent sets before a `drag` and
+reads back beside the rest, as `maintain_z_up` is. A change is recorded as the
+strip's click records it, `Delete brush tool` or `Navigate tool`. With the
+brush on, a `drag` across the viewport paints and deletes; the version lands a
+frame or two after the `drag` replies.
+
 **`show_patches` is settable without patch data.** The HUD greys its checkbox
 when no loaded reconstruction carries patch bitmaps, but the value is a master
 switch with nothing to draw, and refusing it would make an agent check for
 patch data before setting a layer it may want for the next file it opens.
 
-**Refusals are atomic, and they happen at the parse.** Every field's range is
+**Refusals are atomic, and all but one happen at the parse.** Every field's range is
 the range of the HUD's slider for it, read from one list
 (`viewer_3d::display::Field`), which the HUD builds its sliders from as well, so
 the two cannot drift. A number outside its range or not finite, a value of the
@@ -1378,7 +1392,12 @@ and are compared as the decimals the message and the schema write them as, so
 `0.001` is accepted for `length_scale` although `0.001` as an `f32` is a little
 above it. A call naming a good
 field and a bad one changes nothing, and the refusal is a protocol error
-(§ "Errors"), so it leaves no Action Log row. **A number inside its range is
+(§ "Errors"), so it leaves no Action Log row. An unknown `tool` is refused the
+same way, with the list of tools. **The one refusal made after the parse** is
+of the state: `tool: "delete_brush"` while a camera is being moved (the Move
+Camera lock, [edits/move-camera.md](edits/move-camera.md)), which the strip
+greys its button for. It is a domain error, and the call's other fields are not
+applied either. **A number inside its range is
 rounded to the decimals its slider shows**, because the slider rounds the value
 it holds to those decimals on every frame it is drawn: a `point_size_log2` of
 `1.53` would become `1.5` the next time the HUD was open, and rounding on the
@@ -2554,6 +2573,66 @@ its last event, one back to the state egui held before. Each `Key` and
 them: `command` is `ctrl` and `command` everywhere but macOS, where it is
 `mac_cmd` and `command`.
 
+### `drag`
+
+```jsonc
+{ "panel_name": "viewer_3d", "path_px": [[400, 300], [430, 300], [460, 300]] }   // orbit
+{ "panel_name": "viewer_3d", "path_px": [[400, 300], [400, 360]],
+  "modifiers": ["shift"] }                                                      // pan
+{ "path_px": [[600, 40], [640, 40]], "mouse_button": "right" }                  // in window pixels
+```
+
+`drag` presses a mouse button at the first point of `path_px`, moves the
+pointer through the rest of the points one per frame with the button held, and
+releases it at the last point. It drives what only a held button reaches, such
+as the 3D viewport's orbit, pan and zoom drags and a bench handle drag. `click`
+presses and releases in one frame, so it cannot hold a button across frames.
+
+`path_px` is the whole path, from 2 to 120 points `[x, y]`, in the physical
+pixels of the window or, with `panel_name`, of that panel's body, the space
+`click`'s `at_px` is in. The press point is the path's first point rather than
+a separate argument, so the path is one list with no point said twice. There is
+no `widget` form: a drag is aimed at points, and a caller that has a widget
+reads its `rect_px` from the listing. `mouse_button` and `modifiers` are
+`click`'s, and the modifiers are held from the press through the release. A
+path of one point is refused, because a press and release at one point is
+`click`; so is a path longer than 120 points, because each point is a frame and
+the call has to be answered within the transport's ten seconds
+(`input::MAX_DRAG_POINTS`).
+
+**What happens**, one step per frame:
+
+1. A frame is drawn with no input, and every point of the path is resolved
+   against it, so a point outside the target is refused before the button goes
+   down.
+2. The pointer moves to the first point.
+3. The button goes down there.
+4. The pointer moves to each later point, one frame each, with the button held.
+5. The button is released at the last point, in a frame of its own: egui does
+   not count a press and release in one frame as a drag.
+6. One more frame is drawn, and the reply is built after it.
+
+egui reads a drag as the distance the pointer moves between frames, so the
+spacing of the points sets how fast the pointer moves. The 3D viewport turns
+each frame's move into an orbit, pan or zoom step, so a path that covers the
+same distance in more points moves the camera the same amount over more frames.
+
+**The reply** is `click`'s: `at_px` is the last point, where the pointer stays;
+`hit` is the topmost widget that takes a press at the first point, in the frame
+the press was resolved against, or `null`; and `dialogs` and `menus` are those
+open after the release. What the drag did is read back with the tool that
+reports it, `get_scene`'s `view` for the camera.
+
+**Refusals** are `click`'s, and are made for every point of the path: a point
+outside the target, a panel that is closed or behind another tab, and a
+minimized window. Each is one failed Action Log row, before the button goes
+down.
+
+**In the Action Log**, kind `Input`, written in the frame of the press: `drag
+viewer_3d 400,300 to 460,300 through 3 points`, with ` right` or ` middle` after
+`drag` for another button, ` on "…"` after the first point as for `click`, and
+` with Shift` at the end for modifiers.
+
 ### `press_key` / `type_text`
 
 ```jsonc
@@ -2654,6 +2733,15 @@ egui's hover and works; the viewport's keys do not check the pointer at all.
 None of those is a click or a key on a widget, which is what the tools are for.
 On Linux and macOS `pointer_in_rect` reads egui's pointer, and they all follow
 the synthetic one.
+
+The 3D viewport tells a middle drag from a right drag by that button state
+alone: a middle drag pans and a right drag zooms only when
+`platform::windows::mouse_button_state` says that button is down, and on Linux
+and macOS it does not read the button at all. A synthetic `drag` with
+`mouse_button` `middle` or `right` sets egui's button and not that state, so
+over the 3D viewport, on every platform, it moves the camera as a left drag
+with the same modifiers does. Shift for a pan and Ctrl for a zoom are read from
+egui and work.
 
 ### `get_window_layout`
 
@@ -2971,8 +3059,8 @@ re-read rather than reuse. A qualified `pt3d_<hash>_<index>` id survives, which
 is what it is for.
 
 **Point edits close up at the next whole new base.** A point edit
-(`delete_point`, `retriangulate_point`, `commit_bench_track`) keeps every other
-index where it was by leaving the gone point's slot open. Every edit that gives
+(`delete_point`, `delete_points`, `retriangulate_point`, `commit_bench_track`)
+keeps every other index where it was by leaving the gone point's slot open. Every edit that gives
 the node a whole new base, and a `save_reconstruction` that is not a minimal
 copy, first folds those pending point edits into the value: a deleted point's
 slot closes up and every point after it moves down, a replaced point goes back
@@ -3154,11 +3242,12 @@ an override only says something about a copy written somewhere else. Stating one
 on a plain save writes a version carrying the stated metadata, since the metadata
 is inside the content hash ([saving.md](saving.md) § "Materialise on save").
 
-### `delete_point` / `delete_camera_image`
+### `delete_point` / `delete_points` / `delete_camera_image`
 
 ```jsonc
 // delete_point        { "reconstruction_label": "seoul_bull", "point": 1207 }
 // delete_point        { "reconstruction_label": "seoul_bull", "point": "pt3d_a1b2c3d4_1207" }
+// delete_points       { "reconstruction_label": "seoul_bull", "points": [1207, 88, 3410] }
 // delete_camera_image { "reconstruction_label": "seoul_bull", "camera_image": 3 }
 // delete_camera_image { "reconstruction_label": "seoul_bull",
 //                       "camera_image": "images/IMG_0042.jpg" }
@@ -3174,6 +3263,18 @@ is a coordinate in the reconstruction the call named, not in the selected one; a
 qualified `pt3d_<hash>_<index>` id that resolves to a different node is refused
 naming both. The resolution is `goto_point`'s, the same one `get_point` and the
 Go to Point dialog use, so an id means the same thing wherever it is sent.
+
+**`delete_points` is many point deletes as one version**, which one undo
+reverses. It is `AppState::delete_points`, the call `delete_point` makes with a
+one-element list ([document-model.md](document-model.md) § "Two kinds of
+edit"), so the reply has `delete_point`'s shape. `points` are bare indexes into the
+reconstruction the call names; they need not be sorted, and an index named twice
+counts once. Every index is checked before any is deleted, so a list naming a
+point that is out of range or already deleted is refused whole, as is an empty
+list. The label names the point when the list holds one (`Deleted point 1207 in
+seoul_bull`) and counts them otherwise (`Deleted 3 points in seoul_bull`). It is
+how an agent cleans a reconstruction, and how a test makes a large delete
+without a pointer.
 
 ### `move_camera_image`
 
@@ -4391,7 +4492,7 @@ What this arrangement gives:
   and the present, into the frame's own encoder, and only in a frame that has
   such a screenshot waiting (§ "screenshot", "Mechanics"). Everything after that
   — the map, the crop, the PNG — is still in the readback phase.
-- **Input is the one thing fed into the egui pass.** `click`, `hover`,
+- **Input is the one thing fed into the egui pass.** `click`, `hover`, `drag`,
   `press_key` and `type_text` are applied in the drain like every command, which
   checks what the window snapshot can check (a minimized window, a panel that
   is closed or behind a tab, a point outside the target's last laid-out size)
@@ -4543,12 +4644,12 @@ testable without a window:
 | `window` | The `window` block renderer, and nothing else: what a window *is*, how a placement is applied, and the `WindowHost` seam are `crate::window`'s, unconditional because Panels ▸ Save Layout… needs them in every build |
 | `frame` | The three phases `run_ui_and_paint` calls: the drain, the surface copy, and the deferred screenshot; and the two calls from the egui pass, which feed an input step's events in and read the frame's widgets out |
 | `widgets` | The widget listing of one captured frame, and the lookups the input tools aim with |
-| `input` | The four input tools: the parsed command, the steps each runs a frame at a time, their Action Log rows and replies, and the queue on `App` that runs them one after another |
+| `input` | The five input tools: the parsed command, the steps each runs a frame at a time, their Action Log rows and replies, and the queue on `App` that runs them one after another |
 | `mod::apply_as_agent` | The drain's application phase without the channel: the Action Log's actor switch, one `apply` per command, and the query and refusal entries |
 | `server` | The `rmcp` handler and the `axum` / `tokio` plumbing |
 
 `Command`, in [`mcp/mod.rs`](../../crates/sfm-explorer/src/mcp/mod.rs), is the
-command vocabulary: one variant per tool, except that the four input tools
+command vocabulary: one variant per tool, except that the five input tools
 share `Input`, holding the arguments as the parse left them. A reconstruction
 is named by its label, which `apply` resolves against `AppState::scene`; an
 `Option<String>` label means the selected reconstruction when the argument is
@@ -5069,8 +5170,10 @@ where a test hands no host over.
   the fixture a resection and an adjustment both need, one thing rather than
   five near-copies of it. What is asserted is the boundary and not the edit:
   `delete_point` pushes a version whose serial, label and `report` the reply
-  names, and leaves that one sentence in the log as `Mcp`; `delete_camera_image`
-  shrinks the image table; the resection and the adjustment push a
+  names, and leaves that one sentence in the log as `Mcp`; `delete_points`
+  pushes one version for its whole list with the same reply, and a list naming
+  a dead point, an empty list or one that is not whole numbers is refused and
+  pushes nothing; `delete_camera_image` shrinks the image table; the resection and the adjustment push a
   version and report the estimate and the residuals. What each family *does* to
   a reconstruction is asserted in `state::edits::tests`, over the same
   `AppState` calls these make.
@@ -5275,8 +5378,8 @@ where a test hands no host over.
   and the panel list in the prose above are asserted against `catalog()` and
   `Tab::ALL`, because a number written out in words is the first thing to go
   stale.
-- **The catalog is eighty-nine tools**, seventeen of them reads, four of the
-  `Input` kind and one of the `Save` kind, those five carrying
+- **The catalog is ninety-one tools**, seventeen of them reads, five of the
+  `Input` kind and one of the `Save` kind, those six carrying
   `destructiveHint: true`;
   `set_window_layout`'s schema advertises `sfm_explorer_layout`, `window` and
   `layout`, with the `window` section's five keys under it, and `screenshot`'s
@@ -5322,7 +5425,15 @@ where a test hands no host over.
   refused in the words above as one failed row; the parse refuses no target,
   two targets, `panel_name` beside `widget`, a third click, an unknown button or
   modifier, a malformed id and empty text; and every field a listing or an
-  input reply carries is a spelled-out wire name.
+  input reply carries is a spelled-out wire name. A `drag` across a drag-sensing
+  pad in the Background Task panel starts one drag and stops one, its deltas sum
+  to the path's span, and it writes one row naming both ends; `mouse_button` and
+  `modifiers` are held in every frame of it and the modifiers are released
+  afterwards; a path with one point outside the target is refused before the
+  press; and the parse refuses a missing path, one of fewer than 2 or more than
+  120 points, and a point that is not two numbers. In the windowed suite,
+  `ui_basic`, a left `drag` across the 3D viewport orbits the camera: the
+  position `get_scene` reports moves and the target distance does not.
 - **Schema and parser cannot drift**: the cached catalog schema supplies the
   accepted top-level argument names to the parser, so a tool has one declaration
   of that vocabulary. The parser also derives the accepted names of every
@@ -5494,8 +5605,8 @@ Other candidates, in rough order of value:
   GUI thread pumping, so every queued tool call would time out behind a window
   only the human can answer. A `click` can still press a menu item that opens
   one, as a person's click would, and the same wait follows.
-- **No input below egui.** `click`, `hover`, `press_key` and `type_text` put
-  events into egui's input, so they never pass through `winit`, the keyboard
+- **No input below egui.** `click`, `hover`, `drag`, `press_key` and
+  `type_text` put events into egui's input, so they never pass through `winit`, the keyboard
   layout or an input method (§ "What synthetic input does not exercise"). The
   command vocabulary stays the way an agent changes the viewer; the input tools
   are for what only a widget does and for testing the widgets themselves.
@@ -5586,11 +5697,11 @@ Other candidates, in rough order of value:
   `hold_ms` argument would cover them. There is none because `set_view` already
   moves the camera exactly, so only a test of the fly handling itself would need
   it.
-- **Drag and scroll.** The input tools press, move and type, and do not drag or
-  scroll, which the 3D viewport and Image Detail read. Both panels have
+- **Scroll.** The input tools press, move, drag and type, and do not scroll,
+  which the 3D viewport and Image Detail read. Both panels have
   command-vocabulary equivalents (`set_view`, `set_image_detail_view`), so an
-  agent does not need them for the viewer's own operations, only to test the
-  pointer handling itself.
+  agent does not need it for the viewer's own operations, only to test the
+  scroll handling itself.
 - **Tooltips.** egui draws them on their own `Tooltip` layer after a hover
   delay, and the listing skips that layer. Listing them as a third kind in
   `menus` would be easy, but a test would have to wait out the delay.

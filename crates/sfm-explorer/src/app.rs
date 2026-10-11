@@ -280,7 +280,7 @@ impl App {
         });
         {
             let _phase = frame.phase("scene render");
-            self.render_scene(&queue, &mut encoder);
+            self.render_scene(&device, &queue, &mut encoder);
         }
 
         // Phase 3: run the egui/dock UI, publish accessibility, and tessellate.
@@ -536,18 +536,28 @@ impl App {
             // tint for the lock's duration: they are the ones the commit will
             // move, and telling them from the fixed ones is the whole of what
             // the reviewer is steering by.
-            static NONE: std::sync::LazyLock<std::collections::HashSet<u32>> =
-                std::sync::LazyLock::new(std::collections::HashSet::new);
-            let highlighted = match self.viewer_3d.camera_lock.as_ref() {
-                Some(lock) if lock.image.recon == id => &lock.highlighted,
-                _ => &NONE,
-            };
+            //
+            // The delete brush's marks go beside them: the points its stroke
+            // has painted, and the points under its circle before a press.
+            let mut marks = crate::scene_renderer::PointMarks::none();
+            if let Some(lock) = self.viewer_3d.camera_lock.as_ref() {
+                if lock.image.recon == id {
+                    marks.highlighted = &lock.highlighted;
+                }
+            }
+            let (painted, under_brush) = self.viewer_3d.brush_marks(id);
+            if let Some(painted) = painted {
+                marks.painted = painted;
+            }
+            if let Some(under_brush) = under_brush {
+                marks.under_brush = under_brush;
+            }
             let mut phase = uploads.phase("deleted mask");
             let written = self.scene_renderer.update_point_mask(
                 queue,
                 id,
                 &node.edited().deleted_points,
-                highlighted,
+                marks,
             );
             if written == 0 {
                 // Unlike the three above, this runs on every frame rather than
@@ -812,8 +822,13 @@ impl App {
     }
 
     /// Phase 2: encode the 3D scene render passes (scene, target indicator,
-    /// track rays) and the depth/pick readback copy into `encoder`.
-    fn render_scene(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+    /// track rays) and the depth/pick readback copies into `encoder`.
+    fn render_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         let in_camera_view = self.viewer_3d.camera_view.is_some();
 
         // Render the 3D scene to the offscreen texture
@@ -858,9 +873,19 @@ impl App {
             .update_bench_track_uniforms(queue, &self.viewer_3d.camera);
         self.scene_renderer.render_bench_track(encoder);
 
+        // A region of the pick buffer, when the viewport asked for one last
+        // frame. It replaces the 5×5 hover read rather than adding to it: the
+        // 5×5 copy below runs beside it only for a click waiting on its pick.
+        let region = self.viewer_3d.pick_region_request.take();
+        if let Some(rect) = region {
+            self.scene_renderer.copy_pick_region(device, encoder, rect);
+        }
+
         // Copy 5x5 depth + pick region under the mouse (shared by hover + click)
-        if let Some([px, py]) = self.viewer_3d.hover_pixel {
-            self.scene_renderer.copy_readback_region(encoder, px, py);
+        if region.is_none() || self.viewer_3d.pending_click.is_some() {
+            if let Some([px, py]) = self.viewer_3d.hover_pixel {
+                self.scene_renderer.copy_readback_region(encoder, px, py);
+            }
         }
     }
 
@@ -883,9 +908,9 @@ impl App {
 
         let mut raw_input = egui_winit_state.take_egui_input(window);
 
-        // An agent's `click`, `hover`, `press_key` or `type_text`: the next
-        // step's events, behind the real mouse and keyboard's, before anything
-        // below reads the frame's modifiers.
+        // An agent's `click`, `hover`, `drag`, `press_key` or `type_text`: the
+        // next step's events, behind the real mouse and keyboard's, before
+        // anything below reads the frame's modifiers.
         #[cfg(feature = "mcp")]
         self.feed_mcp_input(&mut raw_input.events);
 
@@ -1066,6 +1091,17 @@ impl App {
     /// Phase 4: read back the 5x5 depth + pick region (shared by hover + click)
     /// and update transient hover state plus pending-click selection.
     fn process_pick_readback(&mut self, device: &wgpu::Device) {
+        // A region read stands in for the hover read on its frame, so with no
+        // 5×5 read beside it nothing is hovered: the region's reader draws its
+        // own feedback in place of the hover's.
+        if self.scene_renderer.pick_region_pending() {
+            self.viewer_3d.pick_region = self.scene_renderer.read_pick_region(device);
+            if !self.scene_renderer.readback_pending() {
+                self.scene_renderer.clear_hover();
+                self.state.hovered_image = None;
+                self.state.hovered_point = None;
+            }
+        }
         let Some(readback) = self.scene_renderer.read_readback_result(device) else {
             return;
         };
@@ -1078,7 +1114,17 @@ impl App {
         // Only when the 3D viewer has pointer focus (hover_pixel is set for
         // the current frame). This avoids stale one-frame-delayed readback
         // results from overwriting hover state after the pointer left.
-        if self.viewer_3d.hover_pixel.is_some() {
+        //
+        // With the delete brush on, the circle's preview stands in for the
+        // single-point hover, so the viewport hovers nothing, whether or not
+        // this frame read a region.
+        if self.viewer_3d.hover_pixel.is_some()
+            && self.viewer_3d.tool == crate::viewer_3d::brush::Tool::DeleteBrush
+        {
+            self.scene_renderer.clear_hover();
+            self.state.hovered_image = None;
+            self.state.hovered_point = None;
+        } else if self.viewer_3d.hover_pixel.is_some() {
             match readback.pick {
                 Some(PickTarget::Image(image)) => {
                     self.state.hovered_image = Some(image);

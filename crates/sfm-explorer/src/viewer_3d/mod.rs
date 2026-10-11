@@ -10,6 +10,9 @@
 /// is world geometry with no GPU in it, and the pass that uploads it lives in
 /// [`crate::scene_renderer`].
 pub(crate) mod bench_track;
+/// Crate-visible because the app hands the brush's marks to the renderer and
+/// applies its gesture, and the MCP surface reads and sets the tool.
+pub(crate) mod brush;
 mod camera;
 /// Crate-visible because the MCP surface reads and writes the fields the HUD
 /// draws, through the same list.
@@ -283,6 +286,13 @@ pub struct Viewer3D {
     pub panel_size: [u32; 2],
     /// Mouse position in texture pixels (set each frame from hover pos).
     pub hover_pixel: Option<[u32; 2]>,
+    /// A rectangle of the pick buffer to read on the next frame, in texture
+    /// pixels, in place of the 5×5 hover read. Taken when the copy is encoded,
+    /// so a frame that wants one sets it again.
+    pub(crate) pick_region_request: Option<crate::scene_renderer::PixelRect>,
+    /// The region the last request read, decoded; replaced when the next
+    /// request is read, and kept until then.
+    pub(crate) pick_region: Option<crate::scene_renderer::PickRegion>,
     /// Whether the Alt key is currently held.
     pub alt_held: bool,
     /// Supernova effect activation level (0.0 = off, 1.0 = fully on).
@@ -387,6 +397,25 @@ pub struct Viewer3D {
     /// aims at is then the very layout the window produces, rather than a
     /// second layout built to be aimed at.
     pub(crate) menu_entry_rects: Vec<(&'static str, Rect)>,
+    /// What an unmodified left drag does: navigate, or paint with the delete
+    /// brush. Navigate at launch, chosen on the tool strip, and never
+    /// persisted across runs.
+    pub(crate) tool: brush::Tool,
+    /// The delete brush's stroke, from the press until it is reported or
+    /// cancelled. Held here for the reason [`Self::bench_drag`] is.
+    pub(crate) brush_stroke: Option<brush::BrushStroke>,
+    /// The points under the brush's circle before a press.
+    brush_preview: brush::BrushPreview,
+    /// What a released stroke asked of the app, drained by `dock.rs` after
+    /// the frame for the reason [`Self::bench_gesture`] is.
+    pub(crate) brush_gesture: Option<brush::BrushGesture>,
+    /// How many frames this viewport has drawn, which is what the brush ages
+    /// its unanswered region requests by.
+    brush_frame: u64,
+    /// Screen rect the tool strip occupied on the last frame it was built.
+    /// Excluded from the input paths that read the pointer geometrically, as
+    /// [`Self::hud_rect`] is.
+    tool_strip_rect: Option<Rect>,
 }
 
 /// What the entry that stages a point's track on the bench is called, in both
@@ -450,6 +479,8 @@ impl Viewer3D {
             camera_lock: None,
             panel_size: [0, 0],
             hover_pixel: None,
+            pick_region_request: None,
+            pick_region: None,
             alt_held: false,
             supernova_active: 0.0,
             supernova_view_pos: [0.0, 0.0, 5.0],
@@ -479,6 +510,12 @@ impl Viewer3D {
             bench_drag: None,
             bench_gesture: None,
             menu_entry_rects: Vec::new(),
+            tool: brush::Tool::Navigate,
+            brush_stroke: None,
+            brush_preview: brush::BrushPreview::default(),
+            brush_gesture: None,
+            brush_frame: 0,
+            tool_strip_rect: None,
         }
     }
 
@@ -740,12 +777,20 @@ impl Viewer3D {
             self.view_initialized = true;
         }
 
-        // --- The bench figure's handles, before the viewport's own input ---
+        // --- The delete brush and the bench figure's handles, before the
+        // viewport's own input ---
         //
-        // A drag that began on a handle is an edit of the track and must not
-        // also orbit, pan or zoom: the pointer can only mean one of the two, and
-        // what it means was decided where the button went down.
-        let bench_owns_pointer = self.update_bench_drag(ui, &response, rect, bench.as_ref());
+        // A stroke of the brush deletes points and a drag that began on a
+        // handle is an edit of the track, and neither may also orbit, pan or
+        // zoom: the pointer can only mean one thing, and what it means was
+        // decided where the button went down. The handles do not respond while
+        // the brush is on, so a press on one starts a stroke.
+        let brush_owns_pointer = self.begin_brush_frame(ui, &response, node.id);
+        let handles = bench
+            .as_ref()
+            .filter(|_| self.tool == brush::Tool::Navigate);
+        let owns_pointer =
+            self.update_bench_drag(ui, &response, rect, handles) || brush_owns_pointer;
 
         // Handle all input.
         //
@@ -754,15 +799,17 @@ impl Viewer3D {
         // top-most layer under the pointer, so `response.dragged()`,
         // `clicked()` and `hovered()` are all false while the pointer is over
         // it. Verified against egui 0.34 in `hud/tests.rs`.
-        self.handle_drag(ui, &response, rect, fly_keys_held, bench_owns_pointer);
+        self.handle_drag(ui, &response, rect, fly_keys_held, owns_pointer);
 
         // Scroll, pinch and platform gestures cannot rely on that. They gate on
         // `platform::pointer_in_rect`, a raw geometric containment test that on
         // Windows reads the OS cursor position and knows nothing about egui
-        // layers, so the HUD has to be excluded by geometry.
-        let over_hud = self
-            .hud_rect
-            .is_some_and(|hud| crate::platform::pointer_in_rect(ui.ctx(), hud));
+        // layers, so the HUD and the tool strip have to be excluded by
+        // geometry.
+        let over_hud = [self.hud_rect, self.tool_strip_rect]
+            .into_iter()
+            .flatten()
+            .any(|over| crate::platform::pointer_in_rect(ui.ctx(), over));
         let pointer_over = !over_hud && crate::platform::pointer_in_rect(ui.ctx(), rect);
         if pointer_over {
             self.handle_scroll(rect, scroll_input, fly_keys_held);
@@ -777,8 +824,9 @@ impl Viewer3D {
         }
         // The figure is on top, so a click one of its marks catches does not
         // also reach the points under it: two selections from one click would
-        // be two answers to one gesture.
-        if !bench_owns_pointer {
+        // be two answers to one gesture. A click of the brush is a stroke of
+        // one circle, and selects nothing either.
+        if !owns_pointer {
             self.handle_click(ui, &response, rect);
         }
         self.show_viewport_menu(&response, rect, hover_pick, busy, bench.as_ref());
@@ -796,6 +844,10 @@ impl Viewer3D {
             let py = ((pos.y - rect.top()) * ppp) as u32;
             [px, py]
         });
+
+        // The brush's region request, after this frame's input has moved the
+        // view, so that what it asks for is the picture the next frame draws.
+        self.end_brush_frame(ui, &response, node);
 
         // Compute target view-space position for supernova effect
         let target = self.camera.target();
@@ -859,6 +911,9 @@ impl Viewer3D {
         // The lock banner, over the scene and under nothing: it is what the
         // viewport is in the middle of.
         self.draw_lock_banner(&painter, rect, node);
+
+        // The brush's circle, over the scene where the pointer is.
+        self.draw_brush(ui, &painter, &response);
 
         // Draw info overlay
         let fps = 1.0 / ui.input(|i| i.predicted_dt as f64);
