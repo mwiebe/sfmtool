@@ -60,7 +60,7 @@ impl ImageU8 {
     /// alpha channel is dropped, and a 16-bit image is scaled to 8 bits. The
     /// file's contents, not its extension, choose the decoder.
     pub fn read_rgb(path: &std::path::Path) -> Result<Self, ::image::ImageError> {
-        let rgb = Self::decode(path)?.to_rgb8();
+        let rgb = Self::decode(path)?.into_rgb8();
         Ok(Self::new(rgb.width(), rgb.height(), 3, rgb.into_raw()))
     }
 
@@ -71,16 +71,25 @@ impl ImageU8 {
     /// where it has one and 255 (opaque) where it has none, so `alpha > 0`
     /// marks pixels with data, as in a reconstruction's stored patch bitmaps.
     pub fn read_rgba(path: &std::path::Path) -> Result<Self, ::image::ImageError> {
-        let rgba = Self::decode(path)?.to_rgba8();
+        let rgba = Self::decode(path)?.into_rgba8();
         Ok(Self::new(rgba.width(), rgba.height(), 4, rgba.into_raw()))
     }
 
     /// Decode the file at `path` with the decoder its contents name, not its
     /// extension, so a PNG saved under a `.jpg` name still reads.
+    ///
+    /// A JPEG is decoded by the `jpeg-decoder` crate and every other format by
+    /// the `image` crate. The `image` crate's JPEG decoder, zune-jpeg 0.5.15,
+    /// returns wrong pixels without an error for a baseline JPEG that stores
+    /// each component in a scan of its own, which `jpeg-encoder` writes when
+    /// its optimized Huffman tables are on.
     fn decode(path: &std::path::Path) -> Result<::image::DynamicImage, ::image::ImageError> {
-        ::image::ImageReader::open(path)?
-            .with_guessed_format()?
-            .decode()
+        let reader = ::image::ImageReader::open(path)?.with_guessed_format()?;
+        if reader.format() == Some(::image::ImageFormat::Jpeg) {
+            decode_jpeg(reader.into_inner())
+        } else {
+            reader.decode()
+        }
     }
 
     /// Encode the image to the file at `path`, in the format the path's
@@ -183,11 +192,11 @@ impl ImageU8 {
                     .set_chroma_subsampling_method(jpeg_encoder::ChromaSubsamplingMethod::Average);
                 // Optimized Huffman tables stay off, though off is the
                 // default, to record the choice: with them the encoder writes
-                // each component in a scan of its own. Those files are valid
-                // and OpenCV decodes them, but our reader (image 0.25.10 with
-                // zune-jpeg 0.5.15) returns wrong pixels for them without an
-                // error; see the ignored test
-                // `read_decodes_a_jpeg_with_one_scan_per_component`.
+                // each component in a scan of its own. Those files are valid,
+                // and our reader and OpenCV decode them, but zune-jpeg 0.5.15,
+                // the `image` crate's JPEG decoder, returns wrong pixels for
+                // them without an error, so other programs built on that
+                // crate would misread our files.
                 encoder.set_optimized_huffman_tables(false);
                 let color_type = if self.channels == 1 {
                     jpeg_encoder::ColorType::Luma
@@ -356,10 +365,86 @@ fn write_via_temporary(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
 /// [`ImageU8::read_rgb`] otherwise.
 pub fn image_has_alpha(path: &std::path::Path) -> Result<bool, ::image::ImageError> {
     use ::image::ImageDecoder;
-    let decoder = ::image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .into_decoder()?;
-    Ok(decoder.color_type().has_alpha())
+    let reader = ::image::ImageReader::open(path)?.with_guessed_format()?;
+    if reader.format() == Some(::image::ImageFormat::Jpeg) {
+        // A JPEG holds no alpha. Its header is read by the decoder
+        // `ImageU8::read_rgb` uses, so the two refuse the same files.
+        let mut decoder = jpeg_decoder::Decoder::new(reader.into_inner());
+        decoder.read_info().map_err(jpeg_error)?;
+        return Ok(false);
+    }
+    Ok(reader.into_decoder()?.color_type().has_alpha())
+}
+
+/// Decode the JPEG `reader` holds with the `jpeg-decoder` crate, ignoring the
+/// EXIF orientation as the `image` crate does.
+///
+/// A grey file decodes to grey and a colour one to RGB. A CMYK or YCCK file
+/// becomes RGB with `r = (255 - c) * (255 - k) / 255` and so on, on the
+/// inverted CMYK `jpeg-decoder` returns, as zune-jpeg and OpenCV convert it.
+/// A greyscale JPEG of more than 8 bits (lossless, or 12-bit) is refused as
+/// unsupported. The decoded buffer is held to the `image` crate's default
+/// allocation limit, 512 MiB.
+fn decode_jpeg<R: std::io::Read>(reader: R) -> Result<::image::DynamicImage, ::image::ImageError> {
+    use ::image::error::{ImageFormatHint, UnsupportedError, UnsupportedErrorKind};
+    use ::image::{DynamicImage, GrayImage, ImageFormat, RgbImage};
+    use jpeg_decoder::PixelFormat;
+
+    let mut decoder = jpeg_decoder::Decoder::new(reader);
+    if let Some(limit) = ::image::Limits::default().max_alloc {
+        decoder.set_max_decoding_buffer_size(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+    let pixels = decoder.decode().map_err(jpeg_error)?;
+    let info = decoder.info().expect("set by a successful decode");
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let malformed = || {
+        jpeg_error(jpeg_decoder::Error::Format(
+            "decoded buffer does not match the image size".to_owned(),
+        ))
+    };
+    match info.pixel_format {
+        PixelFormat::L8 => GrayImage::from_raw(width, height, pixels)
+            .map(DynamicImage::ImageLuma8)
+            .ok_or_else(malformed),
+        PixelFormat::RGB24 => RgbImage::from_raw(width, height, pixels)
+            .map(DynamicImage::ImageRgb8)
+            .ok_or_else(malformed),
+        PixelFormat::CMYK32 => {
+            let rgb = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[c, m, y, k]| {
+                    let k = 255 - u32::from(k);
+                    let channel = |c: u8| (((255 - u32::from(c)) * k + 127) / 255) as u8;
+                    [channel(c), channel(m), channel(y)]
+                })
+                .collect();
+            RgbImage::from_raw(width, height, rgb)
+                .map(DynamicImage::ImageRgb8)
+                .ok_or_else(malformed)
+        }
+        PixelFormat::L16 => Err(::image::ImageError::Unsupported(
+            UnsupportedError::from_format_and_kind(
+                ImageFormatHint::Exact(ImageFormat::Jpeg),
+                UnsupportedErrorKind::GenericFeature(
+                    "greyscale JPEG of more than 8 bits".to_owned(),
+                ),
+            ),
+        )),
+    }
+}
+
+/// The `image` crate's error for a `jpeg-decoder` error.
+fn jpeg_error(e: jpeg_decoder::Error) -> ::image::ImageError {
+    use ::image::error::{DecodingError, ImageFormatHint};
+    match e {
+        jpeg_decoder::Error::Io(io) => ::image::ImageError::IoError(io),
+        e => ::image::ImageError::Decoding(DecodingError::new(
+            ImageFormatHint::Exact(::image::ImageFormat::Jpeg),
+            e,
+        )),
+    }
 }
 
 /// Gaussian pyramid of [`ImageU8`] images for anisotropic resampling.

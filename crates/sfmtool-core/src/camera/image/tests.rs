@@ -505,36 +505,166 @@ fn write_replaces_a_file_held_open_without_delete_sharing() {
     assert_eq!(names.len(), 1, "the temporary file is removed");
 }
 
-/// With optimized Huffman tables, `jpeg-encoder` writes a 4:2:0 JPEG with each
-/// component in a scan of its own. The file is valid, and OpenCV decodes it,
-/// but our reader (`image` 0.25.10 with zune-jpeg 0.5.15) returns wrong pixels
-/// for it without an error. `ImageU8::write` keeps those tables off for that
-/// reason; this test passes once the reader decodes such files.
-#[test]
-#[ignore = "image 0.25.10 / zune-jpeg 0.5.15 misdecode a JPEG with one scan per component"]
-fn read_decodes_a_jpeg_with_one_scan_per_component() {
-    let dir = tempfile::tempdir().unwrap();
-    let (w, h) = (64u16, 64u16);
-    let data: Vec<u8> = (0..u32::from(h))
-        .flat_map(|y| (0..u32::from(w)).flat_map(move |x| [200, (x * 4) as u8, (y * 4) as u8]))
-        .collect();
+/// Encode `data` (`components` channels of `color`) with `jpeg-encoder` at
+/// `quality`, with its optimized Huffman tables on or off.
+fn encode_jpeg(
+    data: &[u8],
+    (w, h): (u16, u16),
+    color: jpeg_encoder::ColorType,
+    sampling: jpeg_encoder::SamplingFactor,
+    quality: u8,
+    optimized_huffman: bool,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
-    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, DEFAULT_JPEG_QUALITY);
-    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
-    encoder.set_optimized_huffman_tables(true);
-    encoder
-        .encode(&data, w, h, jpeg_encoder::ColorType::Rgb)
-        .unwrap();
-    let path = dir.path().join("scans.jpg");
-    std::fs::write(&path, &bytes).unwrap();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality);
+    encoder.set_sampling_factor(sampling);
+    encoder.set_optimized_huffman_tables(optimized_huffman);
+    encoder.encode(data, w, h, color).unwrap();
+    bytes
+}
 
-    let back = ImageU8::read_rgb(&path).unwrap();
-    let mean_error = back
-        .data()
-        .iter()
-        .zip(&data)
-        .map(|(a, b)| f64::from(a.abs_diff(*b)))
-        .sum::<f64>()
-        / data.len() as f64;
-    assert!(mean_error < 6.0, "mean error {mean_error}");
+/// The number of start-of-scan (SOS) markers in `jpeg`.
+fn jpeg_scan_count(jpeg: &[u8]) -> usize {
+    jpeg.windows(2).filter(|w| *w == [0xFF, 0xDA]).count()
+}
+
+/// With optimized Huffman tables, `jpeg-encoder` writes a baseline JPEG with
+/// each component in a scan of its own. zune-jpeg 0.5.15, the `image` crate's
+/// JPEG decoder, returns wrong pixels for such a file without an error: whole
+/// images at 4:2:0, and the last row at some odd sizes at 4:4:4. The reader
+/// decodes JPEG with `jpeg-decoder` instead, and reads them as OpenCV does.
+#[test]
+fn read_decodes_a_jpeg_with_one_scan_per_component() {
+    use jpeg_encoder::SamplingFactor;
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (64u16, 64u16, SamplingFactor::R_4_2_0, DEFAULT_JPEG_QUALITY),
+        (37, 23, SamplingFactor::R_4_2_0, DEFAULT_JPEG_QUALITY),
+        (1, 50, SamplingFactor::R_4_2_0, DEFAULT_JPEG_QUALITY),
+        (1, 50, SamplingFactor::R_4_4_4, DEFAULT_JPEG_QUALITY),
+        (17, 9, SamplingFactor::R_4_4_4, 50),
+    ];
+    for (w, h, sampling, quality) in cases {
+        let data: Vec<u8> = (0..u32::from(h))
+            .flat_map(|y| {
+                (0..u32::from(w)).flat_map(move |x| {
+                    [
+                        200,
+                        (x * 255 / u32::from(w)) as u8,
+                        (y * 255 / u32::from(h)) as u8,
+                    ]
+                })
+            })
+            .collect();
+        let bytes = encode_jpeg(
+            &data,
+            (w, h),
+            jpeg_encoder::ColorType::Rgb,
+            sampling,
+            quality,
+            true,
+        );
+        assert_eq!(jpeg_scan_count(&bytes), 3, "one scan per component");
+        let path = dir.path().join("scans.jpg");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let back = ImageU8::read_rgb(&path).unwrap();
+        assert_eq!((back.width(), back.height()), (u32::from(w), u32::from(h)));
+        let row_len = 3 * usize::from(w);
+        let row_errors: Vec<f64> = back
+            .data()
+            .chunks(row_len)
+            .zip(data.chunks(row_len))
+            .map(|(a, b)| {
+                a.iter()
+                    .zip(b)
+                    .map(|(a, b)| f64::from(a.abs_diff(*b)))
+                    .sum::<f64>()
+                    / row_len as f64
+            })
+            .collect();
+        let mean_error = row_errors.iter().sum::<f64>() / row_errors.len() as f64;
+        let worst_row = row_errors.iter().cloned().fold(0.0, f64::max);
+        let case = format!("{w}x{h} {sampling:?} q{quality}");
+        assert!(mean_error < 3.0, "{case}: mean error {mean_error}");
+        assert!(
+            worst_row < 8.0,
+            "{case}: worst row's mean error {worst_row}"
+        );
+        assert_eq!(
+            ImageU8::read_rgba(&path)
+                .unwrap()
+                .data()
+                .chunks(4)
+                .map(|p| p[3])
+                .max(),
+            Some(255)
+        );
+        assert!(!image_has_alpha(&path).unwrap());
+    }
+}
+
+/// A CMYK JPEG (Adobe-inverted, as Photoshop writes it) reads as RGB with
+/// `r = (255 - c) * (255 - k) / 255`, as OpenCV converts it, whether its
+/// components are stored as CMYK or as YCCK.
+#[test]
+fn read_converts_a_cmyk_jpeg_to_rgb() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, h) = (24u16, 16u16);
+    let cmyk: Vec<u8> = (0..u32::from(h))
+        .flat_map(|y| {
+            (0..u32::from(w))
+                .flat_map(move |x| [(x * 10) as u8, (y * 15) as u8, 60, ((x + y) * 2) as u8])
+        })
+        .collect();
+    let expected: Vec<u8> = cmyk
+        .chunks(4)
+        .flat_map(|p| {
+            let k = 255.0 - f64::from(p[3]);
+            [0, 1, 2].map(|i| ((255.0 - f64::from(p[i])) * k / 255.0).round() as u8)
+        })
+        .collect();
+    for color in [
+        jpeg_encoder::ColorType::Cmyk,
+        jpeg_encoder::ColorType::CmykAsYcck,
+    ] {
+        let bytes = encode_jpeg(
+            &cmyk,
+            (w, h),
+            color,
+            jpeg_encoder::SamplingFactor::R_4_4_4,
+            100,
+            false,
+        );
+        let path = dir.path().join("cmyk.jpg");
+        std::fs::write(&path, &bytes).unwrap();
+        let back = ImageU8::read_rgb(&path).unwrap();
+        let mean_error = back
+            .data()
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / expected.len() as f64;
+        assert!(mean_error < 2.0, "{color:?}: mean error {mean_error}");
+    }
+}
+
+#[test]
+fn read_refuses_a_truncated_jpeg_and_a_non_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("short.jpg");
+    gradient(40, 30, 3)
+        .write(&path, DEFAULT_JPEG_QUALITY)
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    // Only the markers before the scan data.
+    let sos = bytes.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    std::fs::write(&path, &bytes[..sos]).unwrap();
+    assert!(ImageU8::read_rgb(&path).is_err());
+
+    let text = dir.path().join("text.jpg");
+    std::fs::write(&text, b"not an image").unwrap();
+    assert!(ImageU8::read_rgb(&text).is_err());
+    assert!(image_has_alpha(&text).is_err());
 }

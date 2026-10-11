@@ -45,8 +45,9 @@ pub fn image_has_alpha(path: PathBuf) -> PyResult<bool> {
 /// The layout is the one a `.sfmr` file stores its thumbnails in
 /// (`images/thumbnails_y_x_rgb`): row, column, then the channels in RGB order,
 /// C-contiguous. This is the decoder the Rust code reads photographs with
-/// (`ImageU8::read_rgb`, the `image` crate), so the pixels equal the ones the
-/// viewer, the bench and the photograph cache read, bit for bit. The EXIF
+/// (`ImageU8::read_rgb`: the `jpeg-decoder` crate for a JPEG, the `image`
+/// crate otherwise), so the pixels equal the ones the viewer, the bench and
+/// the photograph cache read, bit for bit. The EXIF
 /// orientation is ignored: the array has the width and height stored in the
 /// file, as the SIFT extractors and the camera intrinsics do. A grey image has
 /// its value repeated in the three channels, an alpha channel is dropped, and
