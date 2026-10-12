@@ -47,8 +47,8 @@ use crate::patch::keypoint_localize::{
 use crate::patch::member_coherence::MemberCoherenceParams;
 use crate::patch::normal_refine::ProjectedImage;
 use crate::patch::reference_view::{
-    choose_reference_view, read_track, render_view_tile, ReferenceReadings, ReferenceViewOptions,
-    ViewTile,
+    choose_reference_view, read_track, render_view_tile, tile_max_radius, ReferenceReadings,
+    ReferenceViewOptions, ViewTile,
 };
 use crate::patch::self_similarity::{
     zncc_self_similarity_parts, PatchTile, SelfSimilarityEllipse, SelfSimilarityEllipseUnits,
@@ -2442,18 +2442,11 @@ pub(super) fn restate_reference_view(track: &mut EditableTrack) {
                 pair_zncc: m.and_then(|m| m.pair_zncc),
                 semi_major: axes.map(|a| a[0]),
                 semi_minor: axes.map(|a| a[1]),
+                max_radius: axes.map(|_| tile_max_radius()),
             }
         })
         .collect();
-    // The tiles' resolution, which every row the rule read was rendered at.
-    let resolution = rows
-        .iter()
-        .find_map(|&i| {
-            let m = track.observations[i].track.as_ref()?;
-            m.reading_options.map(|o| o.resolution as usize)
-        })
-        .unwrap_or_else(|| open_localizer().resolution as usize);
-    let choice = choose_reference_view(&readings, resolution, &ReferenceViewOptions::default());
+    let choice = choose_reference_view(&readings, &ReferenceViewOptions::default());
     for (k, &i) in rows.iter().enumerate() {
         if let Some(measurement) = track.observations[i].track.as_mut() {
             measurement.reference_view = choice.standing(k);

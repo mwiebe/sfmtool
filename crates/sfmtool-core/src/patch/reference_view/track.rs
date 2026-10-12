@@ -31,7 +31,9 @@ pub struct TrackReading {
 
 /// What the rule reads of one view: the coverage, clipped share and viewing
 /// angle `tile` was read with, its pair ZNCC and cell deficit, and its
-/// self-similarity ellipse's semi-axes `[major, minor]` in grid px.
+/// self-similarity ellipse's semi-axes `[major, minor]` in grid px, read with
+/// the default [`SelfSimilarityParams`] as [`tile_semi_axes`] reads them, so
+/// their cap is [`tile_max_radius`].
 pub fn readings_of(
     tile: &ViewTile,
     pair_zncc: Option<f64>,
@@ -46,7 +48,16 @@ pub fn readings_of(
         pair_zncc,
         semi_major: semi_axes.map(|a| a[0]),
         semi_minor: semi_axes.map(|a| a[1]),
+        max_radius: semi_axes.map(|_| tile_max_radius()),
     }
+}
+
+/// The largest radius, in grid px, of the self-similarity reading
+/// [`tile_semi_axes`] and the bench take of a tile: the default
+/// [`SelfSimilarityParams::max_radius`], at which a semi-major axis reads
+/// "this far or further".
+pub fn tile_max_radius() -> f64 {
+    f64::from(SelfSimilarityParams::default().max_radius)
 }
 
 /// The semi-axes `[major, minor]`, in grid px, of the self-similarity ellipse
@@ -97,7 +108,7 @@ pub fn tile_semi_axes(tile: &ViewTile) -> Option<[f64; 2]> {
 /// Two views of one image share the matrix row of the first of them, as
 /// member coherence counts an image once.
 ///
-/// The rule runs with `options`, at the tiles' resolution `R`.
+/// The rule runs with `options`.
 ///
 /// # Panics
 ///
@@ -152,7 +163,7 @@ pub fn read_track(
             )
         })
         .collect();
-    let choice = choose_reference_view(&readings, resolution as usize, options);
+    let choice = choose_reference_view(&readings, options);
     TrackReading {
         pair_zncc,
         cells,
