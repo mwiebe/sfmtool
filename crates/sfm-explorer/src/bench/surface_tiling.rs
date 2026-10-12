@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Track View's Surface Tiling Mode: covering a surface with patches by
-//! alternating *Duplicate* with a move of the copy in the 3D viewer.
+//! alternating *Duplicate* with a move of the copy by the handles of the 3D
+//! viewer or Image Detail.
 //!
 //! See `specs/gui/track-view.md` § "Surface Tiling Mode". The mode changes two
 //! things, and both are made of the bench's existing steps:
 //!
 //! - **A duplicate in the mode** ([`AppState::duplicate_for_surface_tiling`])
-//!   is *Duplicate*, then the copy's `out` observations dropped
-//!   ([`AppState::drop_out_bench_observations`]), then every verdict still
-//!   pinned on the copy handed back to the thresholds
-//!   ([`AppState::unpin_bench_verdicts`]). Three versions, three Action Log
-//!   rows, as the same three steps taken by hand would be.
-//! - **A move of the patch in the 3D viewer in the mode** starts a
+//!   is *Duplicate*, then every verdict pinned on the copy handed back to the
+//!   thresholds ([`AppState::unpin_bench_verdicts`]), then the observations
+//!   that are `out` once the thresholds have judged them dropped
+//!   ([`AppState::drop_out_bench_observations`]). Three versions, three Action
+//!   Log rows, as the same three steps taken by hand would be. The drop is a
+//!   one-step [`TilingSequence`] ([`DUPLICATE_STEPS`]), because the verdicts
+//!   it reads are final only once the copy's live evaluation has settled.
+//! - **A move of the patch in the mode**, by a handle in the 3D viewer or in
+//!   Image Detail ([`AppState::edit_bench_patch_by_gesture`]), starts a
 //!   [`TilingSequence`] ([`AppState::start_surface_tiling`]): Fit, Find
 //!   matches by geometry, Fit, Grid Plane Normal, Fit and Commit, each through
 //!   the starter its button calls, so each pushes its own version and writes
@@ -26,16 +30,18 @@
 //! item no longer focused, or a version on the node that the sequence did not
 //! push (an undo, a pin, a threshold) each end it with a failed Bench row
 //! naming the step it stopped at and why. A second move of the patch while the
-//! sequence waits between steps starts it again from the first Fit.
+//! sequence waits between steps starts it again from the first Fit, and a move
+//! while a duplicate's drop waits ends the drop before the move's sequence
+//! starts.
 
 #[cfg(test)]
 mod tests;
 
-use sfmtool_core::bench::{EditableTrack, ItemId, Verdict};
+use sfmtool_core::bench::{EditableTrack, ItemId, StageKind, Verdict};
 
 use crate::action_log::Kind;
 use crate::bench::live::Evaluation;
-use crate::bench::{FocusedItem, NormalStep, SplitSettings};
+use crate::bench::{FocusedItem, NormalStep, PatchEdit, SplitSettings};
 use crate::document::VersionSerial;
 use crate::scene::ReconId;
 use crate::state::AppState;
@@ -58,6 +64,10 @@ enum TilingStep {
     GridPlaneNormal,
     /// Track View's *Commit* ([`AppState::commit_bench_track`]).
     Commit,
+    /// The `out` observations dropped
+    /// ([`AppState::drop_out_bench_observations`]): the last step of a
+    /// duplicate in the mode, skipped with no row when none is `out`.
+    DropOut,
 }
 
 impl TilingStep {
@@ -68,6 +78,7 @@ impl TilingStep {
             TilingStep::SearchGeometry => "Find matches by geometry",
             TilingStep::GridPlaneNormal => "Grid Plane Normal",
             TilingStep::Commit => "Commit",
+            TilingStep::DropOut => "Drop the out observations",
         }
     }
 }
@@ -88,6 +99,17 @@ const TILING_STEPS: [TilingStep; 6] = [
     TilingStep::Commit,
 ];
 
+/// What a duplicate in the mode leaves to a [`TilingSequence`]: the drop of
+/// the copy's `out` observations.
+///
+/// It waits, as every step of a sequence does, for the copy's evaluation to
+/// settle. The unpin before it repaints the verdicts from the scores the copy
+/// carries, but where the unpin hands the reference to the rule's pick on
+/// another row those scores are cleared and the evaluation is what judges the
+/// rows, and an evaluation whose repaint moved a verdict reads the track once
+/// more. Only once it has settled are the verdicts the thresholds' own.
+const DUPLICATE_STEPS: [TilingStep; 1] = [TilingStep::DropOut];
+
 /// A Surface Tiling Mode sequence under way on one bench item.
 #[derive(Debug, Clone)]
 pub(crate) struct TilingSequence {
@@ -95,10 +117,13 @@ pub(crate) struct TilingSequence {
     node: ReconId,
     /// The item, by the ID a rename keeps.
     item: ItemId,
+    /// The steps, in order: [`TILING_STEPS`] after a move,
+    /// [`DUPLICATE_STEPS`] after a duplicate.
+    steps: &'static [TilingStep],
     /// How *Grid Plane Normal* cuts the patch.
     split: SplitSettings,
-    /// The position in [`TILING_STEPS`] of the step to start next, or of the
-    /// step running while `waiting_on` is set.
+    /// The position in `steps` of the step to start next, or of the step
+    /// running while `waiting_on` is set.
     next: usize,
     /// The background task the sequence started and has not yet seen end.
     waiting_on: Option<u64>,
@@ -111,7 +136,12 @@ pub(crate) struct TilingSequence {
 impl TilingSequence {
     /// The step the sequence is running or about to start.
     fn step(&self) -> TilingStep {
-        TILING_STEPS[self.next]
+        self.steps[self.next]
+    }
+
+    /// Whether this is a duplicate's drop rather than a move's sequence.
+    fn is_drop(&self) -> bool {
+        self.steps == DUPLICATE_STEPS
     }
 }
 
@@ -159,8 +189,9 @@ impl AppState {
     /// ([`sfmtool_core::bench::EditableTrack::drop_out_observations`]), as
     /// one version.
     ///
-    /// The step a Surface Tiling Mode duplicate takes after the copy is made.
-    /// A track with no `out` observation is a no-effect row, and one whose
+    /// The last step a Surface Tiling Mode duplicate takes, once the copy's
+    /// verdicts are unpinned and judged. A track with no `out` observation is
+    /// a no-effect row, and one whose
     /// every observation is `out` is refused, since a track with none is not
     /// one. The selected rows are cleared, the rows left being renumbered.
     fn drop_out_bench_observations(&mut self, id: ReconId, label: &str) -> Result<(), String> {
@@ -195,26 +226,24 @@ impl AppState {
     }
 
     /// *Duplicate* in Surface Tiling Mode: duplicate the track called
-    /// `label`, drop the copy's `out` observations, and hand every verdict
-    /// still pinned on it back to the thresholds, reporting the copy's label.
+    /// `label`, hand every verdict pinned on the copy back to the thresholds,
+    /// and leave the drop of the copy's `out` observations to a sequence
+    /// ([`DUPLICATE_STEPS`]), reporting the copy's label.
     ///
     /// The three steps are the ones a person takes by hand, each its own
     /// version and row, and the copy is the focused item from the first of
-    /// them on. A step with nothing to do is skipped. A refusal after the
-    /// duplicate leaves the copy on the bench as far as it got and is returned
-    /// for the caller to log, as a refused duplicate is.
+    /// them on. The first two are taken here. The drop is taken by
+    /// [`Self::drive_surface_tiling`] once the copy's evaluation has settled,
+    /// so it drops the rows the thresholds turned `out` as well as the ones
+    /// that were `out` already. A step with nothing to do is skipped. A
+    /// refusal after the duplicate leaves the copy on the bench as far as it
+    /// got and is returned for the caller to log, as a refused duplicate is.
     pub(crate) fn duplicate_for_surface_tiling(
         &mut self,
         id: ReconId,
         label: &str,
     ) -> Result<String, String> {
         let copy = self.duplicate_bench_item(id, label)?;
-        let has_out = self
-            .bench_track(id, &copy)
-            .is_some_and(|track| track.observations.iter().any(|o| o.verdict == Verdict::Out));
-        if has_out {
-            self.drop_out_bench_observations(id, &copy)?;
-        }
         let pinned: Vec<usize> = self
             .bench_track(id, &copy)
             .map(|track| {
@@ -229,38 +258,81 @@ impl AppState {
         if !pinned.is_empty() {
             self.unpin_bench_verdicts(id, &copy, &pinned)?;
         }
+        self.start_drop(id, &copy);
         Ok(copy)
     }
 
-    /// One released gesture over the 3D viewer's bench figure that edits the
-    /// patch of the item called `label` ([`Self::edit_bench_patch`]), and, in
-    /// Surface Tiling Mode, the sequence after it.
+    /// Start the sequence that drops the `out` observations of the copy
+    /// called `copy` once its evaluation has settled ([`DUPLICATE_STEPS`]).
+    ///
+    /// A sequence under way on another item ends first: the duplicate has
+    /// focused the copy, which would end it on the next frame anyway, and the
+    /// row says so now rather than leaving it to be replaced without one.
+    fn start_drop(&mut self, id: ReconId, copy: &str) {
+        let (Ok(index), Some(item)) = (
+            self.node_index(id),
+            self.bench(id).and_then(|bench| bench.id(copy)),
+        ) else {
+            return;
+        };
+        if self.surface_tiling.is_some() {
+            self.stop_surface_tiling(&format!(
+                "a duplicate put {copy} on the bench and focused it"
+            ));
+        }
+        self.surface_tiling = Some(TilingSequence {
+            node: id,
+            item,
+            steps: &DUPLICATE_STEPS,
+            split: SplitSettings::default(),
+            next: 0,
+            waiting_on: None,
+            serial: self.scene[index].history.current_version().serial,
+        });
+    }
+
+    /// One released handle gesture, over the 3D viewer's bench figure or over
+    /// Image Detail's bench layer, that edits the item called `label`
+    /// ([`Self::edit_bench_patch`]), and, in Surface Tiling Mode, the sequence
+    /// after it.
     ///
     /// `tiling` is `None` with the mode off, and otherwise how the sequence's
     /// *Grid Plane Normal* cuts the patch. The sequence starts only when the
-    /// edit changed the patch: a release that put it back where it was is a
-    /// no-effect row and nothing more, as it is with the mode off.
-    pub(crate) fn edit_bench_patch_from_viewer(
+    /// edit changed the track-stage patch ([`PatchEdit::moves_patch`]): a
+    /// release that put it back where it was is a no-effect row and nothing
+    /// more, as it is with the mode off, and so is an edit of one sighting
+    /// alone or of a cluster's sighting, which leaves the patch where it was.
+    pub(crate) fn edit_bench_patch_by_gesture(
         &mut self,
         id: ReconId,
         label: &str,
-        edit: &crate::bench::PatchEdit,
+        edit: &PatchEdit,
         tiling: Option<SplitSettings>,
     ) -> Result<(), String> {
         let edited = self.edit_bench_patch(id, label, edit)?;
-        if let (true, Some(split)) = (edited.changed, tiling) {
+        let Some(split) = tiling else {
+            return Ok(());
+        };
+        let at_track_stage = self
+            .bench_track(id, label)
+            .is_some_and(|track| track.stage_kind() == StageKind::Track);
+        if edited.changed && edit.moves_patch() && at_track_stage {
             self.start_surface_tiling(id, label, split);
         }
         Ok(())
     }
 
     /// Start a Surface Tiling Mode sequence on the item called `label`, the
-    /// patch of which a gesture in the 3D viewer has just moved.
+    /// patch of which a handle gesture in the 3D viewer or Image Detail has just
+    /// moved.
     ///
     /// The sequence's first step starts on the next
     /// [`Self::drive_surface_tiling`]. A sequence already under way is
     /// replaced, so a second move between its steps starts it again from the
-    /// first Fit. `split` is how its *Grid Plane Normal* cuts the patch.
+    /// first Fit. A duplicate's drop still waiting is ended with its row
+    /// first: the move has changed what the evaluation will judge, so the
+    /// verdicts it would drop by are no longer about the ground the copy came
+    /// from. `split` is how its *Grid Plane Normal* cuts the patch.
     fn start_surface_tiling(&mut self, id: ReconId, label: &str, split: SplitSettings) {
         let (Ok(index), Some(item)) = (
             self.node_index(id),
@@ -268,6 +340,16 @@ impl AppState {
         ) else {
             return;
         };
+        if self
+            .surface_tiling
+            .as_ref()
+            .is_some_and(TilingSequence::is_drop)
+        {
+            self.stop_surface_tiling(
+                "the patch was moved before its evaluation settled, so its out observations \
+                 were left on it",
+            );
+        }
         let serial = self.scene[index].history.current_version().serial;
         let restarted = self.surface_tiling.take().is_some();
         let steps = TILING_STEPS.map(TilingStep::name).join(", ");
@@ -285,6 +367,7 @@ impl AppState {
         self.surface_tiling = Some(TilingSequence {
             node: id,
             item,
+            steps: &TILING_STEPS,
             split,
             next: 0,
             waiting_on: None,
@@ -309,7 +392,7 @@ impl AppState {
                 "Surface tiling of {label} stopped at {} (step {} of {}): {why}",
                 sequence.step().name(),
                 sequence.next + 1,
-                TILING_STEPS.len()
+                sequence.steps.len()
             ),
         );
     }
@@ -325,7 +408,7 @@ impl AppState {
         Some(format!(
             "Step {} of {}: {}",
             sequence.next + 1,
-            TILING_STEPS.len(),
+            sequence.steps.len(),
             sequence.step().name()
         ))
     }
@@ -432,6 +515,25 @@ impl AppState {
                             driven.committed = Some(id);
                         }
                     }
+                }
+                return driven;
+            }
+            TilingStep::DropOut => {
+                let has_out = self.bench_track(id, &label).is_some_and(|track| {
+                    track.observations.iter().any(|o| o.verdict == Verdict::Out)
+                });
+                if !has_out {
+                    self.surface_tiling = None;
+                    return driven;
+                }
+                match self.drop_out_bench_observations(id, &label) {
+                    Err(why) => {
+                        // The refusal is the step's own row, as a refused
+                        // commit's is, and the stop row follows it.
+                        self.action_log.fail(Kind::Bench, why.clone());
+                        self.stop_surface_tiling(&why);
+                    }
+                    Ok(()) => self.surface_tiling = None,
                 }
                 return driven;
             }
