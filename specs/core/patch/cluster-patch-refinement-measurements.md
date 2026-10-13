@@ -2,7 +2,7 @@
 
 This file records the fleet measurements behind the piecewise refinement of [cluster-patch-refinement.md](cluster-patch-refinement.md#piecewise-refinement), and the ground-truth measurements behind [cell-plane-normals.md](cell-plane-normals.md). The piecewise refinement registers each kept member's nine cells against the cluster's template, starting at the member's cascade shape, fits a robust affine map to the cell shifts to find the cells that disagree with the others, and stores the shifts with a status per cell in the `.matches` file. By default it also applies the fitted map as an update of the shape, by a loop that keeps the cascade's ZNCC from falling (`PiecewiseParams::move_shape`, on by default); with `move_shape` off it is a measurement only and leaves the member's shape as the cascade found it. The measurements bear on whether the stage runs by default (`sfm cluster-patches --piecewise`), and on the defaults of `min_cell_zncc` (provisionally `0.8`) and of `min_cell_curvature` (provisionally `0.02`).
 
-The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, and the last measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
+The first five sections were measured at commit `f787be3b` on 43 fleet entries, when the stage was a loop that applied every fitted update to the shape: agreement with the cascade's shapes, the cell statistics, the wall time, and the seed stage on the two checked-in ground truths. The later sections repeat parts of that on five entries: after the loop was given an acceptance rule that keeps the cascade's ZNCC, after the default was changed to the measurement with the loop behind `move_shape`, and after the robust fit's residual scale was changed to the factor for two-dimensional residuals. The next two sections measure the cell plane normals against the two checked-in ground truths. The two after them record a blind human review of the loop's moved shapes against the cascade's, which reversed the earlier decision to leave the shape to the cascade, and repeat the subset with the loop as the default. The next measures two gates that read each member's own patch again at its refined shape, against the ground truths of four of the five entries, the one after repeats the cell plane normals on files written at the current defaults, the next measures the cascade's [rotation starts](cluster-patch-refinement.md#rotation-starts) on three entries, against the ground truths of all three, and the last two measure the [shift gate](cluster-patch-refinement.md#acceptance) in units of the member's scale against the same ground truths, with the gates at the refined shape off and then on. While these measurements were taken the stage was specified in a draft proposal, since folded into the spec; "the draft" in the sections below means that proposal.
 
 ## Setup of the fleet run (f787be3b)
 
@@ -1217,3 +1217,134 @@ These files are mostly pairs at similar scale, where the SIFT orientations agree
 Each member that reaches the cascade costs up to twelve start scores, fewer where a start leaves the frame, and the 668, 9 and 7 newly evaluated members add their cascades. The start scores build tiles of their own, which nearly doubles the tile builds. With one start, evaluations are 50% to 56% of refinement CPU and tile builds 1.3% to 4.7%, so the counts put the cost of twelve starts at about 4% to 7% of refinement CPU. The command's wall time was 0.47 to 0.55 s on `SeoulBull` and 1.21 to 1.59 s on `KerryPark480` in both settings; on `DnDTabletop` it was 92 to 127 s with one start and 95 to 106 s with twelve.
 
 **What this decides.** Twelve starts are the default. They do not raise the share of kept members the ground truth calls wrong on any of the three entries, they evaluate members whose seed support leaves the frame, and they cost about 6% more objective evaluations, an estimated 4% to 7% of refinement CPU. The benefit the true pairs show, at scale ratios these three files rarely hold, is not visible in their counts.
+
+## Shift in scale units (2026-10-10)
+
+**Question.** The [shift gate](cluster-patch-refinement.md#acceptance) refuses a member whose refined position moved too far from its SIFT detection. Does the share of wrong members follow the shift in source pixels or the shift in units of the member's refined scale `√|det S|`, and which bar keeps the fewest wrong members for the right ones it refuses?
+
+**Method.**
+
+- **Code.** Branch `bootstrap-core-migration` at `2718240c`, when the gate refused a member whose shift was over a fixed 3 px.
+- **Data.** The cluster files of the [rotation multi-start](#rotation-multi-start-2026-10-11) section: `SeoulBull`, `KerryPark480` and `DnDTabletop`, refined at the defaults of that commit, with the member gate at the refined shape off.
+- **Ground truth.** As in [Gates at the refined shape](#gates-at-the-refined-shape-2026-10-09): a member is *wrong* when its refined position lies further than `max(3, 5·m)` px of its own photograph from the epipolar half-line of its reference's detection, `m` the file's median of that distance over kept members: 3.0 px on `SeoulBull` and `KerryPark480`, 4.68 px on `DnDTabletop`. A slip along the epipolar line is invisible to the test, so wrong shares are lower bounds.
+- **Rules.** Each rule was applied to the kept and the shift-refused members together.
+
+**Result: the wrong share follows the shift over the member's scale.**
+
+Wrong share by group, member count in parentheses:
+
+| | kept | rejected low ZNCC | rejected shift |
+|---|---|---|---|
+| SeoulBull | 6.7% (2,953) | 53.7% (2,288) | 37.0% (81) |
+| KerryPark480 | 16.1% (15,609) | 64.9% (5,503) | 38.7% (194) |
+| DnDTabletop | 9.5% (1,370,494) | 47.9% (41,599) | 17.9% (112,662) |
+
+In pixels the wrong share changes little across the 3 px bar: kept members 2 to 3 px from their detection are wrong 22.8%, 27.4% and 13.1% of the time on the three entries, shift-refused members 3 to 4 px from it 33%, 34% and 15.2%. In units of the member's refined scale the share climbs the same way among refused and kept members alike:
+
+| shift / member scale | SeoulBull | KerryPark480 | DnDTabletop |
+|---|---|---|---|
+| under 1 | 0 of 22 | 12.4% | 16.2% |
+| 1 – 2 | 0 of 8 | 40.5% | 33.4% |
+| 2 – 4 | 35% | 62.2% | 70.3% |
+| over 4 | 74% | 83.9% | 91.0% |
+
+Kept count and wrong share of the kept members under each rule:
+
+| rule | SeoulBull | KerryPark480 | DnDTabletop |
+|---|---|---|---|
+| `\|t\| ≤ 3 px` | 2,953, 6.67% | 15,609, 16.07% | 1,370,494, 9.51% |
+| no shift gate | 3,034, 7.48% | 15,803, 16.35% | 1,483,156, 10.15% |
+| `\|t\| ≤ 1 × scale` | 2,786, 4.38% | 15,316, 15.27% | 1,474,659, 9.98% |
+| `\|t\| ≤ 2 × scale` | 2,938, 5.51% | 15,687, 15.94% | 1,482,082, 10.10% |
+| `\|t\| ≤ 3 × scale` | 2,971, 6.06% | 15,751, 16.14% | 1,482,705, 10.13% |
+
+On `SeoulBull`, two scales admits 30 members the 3 px bar refused, none of them wrong, and refuses 45 it kept, 35 of them wrong. On `DnDTabletop`, where the members the 3 px bar refused have scales of about 10 px, every rule in scale units admits nearly all of the 113k members the 3 px bar refused, and the kept wrong share rises by half a point.
+
+Two other readings separate the shift-refused members. Among `SeoulBull`'s, the wrong ones have a refined-over-detected scale ratio of 0.66 at the median against 1.13 for the right ones, so a fit that wanders also shrinks. And their ZNCC self-similarity radius separates right from wrong better than the shift or the ZNCC: those whose radius would pass the bar of 2.5 are 12.2%, 28.8% and 17.2% wrong on the three entries, those whose radius would fail it 75%, 90.3% and 68.6%. That radius is what the member gate at the refined shape reads, which was off in these files; the [next section](#shift-in-scale-units-with-the-gates-at-the-refined-shape-2026-10-12) measures the rule with it on.
+
+## Shift in scale units with the gates at the refined shape (2026-10-12)
+
+**Question.** The previous section measured the rule with the member gate at the refined shape off, and that gate refuses many of the members the shift gate refuses. With both gates at the refined shape on, as they are by default, does `|t| ≤ 2 × scale` still keep fewer wrong members than `|t| ≤ 3 px` on `SeoulBull` and `KerryPark480`, and what does it cost on `DnDTabletop`?
+
+**Method.**
+
+- **Code.** Branch `cluster-shift-gate-scale` (from `main` at `ea5ccfad`) with the change that adds this section, the extension rebuilt with `pixi run maturin develop --release`.
+- **Data.** The same three unrefined cluster files.
+- **Runs.** The binding `refine_cluster_patches` at its defaults (`radius=6`, resolution 25, both gates at the refined shape on, twelve rotation starts, no piecewise stage), once as it is and once with `max_shift_scales=1e30`, which turns the shift gate off. The rules were applied to the second run as the kernel applies them: the shift gate to every fitted member that passed the other gates, then the per-image dedupe on the survivors. Applied that way, `|t| ≤ 2 × scale` reproduces the first run's statuses exactly on all three entries, and `|t| ≤ 3 px` reproduces the kept counts of the [rotation multi-start](#rotation-multi-start-2026-10-11) section's twelve-start files exactly (2,822, 15,579 and 1,370,918).
+- **Ground truth.** The same test, under `seoul_bull_sculpture_ground_truth.sfmr`, `kerry_park_ground_truth.sfmr` and `DnDTabletop`'s `gt-clean-10-obscull-ba.sfmr`, with the epipolar half-line drawn by projecting the reference's ray, sampled at 2,000 depths from 10⁻³ to 10⁴ baselines, into the member's camera through its own lens model. The bar is 3 px on `SeoulBull` and `KerryPark480` and 4.69 px on `DnDTabletop`. This drawing gives the 3 px rule 4.25%, 16.24% and 9.09% wrong, against the rotation section's 4.18%, 15.97% and 9.50% on the same members.
+
+**Result: two scales keeps more members and fewer wrong ones on the two small captures, and admits the large capture's refused members at 16% wrong.**
+
+| rule | SeoulBull | KerryPark480 | DnDTabletop |
+|---|---|---|---|
+| `\|t\| ≤ 3 px` | 2,822, 4.25% | 15,579, 16.24% | 1,370,918, 9.09% |
+| no shift gate | 2,875, 4.56% | 15,747, 16.38% | 1,482,070, 9.65% |
+| `\|t\| ≤ 1 × scale` | 2,717, 3.57% | 15,300, 15.50% | 1,474,624, 9.53% |
+| `\|t\| ≤ 2 × scale` | 2,838, 4.09% | 15,661, 16.10% | 1,481,502, 9.63% |
+| `\|t\| ≤ 3 × scale` | 2,862, 4.33% | 15,726, 16.30% | 1,481,925, 9.64% |
+
+Against `|t| ≤ 3 px`, two scales admits 29 members on `SeoulBull` (none wrong) and refuses 13 (4 wrong); on `KerryPark480` it admits 129 (25 wrong, 19.4%) and refuses 47 (34 wrong, 72.3%); on `DnDTabletop` it admits 110,584 (18,127 wrong, 16.4%) and refuses none. The median scale of the kept members is 1.34 px on `SeoulBull`, 1.35 px on `KerryPark480` and 5.43 px on `DnDTabletop`, so a 3 px bar is about two scales on the first two and about half a scale on the third; the `DnDTabletop` members over 3 px have a median scale of 10.4 px.
+
+The wrong share by shift over scale, among the fitted members that pass every other gate, member count in parentheses:
+
+| shift / member scale | SeoulBull | KerryPark480 | DnDTabletop |
+|---|---|---|---|
+| under 1 | 3.6% (2,717) | 15.5% (15,300) | 9.5% (1,474,624) |
+| 1 – 2 | 15.7% (121) | 41.3% (361) | 30.6% (6,878) |
+| 2 – 4 | 34.5% (29) | 67.1% (76) | 61.7% (519) |
+| over 4 | 62.5% (8) | 80.0% (10) | 79.6% (49) |
+
+**What this decides.** The gate reads the shift in units of the member's refined scale. The bar of two scales is set by the [review below](#review-of-members-at-08-to-2-scales-2026-10-12), which also accepts the cost on `DnDTabletop`. With the gates at the refined shape on, the share of wrong members climbs with the shift over the scale on all three entries, as it did with them off, and two scales keeps more members and a lower wrong share than 3 px on `SeoulBull` and `KerryPark480`. On `DnDTabletop` those gates do not remove the members the 3 px bar refused: two scales keeps 8.1% more members, 16.4% of them wrong, and the kept wrong share rises from 9.09% to 9.63%. A tighter bar in scale units does not avoid that cost there, since one scale admits nearly as many.
+
+## Review of members at 0.8 to 2 scales (2026-10-12)
+
+**Question.** The previous section shows the wrong share climbing with the shift over the member's scale, but it does not say where the bar belongs. Does the shift mark the wrong members between 0.8 and 2 scales, the range a bar of one or two scales decides, and what do the kept count, the wrong share and the seed pick do at a bar of two scales and of one?
+
+**Method.**
+
+- **Code.** Branch `cluster-shift-gate-scale` as in the previous section.
+- **Fleet files.** Cluster-patches files built for the 8 captures with an approved ground truth (`MurdoSmallAntiqueCat`, `DnDTabletop`, `OmniHilltop`, `fleetws`, `KerryPark360`, `OmniTemple1`, `KerryPark480`, `SeoulBull`), three times: at `main`'s defaults (the 3 px gate), at this branch's defaults (two scales), and with `--max-shift-scales 1`.
+- **Ground truth.** The epipolar test of the previous sections, with each capture's bar `max(3, 5·m)` taken from its 3 px file, `m` the median over that file's kept members. On `fleetws` the bar is 27.97 px, so its labels are coarse.
+- **Seed pick.** The seed pick run on each set of files and scored against the eight ground truths.
+- **Review.** The maintainer looked at 89 members kept at two scales with a shift between 0.8 and 2 scales, sampled with equal numbers of right and wrong members by the ground truth for each capture and band. Each member was shown as tiles of the reference, the refined member and the member at its SIFT detection, crops of the photographs around them, and the rest of its cluster, and was judged right or wrong by eye.
+
+**Result: on the fleet, the bar moves the kept wrong share by about a point or less, except on `fleetws`, whose labels are coarse.**
+
+Kept members and their wrong share:
+
+| capture | 3 px | 2 × scale | 1 × scale |
+|---|---|---|---|
+| MurdoSmallAntiqueCat | 581,262, 11.16% | 649,997, 12.06% | 642,223, 11.67% |
+| DnDTabletop | 1,370,918, 9.51% | 1,481,502, 10.06% | 1,474,624, 9.96% |
+| OmniHilltop | 506,396, 12.36% | 515,932, 12.67% | 510,085, 12.52% |
+| fleetws | 65,982, 37.61% | 76,394, 36.49% | 71,902, 35.53% |
+| KerryPark360 | 52,649, 25.09% | 53,729, 25.11% | 52,788, 24.81% |
+| OmniTemple1 | 155,815, 17.85% | 162,932, 17.74% | 158,536, 17.25% |
+| KerryPark480 | 15,579, 15.97% | 15,661, 15.82% | 15,300, 15.24% |
+| SeoulBull | 2,822, 4.18% | 2,838, 4.02% | 2,717, 3.50% |
+
+The seed pick passes on 6 of the 8 captures with the 3 px files and on 5 of 8 with two scales: `OmniHilltop` fails, because its pick changes and 3 hypotheses qualify where 8 did. With one scale it passes on 6 of 8: `DnDTabletop` passes, and `SeoulBull` fails at a median rotation error of 1.01° against a bar of 1°.
+
+Among the members kept at two scales with a shift between 0.8 and 2 scales, the share the ground truth calls wrong rises with the shift on most captures:
+
+| shift / member scale | MurdoSmallAntiqueCat | DnDTabletop | SeoulBull |
+|---|---|---|---|
+| 0.8 – 1 | 30.0% | 23.0% | 11.5% |
+| 1 – 1.25 | 38.3% | 27.2% | 9.2% |
+| 1.25 – 1.5 | 47.3% | 34.3% | 20.8% |
+| 1.5 – 2 | 58.7% | 44.0% | 25.0% |
+
+**Result: by eye, the shift does not mark the wrong members.**
+
+Members judged wrong by eye, by band:
+
+| shift / member scale | wrong by eye |
+|---|---|
+| 0.8 – 1 | 4 of 31 (13%) |
+| 1 – 1.25 | 11 of 30 (37%) |
+| 1.25 – 1.5 | 6 of 19 (32%) |
+| 1.5 – 2 | 1 of 9 (11%) |
+
+The share judged wrong does not rise with the shift. The reviewer's notes describe the wrong members as different subjects that the refinement matches as well as it can, and name what tells them apart: a difference in colour, the width-to-height ratio of the refined shape, and other members of the cluster lying on a different subject. Among the first 61 members scored, a bar of one scale would refuse 19 judged right to remove 11 judged wrong.
+
+**What this decides.** The bar stays at two scales, as a judgement from this review rather than from the counts. The shift does not mark the wrong members in this range; the refinement finds the best photometric fit it can reach from its starting point, and a wrong member it keeps is mostly a wrong association. Those members are left to later measurements, of colour, the refined shape, agreement within the cluster and geometry. The cost of two scales on the seed pick, `OmniHilltop`'s failure, is accepted, as is the higher kept wrong share on `DnDTabletop` from the previous section.
