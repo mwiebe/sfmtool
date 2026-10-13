@@ -120,6 +120,22 @@ impl Operation {
         kind: Kind::Edit,
     };
 
+    /// One camera of one node switched to the camera model its proposal was
+    /// fitted to, and the tracks its images observe retriangulated through the
+    /// new model, as one version: the camera model proposal's Apply
+    /// (`specs/gui/edits/switch-camera-model.md`).
+    ///
+    /// Cancellable on either side of the switch, which takes no `Progress`
+    /// and is a fit and a pass over the camera's observations, and inside
+    /// `sfmtool_core::reconstruction::retriangulate_points`, which polls the
+    /// flag between its stages and hands back `RetriangulateError::Cancelled`
+    /// rather than a value with some of the tracks re-solved.
+    pub(crate) const SWITCH_CAMERA_MODEL: Operation = Operation {
+        name: "Switch camera model",
+        cancellable: true,
+        kind: Kind::Edit,
+    };
+
     /// One node's coarse observations retired where a finer tracked one covers
     /// them (`specs/gui/edits/prune-covered-observations.md`).
     ///
@@ -313,11 +329,12 @@ impl Operation {
     /// a declaration nothing checks is a declaration that rots.
     // Read by that test alone, which is what it is for.
     #[cfg(test)]
-    pub(crate) const ALL: [Operation; 16] = [
+    pub(crate) const ALL: [Operation; 17] = [
         Operation::OPEN,
         Operation::BUNDLE_ADJUST,
         Operation::TO_EMBEDDED_PATCHES,
         Operation::RETRIANGULATE_ALL_POINTS,
+        Operation::SWITCH_CAMERA_MODEL,
         Operation::PRUNE_COVERED_OBSERVATIONS,
         Operation::ADD_IMAGE_TO_TRACKS,
         Operation::BENCH_FIT,
@@ -427,6 +444,10 @@ pub(crate) enum Finished {
         /// thread can know because only it can push the version.
         text: String,
     },
+    /// A camera model proposal's Apply: the next value as
+    /// [`Finished::Produced`] carries it, and the switch's report for the
+    /// camera, which the wire's reply carries as its `fit` object.
+    SwitchedCamera(Box<SwitchedCamera>),
     /// One bench item's next value, and everything the GUI thread needs to
     /// install it.
     ///
@@ -501,6 +522,21 @@ pub(crate) enum Finished {
     Failed(String),
 }
 
+/// What a camera model proposal's Apply produced: the value, installed as
+/// [`Finished::Produced`] installs one, and the switch's report.
+pub(crate) struct SwitchedCamera {
+    /// What the switch and the retriangulation returned.
+    pub(crate) value: SfmrReconstruction,
+    /// The map from the input's rows to that value's.
+    pub(crate) map: PointMap,
+    /// The version's label.
+    pub(crate) version_label: String,
+    /// The Action Log sentence, up to the serials.
+    pub(crate) text: String,
+    /// The switch's report for the camera.
+    pub(crate) switch: sfmtool_core::reconstruction::switch_camera_model::CameraSwitch,
+}
+
 /// How a index-files build ended, beside whatever it wrote.
 ///
 /// The three endings of [`Finished`] itself, for a build that may have written
@@ -545,6 +581,13 @@ pub(crate) struct FinishedTask {
     /// operation, and for a run that was refused or cancelled.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub(crate) found_nearby: Option<Box<crate::bench::nearby_tracks::FoundNearby>>,
+    /// What a camera model proposal's Apply switched: the switch's report for
+    /// the camera, which `switch_camera_model { proposal: true }` answers with
+    /// once it lands. `None` for every other operation, and for a run that was
+    /// refused or cancelled.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
+    pub(crate) switched_camera:
+        Option<Box<sfmtool_core::reconstruction::switch_camera_model::CameraSwitch>>,
     /// Whether it pushed a version of the node it ran on.
     ///
     /// False for a run that ended in [`Finished::NoChange`] as well as for one
@@ -678,6 +721,11 @@ impl AppState {
         job: Job,
     ) -> Result<(), String> {
         if let Some(why) = self.running_refusal() {
+            return Err(why);
+        }
+        // The one task that can start on a node with a proposal open is the
+        // proposal's own Apply, which ends the proposal before it starts.
+        if let Some(why) = self.proposal_refusal(id) {
             return Err(why);
         }
         let label = self
@@ -879,6 +927,28 @@ impl AppState {
         let mut found_nearby = None;
         let mut kind = operation.kind;
         let mut to_select = None;
+        // A proposal's Apply installs as any produced value does; its switch
+        // report is kept for the reply.
+        let mut switched_camera = None;
+        let finished = match finished {
+            Finished::SwitchedCamera(run) => {
+                let SwitchedCamera {
+                    value,
+                    map,
+                    version_label,
+                    text,
+                    switch,
+                } = *run;
+                switched_camera = Some(Box::new(switch));
+                Finished::Produced {
+                    value,
+                    map,
+                    version_label,
+                    text,
+                }
+            }
+            other => other,
+        };
         let outcome = match finished {
             Finished::Produced {
                 value,
@@ -1046,6 +1116,7 @@ impl AppState {
                     _ => Ok(crate::state::open::opened_sentence(self, &made)),
                 }
             }
+            Finished::SwitchedCamera(_) => unreachable!("unwrapped into Produced above"),
             // Nothing to install and nothing to push, so the row is the whole
             // of it: the node's caches still describe the value it holds.
             Finished::NoChange(text) => Ok(text),
@@ -1100,6 +1171,7 @@ impl AppState {
             opened,
             created_track,
             found_nearby,
+            switched_camera: switched_camera.filter(|_| outcome.is_ok()),
             changed: installed.is_some(),
             took,
             detail: kept,

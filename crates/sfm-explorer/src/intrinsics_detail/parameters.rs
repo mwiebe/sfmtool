@@ -18,9 +18,12 @@ use super::derived::Derived;
 use super::format;
 
 /// Table 1: the model's parameters, in declaration order.
-pub(super) fn show_parameters(ui: &mut egui::Ui, camera: &CameraIntrinsics) {
+///
+/// `id_salt` tells two tables in one frame apart: the current camera's and,
+/// while a proposal is open, the proposed one's beside it.
+pub(super) fn show_parameters(ui: &mut egui::Ui, camera: &CameraIntrinsics, id_salt: &str) {
     ui.label(egui::RichText::new("Parameters").strong());
-    egui::Grid::new("intrinsics_parameters")
+    egui::Grid::new(("intrinsics_parameters", id_salt))
         .num_columns(2)
         .spacing([12.0, 2.0])
         .striped(true)
@@ -34,9 +37,19 @@ pub(super) fn show_parameters(ui: &mut egui::Ui, camera: &CameraIntrinsics) {
 }
 
 /// Table 2: what the parameters *mean*.
-pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived: &Derived) {
+///
+/// `id_salt` as for [`show_parameters`]. `aspect_row` shows the aspect row
+/// whatever the model, so two tables side by side keep their rows in line: a
+/// single-focal model reads `single focal` there.
+pub(super) fn show_derived(
+    ui: &mut egui::Ui,
+    camera: &CameraIntrinsics,
+    derived: &Derived,
+    id_salt: &str,
+    aspect_row: bool,
+) {
     ui.label(egui::RichText::new("Derived").strong());
-    egui::Grid::new("intrinsics_derived")
+    egui::Grid::new(("intrinsics_derived", id_salt))
         .num_columns(2)
         .spacing([12.0, 2.0])
         .striped(true)
@@ -56,6 +69,10 @@ pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived
                 ui.label("aspect fy/fx");
                 ui.monospace(format!("{:.4}", fy / fx));
                 ui.end_row();
+            } else if aspect_row {
+                ui.label("aspect fy/fx");
+                ui.monospace("single focal");
+                ui.end_row();
             }
 
             let (cx, cy) = camera.principal_point();
@@ -73,10 +90,9 @@ pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived
             } else {
                 String::new()
             };
-            ui.monospace(format!("({dx:+.3}, {dy:+.3}) px{percent}"))
-                .on_hover_text(
-                    "From the image centre (w/2, h/2), which is generally not the principal point",
-                );
+            wrapped(ui, format!("({dx:+.3}, {dy:+.3}) px{percent}")).on_hover_text(
+                "From the image centre (w/2, h/2), which is generally not the principal point",
+            );
             ui.end_row();
 
             if let Some(fov) = &derived.fov {
@@ -117,10 +133,10 @@ pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived
                 Some(extent) => match extent.limit_deg.filter(|_| extent.excluded > 0) {
                     Some(limit) => {
                         let (dropped, total) = (extent.excluded, extent.total());
-                        ui.monospace(format!(
-                            "yes — max {:.1} px inside {limit:.1}°",
-                            extent.max_px
-                        ))
+                        wrapped(
+                            ui,
+                            format!("yes — max {:.1} px inside {limit:.1}°", extent.max_px),
+                        )
                         .on_hover_text(format!(
                             "The largest |model − ideal| displacement over a grid of the image, \
                              taken inside {limit:.1}° off-axis. Past that angle this model's own \
@@ -132,12 +148,15 @@ pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived
                         ));
                     }
                     None => {
-                        ui.monospace(format!("yes — max {:.1} px over the image", extent.max_px))
-                            .on_hover_text(
-                                "The largest |model − ideal| displacement over a grid of the \
+                        wrapped(
+                            ui,
+                            format!("yes — max {:.1} px over the image", extent.max_px),
+                        )
+                        .on_hover_text(
+                            "The largest |model − ideal| displacement over a grid of the \
                                  image. This model is trustworthy at every angle its frame \
                                  reaches, so the whole rectangle counts.",
-                            );
+                        );
                     }
                 },
                 None => {
@@ -149,6 +168,13 @@ pub(super) fn show_derived(ui: &mut egui::Ui, camera: &CameraIntrinsics, derived
             }
             ui.end_row();
         });
+}
+
+/// A monospace value that wraps at the panel's right edge, so a long one (the
+/// principal point offset, the distortion) takes a second line in a narrow
+/// panel rather than running past the edge.
+fn wrapped(ui: &mut egui::Ui, text: String) -> egui::Response {
+    ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap())
 }
 
 /// Table 3: `K`, and the two sentences that keep it from being pasted into the
@@ -198,7 +224,7 @@ fn focal_unit_note(camera: &CameraIntrinsics) -> &'static str {
 /// Read off `parameter_names()` rather than compared numerically: a two-focal
 /// model whose two values happen to be equal still has an aspect ratio the file
 /// can express, and a single-focal model never does.
-fn has_two_focal_lengths(camera: &CameraIntrinsics) -> bool {
+pub(super) fn has_two_focal_lengths(camera: &CameraIntrinsics) -> bool {
     camera
         .model
         .parameter_names()

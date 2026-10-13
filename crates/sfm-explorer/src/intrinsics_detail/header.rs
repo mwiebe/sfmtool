@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The identity line — which node, which camera, which model, how big, how
-//! many images — and the `Copy ▾` menu that gets the numbers out.
+//! many images — the `Switch Model…` button that opens a camera model
+//! proposal, and the `Copy ▾` menu that gets the numbers out.
 //!
 //! The reconstruction's name is in the line because several nodes can be loaded
 //! at once and a [`crate::scene::CameraRef`] carries a `ReconId`; without it
@@ -20,18 +21,21 @@ use super::format;
 use crate::scene::SceneNode;
 
 /// `kerry_park · Camera #0 · OPENCV_FISHEYE · 480×480 · 26 images
-/// [Refit spline…] [Copy ▾]`
+/// [Switch Model…] [Copy ▾]`
 ///
-/// Returns whether `Refit spline…` was clicked. The button is greyed, with the
-/// reason as its hover text, for a camera with no spline.
+/// Returns whether `Switch Model…` was clicked. The button is greyed, with
+/// `refusal` as its hover text, where no proposal can be opened on the camera
+/// (`AppState::switch_model_refusal`), or while this camera's proposal is
+/// already open below it.
 pub(super) fn show_header(
     ui: &mut egui::Ui,
     node: &SceneNode,
     index: usize,
     camera: &CameraIntrinsics,
     pose: Option<&Pose>,
+    refusal: Option<&str>,
 ) -> bool {
-    let mut refit = false;
+    let mut switch = false;
     let uses = node
         .recon()
         .image_table
@@ -45,42 +49,86 @@ pub(super) fn show_header(
         format!("{uses} images")
     };
 
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&node.label).strong());
-        ui.label("·");
-        ui.label(egui::RichText::new(format!("Camera #{index}")).strong());
-        ui.label("·");
-        ui.label(camera.model.model_name());
-        // The beta note gets its own label rather than riding the model name,
-        // because egui hangs a tooltip off a whole *widget*: a sub-span of one
-        // label has nowhere to put one (which is why the Scene panel's camera
-        // row, being a single button, appends the note to the row tooltip
-        // instead). Here the header is a run of separate labels, so `(beta)`
-        // can be a widget in its own right and carry the note directly.
-        if let Some(note) = camera.model.beta_note() {
-            ui.label(egui::RichText::new("(beta)").weak())
-                .on_hover_text(note);
-        }
-        ui.label("·");
-        ui.label(format!("{}×{}", camera.width, camera.height));
-        ui.label("·");
-        ui.label(images);
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    // The buttons are laid out first, from the right edge, and the identity
+    // line takes the width they leave, wrapping between its parts rather than
+    // running under them: a narrow panel puts "480×480 · 24 images" on a
+    // second line instead of behind `Switch Model…`.
+    ui.horizontal_top(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             show_copy_menu(ui, camera, pose);
-            let why = crate::refit_spline_prompt::refit_spline_refusal(camera);
-            refit = ui
-                .add_enabled(why.is_none(), egui::Button::new("Refit spline…"))
-                .on_disabled_hover_text(why.unwrap_or_default())
+            switch = ui
+                .add_enabled(refusal.is_none(), egui::Button::new(SWITCH_MODEL))
+                .on_disabled_hover_text(refusal.unwrap_or_default())
                 .on_hover_text(
-                    "Refit this camera's spline to another coefficient count or domain end, \
-                     over its whole domain, as one version.",
+                    "Fit this camera to another camera model, or refit its spline to another \
+                     coefficient count or domain end, and compare the two before applying. \
+                     Apply switches the camera and retriangulates the tracks its images \
+                     observe, as one version.",
                 )
                 .clicked();
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+                |ui| {
+                    part(ui, egui::RichText::new(&node.label).strong(), false);
+                    part(
+                        ui,
+                        egui::RichText::new(format!("Camera #{index}")).strong(),
+                        true,
+                    );
+                    part(ui, camera.model.model_name(), true);
+                    // The beta note gets its own label rather than riding the
+                    // model name, because egui hangs a tooltip off a whole
+                    // *widget*: a sub-span of one label has nowhere to put one
+                    // (which is why the Scene panel's camera row, being a single
+                    // button, appends the note to the row tooltip instead). Here
+                    // the header is a run of separate labels, so `(beta)` can be
+                    // a widget in its own right and carry the note directly.
+                    if let Some(note) = camera.model.beta_note() {
+                        part(ui, egui::RichText::new("(beta)").weak(), false).on_hover_text(note);
+                    }
+                    part(ui, format!("{}×{}", camera.width, camera.height), true);
+                    part(ui, images, true);
+                },
+            );
         });
     });
-    refit
+    switch
 }
+
+/// One part of the identity line, kept on one line of its own: the line wraps
+/// between its parts, never inside one.
+///
+/// `separated` puts a `·` before the part when it stays on the same line. Where
+/// the separator and the part do not both fit in what is left of the line, the
+/// part starts the next line and the separator is left out, so no line starts
+/// with one.
+fn part(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, separated: bool) -> egui::Response {
+    let layout = |ui: &egui::Ui, text: egui::WidgetText| {
+        text.into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+    };
+    let galley = layout(ui, text.into());
+    let gap = ui.spacing().item_spacing.x;
+    let left = ui.available_size_before_wrap().x;
+    if separated {
+        let dot = layout(ui, "·".into());
+        if dot.size().x + gap + galley.size().x <= left {
+            ui.add(egui::Label::new(dot));
+        } else if galley.size().x <= left {
+            // The part alone would still fit; fill the rest of the line so it
+            // goes to the next one rather than following no separator here.
+            ui.allocate_space(egui::vec2(left, 0.0));
+        }
+    }
+    ui.add(egui::Label::new(galley))
+}
+
+/// What the header's button that opens a camera model proposal is called.
+pub(super) const SWITCH_MODEL: &str = "Switch Model…";
 
 /// The `Copy ▾` menu.
 fn show_copy_menu(ui: &mut egui::Ui, camera: &CameraIntrinsics, pose: Option<&Pose>) {

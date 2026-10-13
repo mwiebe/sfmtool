@@ -150,7 +150,7 @@ fn texts(
         ..Default::default()
     };
     crate::test_support::painted_texts(ctx, input, |ui| {
-        panel.show(ui, node, camera, image);
+        panel.show(ui, node, camera, image, None, None);
     })
 }
 
@@ -751,4 +751,527 @@ fn a_camera_with_no_image_gets_a_statement_instead_of_a_plot() {
     let painted = show(&node, Some(0), None);
     assert!(says(&painted, "No projection to plot"));
     assert!(!says(&painted, "θ off-axis"));
+}
+
+// ── Switch Model… and the proposal ──────────────────────────────────────
+
+/// The header's one edit is `Switch Model…`; there is no `Refit spline…`.
+#[test]
+fn the_header_offers_switch_model_and_no_refit_spline() {
+    let painted = show(&fisheye_node(), Some(0), None);
+    assert!(says(&painted, "Switch Model…"));
+    assert!(!says(&painted, "Refit spline"));
+}
+
+/// A node whose camera 1 is a four-coefficient `SFMTOOL_PINHOLE` on a 45°
+/// domain, with a flat spline, and camera 0 a `SIMPLE_PINHOLE`.
+fn spline_proposal_state() -> (crate::state::AppState, crate::scene::ReconId) {
+    let (mut state, id) = crate::state::edits::tests::adjustable_state();
+    {
+        let recon = state.scene[0].recon_mut();
+        let camera = &mut recon.image_table.cameras[0];
+        let (f, _) = camera.focal_lengths();
+        let (cx, cy) = camera.principal_point();
+        camera.model = CameraModel::SimplePinhole {
+            focal_length: f,
+            principal_point_x: cx,
+            principal_point_y: cy,
+        };
+        let mut second = recon.image_table.cameras[0].clone();
+        second.model = CameraModel::SfmtoolPinhole {
+            focal_length: f,
+            principal_point_x: cx,
+            principal_point_y: cy,
+            bspline_rho_max: 1.0,
+            bspline: vec![0.0; 4],
+        };
+        recon.image_table.cameras.push(second);
+        for image in recon.image_table.images.iter_mut().skip(4) {
+            image.camera_index = 1;
+        }
+    }
+    (state, id)
+}
+
+/// One frame of the panel on the state's camera `camera`, with its proposal,
+/// with `events` delivered: what it painted and what it reported.
+fn proposal_frame(
+    panel: &mut IntrinsicsDetail,
+    ctx: &egui::Context,
+    state: &mut crate::state::AppState,
+    camera: usize,
+    events: Vec<egui::Event>,
+) -> (
+    Vec<crate::test_support::PaintedText>,
+    Option<(crate::scene::CameraRef, super::ProposalAction)>,
+) {
+    proposal_frame_at(panel, ctx, state, camera, VIEWPORT.x, events)
+}
+
+/// [`proposal_frame`] with the panel `width` pixels wide.
+fn proposal_frame_at(
+    panel: &mut IntrinsicsDetail,
+    ctx: &egui::Context,
+    state: &mut crate::state::AppState,
+    camera: usize,
+    width: f32,
+    events: Vec<egui::Event>,
+) -> (
+    Vec<crate::test_support::PaintedText>,
+    Option<(crate::scene::CameraRef, super::ProposalAction)>,
+) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(width, VIEWPORT.y),
+        )),
+        events,
+        ..Default::default()
+    };
+    let mut action = None;
+    let node = &state.scene[0];
+    let mut proposal = state.camera_model_proposal.as_mut();
+    let painted = crate::test_support::painted_text_rects(ctx, input, |ui| {
+        action = panel
+            .show(ui, node, Some(camera), None, proposal.as_deref_mut(), None)
+            .proposal;
+    });
+    (painted, action)
+}
+
+fn texts_of(painted: &[crate::test_support::PaintedText]) -> Vec<String> {
+    painted.iter().map(|p| p.text.clone()).collect()
+}
+
+/// A spline camera's proposal carries the refit's controls: the model as the
+/// refit, Coefficients and Spline domain with the camera's own beside them,
+/// no Fit to θ, the fit's line, and the two models side by side.
+#[test]
+fn a_refit_proposal_shows_the_refit_controls_and_both_cameras() {
+    let (mut state, id) = spline_proposal_state();
+    state
+        .open_camera_model_proposal(crate::scene::CameraRef::new(id, 1), None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let painted = texts_of(&painted);
+    for needle in [
+        "SFMTOOL_PINHOLE (refit spline)",
+        "Coefficients",
+        "now 4",
+        "Spline domain (°)",
+        "now 45.0°",
+        "rms ",
+        "Current",
+        "Proposed",
+        "Apply",
+        "Cancel",
+    ] {
+        assert!(says(&painted, needle), "{needle} missing from {painted:?}");
+    }
+    assert!(!says(&painted, "Fit to θ"), "{painted:?}");
+}
+
+/// Any other camera's proposal shows Fit to θ with its default and where it
+/// came from; the panel on another camera of the node shows no strip.
+#[test]
+fn a_change_of_model_shows_the_fit_angle_and_its_default() {
+    let (mut state, id) = spline_proposal_state();
+    state
+        .open_camera_model_proposal(crate::scene::CameraRef::new(id, 0), None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let painted = texts_of(&painted);
+    assert!(says(&painted, "Fit to θ (°)"), "{painted:?}");
+    assert!(says(&painted, "default "), "{painted:?}");
+    assert!(!says(&painted, "(refit spline)"), "{painted:?}");
+
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    assert!(!says(&texts_of(&painted), "Proposal"));
+}
+
+/// Apply and Cancel are reported for the camera shown, and `Escape` over the
+/// panel is Cancel.
+#[test]
+fn apply_cancel_and_escape_are_reported() {
+    let (mut state, id) = spline_proposal_state();
+    let camera = crate::scene::CameraRef::new(id, 1);
+    state
+        .open_camera_model_proposal(camera, None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let at = |label: &str| {
+        painted
+            .iter()
+            .find(|p| p.text == label)
+            .unwrap_or_else(|| panic!("{label} was not painted"))
+            .rect
+            .center()
+    };
+    for (label, expected) in [
+        ("Apply", super::ProposalAction::Apply),
+        ("Cancel", super::ProposalAction::Cancel),
+    ] {
+        let pos = at(label);
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        proposal_frame(
+            &mut panel,
+            &ctx,
+            &mut state,
+            1,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        proposal_frame(&mut panel, &ctx, &mut state, 1, vec![press(true)]);
+        let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 1, vec![press(false)]);
+        assert_eq!(action, Some((camera, expected)), "{label}");
+    }
+
+    let escape = egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 1, vec![escape]);
+    assert_eq!(action, Some((camera, super::ProposalAction::Cancel)));
+}
+
+/// The proposed camera's derived report is cached apart from the current
+/// camera's, keyed by the proposal's generation.
+#[test]
+fn the_proposed_report_is_cached_apart_from_the_current_one() {
+    let (mut state, id) = spline_proposal_state();
+    let camera = crate::scene::CameraRef::new(id, 1);
+    state
+        .open_camera_model_proposal(camera, None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let generation = state.camera_model_proposal.as_ref().unwrap().generation;
+    assert!(matches!(
+        panel.proposed_derived,
+        Some((c, g, _)) if c == camera && g == generation
+    ));
+    assert_eq!(panel.derived.len(), 1, "the current camera's report");
+    panel.forget_recon(id);
+    assert!(panel.proposed_derived.is_none());
+}
+
+/// The pairs of painted strings above `until` whose glyphs overlap, shrunk by
+/// a pixel so strings that merely touch are not counted.
+fn overlapping(painted: &[crate::test_support::PaintedText], until: f32) -> Vec<(String, String)> {
+    let shown: Vec<&crate::test_support::PaintedText> = painted
+        .iter()
+        .filter(|p| p.rect.min.y < until && !p.text.trim().is_empty())
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, a) in shown.iter().enumerate() {
+        for b in &shown[i + 1..] {
+            if a.rect.shrink(1.0).intersects(b.rect.shrink(1.0)) {
+                pairs.push((a.text.clone(), b.text.clone()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Where the first string painted as exactly `text` starts, top to bottom.
+fn top_of(painted: &[crate::test_support::PaintedText], text: &str) -> f32 {
+    painted
+        .iter()
+        .find(|p| p.text == text)
+        .unwrap_or_else(|| panic!("{text} was not painted"))
+        .rect
+        .min
+        .y
+}
+
+/// At the default panel width the header's identity line wraps rather than
+/// running under `Switch Model…` and `Copy`.
+#[test]
+fn the_header_does_not_overlap_its_buttons_at_a_narrow_width() {
+    let mut state = crate::state::AppState::new();
+    state.append_node(fisheye_node());
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    // At 328 px the fixture's line breaks before a part that follows a `·`.
+    for width in [482.0, 360.0, 341.0, 328.0] {
+        for _ in 0..4 {
+            proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+        }
+        let (painted, _) = proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+        let until = top_of(&painted, "Parameters");
+        assert_eq!(overlapping(&painted, until), Vec::new(), "at {width} px");
+        assert_eq!(
+            past_the_edge(&painted, until, width),
+            Vec::<String>::new(),
+            "at {width} px"
+        );
+        assert!(says(&texts_of(&painted), "480×480"), "at {width} px");
+        for dot in painted.iter().filter(|p| p.text == "·") {
+            assert!(
+                painted.iter().any(|p| p.text != "·"
+                    && (p.rect.center().y - dot.rect.center().y).abs() < 2.0
+                    && p.rect.max.x <= dot.rect.min.x + 1.0),
+                "a line starts with a separator at {width} px"
+            );
+        }
+        assert!(says(&texts_of(&painted), "Switch Model…"), "at {width} px");
+    }
+}
+
+/// The current and proposed tables never run into each other: one above the
+/// other at a narrow width, side by side at a wide one.
+#[test]
+fn the_compared_tables_do_not_overlap_at_any_width() {
+    let (mut state, id) = spline_proposal_state();
+    state
+        .open_camera_model_proposal(crate::scene::CameraRef::new(id, 0), None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    for width in [341.0, 455.0, 482.0, 877.0, 1800.0] {
+        for _ in 0..4 {
+            proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+        }
+        let (painted, _) = proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+        let until = top_of(&painted, "K");
+        assert_eq!(overlapping(&painted, until), Vec::new(), "at {width} px");
+        assert_eq!(
+            past_the_edge(&painted, until, width),
+            Vec::<String>::new(),
+            "at {width} px"
+        );
+        let current = top_of(&painted, "Current");
+        let proposed = top_of(&painted, "Proposed");
+        if width < 600.0 {
+            assert!(proposed > current, "not stacked at {width} px");
+        }
+        if width > 1500.0 {
+            assert_eq!(proposed, current, "not side by side at {width} px");
+        }
+    }
+}
+
+/// `Escape` that closes the open Model dropdown closes only the dropdown; the
+/// next `Escape` cancels the proposal.
+#[test]
+fn escape_closing_the_model_dropdown_does_not_cancel() {
+    let (mut state, id) = spline_proposal_state();
+    let camera = crate::scene::CameraRef::new(id, 1);
+    state
+        .open_camera_model_proposal(camera, None)
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    let pos = painted
+        .iter()
+        .find(|p| p.text == "SFMTOOL_PINHOLE (refit spline)")
+        .expect("the Model dropdown")
+        .rect
+        .center();
+    let press = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    proposal_frame(
+        &mut panel,
+        &ctx,
+        &mut state,
+        1,
+        vec![egui::Event::PointerMoved(pos)],
+    );
+    proposal_frame(&mut panel, &ctx, &mut state, 1, vec![press(true)]);
+    proposal_frame(&mut panel, &ctx, &mut state, 1, vec![press(false)]);
+    proposal_frame(&mut panel, &ctx, &mut state, 1, Vec::new());
+    assert!(egui::Popup::is_any_open(&ctx), "the dropdown did not open");
+
+    let escape = || egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 1, vec![escape()]);
+    assert_eq!(action, None, "closing the dropdown cancelled the proposal");
+    assert!(!egui::Popup::is_any_open(&ctx), "the dropdown stayed open");
+    let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 1, vec![escape()]);
+    assert_eq!(action, Some((camera, super::ProposalAction::Cancel)));
+}
+
+/// A proposal whose fit is refused shows the fit angle the fit used and where
+/// it came from, not a made-up 180°, and only the current camera's tables.
+#[test]
+fn a_refused_proposal_shows_its_default_fit_angle_and_the_current_tables() {
+    let (mut state, id) = spline_proposal_state();
+    let inputs = crate::camera_model_proposal::ProposalInputs {
+        camera_model: "SFMTOOL_PINHOLE",
+        coeff_count: Some(8),
+        theta_fit_deg: None,
+        spline_domain_deg: Some(95.0),
+    };
+    state
+        .open_camera_model_proposal(crate::scene::CameraRef::new(id, 0), Some(inputs))
+        .expect("opens with the refusal");
+    let (deg, source) = state
+        .camera_model_proposal
+        .as_ref()
+        .and_then(|p| p.theta_fit_default)
+        .expect("a default beside the refusal");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let painted = texts_of(&painted);
+    assert!(says(&painted, "Refused: "), "{painted:?}");
+    assert!(
+        says(
+            &painted,
+            &format!("default {deg:.1}° ({})", source.as_str())
+        ),
+        "{painted:?}"
+    );
+    assert!(painted.contains(&format!("{deg:.1}")), "{painted:?}");
+    assert!(!painted.contains(&"180.0".to_string()), "{painted:?}");
+    assert!(!says(&painted, "Current"), "{painted:?}");
+    assert!(!says(&painted, "Proposed"), "{painted:?}");
+    // Drawing the strip left the wire's out-of-range domain as it was.
+    let proposal = state.camera_model_proposal.as_ref().expect("open");
+    assert_eq!(proposal.inputs.spline_domain_deg, Some(95.0));
+    assert!(proposal.fit.is_err());
+}
+
+/// The painted strings above `until` that run past the panel's right edge.
+fn past_the_edge(
+    painted: &[crate::test_support::PaintedText],
+    until: f32,
+    width: f32,
+) -> Vec<String> {
+    painted
+        .iter()
+        .filter(|p| p.rect.min.y < until && p.rect.max.x > width + 0.5)
+        .map(|p| p.text.clone())
+        .collect()
+}
+
+/// At the stock window's panel width the fit angle's default and its
+/// `Default` button stay inside the panel, where they can be reached.
+#[test]
+fn the_default_button_stays_inside_a_narrow_panel() {
+    let (mut state, id) = spline_proposal_state();
+    let inputs = crate::camera_model_proposal::ProposalInputs {
+        camera_model: "SFMTOOL_PINHOLE",
+        coeff_count: Some(8),
+        theta_fit_deg: Some(10.0),
+        spline_domain_deg: None,
+    };
+    state
+        .open_camera_model_proposal(crate::scene::CameraRef::new(id, 0), Some(inputs))
+        .expect("opens");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    let width = 341.0;
+    // A wrapped value grows its grid row on the frames after it is laid out.
+    for _ in 0..4 {
+        proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+    }
+    let (painted, _) = proposal_frame_at(&mut panel, &ctx, &mut state, 0, width, Vec::new());
+    let button = painted
+        .iter()
+        .find(|p| p.text == crate::intrinsics_detail::proposal::DEFAULT)
+        .expect("the Default button");
+    assert!(button.rect.max.x <= width, "{:?}", button.rect);
+    let label = painted
+        .iter()
+        .find(|p| p.text.starts_with("default ") && p.text.ends_with("(observations)"))
+        .expect("the default's label");
+    assert!(label.rect.max.x <= width, "{:?}", label.rect);
+    let until = top_of(&painted, "K");
+    assert_eq!(past_the_edge(&painted, until, width), Vec::<String>::new());
+    assert_eq!(overlapping(&painted, until), Vec::new());
+}
+
+/// An `Escape` that ends the editing of a field ends only that, though egui
+/// drops the field's focus before the frame draws; the next one cancels.
+#[test]
+fn escape_ending_a_fields_editing_does_not_cancel() {
+    let (mut state, id) = spline_proposal_state();
+    let camera = crate::scene::CameraRef::new(id, 0);
+    state
+        .open_camera_model_proposal(camera, None)
+        .expect("opens");
+    let (deg, _) = state
+        .camera_model_proposal
+        .as_ref()
+        .and_then(|p| p.theta_fit_default)
+        .expect("a default");
+    let mut panel = IntrinsicsDetail::new();
+    let ctx = egui::Context::default();
+    proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let (painted, _) = proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    let pos = painted
+        .iter()
+        .find(|p| p.text == format!("{deg:.1}"))
+        .expect("the Fit to θ field")
+        .rect
+        .center();
+    let press = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    proposal_frame(
+        &mut panel,
+        &ctx,
+        &mut state,
+        0,
+        vec![egui::Event::PointerMoved(pos)],
+    );
+    proposal_frame(&mut panel, &ctx, &mut state, 0, vec![press(true)]);
+    proposal_frame(&mut panel, &ctx, &mut state, 0, vec![press(false)]);
+    proposal_frame(&mut panel, &ctx, &mut state, 0, Vec::new());
+    assert!(
+        ctx.egui_wants_keyboard_input(),
+        "the field is not being edited"
+    );
+
+    let escape = || egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 0, vec![escape()]);
+    assert_eq!(
+        action, None,
+        "ending the field's editing cancelled the proposal"
+    );
+    assert!(
+        !ctx.egui_wants_keyboard_input(),
+        "the field is still being edited"
+    );
+    let (_, action) = proposal_frame(&mut panel, &ctx, &mut state, 0, vec![escape()]);
+    assert_eq!(action, Some((camera, super::ProposalAction::Cancel)));
 }

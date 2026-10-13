@@ -522,3 +522,98 @@ fn the_outermost_keypoint_can_be_left_out_of_the_report() {
     let (_, again) = switch_camera_model(&recon, &[0], &t, &options).unwrap();
     assert_eq!(again, without_report);
 }
+
+/// The fit alone is the camera the switch installs, for a change of model, a
+/// refit of a spline and a source without a trusted bound, and it refuses what
+/// the switch refuses.
+#[test]
+fn the_fit_alone_is_the_camera_the_switch_installs() {
+    let cases: Vec<(SfmrReconstruction, usize, RefitTarget, RefitOptions)> = vec![
+        (
+            scene(vec![kerry_cam0(), kerry_cam0()], |i| (i % 2) as u32),
+            1,
+            target("SFMTOOL_FISHEYE"),
+            RefitOptions::default(),
+        ),
+        (
+            scene(vec![equidistant()], |_| 0),
+            0,
+            target("SFMTOOL_FISHEYE"),
+            RefitOptions::default(),
+        ),
+        (
+            scene(vec![kerry_spline()], |_| 0),
+            0,
+            RefitTarget::from_name("SFMTOOL_FISHEYE", Some(10)).unwrap(),
+            RefitOptions {
+                theta_fit_deg: None,
+                spline_domain_deg: Some(120.0),
+            },
+        ),
+    ];
+    for (recon, camera, target, refit) in cases {
+        let alone = fit_camera_switch(&recon, camera, &target, &refit).expect("a fit");
+        let (_, report) = switch_camera_model(&recon, &[camera], &target, &fit(refit)).unwrap();
+        assert_eq!(alone, report.cameras[0].refit);
+    }
+
+    let recon = scene(vec![equidistant()], |_| 0);
+    let options = RefitOptions {
+        theta_fit_deg: Some(60.0),
+        spline_domain_deg: None,
+    };
+    let pinhole = target("SFMTOOL_PINHOLE");
+    assert_eq!(
+        fit_camera_switch(&recon, 0, &pinhole, &options),
+        Err(
+            switch_camera_model(&recon, &[0], &pinhole, &fit(options.clone()))
+                .err()
+                .expect("refused")
+        ),
+    );
+    assert_eq!(
+        fit_camera_switch(&recon, 2, &pinhole, &options),
+        Err(SwitchCameraModelError::UnknownCamera {
+            camera: 2,
+            count: 1
+        })
+    );
+}
+
+/// The default fit angle is the one a fit given none uses, and is reported for
+/// a target whose fit at that angle is refused.
+#[test]
+fn the_default_fit_angle_is_the_fits_and_survives_a_refusal() {
+    let recon = scene(vec![equidistant()], |_| 0);
+    let (deg, source) = default_fit_angle(&recon, 0).expect("a default");
+    assert_eq!(source, ThetaFitSource::Observations);
+    let refit = fit_camera_switch(
+        &recon,
+        0,
+        &target("SFMTOOL_FISHEYE"),
+        &RefitOptions::default(),
+    )
+    .expect("a fit");
+    assert_eq!((refit.theta_fit_deg, refit.theta_fit_source), (deg, source));
+    // A perspective target is refused for the point 95° off the axis; the
+    // default is still there.
+    assert!(fit_camera_switch(
+        &recon,
+        0,
+        &target("SFMTOOL_PINHOLE"),
+        &RefitOptions::default()
+    )
+    .is_err());
+    assert!((deg - WIDE_DEG).abs() < 1e-6);
+
+    let kerry = scene(vec![kerry_cam0()], |_| 0);
+    let (_, source) = default_fit_angle(&kerry, 0).expect("a default");
+    assert_eq!(source, ThetaFitSource::TrustedBound);
+    assert_eq!(
+        default_fit_angle(&kerry, 3),
+        Err(SwitchCameraModelError::UnknownCamera {
+            camera: 3,
+            count: 1
+        })
+    );
+}
