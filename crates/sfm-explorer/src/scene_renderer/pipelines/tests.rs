@@ -103,7 +103,8 @@ fn the_recon_uniforms_struct_matches_its_wgsl_layout() {
             pickable: 1,
             tint_color: [0.0; 4],
             show_infinity: 1.0,
-            _pad: [0.0; 3],
+            preview_s: 0.0,
+            _pad: [0.0; 2],
         }),
     );
     assert_eq!(std::mem::size_of::<ReconUniforms>() % 16, 0);
@@ -184,9 +185,11 @@ fn the_gbuffer_pipelines_match_the_textures_sizing_allocates() {
             ..Default::default()
         });
         pass.set_pipeline(&points.pipeline);
+        pass.set_pipeline(&points.preview_pipeline);
         pass.set_pipeline(&frustum.pipeline);
         pass.set_pipeline(&image_quad.pipeline);
         pass.set_pipeline(&patch.pipeline);
+        pass.set_pipeline(&patch.preview_pipeline);
         pass.set_pipeline(&distorted_quad);
     }
     queue.submit([encoder.finish()]);
@@ -255,6 +258,61 @@ fn the_wgsl_mask_words_match_the_rust_ones() {
             wgsl_u32_const(common, name),
             rust_value,
             "{name} differs between common.wgsl and upload/overlay.rs"
+        );
+    }
+}
+
+#[test]
+fn the_wgsl_preview_flags_and_failure_colour_match_the_rust_ones() {
+    // The proposal job writes the flags into the preview buffers and the
+    // failure colour is named once beside the tint palette; the point and
+    // patch shaders branch on the one and draw the other, so both sides must
+    // agree. Written once on each side, in `common.wgsl` and in
+    // `camera_model_proposal/preview.rs` and `scene.rs`.
+    use crate::camera_model_proposal::preview::{FLAG_LOSES, FLAG_MOVES, FLAG_STILL};
+    let common = include_str!("../../shaders/common.wgsl");
+    for (name, rust_value) in [
+        ("PREVIEW_STILL", FLAG_STILL),
+        ("PREVIEW_MOVES", FLAG_MOVES),
+        ("PREVIEW_LOSES", FLAG_LOSES),
+    ] {
+        let line = format!("const {name}: f32 = {rust_value:.1};");
+        assert!(
+            common.lines().any(|l| l.trim() == line),
+            "common.wgsl does not declare `{line}`"
+        );
+    }
+    // The constant is the linear value of the sRGB colour, since the colour
+    // target encodes what the shader writes.
+    let line = common
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("const FAILURE_COLOR: vec3<f32> = vec3<f32>(")
+        })
+        .expect("common.wgsl declares FAILURE_COLOR");
+    let written: Vec<f64> = line
+        .trim_end_matches(");")
+        .split(',')
+        .map(|v| v.trim().parse().expect("a number"))
+        .collect();
+    let linear = |c: u8| {
+        let c = c as f64 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let expected: Vec<f64> = crate::scene::FAILURE_RGB
+        .iter()
+        .map(|&c| linear(c))
+        .collect();
+    assert_eq!(written.len(), 3);
+    for (w, e) in written.iter().zip(&expected) {
+        assert!(
+            (w - e).abs() < 1e-5,
+            "FAILURE_COLOR is {written:?}, not {expected:?}"
         );
     }
 }

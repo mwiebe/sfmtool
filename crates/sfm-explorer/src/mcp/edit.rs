@@ -502,6 +502,8 @@ pub(super) fn propose_camera_model(
     state: &mut AppState,
     label: &str,
     request: &crate::state::edits::SwitchCameraModelRequest,
+    preview_retriangulation: Option<bool>,
+    animate: Option<bool>,
 ) -> JsonReply {
     use sfmtool_core::camera::refit_intrinsics::RefitTarget;
 
@@ -532,6 +534,19 @@ pub(super) fn propose_camera_model(
     state
         .open_camera_model_proposal(camera, Some(inputs))
         .map_err(ToolError::new)?;
+    if let Some(open) = state.camera_model_proposal.as_mut() {
+        if let Some(preview) = preview_retriangulation {
+            open.preview_retriangulation = preview;
+        }
+        if let Some(animate) = animate {
+            open.animate = animate;
+        }
+        // Without animation `s` is set to its goal at once, so the reply says
+        // where it now stands rather than where the last frame left it.
+        if !open.animate {
+            open.step_preview(0.0);
+        }
+    }
     let proposal = state
         .camera_model_proposal_on(id)
         .expect("a proposal was just opened");
@@ -605,7 +620,7 @@ pub(super) fn apply_camera_model_proposal(
 }
 
 /// A number the wire can carry: `null` where it is not finite.
-fn finite(value: f64) -> Value {
+pub(super) fn finite(value: f64) -> Value {
     if value.is_finite() {
         json!(value)
     } else {
