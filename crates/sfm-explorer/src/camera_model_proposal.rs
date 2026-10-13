@@ -26,18 +26,21 @@ use sfmtool_core::camera::refit_intrinsics::{
     spline_domain_deg, CameraIntrinsicsRefit, RefitOptions, RefitTarget, ThetaFitSource,
 };
 use sfmtool_core::camera::CameraIntrinsics;
-use sfmtool_core::reconstruction::outermost_keypoint::{outermost_keypoints, KeypointReach};
+use sfmtool_core::reconstruction::outermost_keypoint::KeypointReach;
 use sfmtool_core::reconstruction::switch_camera_model::{default_fit_angle, fit_camera_switch};
-use sfmtool_core::{EditedReconstruction, RowMap, SfmrReconstruction};
+use sfmtool_core::{RowMap, SfmrReconstruction};
 
 use crate::action_log::Kind;
 use crate::document::VersionSerial;
 use crate::scene::{CameraRef, ReconId};
 use crate::state::edits::SwitchCameraModelRequest;
-use crate::state::AppState;
+use crate::state::{AppState, FieldMode};
 
+mod observations;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+pub(crate) use observations::{ObservationReprojection, ObservedKeypoint};
 
 /// Why an edit of a node other than Apply is refused while a proposal is open
 /// on it: the hover text of every greyed menu entry and the refusal of the
@@ -75,19 +78,6 @@ pub(crate) struct KeypointExtent {
 }
 
 impl KeypointExtent {
-    /// The camera `camera` of `edited`'s base value, over its observations and,
-    /// when `read_sift_files`, its images' `.sift` files.
-    pub(crate) fn of(edited: &EditedReconstruction, camera: usize, read_sift_files: bool) -> Self {
-        outermost_keypoints(&edited.base, &[camera], read_sift_files)
-            .into_iter()
-            .next()
-            .map(|o| KeypointExtent {
-                observed: o.observed,
-                detected: o.detected,
-            })
-            .unwrap_or_default()
-    }
-
     /// The angle the domain row's button sets: the detected keypoint's, or the
     /// observed one's when nothing was detected.
     pub(crate) fn suggested_domain_deg(&self) -> Option<f64> {
@@ -155,9 +145,18 @@ pub(crate) struct CameraModelProposal {
     pub(crate) targets: Vec<&'static str>,
     /// How far out the camera's images reach, read once when it opened.
     pub(crate) keypoint_extent: KeypointExtent,
+    /// The observations of the camera's images whose keypoint could be read,
+    /// in ascending image order, read once when it opened.
+    observations: Vec<ObservedKeypoint>,
+    /// Their incidence angles under the current camera, ascending: the
+    /// Camera Intrinsics panel's rug.
+    rug: Vec<f64>,
     /// What the current fit was made from.
     pub(crate) inputs: ProposalInputs,
-    /// A counter every change of `inputs` advances.
+    /// A counter every change of `inputs` advances, drawn from one counter for
+    /// the whole viewer (`next_generation`), so no two proposals share a
+    /// generation and a cache keyed by it never serves one proposal's camera
+    /// for another's.
     pub(crate) generation: u64,
     /// The fit, or the core's refusal sentence.
     pub(crate) fit: Result<CameraIntrinsicsRefit, String>,
@@ -238,7 +237,7 @@ impl CameraModelProposal {
             return false;
         }
         self.inputs = inputs;
-        self.generation += 1;
+        self.generation = next_generation();
         self.fit = self.compute_fit();
         if let Ok(refit) = &self.fit {
             if self.inputs.spline_domain_deg.is_none()
@@ -495,6 +494,12 @@ impl AppState {
             (Arc::new(value), Some(map))
         };
         let source = node.recon().image_table.cameras[camera.index()].clone();
+        // One read of each image's `.sift` file feeds both the outermost
+        // extent, over the version's base as the switch reports it, and the
+        // keypoints of the value the fits read.
+        let (keypoint_extent, observations) =
+            observations::read_camera_keypoints(&edited.base, &value, camera.index());
+        let rug = observations::rug_angles(&source, &observations);
         let targets = targets_for(&source);
         let value_for_default = Arc::clone(&value);
         let mut proposal = CameraModelProposal {
@@ -505,7 +510,9 @@ impl AppState {
             source,
             value,
             rows,
-            keypoint_extent: KeypointExtent::of(edited, camera.index(), true),
+            keypoint_extent,
+            observations,
+            rug,
             targets,
             inputs: ProposalInputs {
                 camera_model: "",
@@ -541,7 +548,33 @@ impl AppState {
         self.camera_model_proposal = Some(proposal);
         self.select_camera(Some(camera));
         self.action_log.record(Kind::View, text);
+        self.sync_proposal_field();
         Ok(())
+    }
+
+    /// Select the Image Detail field [`FieldMode::ChangeToProposed`] while a
+    /// proposal is open, keeping the mode it replaced, and put that mode back
+    /// once none is open. A mode chosen by hand while the proposal is open
+    /// stands until the proposal ends.
+    ///
+    /// Called where a proposal opens or is dropped, and once per frame from
+    /// [`Self::tend_camera_model_proposal`], which covers the endings in
+    /// between (Apply, a node closed under it).
+    pub(crate) fn sync_proposal_field(&mut self) {
+        match (
+            self.camera_model_proposal.is_some(),
+            self.field_before_proposal,
+        ) {
+            (true, None) => {
+                self.field_before_proposal = Some(self.intrinsics_display.field);
+                self.intrinsics_display.field = FieldMode::ChangeToProposed;
+            }
+            (false, Some(before)) => {
+                self.intrinsics_display.field = before;
+                self.field_before_proposal = None;
+            }
+            _ => {}
+        }
     }
 
     /// Drop the proposal on `id` without applying it, writing one `View` row
@@ -569,6 +602,7 @@ impl AppState {
             }
         };
         self.action_log.record(Kind::View, text);
+        self.sync_proposal_field();
         true
     }
 
@@ -622,6 +656,13 @@ impl AppState {
     /// [`Self::end_camera_model_proposal_implicitly`] does, or the one an
     /// implicit ending since the last frame pushed a version on.
     pub(crate) fn tend_camera_model_proposal(&mut self) -> Option<ReconId> {
+        let switched = self.tend_camera_model_proposal_once();
+        self.sync_proposal_field();
+        switched
+    }
+
+    /// [`Self::tend_camera_model_proposal`] before the field mode follows.
+    fn tend_camera_model_proposal_once(&mut self) -> Option<ReconId> {
         if let Some(id) = self.camera_model_switched.take() {
             return Some(id);
         }
@@ -687,4 +728,11 @@ fn opened_text(proposal: &CameraModelProposal) -> String {
         "Proposed {target} for camera {} of {}: {fit}",
         proposal.camera, proposal.label
     )
+}
+
+/// The next proposal generation: one counter for the whole viewer, so a
+/// generation names one fit of one proposal.
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
