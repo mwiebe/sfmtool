@@ -16,6 +16,7 @@ mod grid_plane_normal;
 mod normal;
 mod observation_readings;
 mod reference_view;
+mod refit_points;
 pub(super) mod scene;
 
 use std::sync::Arc;
