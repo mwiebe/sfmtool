@@ -395,7 +395,17 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   its gradient entry, which removes the penalty's coupling to it as well; where
   a row of the round's set touches a slot that has lost support since the first
   linearization, its supported neighbours' gradient reads the pinned value as a
-  constant. **Step guard.** A candidate spline is admissible when it is
+  constant. A coefficient released in a round is one supported both at the
+  round's first linearization and in the current one: a coefficient that gains
+  support later in the round stays pinned until the next round. It has no
+  penalty row in this round, since the rows are fixed at the first
+  linearization, and the column it gains is the edge of its basis span that an
+  observation has only begun to reach, many orders of magnitude below its
+  neighbours'. Released with that column and no row, the coefficient follows
+  the one observation without bound: on the tail fixture of the testing
+  requirements the last coefficient went from 0.0601 to 32,152 in one round
+  ([`bundle-adjustment-measurements.md`](bundle-adjustment-measurements.md#a-weakly-supported-spline-tail)).
+  The next round's rows include it. **Step guard.** A candidate spline is admissible when it is
   finite and keeps the model's monotonicity invariant `1 + δ'(d) > 0`
   everywhere on `[0, d_max]` and on the linear tail past it, where the single
   `1 + δ'(d_max) > 0` decides the whole half-line. The whole domain rather
@@ -437,9 +447,10 @@ cost = Σ_i s² · ρ(r_i² / s²),   ρ(z) = 2·(√(1 + z) − 1),   s = loss_
   the optimum lies past the limit, the held step is accepted at the same `λ`,
   `λ` falls, and a damped full step that would have moved the distortion
   part of the way is not tried, so the distortion can stay where it was for
-  the round (see
-  [`../../drafts/bundle-adjustment-spline-tail-amendment.md`](../../drafts/bundle-adjustment-spline-tail-amendment.md)
-  § "After step 2").
+  the round (measured in
+  [`bundle-adjustment-measurements.md`](bundle-adjustment-measurements.md#a-weakly-supported-spline-tail);
+  a damped distortion step in its place is an
+  [open question](#open-questions)).
 - **Staged releases.** Callers open the shared parameters in stages:
   fixed → `opt_f` → `opt_f` plus a distortion release, so a distortion
   parameter opens only on a focal that has already settled — `opt_f + opt_k1`
@@ -822,14 +833,31 @@ Python's point of view).
   camera's spline is held and the other's moves; and the same round run to
   its end reports `converged: false`, says on `progress` that it settled with
   camera 0's spline held, and returns a monotone spline.
-- **A weakly supported spline tail**: a scene whose observations thin out
-  toward the domain end, started from a monotone spline with a wild tail,
-  adjusted under the default schedule once held and once with the focal and
-  the distortion released, gives a released median residual not above the
-  held one, an end slope `1 + δ'(d_max)` well away from 0, and a final round
-  that does not report convergence with the spline held at its guard
-  ([`../../drafts/bundle-adjustment-spline-tail-amendment.md`](../../drafts/bundle-adjustment-spline-tail-amendment.md)
-  § "Step 3: a regression test of the whole case").
+- **A weakly supported spline tail**: the tail fixture is a pinhole scene
+  with no distortion whose observations thin out toward the domain end, the
+  last four knot spans holding at most 1, 3, 12 and 30 of them from the end,
+  so that the last of 20 coefficients is reached by one observation or none,
+  with ±0.3 px of noise and a starting spline whose last three coefficients
+  alternate and give an end slope `1 + δ'(d_max)` of 5.6; the poses and points
+  are settled under the default schedule with the lens held.
+  - *Support gained within a round.* On a draw where no observation reaches
+    the last span at the start and the first step of a round with the focal
+    and the spline released carries one into it, two iterations of that
+    round return the last coefficient bit for bit while the rest of the tail
+    moves.
+  - *The release.* Over four draws at two scene sizes, the focal and the
+    spline released under the default schedule return a monotone spline with
+    every coefficient within 0.25 (the spline's share of a focal up to 15%
+    off is about 0.13), a median residual no more than 0.005 px above a held
+    adjustment's from the same start, at a noise level near 0.16 px, and a
+    final round that does not report convergence with the end slope under
+    0.05. The draws include two on which the last coefficient ran away when
+    it gained support within a round, and two on which, without the
+    regularization and the held retry, the release ended at an end slope of
+    0.000 and reported convergence there. The end slope itself is not
+    bounded away from 0 or from its start on this family; the measurements
+    say why
+    ([`bundle-adjustment-measurements.md`](bundle-adjustment-measurements.md#a-weakly-supported-spline-tail)).
 - **Directions carry the `k1` release**: on a scene whose finite cloud sits near the
   optical axis (no `θ³` signal) and whose far field is marked at infinity,
   `opt_k1` recovers the planted curvature — and the same solve with the
@@ -1658,3 +1686,46 @@ validation, and outputs are unchanged.
   through the reconstruction-level adjustment it backs the viewer's Bundle
   Adjust command, the `bundle_adjust` MCP tool and `sfm xform --bundle-adjust`
   on spline cameras.
+
+## Open questions
+
+- **The spline penalty's weight under the robust loss.** The refit's data rows
+  are plain least squares. The adjustment's are soft-L1 with second-order
+  scaling, so an observation's curvature is `(1 + z)^(−3/2)` of a plain row's,
+  with `z = (r/s)²`, and at the last stage's loss scale of 1 px many inliers
+  have `z` near or above one. The penalty weight `w_j` counts each kept
+  observation as two plain rows, as the refit does; counting each by its
+  robust weight, or by `s²`, would make the penalty heavier. On the
+  `dino_dog_toy` case the present weight keeps the default schedule's release
+  off the monotonicity limit, but not a `[(12, 2)]` round run alone, which
+  settles at the guard
+  ([`bundle-adjustment-measurements.md`](bundle-adjustment-measurements.md#a-weakly-supported-spline-tail)).
+  On the synthetic tail fixture, where one observation reaches the last
+  coefficient, the present weight lets that observation pull the end slope to
+  between 0.010 and 0.40 on 9 of 60 draws. Whether a heavier weight keeps
+  those off the limit, and what it costs a well-supported tail, is not
+  measured.
+- **A damped distortion step beside the held one.** The held-distortion retry
+  pins the distortion outright, so when the full step crosses the guard by
+  overshooting rather than because the optimum lies past the limit, the
+  distortion does not move for the round (the `[(50, 5)]` round run alone in
+  the measurements). The alternative is to damp the inadmissible
+  camera's distortion slots more, by their own factor on the diagonal, and
+  retry at the same `λ` with that factor rising until the step is admissible,
+  pinning being the limit. The poses and points would keep the step `λ`
+  allows them while the distortion takes the largest admissible damped step.
+  It costs more LU solves per rung and a second damping factor to carry
+  between iterations. Whether a real case needs it is open, since the
+  default schedule's later rounds move the spline anyway.
+- **Penalty rows at a pinned coefficient.** Leaving out the penalty rows that
+  touch an unsupported coefficient lets the supported tail end freely next to
+  it. Keeping every interior row, with the pinned values as constants, would
+  tie the tail to the unsupported values instead. The kernel does the first,
+  and the pinned coefficient keeps its input value, however wild. On the
+  synthetic tail fixture the last coefficient is pinned for the whole solve
+  on 12 of 60 draws and stays at its starting 0.0601 while its
+  neighbours move, which leaves an end slope between 0.0001 and 9.3; past the
+  outermost observation the curve is then set by a value no data holds.
+  Whether such a coefficient should instead be pulled to continue its
+  neighbours, by a row that holds it without data, is a choice between
+  that and keeping the spline exactly where no data reaches.
