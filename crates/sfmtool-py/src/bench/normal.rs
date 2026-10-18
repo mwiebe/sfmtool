@@ -24,18 +24,20 @@ use sfmtool_core::bench::{
     FiniteDifferenceOptions, FitNormalOptions, GridPlaneAcceptance, GridPlaneCells,
     GridPlaneDetail, GridPlaneFitModel, GridPlaneIteration, GridPlaneNormalOptions,
     GridPlaneOutcome, GridPlaneRender, GridPlaneTile, GridPlaneView, GrownPlaneAttempt,
-    GrownPlaneNormalOptions, GrownPlaneRefusal, GrownPlaneSequence, GrownPlaneStart,
-    GrownPlaneTryOutcome, GrownPlaneView, NormalEstimate, NormalReport, PieceLayout,
+    GrownPlaneNormalOptions, GrownPlanePair, GrownPlanePick, GrownPlaneRefusal, GrownPlaneSequence,
+    GrownPlaneStart, GrownPlaneTryOutcome, GrownPlaneView, NormalEstimate, NormalReport,
+    PieceLayout,
 };
 use sfmtool_core::patch::cell_plane_normals::{CellPlaneStatus, NormalDeterminacy};
 use sfmtool_core::patch::cluster_refine::{CellStatus, LoopStop};
-use sfmtool_core::progress::Progress;
+use sfmtool_core::progress::{Event, Progress};
 use sfmtool_matches_format::ClusterCellStatus;
 
 use super::{
     evaluate_report_dict, fit_options, refused, tilt_report_dict, views_of, PyEditableTrack,
 };
 use crate::patches::views::{resolve_pyramids, PosedViews};
+use crate::phase_record::PhaseRecord;
 use crate::reconstruction::edited::PyEditedReconstruction;
 
 /// The word for why a cell loop stopped.
@@ -449,6 +451,7 @@ fn cells_dict<'py>(py: Python<'py>, cells: &GridPlaneCells) -> PyResult<Bound<'p
 /// The word for how a grown-plane view's first window found its shift.
 fn start_name(start: GrownPlaneStart) -> &'static str {
     match start {
+        GrownPlaneStart::NoSearch => "no_search",
         GrownPlaneStart::Keypoint => "keypoint",
         GrownPlaneStart::Widened => "widened",
         GrownPlaneStart::NoKeypoint => "no_keypoint",
@@ -461,14 +464,14 @@ fn refusal_name(refusal: GrownPlaneRefusal) -> &'static str {
         GrownPlaneRefusal::UnderFloor => "under_floor",
         GrownPlaneRefusal::TooFar => "too_far",
         GrownPlaneRefusal::HeldUnderFloor => "held_under_floor",
+        GrownPlaneRefusal::ViewLeftOut => "view_left_out",
     }
 }
 
 /// The word for what became of one try of a view.
 fn try_outcome_name(outcome: GrownPlaneTryOutcome) -> &'static str {
     match outcome {
-        GrownPlaneTryOutcome::Joined => "joined",
-        GrownPlaneTryOutcome::Deferred => "deferred",
+        GrownPlaneTryOutcome::Matched => "matched",
         GrownPlaneTryOutcome::LeftOut => "left_out",
     }
 }
@@ -484,7 +487,6 @@ fn maybe_vector<'py, const N: usize>(
 /// The dict form of one growth of one view.
 fn attempt_dict<'py>(py: Python<'py>, attempt: &GrownPlaneAttempt) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("from_start", attempt.from_start)?;
     d.set_item("start", start_name(attempt.start))?;
     d.set_item(
         "stage_zncc",
@@ -493,8 +495,6 @@ fn attempt_dict<'py>(py: Python<'py>, attempt: &GrownPlaneAttempt) -> PyResult<B
     d.set_item("shift", PyArray1::from_vec(py, attempt.shift.to_vec()))?;
     d.set_item("normal", PyArray1::from_vec(py, attempt.normal.to_vec()))?;
     d.set_item("grid_zncc", attempt.grid_zncc)?;
-    d.set_item("distance", attempt.distance)?;
-    d.set_item("held_zncc", attempt.held_zncc)?;
     d.set_item("sigma_deg", attempt.sigma_deg)?;
     d.set_item("refusal", attempt.refusal.map(refusal_name))?;
     Ok(d)
@@ -510,7 +510,6 @@ fn grown_view_dict<'py>(py: Python<'py>, view: &GrownPlaneView) -> PyResult<Boun
             d.set_item("keypoint", maybe_vector(py, *keypoint))?;
         }
         GrownPlaneView::Joined {
-            from_start,
             start,
             shift,
             grid_zncc,
@@ -520,12 +519,25 @@ fn grown_view_dict<'py>(py: Python<'py>, view: &GrownPlaneView) -> PyResult<Boun
             keypoint,
         } => {
             d.set_item("kind", "joined")?;
-            d.set_item("from_start", *from_start)?;
             d.set_item("start", start_name(*start))?;
             d.set_item("shift", PyArray1::from_vec(py, shift.to_vec()))?;
             d.set_item("grid_zncc", *grid_zncc)?;
             d.set_item("distance", *distance)?;
             d.set_item("held_zncc", *held_zncc)?;
+            d.set_item("was", maybe_vector(py, *was))?;
+            d.set_item("keypoint", maybe_vector(py, *keypoint))?;
+        }
+        GrownPlaneView::ShiftOnly {
+            start,
+            shift,
+            grid_zncc,
+            was,
+            keypoint,
+        } => {
+            d.set_item("kind", "shift_only")?;
+            d.set_item("start", start_name(*start))?;
+            d.set_item("shift", PyArray1::from_vec(py, shift.to_vec()))?;
+            d.set_item("grid_zncc", *grid_zncc)?;
             d.set_item("was", maybe_vector(py, *was))?;
             d.set_item("keypoint", maybe_vector(py, *keypoint))?;
         }
@@ -541,6 +553,42 @@ fn grown_view_dict<'py>(py: Python<'py>, view: &GrownPlaneView) -> PyResult<Boun
         }
         GrownPlaneView::NotAttempted => d.set_item("kind", "not_attempted")?,
     }
+    Ok(d)
+}
+
+/// The dict form of one pair of views matched against each other.
+fn pair_dict<'py>(py: Python<'py>, pair: &GrownPlanePair) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("observations", pair.observations.to_vec())?;
+    d.set_item("images", pair.images.to_vec())?;
+    d.set_item("angle_deg", pair.angle_deg)?;
+    d.set_item("normal", PyArray1::from_vec(py, pair.normal.to_vec()))?;
+    d.set_item(
+        "relative_shift",
+        PyArray1::from_vec(py, pair.relative_shift.to_vec()),
+    )?;
+    d.set_item("zncc", pair.zncc)?;
+    d.set_item("sigma_deg", pair.sigma_deg)?;
+    d.set_item("distance", pair.distance)?;
+    d.set_item("kept", pair.refusal.is_none())?;
+    d.set_item("refusal", pair.refusal.map(refusal_name))?;
+    Ok(d)
+}
+
+/// The dict form of one pick of the selection.
+fn pick_dict<'py>(py: Python<'py>, pick: &GrownPlanePick) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("observation", pick.observation)?;
+    d.set_item("image", pick.image)?;
+    d.set_item("angle_deg", pick.angle_deg)?;
+    d.set_item(
+        "offset_direction",
+        PyArray1::from_vec(py, pick.offset_direction.to_vec()),
+    )?;
+    d.set_item("scale_px", pick.scale_px)?;
+    d.set_item("predicted_weak", pick.predicted_weak)?;
+    d.set_item("matched", pick.matched)?;
+    d.set_item("sigma_after_deg", pick.sigma_after_deg)?;
     Ok(d)
 }
 
@@ -571,17 +619,29 @@ fn sequence_dict<'py>(
         }
         t.set_item("attempts", attempts)?;
         t.set_item("outcome", try_outcome_name(entry.outcome))?;
-        t.set_item("shared_normal", maybe_vector(py, entry.shared_normal))?;
-        t.set_item("shared_sigma_deg", entry.shared_sigma_deg)?;
+        t.set_item("combined_normal", maybe_vector(py, entry.combined_normal))?;
+        t.set_item("combined_sigma_deg", entry.combined_sigma_deg)?;
         trace.append(t)?;
     }
     d.set_item("trace", trace)?;
+    let picks = PyList::empty(py);
+    for pick in &sequence.picks {
+        picks.append(pick_dict(py, pick)?)?;
+    }
+    d.set_item("picks", picks)?;
+    let pairs = PyList::empty(py);
+    for pair in &sequence.pairs {
+        pairs.append(pair_dict(py, pair)?)?;
+    }
+    d.set_item("pairs", pairs)?;
     d.set_item("normal", maybe_vector(py, sequence.normal))?;
     let precision = match &sequence.precision {
         Some(p) => {
             let q = PyDict::new(py);
             q.set_item("sigma_weak_deg", p.sigma_weak_deg)?;
             q.set_item("sigma_strong_deg", p.sigma_strong_deg)?;
+            q.set_item("discounted_sigma_weak_deg", p.discounted_sigma_weak_deg)?;
+            q.set_item("discounted_sigma_strong_deg", p.discounted_sigma_strong_deg)?;
             q.set_item("low_confidence", p.low_confidence)?;
             Some(q)
         }
@@ -591,6 +651,9 @@ fn sequence_dict<'py>(
     d.set_item("turned", sequence.turned())?;
     d.set_item("joined", sequence.joined())?;
     d.set_item("left_out", sequence.left_out())?;
+    d.set_item("shift_only", sequence.shift_only())?;
+    d.set_item("matched", sequence.matched())?;
+    d.set_item("pairs_kept", sequence.pairs_kept())?;
     d.set_item("written", sequence.written)?;
     Ok(d)
 }
@@ -997,69 +1060,106 @@ fn grid_plane_normal(
 /// Turn a track-stage `track`'s patch to the one plane its ``in`` views agree
 /// on, fitted directly to the photographs.
 ///
-/// The reference and the working grid are :func:`grid_plane_normal`'s. For each
-/// other ``in`` view, nearest the reference in angle first, the step fits the
-/// plane's tilt and the view's image shift so that the view's samples through
-/// the plane agree with the reference's by ZNCC: a ``spot_window``-sample
-/// window (default 7) at the grid's centre finds the shift by a search within
-/// ``keypoint_search_px`` (default 3.0) of the shift the view's keypoint
-/// implies, widened to ``spot_search_px`` (default 12.0) when no shift reaches
-/// ``min_keypoint_zncc`` (default 0.7) or the best is on the edge, in steps of
-/// ``spot_search_step_px`` (default 0.5); the window then grows through
+/// The reference and the working grid are :func:`grid_plane_normal`'s. A view
+/// is grown against the reference from the starting plane: a
+/// ``spot_window``-sample window (default 7) at the grid's centre starts from
+/// the shift the view's keypoint implies, with no search; where that growth
+/// is refused, it finds the shift by a search within ``keypoint_search_px``
+/// (default 3.0) of that shift, widened to ``spot_search_px`` (default 12.0) when no shift reaches
+/// ``min_keypoint_zncc`` (default 0.7) or the best is on the edge, in steps
+/// of ``spot_search_step_px`` (default 0.5); the window then grows through
 /// half-widths of ``window_fractions`` of the grid's side (default
-/// ``[1/8, 1/5, 1/3, 1/2]``, ``1/2`` covering the whole grid), with tilt and shift fitted by Levenberg-Marquardt at each size
-/// (``max_iterations``, default 20, ``initial_damping``, default 1e-3,
-/// ``min_improvement``, default 1e-6, and the Jacobian steps
-/// ``jacobian_tilt_step``, default 1e-3, and ``jacobian_shift_step_px``,
-/// default 0.05). The first view joins when its robust grid score reaches
-/// ``min_held_zncc`` (default 0.5); each later one when its own plane is within
-/// ``max_agreement_distance`` (default 3.0) of the shared plane by the
-/// Mahalanobis distance and, held to the shared plane, it still scores
-/// ``min_held_zncc``. ``zncc_tolerance`` (default 0.01) turns a view's
-/// information into a covariance, ``min_coverage`` (default 0.6) is the share
-/// of a ZNCC's samples that must land on the photograph, and
-/// ``low_confidence_sigma_deg`` (default 2.0) is the weakest-direction ``σ``
-/// above which the plane is reported as low confidence. ``working_resolution``
-/// is :func:`grid_plane_normal`'s. Every default is the Rust step's, and a
-/// setting outside what the step takes is refused before the photographs are
-/// decoded.
+/// ``[1/8, 1/5, 1/3, 1/2]``, ``1/2`` covering the whole grid), with tilt and
+/// shift fitted by Levenberg-Marquardt at each size (``max_iterations``,
+/// default 20, ``initial_damping``, default 1e-3, ``min_improvement``,
+/// default 1e-6, and the Jacobian steps ``jacobian_tilt_step``, default 1e-3,
+/// and ``jacobian_shift_step_px``, default 0.05). Each growth gives the
+/// view's own plane and its information about the tilt.
 ///
-/// The patch is turned to the shared plane whenever a view joined, however low
-/// its precision, and the reference's and each joined view's keypoints are
-/// written; when no view joined, the track is given back as it was, read
-/// again. The centre does not move. ``images`` and the last four keywords are
-/// :func:`fit`'s, and set the reading the step ends with.
+/// The views grown are a selection, picked one at a time by a prediction of
+/// their information from their geometry, until the combined weakest ``σ``
+/// is at most ``target_sigma_deg`` (default 0.5) or ``max_selected_views``
+/// (default 6) have passed the floor: a growth whose own score reaches
+/// ``min_held_zncc`` (default 0.5). Their planes are combined by a robust
+/// information-weighted mean, never by fitting the views together, leaving
+/// out the furthest estimate past ``max_agreement_distance`` (default 3.0)
+/// by the Mahalanobis distance until none is, and then any view under
+/// ``min_held_zncc`` at the mean. Up to ``max_pairs`` (default 3) of the
+/// widest pairs of kept views are then matched against each other and
+/// combined with the views' planes by the robust mean, and the shift alone
+/// of every view not picked is fitted at the final plane. ``zncc_tolerance``
+/// (default 0.01) turns information into a covariance, ``min_coverage``
+/// (default 0.6) is the share of a ZNCC's samples that must land on the
+/// photograph, and
+/// ``low_confidence_sigma_deg`` (default 2.0) is the weakest-direction ``σ``,
+/// with each pair's information halved, above which the plane is reported as
+/// low confidence. ``working_resolution`` is :func:`grid_plane_normal`'s.
+/// Every default is the Rust step's, and a setting outside what the step
+/// takes is refused before the photographs are decoded.
+///
+/// The patch is turned to the final plane whenever a view joined, however
+/// low its precision, and the reference's, each joined view's and each
+/// shift-only view's that passed the floor keypoints are written; when no
+/// view joined, the track is given back as it was, read again. The centre
+/// does not move. ``images`` and the last four keywords are :func:`fit`'s,
+/// and set the reading the step ends with.
 ///
 /// Returns ``(EditableTrack, report)``, the report described under
 /// :func:`grid_plane_normal`. Here ``estimate`` has ``kind`` ``"grown_plane"``
-/// and carries ``reference`` (the reference observation, or ``None`` when
-/// none was found and nothing was tried), ``working_resolution`` (``0`` with
-/// no reference), ``window_half_widths`` (the stages' windows, grid px),
-/// ``normal`` (the shared plane's outward normal, or ``None`` when no view
-/// joined), ``precision`` (``None`` when no view joined, else
-/// ``sigma_weak_deg``, ``sigma_strong_deg`` and ``low_confidence``),
-/// ``turned``, ``joined``, ``left_out`` and ``written`` (keypoints written,
-/// the reference's among them), ``views`` and ``trace``.
+/// and carries ``reference`` (the reference observation, or
+/// ``None`` when none was found and nothing was tried),
+/// ``working_resolution`` (``0`` with no reference), ``window_half_widths``
+/// (the stages' windows, grid px), ``normal`` (the final plane's outward
+/// normal, or ``None`` when no view joined), ``precision`` (``None`` when no
+/// view joined, else ``sigma_weak_deg`` and ``sigma_strong_deg`` from every
+/// kept estimate's information summed, ``discounted_sigma_weak_deg`` and
+/// ``discounted_sigma_strong_deg`` with each kept pair's halved, and
+/// ``low_confidence``), ``turned``, ``joined``, ``left_out``, ``shift_only``,
+/// ``matched`` (views grown against the reference), ``pairs_kept``,
+/// ``written`` (keypoints written, the reference's among them), ``views``,
+/// ``trace``, ``picks`` and ``pairs``.
 ///
 /// ``views`` has one dict per observation, ``kind`` naming what the step made
 /// of it: ``"reference"`` with ``keypoint`` (the one written, or ``None``);
-/// ``"joined"`` with ``from_start``, ``start`` (``"keypoint"``,
-/// ``"widened"`` or ``"no_keypoint"``), ``distance`` and ``held_zncc`` (each
-/// ``None`` for the first view) of the growth that joined, ``shift`` (``(2,)``,
-/// image px) and ``grid_zncc`` at the final shared plane, ``was`` (the
-/// keypoint before the step, or ``None``) and ``keypoint`` (the one written,
-/// or ``None`` off the photograph); ``"left_out"`` with ``reason``
-/// (``"under_floor"``, ``"too_far"`` or ``"held_under_floor"``),
-/// ``distance`` and ``held_zncc``; or ``"not_attempted"``. ``trace`` has one
-/// dict per try in the order made: ``observation``, ``image``, ``angle_deg``
-/// (from the reference, seen from the patch centre), ``outcome``
-/// (``"joined"``, ``"deferred"`` or ``"left_out"``), ``shared_normal`` (or
-/// ``None`` while no view has joined), ``shared_sigma_deg`` (``NaN`` while
-/// none has) and ``attempts``, each with ``from_start``, ``start``,
-/// ``stage_zncc`` (a float64 array, one score per stage), ``shift``,
-/// ``normal`` (the growth's own plane), ``grid_zncc``, ``distance``,
-/// ``held_zncc``, ``sigma_deg`` (its own weakest ``σ``, ``NaN`` for the first
-/// view) and ``refusal`` (``None`` when it joined, else a ``reason`` word).
+/// ``"joined"`` with ``start`` (``"no_search"``, ``"keypoint"``,
+/// ``"widened"`` or ``"no_keypoint"``), ``distance`` and ``held_zncc`` (its
+/// plane's distance from the final plane and its score there), ``shift``
+/// (``(2,)``, image px, moved to the final plane) and
+/// ``grid_zncc`` at the final plane, ``was`` (the keypoint before the step,
+/// or ``None``) and ``keypoint`` (the one written, or ``None`` off the
+/// photograph); ``"shift_only"`` with ``start``, ``shift``, ``grid_zncc``,
+/// ``was`` and ``keypoint`` (``None`` under the floor or off the photograph);
+/// ``"left_out"`` with ``reason`` (``"under_floor"``, ``"too_far"`` or
+/// ``"held_under_floor"``), ``distance`` and ``held_zncc``; or
+/// ``"not_attempted"``. ``trace`` has one dict per try in the order made:
+/// ``observation``, ``image``, ``angle_deg`` (from the reference, seen from
+/// the patch centre), ``outcome`` (``"matched"`` or ``"left_out"``),
+/// ``combined_normal`` (the plane of the views picked so far, this one among
+/// them, or ``None`` for a try that left the view out or came after the
+/// selection), ``combined_sigma_deg`` (``NaN`` then) and ``attempts``, each
+/// with ``start``, ``stage_zncc`` (a float64 array, one score per stage),
+/// ``shift``, ``normal`` (the growth's own plane), ``grid_zncc``,
+/// ``sigma_deg`` (its own weakest ``σ``) and ``refusal`` (``None`` when it
+/// was taken, else ``"under_floor"``). ``picks`` has one dict per pick of
+/// the selection: ``observation``, ``image``,
+/// ``angle_deg``, ``offset_direction`` (``(2,)``, in the starting frame),
+/// ``scale_px``, ``predicted_weak`` (the smallest eigenvalue of the
+/// information predicted with it added, ``NaN`` for a pick made by angle
+/// alone while no view had been matched), ``matched`` and
+/// ``sigma_after_deg`` (``NaN`` when it was not matched).
+/// ``pairs`` has one dict per pair: ``observations``, ``images``,
+/// ``angle_deg`` (between the two views), ``normal``, ``relative_shift``,
+/// ``zncc``, ``sigma_deg``, ``distance``, ``kept`` and ``refusal`` (a
+/// ``reason`` word or ``"view_left_out"``).
+///
+/// With ``record_phases=True`` (default ``False``; the result is the same
+/// either way) the step runs with a detailed progress record, and the report
+/// also carries ``phases``: one dict per phase the step closed, in the order
+/// entered, a phase before the phases inside it, each with ``name``,
+/// ``depth``, ``note`` (what the phase did, or ``None``), ``start_s`` (seconds
+/// from the beginning of the call to the phase's entry), ``duration_s``
+/// (seconds) and ``messages`` (a list of dicts with ``level`` and ``text``).
+/// Without it the report has no ``phases``.
 ///
 /// Raises ``ValueError`` with the reason when the step is refused, including a
 /// setting it does not take.
@@ -1080,6 +1180,9 @@ fn grid_plane_normal(
     max_agreement_distance = None,
     min_held_zncc = None,
     low_confidence_sigma_deg = None,
+    max_pairs = None,
+    target_sigma_deg = None,
+    max_selected_views = None,
     min_coverage = None,
     max_iterations = None,
     initial_damping = None,
@@ -1090,6 +1193,7 @@ fn grid_plane_normal(
     max_cache_bytes = None,
     sigma_px = None,
     depth_likelihood_ratio_threshold = None,
+    record_phases = false,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn grown_plane_normal(
@@ -1108,6 +1212,9 @@ fn grown_plane_normal(
     max_agreement_distance: Option<f64>,
     min_held_zncc: Option<f64>,
     low_confidence_sigma_deg: Option<f64>,
+    max_pairs: Option<usize>,
+    target_sigma_deg: Option<f64>,
+    max_selected_views: Option<usize>,
     min_coverage: Option<f64>,
     max_iterations: Option<u32>,
     initial_damping: Option<f64>,
@@ -1118,6 +1225,7 @@ fn grown_plane_normal(
     max_cache_bytes: Option<usize>,
     sigma_px: Option<f64>,
     depth_likelihood_ratio_threshold: Option<f64>,
+    record_phases: bool,
 ) -> PyResult<(PyEditableTrack, Py<PyDict>)> {
     let defaults = GrownPlaneNormalOptions::default();
     let options = GrownPlaneNormalOptions {
@@ -1133,6 +1241,9 @@ fn grown_plane_normal(
         min_held_zncc: min_held_zncc.unwrap_or(defaults.min_held_zncc),
         low_confidence_sigma_deg: low_confidence_sigma_deg
             .unwrap_or(defaults.low_confidence_sigma_deg),
+        max_pairs: max_pairs.unwrap_or(defaults.max_pairs),
+        target_sigma_deg: target_sigma_deg.unwrap_or(defaults.target_sigma_deg),
+        max_selected_views: max_selected_views.unwrap_or(defaults.max_selected_views),
         min_coverage: min_coverage.unwrap_or(defaults.min_coverage),
         max_iterations: max_iterations.unwrap_or(defaults.max_iterations),
         initial_damping: initial_damping.unwrap_or(defaults.initial_damping),
@@ -1151,15 +1262,20 @@ fn grown_plane_normal(
     let posed = PosedViews::from_reconstruction(&edited.inner.base);
     let pyramids = resolve_pyramids(&posed, images)?;
     let views = views_of(&posed, &pyramids);
-    let (next, report) = core_grown_plane_normal(
-        &track.inner,
-        &edited.inner,
-        &views,
-        &options,
-        &Progress::none(),
-    )
-    .map_err(refused)?;
+    let record = PhaseRecord::new();
+    let sink = |event: Event<'_>| record.sink(event);
+    let progress = if record_phases {
+        Progress::to(&sink).detailed(true)
+    } else {
+        Progress::none()
+    };
+    let (next, report) =
+        core_grown_plane_normal(&track.inner, &edited.inner, &views, &options, &progress)
+            .map_err(refused)?;
     let d = normal_report_dict(py, &report)?;
+    if record_phases {
+        d.set_item("phases", record.to_list(py)?)?;
+    }
     Ok((
         PyEditableTrack {
             inner: Arc::new(next),

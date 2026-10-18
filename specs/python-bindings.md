@@ -28,6 +28,20 @@ calls ([explorer-command.md](cli/visualization/explorer-command.md)):
 | `THUMBNAIL_SIZE` | the thumbnail edge length both on-disk formats store, which the Python SIFT extractors resize to | [sift-file-format.md](formats/sift-file-format.md), [sfmr-file-format.md](formats/sfmr-file-format.md) |
 | `ProgressCounter` ([source](../crates/sfmtool-py/src/py_progress.rs)) | a thread-safe counter a long GIL-releasing kernel increments and Python polls from another thread | none (used in [cluster-patches-command.md](cli/image-feature/cluster-patches-command.md)) |
 
+A binding that hands a step's phases back to Python runs the step with a
+detailed `Progress` whose sink is a `PhaseRecord`
+([phase_record.rs](../crates/sfmtool-py/src/phase_record.rs)), and puts the
+record's list in its report: one dict per closed phase, in the order
+entered, with `name`, `depth`, `note`, `start_s`, `duration_s` and
+`messages`. The keeping is `sfmtool_progress::PhaseLog`'s: a phase takes the
+slot open at its depth when its `Enter` arrives and fills it when its `Leave`
+does, so a phase comes before the phases inside it, `start_s` is the time of
+the `Enter` and `duration_s` the `Leave`'s duration, and a message goes to the
+phase open one depth above it. One slot per depth holds for a call that
+reports from one thread at a time. `grown_plane_normal(...,
+record_phases=True)` is the one binding that offers it
+([editable-track.md](core/bench/editable-track.md) § "Python bindings").
+
 ## Where Python code reads a binding
 
 Each extension submodule `<name>` has a public module `sfmtool.<name>`, a

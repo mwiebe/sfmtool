@@ -5,8 +5,10 @@
 //! that look at the point from around it: a textured plane seen out to 50
 //! degrees, one view whose top cells see something else, views all within a
 //! few degrees, a view that sees another plane, repeating texture seen from
-//! poses that are off, keypoints off the content in views whose poses are
-//! further off, and a flat wall.
+//! poses that are off with keypoints on the content, keypoints off the
+//! content in views whose poses are further off, views on opposite sides of
+//! the reference whose pairs sharpen the plane, a selection that matches a
+//! few of many views, and a flat wall.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -178,9 +180,12 @@ fn wide_centres() -> Vec<[f64; 3]> {
     ]
 }
 
-/// From 25 degrees off, every view joins and the patch is turned to within a
-/// degree of the plane; each joined view's keypoint is written at the point's
-/// projection and the reference keeps its own.
+/// From 25 degrees off, the patch is turned to within a degree of the plane.
+/// The plane's `σ` stays over the target, so the selection matches all five
+/// views; every one joins on its growth with no search, each written
+/// keypoint is at the point's projection and the reference keeps its own, and
+/// each joined view's score at the final plane is its held score. The two
+/// pairs are kept, and halving their information raises `σ`.
 #[test]
 fn a_textured_plane_started_far_off_is_turned_onto_it() {
     let centres = wide_centres();
@@ -192,15 +197,19 @@ fn a_textured_plane_started_far_off_is_turned_onto_it() {
 
     let after = degrees(placement_of(&turned).normal(), truth());
     assert!(after < 1.0, "{after:.3} deg off: {report}");
-    assert_eq!(
-        sequence.joined(),
-        centres.len() - 1,
-        "{report}: {sequence:#?}"
-    );
-    assert_eq!(sequence.left_out(), 0);
+    assert_eq!(sequence.matched(), centres.len() - 1, "{sequence:#?}");
+    assert_eq!(sequence.picks.len(), centres.len() - 1, "{sequence:#?}");
+    assert_eq!(sequence.joined(), centres.len() - 1, "{report}");
+    assert_eq!(sequence.left_out(), 0, "{report}");
+    assert_eq!(sequence.shift_only(), 0, "{report}");
+    for entry in &sequence.trace {
+        assert_eq!(entry.attempts.len(), 1, "{entry:#?}");
+        assert_eq!(entry.attempts[0].start, GrownPlaneStart::NoSearch);
+    }
     let precision = sequence.precision.expect("views joined");
-    assert!(!precision.low_confidence, "{report}");
     assert!(precision.sigma_weak_deg >= precision.sigma_strong_deg);
+    assert!(precision.discounted_sigma_weak_deg > precision.sigma_weak_deg);
+    assert!(!precision.low_confidence, "{report}");
     // The centre does not move, and the track is read back.
     assert!((placement_of(&turned).center - WORLD).norm() < 1e-9);
     assert!(turned.track().expect("track stage").bitmap.is_some());
@@ -212,7 +221,15 @@ fn a_textured_plane_started_far_off_is_turned_onto_it() {
         "the reference keeps its keypoint"
     );
     for (row, view) in sequence.views.iter().enumerate() {
-        if let GrownPlaneView::Joined { keypoint, .. } = view {
+        if let GrownPlaneView::Joined {
+            keypoint,
+            grid_zncc,
+            held_zncc,
+            ..
+        } = view
+        {
+            // The score at the final plane is the last held score.
+            assert_eq!(Some(*grid_zncc), *held_zncc, "row {row}");
             let written = keypoint.expect("on the photograph");
             let truth = scene.project(track.observations[row].image as usize, WORLD);
             assert!(
@@ -223,9 +240,14 @@ fn a_textured_plane_started_far_off_is_turned_onto_it() {
             assert!(distance_px(held, written) < 1e-3);
         }
     }
-    assert_eq!(sequence.written, centres.len());
+    assert_eq!(sequence.written, centres.len(), "{report}");
+    assert_eq!(sequence.pairs.len(), 2, "{sequence:#?}");
+    assert_eq!(sequence.pairs_kept(), 2, "{sequence:#?}");
     let sentence = report.to_string();
-    assert!(sentence.starts_with("5 of 5 views joined; "), "{sentence}");
+    assert!(
+        sentence.starts_with("5 of 5 views joined, 2 of 2 pairs kept; "),
+        "{sentence}"
+    );
     assert!(sentence.contains("6 keypoints written"), "{sentence}");
 }
 
@@ -290,67 +312,50 @@ fn narrow_views_turn_the_patch_with_low_confidence() {
 }
 
 /// A view that sees the texture on a plane turned 25 degrees from the one
-/// the others see is left out, and the plane is the others'. Its own plane
-/// is 8.7 σ from the shared one, with a held score of 0.49.
+/// the others see is left out, and the plane is the others'. The selection
+/// matches every view; this one passes the floor on its own, the combination
+/// leaves it out as too far, its search lands on its keypoint-implied shift,
+/// and it stays out.
 #[test]
 fn a_view_whose_own_plane_disagrees_is_left_out() {
     let centres = wide_centres();
-    let odd = centres[4];
-    // The other plane through the point, turned about world `x`.
-    let turn = nalgebra::Rotation3::from_axis_angle(&Vector3::x_axis(), 25f64.to_radians());
-    let other_normal = turn * truth();
-    let scene = Scene::looking_at(&centres, WORLD, camera(), move |c, d| {
-        if c != odd {
-            let (x, y) = hit(c, d, PLANE_Z);
-            return plane_texture(x, y);
-        }
-        let (c, d) = (Vector3::from(c), Vector3::from(d));
-        let lambda = (WORLD.coords - c).dot(&other_normal) / d.dot(&other_normal);
-        let p = c + d * lambda - WORLD.coords;
-        // Coordinates in the other plane, so its texture is the plane's
-        // turned with it.
-        let (u, v) = (turn * Vector3::x(), turn * Vector3::y());
-        plane_texture(p.dot(&u), p.dot(&v))
-    });
+    let scene = disagreeing_scene();
     let edited = edited_of(&scene);
     let track = tilted_track(&edited, Vector3::y(), 10.0);
+    let row = row_of(&track, 4);
     let (turned, report) = run(&scene, &edited, &track, &GrownPlaneNormalOptions::default());
     let sequence = sequence_of(&report);
     let after = degrees(placement_of(&turned).normal(), truth());
     assert!(after < 1.0, "{after:.3} deg off: {report}");
-    let row = row_of(&track, 4);
+    assert_eq!(sequence.matched(), centres.len() - 1, "{sequence:#?}");
     match &sequence.views[row] {
         GrownPlaneView::LeftOut {
             reason, distance, ..
         } => {
             assert_eq!(*reason, GrownPlaneRefusal::TooFar);
-            assert!(distance.expect("a shared plane") > 3.0, "{distance:?}");
+            assert!(distance.expect("a combined plane") > 3.0, "{distance:?}");
         }
         other => panic!("left out, not {other:?}: {report}"),
     }
     assert_eq!(sequence.joined(), centres.len() - 2, "{report}");
-    // The views are tried nearest the reference first; the odd view is
-    // grown again from the starting plane, deferred once and then left out.
-    let first_pass = &sequence.trace[..centres.len() - 1];
-    assert!(first_pass
-        .windows(2)
-        .all(|w| w[0].angle_deg <= w[1].angle_deg));
+    // No kept pair holds it.
+    for pair in &sequence.pairs {
+        assert!(pair.refusal.is_some() || !pair.observations.contains(&row));
+    }
     let tries: Vec<_> = sequence
         .trace
         .iter()
         .filter(|t| t.observation == row)
         .collect();
+    let outcomes: Vec<_> = tries.iter().map(|t| t.outcome).collect();
     assert_eq!(
-        tries.iter().map(|t| t.outcome).collect::<Vec<_>>(),
-        [
-            GrownPlaneTryOutcome::Deferred,
-            GrownPlaneTryOutcome::LeftOut
-        ]
+        outcomes,
+        [GrownPlaneTryOutcome::Matched, GrownPlaneTryOutcome::LeftOut],
+        "{tries:#?}"
     );
-    for t in &tries {
-        let starts: Vec<bool> = t.attempts.iter().map(|a| a.from_start).collect();
-        assert_eq!(starts, [false, true], "{t:?}");
-    }
+    assert_eq!(tries[0].attempts.len(), 1);
+    assert_eq!(tries[0].attempts[0].start, GrownPlaneStart::NoSearch);
+    assert!(tries[1].attempts.is_empty(), "{tries:#?}");
 }
 
 /// A checker four image px a square, so that a 7×7 window matches equally
@@ -368,11 +373,14 @@ fn checker(x: f64, y: f64) -> f64 {
 
 /// On repeating texture, with each view's pose turned so that its content
 /// sits 6 to 7 px from where the pose projects the point and its keypoint on
-/// the content, the first window started from each view's keypoint takes the
-/// right shift; widened at once to the full search about the keypoint
-/// instead, it takes another peak of the checker in some view.
+/// the content, every view grows from its keypoint-implied shift with no
+/// search and joins on its first growth, written on the content, and does so
+/// too where its search would widen at once about the keypoint, which on
+/// this checker takes another peak. The same views searched instead, as a
+/// view with no keypoint is, land on other peaks of the checker (here up to
+/// 11.2 px off).
 #[test]
-fn the_keypoint_start_takes_the_right_peak_on_repeating_texture() {
+fn the_keypoint_implied_shift_takes_the_right_peak_on_repeating_texture() {
     let centres = vec![
         centre(0.0, 0.0),
         centre(20.0, 0.0),
@@ -406,8 +414,8 @@ fn the_keypoint_start_takes_the_right_peak_on_repeating_texture() {
     // The reference is the camera whose pose is right.
     let (track, _) = set_reference(&track, row_of(&track, 0)).expect("an in row");
 
-    let written_off = |options: &GrownPlaneNormalOptions| {
-        let (turned, report) = run(&scene, &edited, &track, options);
+    let written_off = |track: &EditableTrack, options: &GrownPlaneNormalOptions| {
+        let (turned, report) = run(&scene, &edited, track, options);
         let sequence = sequence_of(&report).clone();
         let mut worst: f64 = 0.0;
         for (row, view) in sequence.views.iter().enumerate() {
@@ -420,25 +428,41 @@ fn the_keypoint_start_takes_the_right_peak_on_repeating_texture() {
         (sequence, worst)
     };
 
-    let (sequence, worst) = written_off(&GrownPlaneNormalOptions::default());
-    assert_eq!(sequence.joined(), 3, "{sequence:#?}");
-    for view in &sequence.views {
-        if let GrownPlaneView::Joined { start, .. } = view {
-            assert_eq!(*start, GrownPlaneStart::Keypoint, "{sequence:#?}");
-        }
-    }
-    assert!(worst < 0.75, "{worst:.2} px: {sequence:#?}");
-
     // A search bound of nothing about the keypoint always widens to the
-    // full search about it.
+    // full search about it, which here lands on another peak; the growth
+    // with no search comes first and does not use it.
     let widened = GrownPlaneNormalOptions {
         keypoint_search_px: 0.0,
         ..Default::default()
     };
-    let (sequence, worst) = written_off(&widened);
+    let mut sequence = None;
+    for options in [GrownPlaneNormalOptions::default(), widened] {
+        let (run_sequence, worst) = written_off(&track, &options);
+        assert_eq!(run_sequence.joined(), 3, "{run_sequence:#?}");
+        for entry in &run_sequence.trace {
+            assert_eq!(entry.outcome, GrownPlaneTryOutcome::Matched, "{entry:#?}");
+            assert_eq!(entry.attempts.len(), 1, "{entry:#?}");
+            assert_eq!(entry.attempts[0].start, GrownPlaneStart::NoSearch);
+            // Stage 1 reads the window at the implied shift.
+            assert!(entry.attempts[0].stage_zncc[0].is_finite(), "{entry:#?}");
+        }
+        assert!(worst < 0.75, "{worst:.2} px: {run_sequence:#?}");
+        sequence.get_or_insert(run_sequence);
+    }
+    let sequence = sequence.expect("a run");
+
+    // With no keypoint but the reference's, every view searches.
+    let mut searched = track.clone();
+    let reference = sequence.reference.expect("a reference");
+    for (row, observation) in searched.observations.iter_mut().enumerate() {
+        if row != reference {
+            observation.track = None;
+        }
+    }
+    let (sequence, worst) = written_off(&searched, &GrownPlaneNormalOptions::default());
     for view in &sequence.views {
         if let GrownPlaneView::Joined { start, .. } = view {
-            assert_eq!(*start, GrownPlaneStart::Widened, "{sequence:#?}");
+            assert_eq!(*start, GrownPlaneStart::NoKeypoint, "{sequence:#?}");
         }
     }
     assert!(worst > 4.0, "{worst:.2} px: {sequence:#?}");
@@ -446,9 +470,11 @@ fn the_keypoint_start_takes_the_right_peak_on_repeating_texture() {
 
 /// With each view's pose turned so that its content sits about 16 px from
 /// where the pose projects the point, past the widened search's 12 px about
-/// zero shift, and each keypoint 6 px off the content, past the 3 px search
-/// about the keypoint, every view widens about its keypoint-implied shift,
-/// finds the content and is written on it.
+/// zero shift, and each keypoint 6 px off the content, past what the fit
+/// recovers and past the 3 px search about the keypoint, every view grown
+/// from its keypoint-implied shift with no search is refused; the search
+/// then widens about that shift, finds the content, and the view joins and
+/// is written on it.
 #[test]
 fn the_widened_search_is_centred_on_the_keypoint() {
     let centres = vec![
@@ -495,6 +521,17 @@ fn the_widened_search_is_centred_on_the_keypoint() {
     let (turned, report) = run(&scene, &edited, &track, &GrownPlaneNormalOptions::default());
     let sequence = sequence_of(&report);
     assert_eq!(sequence.joined(), 3, "{sequence:#?}");
+    // Grown from the keypoint-implied shift, 6 px off, a view is refused; the
+    // search that follows it is what joins.
+    for entry in &sequence.trace {
+        let starts: Vec<_> = entry.attempts.iter().map(|a| a.start).collect();
+        assert_eq!(
+            starts,
+            [GrownPlaneStart::NoSearch, GrownPlaneStart::Widened],
+            "{entry:#?}"
+        );
+        assert!(entry.attempts[0].refusal.is_some());
+    }
     for (row, view) in sequence.views.iter().enumerate() {
         if let GrownPlaneView::Joined { start, .. } = view {
             assert_eq!(*start, GrownPlaneStart::Widened, "{sequence:#?}");
@@ -579,4 +616,325 @@ fn the_grown_plane_normal_refuses_a_bearing_bad_options_and_stops_when_cancelled
         Some(NormalError::Cancelled)
     );
     assert!(cancel.load(Ordering::Relaxed));
+}
+
+/// The scene of [`a_view_whose_own_plane_disagrees_is_left_out`]: one view at
+/// 38 degrees sees the texture on a plane turned 25 degrees from the others'.
+fn disagreeing_scene() -> Scene {
+    let centres = wide_centres();
+    let odd = centres[4];
+    let turn = nalgebra::Rotation3::from_axis_angle(&Vector3::x_axis(), 25f64.to_radians());
+    let other_normal = turn * truth();
+    Scene::looking_at(&centres, WORLD, camera(), move |c, d| {
+        if c != odd {
+            let (x, y) = hit(c, d, PLANE_Z);
+            return plane_texture(x, y);
+        }
+        let (c, d) = (Vector3::from(c), Vector3::from(d));
+        let lambda = (WORLD.coords - c).dot(&other_normal) / d.dot(&other_normal);
+        let p = c + d * lambda - WORLD.coords;
+        let (u, v) = (turn * Vector3::x(), turn * Vector3::y());
+        plane_texture(p.dot(&u), p.dot(&v))
+    })
+}
+
+/// Detail phases change nothing: the step's track and report are the same
+/// with no sink, with a sink at the overview level and with a detailed one.
+/// The overview level records the step and one phase per try; the detailed
+/// one adds every stage under them, here including the searches of a view
+/// whose keypoints are removed, a view left out by the means, the pairs, the
+/// picks and the shift-only fits. No joint fit is recorded.
+#[test]
+fn the_grown_plane_normals_detail_phases_change_nothing() {
+    use crate::progress::Event;
+    use std::sync::Mutex;
+
+    let scene = disagreeing_scene();
+    let edited = edited_of(&scene);
+    let mut track = tilted_track(&edited, Vector3::y(), 10.0);
+    // One view other than the reference with no keypoint, so that its
+    // growth comes from the search.
+    let row = row_of(&track, 1);
+    track.observations[row].track = None;
+    let views = scene.views();
+
+    // Three picks, so that some views are fitted for their shift alone, and
+    // the default, under which every view is matched.
+    for max_selected_views in [3, 6] {
+        let options = GrownPlaneNormalOptions {
+            max_selected_views,
+            ..Default::default()
+        };
+        let quiet = grown_plane_normal(&track, &edited, &views, &options, &Progress::none())
+            .expect("the step runs");
+        let record = |detailed: bool| {
+            let seen: Mutex<Vec<(&'static str, u8, Option<String>)>> = Mutex::new(Vec::new());
+            let sink = |event: Event<'_>| {
+                if let Event::Leave {
+                    phase, depth, note, ..
+                } = event
+                {
+                    seen.lock()
+                        .unwrap()
+                        .push((phase, depth, note.map(str::to_string)));
+                }
+            };
+            let progress = Progress::to(&sink).detailed(detailed);
+            let result = grown_plane_normal(&track, &edited, &views, &options, &progress)
+                .expect("the step runs");
+            (result, seen.into_inner().unwrap())
+        };
+        let (overview, overview_phases) = record(false);
+        let (detailed, detailed_phases) = record(true);
+        for other in [&overview, &detailed] {
+            assert_eq!(format!("{:?}", quiet.0), format!("{:?}", other.0));
+            assert_eq!(format!("{:?}", quiet.1), format!("{:?}", other.1));
+        }
+
+        let sequence = sequence_of(&quiet.1);
+        let tries = sequence.trace.len();
+        let names = |phases: &[(&'static str, u8, Option<String>)], name: &str| {
+            phases.iter().filter(|(n, _, _)| *n == name).count()
+        };
+        // The overview: the step and one phase per try, nothing finer.
+        assert_eq!(names(&overview_phases, "grown plane normal"), 1);
+        assert_eq!(names(&overview_phases, "grown plane view"), tries);
+        for detail in [
+            "growth",
+            "window stage",
+            "judge",
+            "mean",
+            "pairs",
+            "selection",
+        ] {
+            assert_eq!(names(&overview_phases, detail), 0, "{detail}");
+        }
+
+        // The detail: every stage, each noted.
+        let growths: usize = sequence.trace.iter().map(|t| t.attempts.len()).sum();
+        assert!(names(&detailed_phases, "growth") >= growths);
+        let windows = sequence.window_half_widths.len() - 1;
+        let shift_only = sequence.shift_only();
+        assert_eq!(names(&detailed_phases, "window stage"), growths * windows);
+        assert_eq!(names(&detailed_phases, "whole-grid stage"), growths);
+        assert_eq!(names(&detailed_phases, "judge"), growths);
+        assert_eq!(names(&detailed_phases, "joint fit"), 0);
+        assert_eq!(names(&detailed_phases, "precision"), 0);
+        assert!(names(&detailed_phases, "mean") >= 1);
+        assert_eq!(names(&detailed_phases, "pairs"), 1);
+        assert!(!sequence.pairs.is_empty(), "{sequence:#?}");
+        assert_eq!(names(&detailed_phases, "pair fit"), sequence.pairs.len());
+        assert_eq!(names(&detailed_phases, "selection"), sequence.picks.len());
+        assert_eq!(names(&detailed_phases, "shift-only fit"), shift_only);
+        let picked = max_selected_views.min(sequence.views.len() - 1);
+        assert_eq!(sequence.picks.len(), picked, "{sequence:#?}");
+        assert_eq!(
+            shift_only,
+            sequence.views.len() - 1 - picked,
+            "{sequence:#?}"
+        );
+        assert!(
+            names(&detailed_phases, "widened search") >= 1,
+            "{:#?}",
+            sequence.trace
+        );
+        for once in ["setup", "turn and write", "grown plane normal"] {
+            assert_eq!(names(&detailed_phases, once), 1, "{once}");
+        }
+        let own = [
+            "grown plane view",
+            "setup",
+            "growth",
+            "keypoint search",
+            "widened search",
+            "window stage",
+            "whole-grid stage",
+            "judge",
+            "mean",
+            "pairs",
+            "pair fit",
+            "selection",
+            "shift-only fit",
+            "turn and write",
+        ];
+        for (name, _, note) in &detailed_phases {
+            assert!(!own.contains(name) || note.is_some(), "{name} has no note");
+        }
+        let depth_of = |name: &str| {
+            detailed_phases
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, d, _)| *d)
+                .expect("recorded")
+        };
+        let step = depth_of("grown plane normal");
+        assert_eq!(depth_of("grown plane view"), step + 1);
+        assert_eq!(depth_of("growth"), depth_of("grown plane view") + 1);
+        assert_eq!(depth_of("window stage"), depth_of("growth") + 1);
+        // A search under a growth where a growth searched; under the
+        // selection, also under a shift-only fit.
+        let searched = sequence
+            .trace
+            .iter()
+            .flat_map(|t| &t.attempts)
+            .any(|a| a.start != GrownPlaneStart::NoSearch);
+        assert!(
+            !searched
+                || detailed_phases
+                    .iter()
+                    .any(|(n, d, _)| *n == "widened search" && *d == depth_of("growth") + 1)
+        );
+        assert_eq!(depth_of("mean"), step + 1);
+        assert_eq!(depth_of("selection"), step + 1);
+        assert_eq!(depth_of("pair fit"), depth_of("pairs") + 1);
+        if max_selected_views == 3 {
+            assert_eq!(depth_of("shift-only fit"), step + 1);
+        } else {
+            // Every view is matched, and the means leave the disagreeing
+            // one out.
+            let refused = detailed_phases
+                .iter()
+                .filter(|(n, _, note)| {
+                    let note = note.as_deref().unwrap_or("");
+                    let words: Vec<&str> = note.split_whitespace().collect();
+                    *n == "mean" && words.len() > 2 && words[0] != words[2]
+                })
+                .count();
+            assert!(refused >= 1, "{detailed_phases:#?}");
+        }
+    }
+}
+
+/// The information-weighted plane of the views on opposite sides of a
+/// reference that faces the plane: each view is 20 degrees from it, and the
+/// two pairs, the views opposite each other, are 40 degrees apart. The
+/// selection matches all four, the pairs are matched widest first and both
+/// are kept; with them the weakest `σ` is under that of the reference matches
+/// alone (with `max_pairs` 0), and still is with each pair's information
+/// halved, and the plane stays on the truth.
+#[test]
+fn wide_pairs_sharpen_the_plane_over_reference_matches_alone() {
+    let centres = vec![
+        centre(0.0, 0.0),
+        centre(20.0, 0.0),
+        centre(20.0, 180.0),
+        centre(20.0, 90.0),
+        centre(20.0, 270.0),
+    ];
+    let scene = Scene::looking_at(&centres, WORLD, camera(), textured_plane);
+    let edited = edited_of(&scene);
+    let track = tilted_track(&edited, Vector3::new(1.0, 0.3, 0.0), 15.0);
+    let (track, _) = set_reference(&track, row_of(&track, 0)).expect("an in row");
+
+    let without = GrownPlaneNormalOptions {
+        max_pairs: 0,
+        ..Default::default()
+    };
+    let (alone, alone_report) = run(&scene, &edited, &track, &without);
+    let (paired, paired_report) = run(&scene, &edited, &track, &GrownPlaneNormalOptions::default());
+    let (alone_seq, paired_seq) = (sequence_of(&alone_report), sequence_of(&paired_report));
+    assert_eq!(alone_seq.joined(), 4, "{alone_seq:#?}");
+    assert_eq!(paired_seq.joined(), 4, "{paired_seq:#?}");
+    assert!(alone_seq.pairs.is_empty());
+    assert_eq!(paired_seq.pairs.len(), 2, "{paired_seq:#?}");
+    assert_eq!(paired_seq.pairs_kept(), 2, "{paired_seq:#?}");
+    for pair in &paired_seq.pairs {
+        assert!((pair.angle_deg - 40.0).abs() < 0.5, "{pair:?}");
+        let images: Vec<u32> = pair
+            .observations
+            .iter()
+            .map(|&r| track.observations[r].image)
+            .collect();
+        assert!(
+            images == [1, 2] || images == [2, 1] || images == [3, 4] || images == [4, 3],
+            "opposite views: {images:?}"
+        );
+    }
+    let a = alone_seq.precision.expect("views joined");
+    let p = paired_seq.precision.expect("views joined");
+    assert!(
+        p.sigma_weak_deg < a.sigma_weak_deg,
+        "{paired_report} vs {alone_report}"
+    );
+    assert!(
+        p.discounted_sigma_weak_deg < a.sigma_weak_deg,
+        "{paired_report} vs {alone_report}"
+    );
+    assert!(p.discounted_sigma_weak_deg > p.sigma_weak_deg);
+    for turned in [&alone, &paired] {
+        let after = degrees(placement_of(turned).normal(), truth());
+        assert!(after < 1.0, "{after:.3}: {paired_report}");
+    }
+}
+
+/// Sixteen views around the point, in rings at 10 to 40 degrees: the
+/// selection matches the widest view first and then the view that most
+/// raises the weakest predicted information, and stops once the combined
+/// plane's `σ` reaches the target, having matched far fewer views than there
+/// are. Every other view is fitted for its shift alone at the final plane and
+/// written at the point's projection.
+#[test]
+fn the_selection_reaches_the_target_sigma_matching_few_views() {
+    let mut centres = vec![centre(0.0, 0.0)];
+    for (ring, from) in [10.0, 20.0, 30.0, 40.0].into_iter().enumerate() {
+        for k in 0..4 {
+            centres.push(centre(from, 90.0 * k as f64 + 22.5 * ring as f64));
+        }
+    }
+    let scene = Scene::looking_at(&centres, WORLD, camera(), textured_plane);
+    let edited = edited_of(&scene);
+    let track = tilted_track(&edited, Vector3::new(0.4, 1.0, 0.0), 15.0);
+    let (track, _) = set_reference(&track, row_of(&track, 0)).expect("an in row");
+    let target = 1.0;
+    let options = GrownPlaneNormalOptions {
+        target_sigma_deg: target,
+        max_selected_views: 16,
+        ..Default::default()
+    };
+    let (turned, report) = run(&scene, &edited, &track, &options);
+    let sequence = sequence_of(&report);
+    let others = centres.len() - 1;
+    assert!(
+        sequence.matched() <= 3,
+        "{} of {others}: {report}: {:#?}",
+        sequence.matched(),
+        sequence.picks
+    );
+    assert_eq!(sequence.picks.len(), sequence.matched());
+    let last = sequence.picks.last().expect("a pick");
+    assert!(last.sigma_after_deg <= target, "{:#?}", sequence.picks);
+    // The first pick is one of the widest ring.
+    assert!(
+        (sequence.picks[0].angle_deg - 40.0).abs() < 0.5,
+        "{:#?}",
+        sequence.picks
+    );
+    // A later pick is not along the first one's offset.
+    let d0 = sequence.picks[0].offset_direction;
+    let d1 = sequence.picks[1].offset_direction;
+    assert!(
+        (d0[0] * d1[0] + d0[1] * d1[1]).abs() < 0.9,
+        "{:#?}",
+        sequence.picks
+    );
+    let precision = sequence.precision.expect("views joined");
+    assert!(precision.discounted_sigma_weak_deg <= target, "{report}");
+    let after = degrees(placement_of(&turned).normal(), truth());
+    assert!(after < 1.0, "{after:.3} deg off: {report}");
+    assert_eq!(
+        sequence.shift_only(),
+        others - sequence.matched(),
+        "{report}"
+    );
+    for (row, view) in sequence.views.iter().enumerate() {
+        if let GrownPlaneView::ShiftOnly { keypoint, .. } = view {
+            let written = keypoint.expect("passed the floor, on the photograph");
+            let truth = scene.project(track.observations[row].image as usize, WORLD);
+            assert!(
+                distance_px(written, truth) < 0.5,
+                "row {row}: {written:?} vs {truth:?}"
+            );
+        }
+    }
+    assert_eq!(sequence.written, centres.len(), "{report}");
 }

@@ -18,8 +18,9 @@ Today's Grid Plane Normal (``finite_difference_normal`` with
 ``old_*`` and ``old3_*`` fields, as the evaluation names them. With
 ``--grown``, ``grown_plane_normal`` is run from the same track too, into the
 evaluation's ``grown_*`` fields (its error, ``σ``, confidence, views joined
-and left out, wall time and per-try trace); ``--grown-opt KEY=VALUE``,
-repeated, passes it a keyword and implies ``--grown``.
+and left out, wall time and per-try trace), with its detail phases recorded
+(``record_phases=True``); ``--grown-opt KEY=VALUE``, repeated, passes it a
+keyword and implies ``--grown``.
 
     pixi run -e test python scripts/track_at_pixel/normal_sources/grid_plane_detail.py \\
         DATASET POINT [POINT ...] --out DIR [--label NAME] \\
@@ -41,7 +42,9 @@ the grown step's after ``grown-`` (or ``--label``):
 - ``point_<index>.json``: the evaluation's row for the point (``old_*``,
   ``old3_*``, ``new_*`` and, with ``--grown``, ``grown_*`` fields, the trace
   with each proposal's error to the ground truth), plus ``point_id``,
-  ``start``, ``new_options``, ``grown_options`` with ``--grown``, and
+  ``start``, ``new_options``, with ``--grown`` ``grown_options``,
+  ``grown_phases`` (the step's recorded phases, as the binding gives them) and
+  ``grown_phase_ms`` (each phase name's summed ``ms`` and ``count``), and
   ``detail``, the step's detail record with every array replaced by
   ``{"npz": KEY, "shape": [...], "dtype": ...}``;
 - ``point_<index>.npz``: those arrays under their ``KEY`` (the path into the
@@ -50,11 +53,15 @@ the grown step's after ``grown-`` (or ``--label``):
   bitmaps.
 
 ``DIR/cameras.json`` holds each image's name, pose and lens, as the
-evaluation writes it. With ``--grown``, the grown step's sentence is printed
-for each point as it finishes, and at the end a table for each start: the
+evaluation writes it. With ``--grown``, the grown step's sentence and its
+time per phase name (summed, slowest first, each with its share of the step;
+a phase's time includes the phases inside it) are printed for each point as
+it finishes, and at the end a table for each start: the
 point, the errors of the start, ``old``, ``new`` and the grown step, the grown
-step's weakest ``σ`` and confidence, its views joined of those tried, and its
-wall time.
+step's weakest ``σ`` (every kept estimate's information summed, and with each
+kept pair's halved) and confidence, its views joined of those tried, the
+views it grew against the reference of those beside the reference, the pairs
+kept of those matched, and its wall time.
 
 The 16 hand-picked points of the grown-plane draft are ``dino_dog_toy`` (the
 candidate ground truth, given by its path) ``0 1 528 672 810 933``,
@@ -141,11 +148,42 @@ def run(ds, edited, p, start, new_options, grown_options=None):
         row, track, edited, ds, {**new_options, "record_detail": True}, to_cam, gt
     )
     if grown_options is not None:
-        run_grown(row, track, edited, ds, grown_options, to_cam, gt)
+        grown = run_grown(
+            row, track, edited, ds, {**grown_options, "record_phases": True}, to_cam, gt
+        )
+        if grown is not None:
+            row["grown_phases"] = grown["phases"]
+            row["grown_phase_ms"] = phase_breakdown(grown["phases"])
     return row, None if report is None else report["estimate"]["detail"]
 
 
-GROWN_HEADER = " point  start    old    new  grown  sigma conf joined       ms"
+def phase_breakdown(phases):
+    """Each phase name's summed time, ms, and how many times it ran.
+
+    A phase's time includes the phases inside it, so the names do not add up
+    to the step's.
+    """
+    out = {}
+    for phase in phases:
+        entry = out.setdefault(phase["name"], {"ms": 0.0, "count": 0})
+        entry["ms"] += 1000 * phase["duration_s"]
+        entry["count"] += 1
+    return out
+
+
+def breakdown_lines(breakdown):
+    """The breakdown as lines, slowest first, each with its share of the step."""
+    total = breakdown.get("grown plane normal", {}).get("ms", 0.0)
+    lines = []
+    for name, entry in sorted(breakdown.items(), key=lambda kv: -kv[1]["ms"]):
+        share = 100 * entry["ms"] / total if total > 0 else float("nan")
+        lines.append(
+            f"    {name:<20s} {entry['ms']:9.1f} ms {share:5.1f}%  x{entry['count']}"
+        )
+    return lines
+
+
+GROWN_HEADER = " point  start    old    new  grown  sigma  sig_b conf joined matched pairs       ms"
 
 
 def grown_line(row):
@@ -156,11 +194,16 @@ def grown_line(row):
 
     confidence = {None: "-", True: "low", False: "ok"}[row.get("grown_low_confidence")]
     tried = row.get("grown_joined", 0) + row.get("grown_left_out", 0)
+    pairs = row.get("grown_pairs", [])
+    kept = sum(p["kept"] for p in pairs)
     return (
         f"{row['point']:6d} {deg(row.get('start_deg'))} {deg(row.get('old_deg'))} "
         f"{deg(row.get('new_deg'))} {deg(row.get('grown_deg'))} "
-        f"{deg(row.get('grown_sigma_weak_deg'))} {confidence:>4s} "
+        f"{deg(row.get('grown_sigma_weak_deg'))} "
+        f"{deg(row.get('grown_discounted_sigma_weak_deg'))} {confidence:>4s} "
         f"{row.get('grown_joined', 0):3d}/{tried:<3d} "
+        f"{row.get('grown_matched', 0):3d}/{row.get('grown_candidates', 0):<3d} "
+        f"{kept:2d}/{len(pairs):<2d} "
         f"{row.get('grown_ms', float('nan')):8.0f}"
     )
 
@@ -238,6 +281,9 @@ def main():
             )
             if grown_options is not None:
                 print(f"  grown: {row.get('grown_text', row['status'])}", flush=True)
+                if "grown_phase_ms" in row:
+                    for line in breakdown_lines(row["grown_phase_ms"]):
+                        print(line, flush=True)
                 if row["status"] == "ok":
                     lines.append(grown_line(row))
         if lines:
