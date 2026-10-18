@@ -465,7 +465,7 @@ and the tests that aim at it cannot drift.
 
 | Entry | What it does | Hover text |
 |---|---|---|
-| **Set to Origin** | The patch's frame becomes the world frame: `X` along `u`, `Y` along `v`, `Z` along the outward normal, and the centre at the origin. | "Draw the scene in this patch's own frame: its centre at the origin, its normal along +Z." |
+| **Set to Origin** | The patch's coordinate system becomes the world's: `X` along `u`, `Y` along `v`, `Z` along the outward normal, and the centre at the origin. | "Draw the scene in this patch's coordinate system: its centre at the origin, its normal along +Z." |
 | **Align Normal to Z** | Tips the scene about the patch's centre by the shortest rotation taking its normal to `+Z`. Position and heading are otherwise untouched. | "Tip the scene so this patch faces +Z, turning about the patch so it stays where it is." |
 | **Translate to Origin** | Moves the scene so the patch's centre is at the origin. Orientation untouched. | "Move the scene so this patch's centre is at the origin." |
 | **Translate to XY Plane** | Moves the scene along world `Z` alone, so the patch's centre lands at `z = 0`. | "Drop the scene along Z so this patch's centre sits on the ground plane." |
@@ -473,7 +473,7 @@ and the tests that aim at it cannot drift.
 Once the normal is `+Z`, **Translate to XY Plane** puts the patch's plane exactly
 on the `XY` plane, which makes **Align Normal to Z** followed by it the two-step
 way to lay a surface on the ground without moving it sideways. The log reads
-`Set run_b to the frame of patch tk104`, `Aligned run_b's patch tk104 normal to
+`Set run_b to patch tk104's coordinate system`, `Aligned run_b's patch tk104 normal to
 +Z`, `Translated run_b's patch tk104 to the origin` and `Translated run_b's
 patch tk104 to the XY plane`, each followed by its version transition; the
 focused item's label names the patch because it is what the Bench group and Track
@@ -481,7 +481,7 @@ View show.
 
 ### Which patch, and which node
 
-The square is the placement of the focused item on the bench of
+The square is the patch frame of the focused item on the bench of
 `AppState::selected_recon`, at the track stage, and the viewport draws no other,
 so the patch a menu opens on is singular and so is the node it acts on. A
 cluster-stage item, a track with no patch and an empty bench draw no square and
@@ -516,12 +516,12 @@ handles still answer.
 ### What each entry computes
 
 Every entry reads the patch **in world coordinates**, after the transform the
-node already carries. With that transform `T0 = (R0, t0, s0)` and the placement
+node already carries. With that transform `T0 = (R0, t0, s0)` and the patch frame
 in the node's own coordinates, `c = T0(c_own)`, `u = R0 u_own`,
 `v = R0 v_own` and `n = u × v`. The scale is dropped from the axes: `Se3Transform`
 carries a uniform scale, which stretches no direction relative to another, so
-the three stay orthonormal and right-handed. `PatchFrame::of` squares them up
-besides, keeping `u` and rebuilding `v` from the normal, because a stored frame
+the three stay orthonormal and right-handed. `PatchCoordinateSystem::of` squares them up
+besides, keeping `u` and rebuilding `v` from the normal, because a stored patch frame
 is orthonormal only to the `f32` it was read from and a matrix that is not quite
 a rotation makes a quaternion that is not quite unit.
 
@@ -554,7 +554,7 @@ not a special case: the answer's axis swings, and the patch still ends up facing
 
 **The map composes after the transform the node already carries**, since that
 transform takes the node's coordinates into the world `A` acts on:
-`next = T0.compose(A)`, the shape `Align to…` writes. Applied to the placement's
+`next = T0.compose(A)`, the shape `Align to…` writes. Applied to the patch frame's
 own centre it gives `Mᵀ(s0 R0 c_own + t0) − Mᵀc = 0`, and its rotation takes
 `u_own` to `Mᵀu = e_x`. The node keeps the scale it had, which is what "reframe,
 do not resize" means for a node that arrived under a similarity. A reversed

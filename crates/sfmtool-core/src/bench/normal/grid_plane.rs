@@ -6,7 +6,7 @@
 //! per view, gated in each view, and triangulated from the views it survived
 //! in.
 //!
-//! Each `in` view is rendered once at the track's current frame as a context
+//! Each `in` view is rendered once at the track's current patch frame as a context
 //! tile: the patch re-anchored in its plane on the view's keypoint and drawn
 //! through that plane ([`WarpMap::from_patch`]) on the working grid plus a
 //! margin of the cell search bound, the render the keypoint localizer makes
@@ -56,14 +56,14 @@ use super::super::fit::FitOptions;
 use super::super::steps::tilt_patch;
 use super::super::track::EditableTrack;
 use super::{
-    frame_of, normal_preconditions, perpendicular_part, turn_and_read, NormalError, NormalEstimate,
-    NormalReport,
+    normal_preconditions, patch_frame_of, perpendicular_part, turn_and_read, NormalError,
+    NormalEstimate, NormalReport,
 };
 
 mod detail;
 
 pub use detail::{
-    GridPlaneCell, GridPlaneDetail, GridPlaneFitModel, GridPlaneFrame, GridPlaneLayout,
+    GridPlaneCell, GridPlaneDetail, GridPlaneFitModel, GridPlaneLayout, GridPlanePatchFrame,
     GridPlanePlane, GridPlaneRay, GridPlaneRender, GridPlaneTile, GridPlaneView, GridPlaneViewCell,
     GridPlaneViewFit,
 };
@@ -108,7 +108,7 @@ pub struct GridPlaneNormalOptions {
     /// Side of the working grid the views are rendered on, in samples, at
     /// least 3. `None` renders at about one sample per photograph pixel of
     /// the reference view: the patch's longer side as the reference view
-    /// sees it at the starting frame, rounded up and clamped to `R ..= 2R`
+    /// sees it at the starting patch frame, rounded up and clamped to `R ..= 2R`
     /// (see `working_side`), with `R` the reconstruction's own patch
     /// resolution where it stores patch bitmaps and otherwise the fit's
     /// sub-pixel resolution, the grid the track's bitmap is rendered on.
@@ -120,7 +120,7 @@ pub struct GridPlaneNormalOptions {
     /// grid px.
     pub update_tolerance_px: f32,
     /// The most renders the loop makes, at least 1. A turn is kept only once
-    /// a render at the turned frame has scored it, so the last render's own
+    /// a render at the turned patch frame has scored it, so the last render's own
     /// turn is not taken unless it is under
     /// [`Self::update_tolerance_px`].
     pub max_iterations: u8,
@@ -172,7 +172,7 @@ pub enum GridPlaneAcceptance {
     /// ([`GridPlaneCells::score_before`]).
     WindowedZncc,
     /// Every rendered turn is kept; the loop stops only on the tolerance, the
-    /// render cap, an oscillation (keeping the later frame), or a plane that
+    /// render cap, an oscillation (keeping the later patch frame), or a plane that
     /// proposes no turn. For measuring what the planes propose without the
     /// score's veto.
     None,
@@ -214,8 +214,8 @@ pub struct GridPlaneIteration {
 /// What the cells said, carried by [`NormalEstimate::GridPlaneCells`]. Every
 /// reading is of the last render the loop kept: when the step turned the
 /// patch, the render one turn of under
-/// [`GridPlaneNormalOptions::update_tolerance_px`] before the frame it turned
-/// to; otherwise the render at the frame the loop had reached, which the step
+/// [`GridPlaneNormalOptions::update_tolerance_px`] before the patch frame it turned
+/// to; otherwise the render at the patch frame the loop had reached, which the step
 /// does not keep (see [`GridPlaneOutcome`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GridPlaneCells {
@@ -251,7 +251,7 @@ pub struct GridPlaneCells {
     /// [`LoopStop::Measured`] when the last render's cells fixed no axis, so
     /// no turn was proposed.
     pub stop: LoopStop,
-    /// The acceptance score at the frame the step started from: the mean over
+    /// The acceptance score at the patch frame the step started from: the mean over
     /// the non-reference views of the windowed ZNCC of each view's tile against
     /// the reference's render, with the cluster refinement's default window.
     /// `NaN` when no view scored.
@@ -266,7 +266,7 @@ pub struct GridPlaneCells {
     pub normal_precision_deg: f64,
     /// The views' baseline: the largest angle between two of the rendered
     /// `in` sightings' directions from the patch centre at the starting
-    /// frame, degrees; `NaN` with fewer than two.
+    /// patch frame, degrees; `NaN` with fewer than two.
     pub view_baseline_deg: f64,
     /// Every render of the loop, in order.
     pub trace: Vec<GridPlaneIteration>,
@@ -279,7 +279,7 @@ pub struct GridPlaneCells {
 /// and, where it did not, why.
 ///
 /// Only [`Self::Turned`] moves the normal. The other two leave the track at
-/// the normal it was given, not at a frame part way along the loop, and the
+/// the normal it was given, not at a patch frame part way along the loop, and the
 /// step still reads the track back and returns it: neither is a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridPlaneOutcome {
@@ -361,7 +361,7 @@ impl std::fmt::Display for GridPlaneCells {
 /// Turn the track's patch to the plane through its cells.
 ///
 /// The patch's square is cut into the nine cells of the ZNCC grid. Each `in`
-/// view is rendered once at the current frame, centred on its keypoint and
+/// view is rendered once at the current patch frame, centred on its keypoint and
 /// drawn through the patch's plane, and each cell of it is registered against
 /// the same cell of the reference view's render by a shift search within
 /// [`GridPlaneNormalOptions::cell_shift_bound_px`]. A cell is refused in a view
@@ -381,7 +381,7 @@ impl std::fmt::Display for GridPlaneCells {
 /// stops when a turn moves no cell centre by more than
 /// [`GridPlaneNormalOptions::update_tolerance_px`] (that turn is taken), at
 /// [`GridPlaneNormalOptions::max_iterations`] renders, when a turn moves the
-/// cells no less than the one before (the better-scoring of the two frames
+/// cells no less than the one before (the better-scoring of the two patch frames
 /// is kept), or when a turn is rejected.
 ///
 /// Only a loop that converges turns the patch ([`GridPlaneOutcome::Turned`]).
@@ -391,7 +391,7 @@ impl std::fmt::Display for GridPlaneCells {
 /// when the loop stops on a rejected turn, an oscillation or the render cap.
 ///
 /// The step ends as the other normal steps do: the original track is turned
-/// to the converged frame's normal, or to its own, with [`tilt_patch`] and
+/// to the converged patch frame's normal, or to its own, with [`tilt_patch`] and
 /// read back, its bitmap rendered. The centre does not move.
 ///
 /// # Example
@@ -496,13 +496,15 @@ pub fn grid_plane_normal(
         })
     });
 
-    let kept = frame_of(&end.state);
+    let kept = patch_frame_of(&end.state);
     // Only a converged loop turns the patch; any other ending leaves the
     // normal the step was given.
     let outcome = GridPlaneOutcome::of(end.stop);
     let normal = match outcome {
         GridPlaneOutcome::Turned => kept.normal(),
-        GridPlaneOutcome::Undetermined | GridPlaneOutcome::Unstable => frame_of(track).normal(),
+        GridPlaneOutcome::Undetermined | GridPlaneOutcome::Unstable => {
+            patch_frame_of(track).normal()
+        }
     };
     let measured = &end.measured;
     let report = GridPlaneCells {
@@ -553,7 +555,7 @@ struct Cells<'a, 'v> {
     /// whole-member ZNCC reads with.
     window: Vec<f64>,
     /// The largest angle between two rows' sighting directions from the
-    /// starting frame's centre, degrees.
+    /// starting patch frame's centre, degrees.
     baseline_deg: f64,
 }
 
@@ -592,7 +594,7 @@ fn in_plane_count(plane: &CellPlaneNormal) -> usize {
         .count()
 }
 
-/// One render of every view at one frame, and what the cells said.
+/// One render of every view at one patch frame, and what the cells said.
 struct Measurement {
     plane: CellPlaneNormal,
     view_cells: Vec<[CellStatus; 9]>,
@@ -638,7 +640,7 @@ impl Measurement {
 struct Render {
     /// The patch re-anchored on the view's keypoint, at the working grid's
     /// size: what the cell positions are read on.
-    placement: OrientedPatch,
+    patch_frame: OrientedPatch,
     /// `side × side × channels`, interleaved, `NaN` off the photograph.
     samples: Vec<f32>,
     side: usize,
@@ -647,7 +649,7 @@ struct Render {
 
 impl<'a, 'v> Cells<'a, 'v> {
     /// The rows, the reference and the working grid of one step, chosen
-    /// once from the starting frame. `base` is the resolution the reference
+    /// once from the starting patch frame. `base` is the resolution the reference
     /// rule renders at and the working grid's floor, `R`.
     fn new(
         track: &EditableTrack,
@@ -675,9 +677,9 @@ impl<'a, 'v> Cells<'a, 'v> {
             .collect();
         // The fit's reference: the one the track holds where its row is `in`
         // with a keypoint, and otherwise the reference-view rule's pick.
-        let frame = frame_of(track);
+        let patch_frame = patch_frame_of(track);
         let reference = resolve_reference(
-            &frame,
+            &patch_frame,
             images,
             &view_set,
             &seeds,
@@ -691,19 +693,24 @@ impl<'a, 'v> Cells<'a, 'v> {
         .map(|k| rows[k]);
         // The working grid, chosen once so that every render of the loop is
         // on one grid: the caller's, or the reference view's footprint of the
-        // patch at the starting frame, at its keypoint.
+        // patch at the starting patch frame, at its keypoint.
         let resolution = match options.working_resolution {
             Some(side) => side.max(MIN_WORKING_RESOLUTION),
             None => {
                 let jacobian = reference.and_then(|r| {
                     let observation = &track.observations[r];
                     let view = &images[observation.image as usize];
-                    let placement = seed_of(observation)
+                    let anchored_patch_frame = seed_of(observation)
                         .and_then(|kp| {
-                            frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp)
+                            patch_frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp)
                         })
-                        .unwrap_or_else(|| frame.clone());
-                    patch_grid_jacobian(&placement, view.camera, view.cam_from_world, base as usize)
+                        .unwrap_or_else(|| patch_frame.clone());
+                    patch_grid_jacobian(
+                        &anchored_patch_frame,
+                        view.camera,
+                        view.cam_from_world,
+                        base as usize,
+                    )
                 });
                 working_side(jacobian, base)
             }
@@ -716,7 +723,7 @@ impl<'a, 'v> Cells<'a, 'v> {
             .map(|c| c[0].hypot(c[1]))
             .fold(0.0, f64::max);
         let baseline_deg = view_baseline_deg(
-            frame.center.coords,
+            patch_frame.center.coords,
             rows.iter().map(|&i| {
                 images[track.observations[i].image as usize]
                     .cam_from_world
@@ -750,13 +757,13 @@ impl<'a, 'v> Cells<'a, 'v> {
         }
     }
 
-    /// Render every view at `track`'s frame, register and gate its cells,
+    /// Render every view at `track`'s patch frame, register and gate its cells,
     /// triangulate them and fit the plane, and score the views against the
     /// reference.
     fn measure(&self, track: &EditableTrack) -> Result<Measurement, NormalError> {
-        let frame = frame_of(track);
+        let patch_frame = patch_frame_of(track);
         let r = self.layout.resolution;
-        let wpp = 2.0 * frame.half_extent[0] / r as f64;
+        let wpp = 2.0 * patch_frame.half_extent[0] / r as f64;
         let params = &self.options.plane;
         let mut view_cells = vec![[CellStatus::NotAttempted; 9]; track.observations.len()];
         let mut rays: [Vec<CellRay>; 9] = Default::default();
@@ -764,7 +771,7 @@ impl<'a, 'v> Cells<'a, 'v> {
         let mut record = self
             .options
             .record_detail
-            .then(|| Box::new(empty_render(&frame)));
+            .then(|| Box::new(empty_render(&patch_frame)));
         let mut plane_record = record.as_ref().map(|_| CellPlaneRecord::empty());
         let nothing = |view_cells, mut record: Option<Box<GridPlaneRender>>| {
             let plane = fit_cell_plane_recorded(&Default::default(), params, None);
@@ -780,7 +787,8 @@ impl<'a, 'v> Cells<'a, 'v> {
         self.progress.check_cancel()?;
         let ref_observation = &track.observations[reference];
         let ref_view = &self.images[ref_observation.image as usize];
-        let Some(ref_render) = self.render(&frame, ref_view, seed_of(ref_observation), 0) else {
+        let Some(ref_render) = self.render(&patch_frame, ref_view, seed_of(ref_observation), 0)
+        else {
             return Ok(nothing(view_cells, record));
         };
         if let Some(record) = record.as_deref_mut() {
@@ -795,7 +803,7 @@ impl<'a, 'v> Cells<'a, 'v> {
             view_cells[reference][k] = status;
             if status == CellStatus::Fitted {
                 if let Some((ray, pixel)) = cell_ray(
-                    &ref_render.placement,
+                    &ref_render.patch_frame,
                     ref_view,
                     &ref_posed,
                     *centre,
@@ -825,7 +833,8 @@ impl<'a, 'v> Cells<'a, 'v> {
             self.progress.check_cancel()?;
             let observation = &track.observations[row];
             let view = &self.images[observation.image as usize];
-            let Some(render) = self.render(&frame, view, seed_of(observation), self.layout.margin)
+            let Some(render) =
+                self.render(&patch_frame, view, seed_of(observation), self.layout.margin)
             else {
                 continue;
             };
@@ -867,7 +876,7 @@ impl<'a, 'v> Cells<'a, 'v> {
                 let c = self.layout.centres[k / 3][k % 3];
                 let at = [c[0] + reading.shift[0], c[1] + reading.shift[1]];
                 if let Some((ray, pixel)) =
-                    cell_ray(&render.placement, view, &posed, at, wpp, params)
+                    cell_ray(&render.patch_frame, view, &posed, at, wpp, params)
                 {
                     if let Some(record) = record.as_deref_mut() {
                         record.cells[k]
@@ -899,7 +908,7 @@ impl<'a, 'v> Cells<'a, 'v> {
         edited: &EditedReconstruction,
         measured: &Measurement,
     ) -> Result<Proposal, NormalError> {
-        let was = frame_of(track).normal();
+        let was = patch_frame_of(track).normal();
         if measured.plane.determinacy == NormalDeterminacy::None {
             return Ok(Proposal::Nothing);
         }
@@ -943,30 +952,31 @@ impl<'a, 'v> Cells<'a, 'v> {
         })
     }
 
-    /// One view's context tile at `frame`: the patch re-anchored on
-    /// `keypoint` (on the frame itself where there is none or its ray misses
+    /// One view's context tile at `patch_frame`: the patch re-anchored on
+    /// `keypoint` (on the patch frame itself where there is none or its ray misses
     /// the plane), widened by `margin` grid px on every side, and drawn
     /// through its plane with the sampler the fit's bitmap render picks from
     /// the view's Jacobian. `None` when no sample lands on the photograph.
     fn render(
         &self,
-        frame: &OrientedPatch,
+        patch_frame: &OrientedPatch,
         view: &ProjectedImage<'_>,
         keypoint: Option<[f64; 2]>,
         margin: usize,
     ) -> Option<Render> {
         let r = self.layout.resolution;
-        let placement = keypoint
-            .and_then(|kp| frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp))
-            .unwrap_or_else(|| frame.clone());
-        let jacobian = patch_grid_jacobian(&placement, view.camera, view.cam_from_world, r);
+        let anchored_patch_frame = keypoint
+            .and_then(|kp| patch_frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp))
+            .unwrap_or_else(|| patch_frame.clone());
+        let jacobian =
+            patch_grid_jacobian(&anchored_patch_frame, view.camera, view.cam_from_world, r);
         let sampler = self.options.fit.refine.sampler.for_jacobian(jacobian);
         let side = r + 2 * margin;
         let scale = side as f64 / r as f64;
-        let mut context = placement.clone();
+        let mut context = anchored_patch_frame.clone();
         context.half_extent = [
-            placement.half_extent[0] * scale,
-            placement.half_extent[1] * scale,
+            anchored_patch_frame.half_extent[0] * scale,
+            anchored_patch_frame.half_extent[1] * scale,
         ];
         let mut map = WarpMap::from_patch(&context, view.camera, view.cam_from_world, side as u32);
         let tile = {
@@ -991,7 +1001,7 @@ impl<'a, 'v> Cells<'a, 'v> {
             }
         }
         any.then_some(Render {
-            placement,
+            patch_frame: anchored_patch_frame,
             samples,
             side,
             channels,
@@ -1101,13 +1111,13 @@ fn gated(
 }
 
 /// The ray through the photograph's pixel under grid position `at` of a
-/// render through `placement`, in grid px centred on the grid. Its noise floor
+/// render through `patch_frame`, in grid px centred on the grid. Its noise floor
 /// is a measured shift's precision carried into the view's pixels by the
 /// render map's local Jacobian, floored at the kernel's absolute floor.
 /// Returns the ray with the pixel it passes through; `None` where the
 /// position does not project.
 fn cell_ray(
-    placement: &OrientedPatch,
+    patch_frame: &OrientedPatch,
     view: &ProjectedImage<'_>,
     posed: &PosedView<'_>,
     at: [f64; 2],
@@ -1115,9 +1125,9 @@ fn cell_ray(
     params: &CellPlaneParams,
 ) -> Option<(CellRay, [f64; 2])> {
     let pixel = |gx: f64, gy: f64| {
-        let world = shifted_center(placement, gx, gy, wpp, wpp);
+        let world = shifted_center(patch_frame, gx, gy, wpp, wpp);
         view.camera
-            .project_homogeneous(view.cam_from_world, world.coords, placement.w)
+            .project_homogeneous(view.cam_from_world, world.coords, patch_frame.w)
     };
     let centre = pixel(at[0], at[1])?;
     let (right, left) = (pixel(at[0] + 0.5, at[1])?, pixel(at[0] - 0.5, at[1])?);
@@ -1131,10 +1141,10 @@ fn cell_ray(
     posed.ray_through(centre, floor).map(|ray| (ray, centre))
 }
 
-/// A render's detail before anything is read: the frame, no tiles, no rays,
+/// A render's detail before anything is read: the patch frame, no tiles, no rays,
 /// and a plane with nothing fitted. The trace entry is filled in when the loop
 /// ends.
-fn empty_render(frame: &OrientedPatch) -> GridPlaneRender {
+fn empty_render(patch_frame: &OrientedPatch) -> GridPlaneRender {
     let nan3 = [f64::NAN; 3];
     let cell = GridPlaneCell {
         rays: Vec::new(),
@@ -1148,12 +1158,12 @@ fn empty_render(frame: &OrientedPatch) -> GridPlaneRender {
         weight: 0.0,
     };
     GridPlaneRender {
-        frame: GridPlaneFrame {
-            center: frame.center.coords.into(),
-            u_axis: frame.u_axis.into(),
-            v_axis: frame.v_axis.into(),
-            normal: frame.normal().into(),
-            half_extent: frame.half_extent,
+        patch_frame: GridPlanePatchFrame {
+            center: patch_frame.center.coords.into(),
+            u_axis: patch_frame.u_axis.into(),
+            v_axis: patch_frame.v_axis.into(),
+            normal: patch_frame.normal().into(),
+            half_extent: patch_frame.half_extent,
         },
         reference: None,
         views: Vec::new(),
@@ -1337,9 +1347,9 @@ fn tile_zncc(
     (scored > 0).then(|| sum / scored as f64)
 }
 
-/// The signed distance of `plane`'s weighted cell centroid from `frame`'s
+/// The signed distance of `plane`'s weighted cell centroid from `patch_frame`'s
 /// centre along its normal; `NaN` when the cells fixed no axis.
-fn plane_offset(plane: &CellPlaneNormal, frame: &OrientedPatch) -> f64 {
+fn plane_offset(plane: &CellPlaneNormal, patch_frame: &OrientedPatch) -> f64 {
     if plane.determinacy == NormalDeterminacy::None {
         return f64::NAN;
     }
@@ -1354,7 +1364,7 @@ fn plane_offset(plane: &CellPlaneNormal, frame: &OrientedPatch) -> f64 {
     if total.is_nan() || total <= 0.0 {
         return f64::NAN;
     }
-    (centroid / total - frame.center.coords).dot(&normal)
+    (centroid / total - patch_frame.center.coords).dot(&normal)
 }
 
 /// How [`turn_loop`] ended.

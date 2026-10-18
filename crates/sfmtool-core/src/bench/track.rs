@@ -401,7 +401,7 @@ pub struct TrackMeasurement {
     /// ([`SelfSimilarityEllipseUnits`]): in grid px, in source-image px
     /// through the Jacobian of the tile's warp at its centre, and along the
     /// patch's `u` and `v` axes in the scene's world-space unit (degrees for
-    /// a patch at infinity), all read through the keypoint-anchored placement
+    /// a patch at infinity), all read through the keypoint-anchored patch frame
     /// the tile was rendered through. `None` wherever
     /// `zncc_self_similarity_radius` is; its `image_px` is `None` where the
     /// tile's centre does not project.
@@ -743,20 +743,20 @@ pub struct TrackPayload {
     /// Whether [`Self::position`] is a bearing rather than a place: the point's
     /// own `w == 0`.
     ///
-    /// **The flag is the authority and the frame is not.** The same three
+    /// **The flag is the authority and the patch frame is not.** The same three
     /// numbers are a place or a unit direction depending on this one bit, and a
     /// track can carry the bit with no patch at all -- a point put on the bench
     /// from a `sift_files` reconstruction has no patch frame to read a `w` off,
     /// and its bearings are still bearings. So everything that says which of the
     /// two it is holding -- the panel's word in front of the coordinate, the
     /// wire's choice of `direction` over `position`, the commit's `w` -- reads
-    /// this, and [`Self::placement`]'s own `w` is kept equal to it wherever both
+    /// this, and [`Self::patch_frame`]'s own `w` is kept equal to it wherever both
     /// exist, for the renderer and the kernels that project corners.
     pub at_infinity: bool,
     /// The patch the localizer registers against. Its centre is
     /// [`Self::position`] when both are present, and its `w` agrees with
     /// [`Self::at_infinity`].
-    pub placement: Option<OrientedPatch>,
+    pub patch_frame: Option<OrientedPatch>,
     /// The `(R, R, C)` patch bitmap: the render of the reference observation
     /// [`Self::reference`] names, or, where it names none, a bitmap that is not
     /// the render of one of the track's observations (a fused mean an older
@@ -842,7 +842,7 @@ pub struct TrackPayload {
     /// The colour the point carries, used when there is no bitmap to read one
     /// from.
     pub color: [u8; 3],
-    /// Confidence in the frame's normal, in the stored column's byte scale.
+    /// Confidence in the patch frame's normal, in the stored column's byte scale.
     pub normal_confidence: Option<u8>,
     /// The last triangulation's condition number.
     pub condition_number: Option<f64>,

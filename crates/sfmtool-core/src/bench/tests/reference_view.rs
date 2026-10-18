@@ -180,7 +180,7 @@ fn an_evaluation_picks_the_lowest_cost_view_on_a_ground_truth_track() {
 /// The self-similarity readings come from the tile the reference view's
 /// readings share. They are the readings of the tile rendered the way they
 /// were before that tile was shared: the patch anchored on the keypoint, the
-/// sampler the sampler rule picks from that placement's Jacobian, black off
+/// sampler the sampler rule picks from that patch frame's Jacobian, black off
 /// the photograph, and the self-similarity read the overlap way over the
 /// samples on the photograph.
 #[test]
@@ -190,19 +190,27 @@ fn the_shared_tile_leaves_the_self_similarity_readings_as_a_direct_render_gives_
     let views = truth.views();
     let options = EvaluateOptions::default();
     let resolution = options.patch_resolution(&edited.base) as usize;
-    let frame = read
+    let patch_frame = read
         .track()
-        .and_then(|t| t.placement.clone())
-        .expect("a track-stage frame");
+        .and_then(|t| t.patch_frame.clone())
+        .expect("a track-stage patch frame");
     for (i, observation) in read.observations.iter().enumerate() {
         let view = &views[observation.image as usize];
-        let anchored =
-            frame.anchored_at_keypoint(view.camera, view.cam_from_world, keypoint_of(&read, i));
-        let placement = anchored.as_ref().unwrap_or(&frame);
-        let jacobian = patch_grid_jacobian(placement, view.camera, view.cam_from_world, resolution);
+        let anchored = patch_frame.anchored_at_keypoint(
+            view.camera,
+            view.cam_from_world,
+            keypoint_of(&read, i),
+        );
+        let anchored_patch_frame = anchored.as_ref().unwrap_or(&patch_frame);
+        let jacobian = patch_grid_jacobian(
+            anchored_patch_frame,
+            view.camera,
+            view.cam_from_world,
+            resolution,
+        );
         let sampler = options.localize.sampler.for_jacobian(jacobian);
         let mut map = WarpMap::from_patch(
-            placement,
+            anchored_patch_frame,
             view.camera,
             view.cam_from_world,
             resolution as u32,
@@ -232,8 +240,12 @@ fn the_shared_tile_leaves_the_self_similarity_readings_as_a_direct_render_gives_
         };
         let parts =
             zncc_self_similarity_parts(&tile, Some(&valid), &SelfSimilarityParams::default());
-        let ellipse =
-            SelfSimilarityEllipseUnits::read(&parts.whole, jacobian, Some(placement), resolution);
+        let ellipse = SelfSimilarityEllipseUnits::read(
+            &parts.whole,
+            jacobian,
+            Some(anchored_patch_frame),
+            resolution,
+        );
 
         // Compared as printed, so that a `NaN` (a circle's major angle, a
         // textureless cell) matches itself.
@@ -264,10 +276,10 @@ fn the_pair_zncc_is_the_median_of_member_coherence_s_row_called_directly() {
     let (read, edited) = truth.evaluated_track();
     let views = truth.views();
     let options = EvaluateOptions::default();
-    let frame = read
+    let patch_frame = read
         .track()
-        .and_then(|t| t.placement.clone())
-        .expect("a track-stage frame");
+        .and_then(|t| t.patch_frame.clone())
+        .expect("a track-stage patch frame");
     let rows: Vec<usize> = (0..read.observations.len())
         .filter(|&i| read.observations[i].verdict == Verdict::In)
         .collect();
@@ -279,7 +291,7 @@ fn the_pair_zncc_is_the_median_of_member_coherence_s_row_called_directly() {
         sampler: options.localize.sampler,
         ..MemberCoherenceParams::default()
     };
-    let matrix = member_zncc_matrix(&frame, &views, &members, Some(&keypoints), &params);
+    let matrix = member_zncc_matrix(&patch_frame, &views, &members, Some(&keypoints), &params);
     assert_eq!(matrix.members, members);
     for (k, &i) in rows.iter().enumerate() {
         let others: Vec<f64> = (0..matrix.len())
@@ -302,12 +314,12 @@ fn tile_of_row(
     i: usize,
     resolution: usize,
 ) -> ViewTile {
-    let frame = read
+    let patch_frame = read
         .track()
-        .and_then(|t| t.placement.clone())
-        .expect("a track-stage frame");
+        .and_then(|t| t.patch_frame.clone())
+        .expect("a track-stage patch frame");
     render_view_tile(
-        &frame,
+        &patch_frame,
         &views[read.observations[i].image as usize],
         Some(keypoint_of(read, i)),
         resolution,
@@ -603,7 +615,7 @@ const PARTIAL_POINT: usize = 53;
 
 /// Point `p`'s patch, its images and its stored keypoints.
 fn point_inputs(recon: &SfmrReconstruction, p: usize) -> (OrientedPatch, Vec<u32>, Vec<[f64; 2]>) {
-    let cloud = PatchCloud::from_stored_frames(recon).expect("patch frames");
+    let cloud = PatchCloud::from_stored_patch_frames(recon).expect("patch frames");
     let kxy = recon.keypoints_xy().expect("inline keypoints");
     let offsets = &recon.point_set.observation_offsets;
     let rows = offsets[p]..offsets[p + 1];
@@ -738,7 +750,7 @@ fn normal_refinement_stores_the_bitmap_its_reference_names() {
     let out = refine_patch_normal(&patch, &views, 24, &params, Some(&anchors(&keypoints)));
     let rgba = out.representative.as_ref().expect("a bitmap");
     // The stored bitmap agrees with its reference: the named view's tile at
-    // the refined frame.
+    // the refined patch frame.
     let all_views: Vec<u32> = (0..views.len() as u32).collect();
     let render = render_reference(
         &out.patch,
@@ -816,7 +828,7 @@ fn rendering_from_the_evaluation_matches_the_three_calls() {
     let truth = GroundTruth::load();
     let views = truth.views();
     let (read, edited) = truth.evaluated_track();
-    let p = read.track().unwrap().placement.clone().unwrap();
+    let p = read.track().unwrap().patch_frame.clone().unwrap();
     let aim = (p.normal() + p.u_axis.normalize() * 0.05).normalize();
     let (tilted, _) = tilt_patch(&read, &edited, aim).expect("a small turn");
     assert!(tilted.track().unwrap().bitmap.is_none());
@@ -1132,7 +1144,7 @@ fn a_defined_reference_is_rendered_from_through_the_bench_s_steps() {
 
     // A patch step drops the bitmap; the render keeps the reference, and the
     // combined call matches the three separate calls.
-    let p = first.track().unwrap().placement.clone().unwrap();
+    let p = first.track().unwrap().patch_frame.clone().unwrap();
     let aim = (p.normal() + p.u_axis.normalize() * 0.05).normalize();
     let (tilted, _) = tilt_patch(&first, &edited, aim).expect("a small turn");
     assert!(tilted.track().unwrap().bitmap.is_none());
@@ -1540,8 +1552,8 @@ fn a_bench_built_track_with_a_bitmap_naming_no_row_is_rendered_from_the_pick() {
 fn turned_away(track: &EditableTrack) -> EditableTrack {
     let mut turned = track.clone();
     if let crate::bench::Stage::Track(payload) = &mut turned.stage {
-        let placement = payload.placement.as_mut().expect("a placed track");
-        placement.v_axis = -placement.v_axis;
+        let patch_frame = payload.patch_frame.as_mut().expect("a placed track");
+        patch_frame.v_axis = -patch_frame.v_axis;
     }
     turned
 }
@@ -1630,9 +1642,9 @@ fn a_track_whose_in_rows_are_ineligible_is_judged_against_an_out_row() {
     // rows 4-7 see it from behind.
     let mut track = read.clone();
     if let crate::bench::Stage::Track(payload) = &mut track.stage {
-        let placement = payload.placement.as_mut().expect("a placed track");
-        let (n, theta) = (placement.normal(), 80f64.to_radians());
-        placement.v_axis = placement.v_axis * theta.cos() + n * theta.sin();
+        let patch_frame = payload.patch_frame.as_mut().expect("a placed track");
+        let (n, theta) = (patch_frame.normal(), 80f64.to_radians());
+        patch_frame.v_axis = patch_frame.v_axis * theta.cos() + n * theta.sin();
         payload.drop_bitmap();
     }
     for i in 0..8 {

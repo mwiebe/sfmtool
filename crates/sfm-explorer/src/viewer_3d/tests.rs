@@ -896,37 +896,38 @@ fn staged() -> Staged {
         rect: egui::Rect::NOTHING,
     };
     let track = staged.track();
-    look_square_at(&mut staged.viewer, &placement_of(&track));
+    look_square_at(&mut staged.viewer, &patch_frame_of(&track));
     staged.settle(&track);
     staged
 }
 
 /// The track's patch, as an owned value.
-fn placement_of(track: &EditableTrack) -> OrientedPatch {
+fn patch_frame_of(track: &EditableTrack) -> OrientedPatch {
     track
         .track()
-        .and_then(|payload| payload.placement.clone())
+        .and_then(|payload| payload.patch_frame.clone())
         .expect("a track from a point carries the stored patch")
 }
 
 /// Point the viewport square at the patch, [`STANDOFF`] half-lengths off it.
 ///
-/// The frame's own `v` is the viewport's up, so the square's `u` runs along the
-/// panel's `x` and a drag along the screen is a drag along an axis of the patch.
-fn look_square_at(viewer: &mut Viewer3D, frame: &OrientedPatch) {
-    let eye = frame.center + frame.normal() * (frame.half_extent[0] * STANDOFF);
-    viewer.camera.world_up = frame.v_axis;
-    viewer.camera.camera = Camera::look_at(eye, frame.center, frame.v_axis);
+/// The patch frame's own `v` is the viewport's up, so the square's `u` runs along
+/// the panel's `x` and a drag along the screen is a drag along an axis of the
+/// patch.
+fn look_square_at(viewer: &mut Viewer3D, patch_frame: &OrientedPatch) {
+    let eye = patch_frame.center + patch_frame.normal() * (patch_frame.half_extent[0] * STANDOFF);
+    viewer.camera.world_up = patch_frame.v_axis;
+    viewer.camera.camera = Camera::look_at(eye, patch_frame.center, patch_frame.v_axis);
     viewer.view_initialized = true;
 }
 
 /// Point it along the patch's own `u` instead, which is the view in which the
 /// plane is edge-on and a pixel of pointer motion is an unbounded distance
 /// along it.
-fn look_edge_on(viewer: &mut Viewer3D, frame: &OrientedPatch) {
-    let eye = frame.center + frame.u_axis * (frame.half_extent[0] * STANDOFF);
-    viewer.camera.world_up = frame.v_axis;
-    viewer.camera.camera = Camera::look_at(eye, frame.center, frame.v_axis);
+fn look_edge_on(viewer: &mut Viewer3D, patch_frame: &OrientedPatch) {
+    let eye = patch_frame.center + patch_frame.u_axis * (patch_frame.half_extent[0] * STANDOFF);
+    viewer.camera.world_up = patch_frame.v_axis;
+    viewer.camera.camera = Camera::look_at(eye, patch_frame.center, patch_frame.v_axis);
     viewer.view_initialized = true;
 }
 
@@ -939,12 +940,17 @@ fn look_edge_on(viewer: &mut Viewer3D, frame: &OrientedPatch) {
 /// which the three other handles read, foreshortens by the same turn. `standoff`
 /// is the second half of that, a nearer eye making the segment larger on screen
 /// without making the view any less end-on.
-fn look_off_normal(viewer: &mut Viewer3D, frame: &OrientedPatch, degrees: f64, standoff: f64) {
+fn look_off_normal(
+    viewer: &mut Viewer3D,
+    patch_frame: &OrientedPatch,
+    degrees: f64,
+    standoff: f64,
+) {
     let (sin, cos) = degrees.to_radians().sin_cos();
-    let out = frame.normal() * cos + frame.u_axis * sin;
-    let eye = frame.center + out * (frame.half_extent[0] * standoff);
-    viewer.camera.world_up = frame.v_axis;
-    viewer.camera.camera = Camera::look_at(eye, frame.center, frame.v_axis);
+    let out = patch_frame.normal() * cos + patch_frame.u_axis * sin;
+    let eye = patch_frame.center + out * (patch_frame.half_extent[0] * standoff);
+    viewer.camera.world_up = patch_frame.v_axis;
+    viewer.camera.camera = Camera::look_at(eye, patch_frame.center, patch_frame.v_axis);
     viewer.view_initialized = true;
 }
 
@@ -973,7 +979,7 @@ fn dot(staged: &Staged) -> egui::Pos2 {
 
 /// Corner `k` of the square, in panel px.
 fn corner(staged: &Staged, k: usize) -> egui::Pos2 {
-    on_panel(staged, figure(&staged.viewer).frame[k].a)
+    on_panel(staged, figure(&staged.viewer).square[k].a)
 }
 
 /// The midpoint of edge `k`, which runs from corner `k` to corner `k + 1`.
@@ -986,7 +992,7 @@ fn edge_mid(staged: &Staged, k: usize) -> egui::Pos2 {
 fn normal_segment(staged: &Staged) -> (egui::Pos2, egui::Pos2) {
     let arrow = figure(&staged.viewer)
         .normal
-        .expect("a finite frame carries its normal");
+        .expect("a finite patch frame carries its normal");
     (on_panel(staged, arrow[0].a), on_panel(staged, arrow[0].b))
 }
 
@@ -1227,7 +1233,7 @@ fn an_edge_dragged_lands_under_the_release_point_with_the_far_edge_held() {
         (far_after - far_before).length() < 1.0,
         "the far edge moved from {far_before:?} to {far_after:?}",
     );
-    let after = placement_of(&resized);
+    let after = patch_frame_of(&resized);
     assert_eq!(
         after.half_extent[0], after.half_extent[1],
         "a patch frame is square"
@@ -1271,8 +1277,8 @@ fn a_corner_dragged_onto_its_neighbour_is_a_quarter_turn_and_one_version() {
         "{:?}",
         labels.last(),
     );
-    let was = placement_of(&track);
-    let turned = placement_of(&staged.track());
+    let was = patch_frame_of(&track);
+    let turned = patch_frame_of(&staged.track());
     assert_eq!(turned.center, was.center, "a turn moves the patch nowhere");
     assert!((turned.normal() - was.normal()).norm() < 1e-12);
 }
@@ -1292,7 +1298,7 @@ const DOT_LEAN_DEG: f64 = 15.0;
 fn look_past_the_arrowhead(staged: &mut Staged, track: &EditableTrack) {
     look_off_normal(
         &mut staged.viewer,
-        &placement_of(track),
+        &patch_frame_of(track),
         DOT_LEAN_DEG,
         STANDOFF,
     );
@@ -1343,8 +1349,8 @@ fn a_dot_drag_is_one_version_whose_label_names_the_move() {
         labels.last(),
     );
     // In the patch's own plane, with the axes and the size untouched.
-    let was = placement_of(&track);
-    let now = placement_of(&staged.track());
+    let was = patch_frame_of(&track);
+    let now = patch_frame_of(&staged.track());
     assert_eq!(now.half_extent, was.half_extent);
     assert!((now.normal() - was.normal()).norm() < 1e-12);
     let offset = now.center - was.center;
@@ -1412,7 +1418,7 @@ fn an_edge_on_view_takes_no_press_and_a_busy_node_takes_none_either() {
 
     // Then edge-on, where a pixel of pointer motion is an unbounded distance
     // along the plane.
-    look_edge_on(&mut staged.viewer, &placement_of(&track));
+    look_edge_on(&mut staged.viewer, &patch_frame_of(&track));
     staged.settle(&track);
     let press = dot(&staged);
     let flat = gesture(&mut staged, &track, false, press, &steps, false);
@@ -1484,15 +1490,15 @@ fn as_bearing(state: &AppState, id: ReconId, track: &EditableTrack) -> EditableT
     };
     payload.at_infinity = true;
     payload.position = None;
-    let frame = payload.placement.as_mut().expect("a patch");
-    let direction = (frame.center - seen_from).normalize();
+    let patch_frame = payload.patch_frame.as_mut().expect("a patch");
+    let direction = (patch_frame.center - seen_from).normalize();
     // The world axis the bearing leans on least, so the tangent frame it builds
     // is well conditioned.
     let up = [Vector3::x(), Vector3::y(), Vector3::z()]
         .into_iter()
         .min_by(|a, b| direction.dot(a).abs().total_cmp(&direction.dot(b).abs()))
         .expect("three axes");
-    *frame = OrientedPatch::from_infinity_direction(
+    *patch_frame = OrientedPatch::from_infinity_direction(
         Point3::from(direction),
         up,
         [BEARING_HALF, BEARING_HALF],
@@ -1507,7 +1513,7 @@ fn as_bearing(state: &AppState, id: ReconId, track: &EditableTrack) -> EditableT
 fn the_three_handles_of_a_track_at_infinity_move_the_bearing_the_size_and_the_spin() {
     let mut staged = staged();
     let track = as_bearing(&staged.state, staged.id, &staged.track());
-    let was = placement_of(&track);
+    let was = patch_frame_of(&track);
     // Looking along the bearing: a direction is projected rotation-only, so
     // where the eye stands does not enter into it.
     staged.viewer.camera.world_up = was.v_axis;
@@ -1541,7 +1547,7 @@ fn the_three_handles_of_a_track_at_infinity_move_the_bearing_the_size_and_the_sp
         &[egui::vec2(30.0, 0.0)],
         false,
     );
-    let slid = placement_of(&applied(&edit_of(&dragged)));
+    let slid = patch_frame_of(&applied(&edit_of(&dragged)));
     assert_eq!(slid.w, 0.0, "a bearing stays a bearing");
     assert!((slid.center.coords.norm() - 1.0).abs() < 1e-12);
     assert!(
@@ -1553,7 +1559,7 @@ fn the_three_handles_of_a_track_at_infinity_move_the_bearing_the_size_and_the_sp
     let press = edge_mid(&staged, 1);
     let step = egui::vec2((press.x - dot(&staged).x) * 0.6, 0.0);
     let dragged = gesture(&mut staged, &track, false, press, &[step], false);
-    let bigger = placement_of(&applied(&edit_of(&dragged)));
+    let bigger = patch_frame_of(&applied(&edit_of(&dragged)));
     assert_eq!(bigger.w, 0.0);
     assert_eq!(bigger.half_extent[0], bigger.half_extent[1]);
     assert!(
@@ -1567,7 +1573,7 @@ fn the_three_handles_of_a_track_at_infinity_move_the_bearing_the_size_and_the_sp
     let press = corner(&staged, 2);
     let step = corner(&staged, 3) - press;
     let dragged = gesture(&mut staged, &track, false, press, &[step], false);
-    let spun = placement_of(&applied(&edit_of(&dragged)));
+    let spun = patch_frame_of(&applied(&edit_of(&dragged)));
     assert_eq!(spun.center, was.center, "a turn moves the bearing nowhere");
     assert_eq!(spun.half_extent, was.half_extent);
     assert!(
@@ -1633,9 +1639,11 @@ fn a_corner_turns_the_cursor_along_its_arc_where_an_edge_lies_across_itself() {
 const OFF_NORMAL_DEG: f64 = 60.0;
 
 /// The eye's place for [`OFF_NORMAL_DEG`], as a world point.
-fn off_normal_eye(frame: &OrientedPatch) -> Point3<f64> {
+fn off_normal_eye(patch_frame: &OrientedPatch) -> Point3<f64> {
     let (sin, cos) = OFF_NORMAL_DEG.to_radians().sin_cos();
-    frame.center + (frame.normal() * cos + frame.u_axis * sin) * (frame.half_extent[0] * STANDOFF)
+    patch_frame.center
+        + (patch_frame.normal() * cos + patch_frame.u_axis * sin)
+            * (patch_frame.half_extent[0] * STANDOFF)
 }
 
 /// A press on the normal's segment moves the patch along the normal, and the
@@ -1648,7 +1656,7 @@ fn off_normal_eye(frame: &OrientedPatch) -> Point3<f64> {
 fn a_normal_drag_moves_the_patch_along_its_normal_and_orbits_nothing() {
     let mut staged = staged();
     let track = staged.track();
-    let was = placement_of(&track);
+    let was = patch_frame_of(&track);
     look_off_normal(&mut staged.viewer, &was, OFF_NORMAL_DEG, STANDOFF);
     staged.settle(&track);
 
@@ -1692,7 +1700,7 @@ fn a_normal_drag_moves_the_patch_along_its_normal_and_orbits_nothing() {
 
     // The patch moved along its normal and nowhere else, keeping its axes and
     // its size.
-    let now = placement_of(&staged.track());
+    let now = patch_frame_of(&staged.track());
     assert_eq!(now.half_extent, was.half_extent);
     assert!((now.normal() - was.normal()).norm() < 1e-12);
     let moved = now.center - was.center;
@@ -1736,7 +1744,7 @@ fn escape_leaves_no_offset_and_a_normal_drag_that_ends_where_it_started_pushes_n
     let track = staged.track();
     look_off_normal(
         &mut staged.viewer,
-        &placement_of(&track),
+        &patch_frame_of(&track),
         OFF_NORMAL_DEG,
         STANDOFF,
     );
@@ -1784,7 +1792,7 @@ fn a_view_down_the_normal_refuses_the_segment_where_the_plane_handles_are_at_the
     // long: what refuses it is the angle and not its size on screen.
     look_off_normal(
         &mut staged.viewer,
-        &placement_of(&track),
+        &patch_frame_of(&track),
         crate::bench::geometry::MIN_PLANE_ANGLE_DEG - 1.0,
         3.0,
     );
@@ -1835,12 +1843,12 @@ fn a_view_down_the_normal_refuses_the_segment_where_the_plane_handles_are_at_the
 fn the_normal_segments_cursor_lies_along_it_where_an_edges_lies_across_itself() {
     let mut staged = staged();
     let track = staged.track();
-    let frame = placement_of(&track);
-    let eye = off_normal_eye(&frame);
-    let forward = (frame.center - eye).normalize();
+    let patch_frame = patch_frame_of(&track);
+    let eye = off_normal_eye(&patch_frame);
+    let forward = (patch_frame.center - eye).normalize();
     // The patch's `v` taken into the image plane, which is the unrolled up, and
     // the axis a roll about the view direction turns it toward.
-    let flat_up = (frame.v_axis - forward * frame.v_axis.dot(&forward)).normalize();
+    let flat_up = (patch_frame.v_axis - forward * patch_frame.v_axis.dot(&forward)).normalize();
     let right = forward.cross(&flat_up).normalize();
 
     // Within the 22.5-degree quantization a resize cursor has, two directions
@@ -1854,7 +1862,7 @@ fn the_normal_segments_cursor_lies_along_it_where_an_edges_lies_across_itself() 
         let (sin, cos) = roll.to_radians().sin_cos();
         let up = flat_up * cos + right * sin;
         staged.viewer.camera.world_up = up;
-        staged.viewer.camera.camera = Camera::look_at(eye, frame.center, up);
+        staged.viewer.camera.camera = Camera::look_at(eye, patch_frame.center, up);
         staged.viewer.view_initialized = true;
         staged.settle(&track);
 
@@ -1907,7 +1915,7 @@ fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
 fn an_arrowhead_drag_tilts_the_patch_and_orbits_nothing() {
     let mut staged = staged();
     let track = staged.track();
-    let was = placement_of(&track);
+    let was = patch_frame_of(&track);
     look_off_normal(&mut staged.viewer, &was, AIMING_DEG, STANDOFF);
     staged.settle(&track);
 
@@ -1948,7 +1956,7 @@ fn an_arrowhead_drag_tilts_the_patch_and_orbits_nothing() {
     // The square turned about its own centre and nowhere else: the centre and
     // the size are where they were, and the normal is not.
     let tilted = staged.track();
-    let now = placement_of(&tilted);
+    let now = patch_frame_of(&tilted);
     assert_eq!(now.center, was.center);
     assert_eq!(now.half_extent, was.half_extent);
     assert!(
@@ -1988,7 +1996,7 @@ const _: () = assert!(CLOSE_STANDOFF < geometry::AIM_LEVER);
 fn an_arrowhead_close_to_the_eye_takes_the_press_rather_than_orbiting() {
     let mut staged = staged();
     let track = staged.track();
-    let was = placement_of(&track);
+    let was = patch_frame_of(&track);
     look_off_normal(&mut staged.viewer, &was, 10.0, CLOSE_STANDOFF);
     staged.settle(&track);
 
@@ -2013,7 +2021,7 @@ fn an_arrowhead_close_to_the_eye_takes_the_press_rather_than_orbiting() {
         .edit_bench_patch(staged.id, &staged.label, &PatchEdit::Tilt { normal })
         .expect("a finite direction");
     assert!(
-        (placement_of(&staged.track()).normal() - was.normal()).norm() > 1e-3,
+        (patch_frame_of(&staged.track()).normal() - was.normal()).norm() > 1e-3,
         "the patch did not turn",
     );
 }
@@ -2026,7 +2034,7 @@ fn escape_leaves_no_tilt_and_an_arrowhead_drag_that_ends_where_it_started_pushes
     let track = staged.track();
     look_off_normal(
         &mut staged.viewer,
-        &placement_of(&track),
+        &patch_frame_of(&track),
         AIMING_DEG,
         STANDOFF,
     );
@@ -2094,8 +2102,8 @@ fn bench_frame(
 fn the_arrowheads_gesture_is_chosen_at_the_press_and_does_not_change_under_it() {
     let mut staged = staged();
     let track = staged.track();
-    let frame = placement_of(&track);
-    look_off_normal(&mut staged.viewer, &frame, AIMING_DEG, STANDOFF);
+    let patch_frame = patch_frame_of(&track);
+    look_off_normal(&mut staged.viewer, &patch_frame, AIMING_DEG, STANDOFF);
     staged.settle(&track);
 
     let head = arrowhead(&staged);
@@ -2162,7 +2170,7 @@ fn the_arrowheads_gesture_is_chosen_at_the_press_and_does_not_change_under_it() 
     let eye = staged.viewer.camera.position();
     assert!(
         matches!(
-            geometry::tilt_gesture(&placement_of(&staged.track()), eye),
+            geometry::tilt_gesture(&patch_frame_of(&staged.track()), eye),
             Some(geometry::Tilt::Swing(_)),
         ),
         "the drag should have carried the normal past the bar it was chosen by",
@@ -2177,10 +2185,10 @@ fn the_arrowheads_gesture_is_chosen_at_the_press_and_does_not_change_under_it() 
 fn the_arrowheads_cursor_is_the_gesture_it_is_about_to_make() {
     let mut staged = staged();
     let track = staged.track();
-    let frame = placement_of(&track);
+    let patch_frame = patch_frame_of(&track);
 
     // Near the line of sight, where the aim is free in two directions at once.
-    look_off_normal(&mut staged.viewer, &frame, AIMING_DEG, STANDOFF);
+    look_off_normal(&mut staged.viewer, &patch_frame, AIMING_DEG, STANDOFF);
     staged.settle(&track);
     let head = arrowhead(&staged);
     assert_eq!(
@@ -2192,15 +2200,15 @@ fn the_arrowheads_cursor_is_the_gesture_it_is_about_to_make() {
     // Across it, where the head swings about one axis. Read at several rolls of
     // the camera, so the claim is about the direction the radius runs in and
     // not about the panel's own axes.
-    let eye = off_normal_eye(&frame);
-    let forward = (frame.center - eye).normalize();
-    let flat_up = (frame.v_axis - forward * frame.v_axis.dot(&forward)).normalize();
+    let eye = off_normal_eye(&patch_frame);
+    let forward = (patch_frame.center - eye).normalize();
+    let flat_up = (patch_frame.v_axis - forward * patch_frame.v_axis.dot(&forward)).normalize();
     let right = forward.cross(&flat_up).normalize();
     for roll in [0.0_f64, 35.0, 70.0, 110.0] {
         let (sin, cos) = roll.to_radians().sin_cos();
         let up = flat_up * cos + right * sin;
         staged.viewer.camera.world_up = up;
-        staged.viewer.camera.camera = Camera::look_at(eye, frame.center, up);
+        staged.viewer.camera.camera = Camera::look_at(eye, patch_frame.center, up);
         staged.viewer.view_initialized = true;
         staged.settle(&track);
 

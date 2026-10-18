@@ -41,15 +41,15 @@ use crate::viewer_3d::{
 #[cfg(test)]
 mod tests;
 
-/// One of the four ways the world's frame can be put onto a patch.
+/// One of the four ways the world's coordinate frame can be put onto a patch.
 ///
-/// They differ only in how much of the patch's frame the world adopts: all of
-/// it, its normal, its centre, or its height. Each is a map acting in **world**
+/// They differ only in how much of the patch's coordinate system the world adopts:
+/// all of it, its normal, its centre, or its height. Each is a map acting in **world**
 /// space ([`PatchReframe::map`]), with a scale of `1`: they re-frame the scene
 /// and never resize it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PatchReframe {
-    /// The patch's frame becomes the world frame: `X` along `u`, `Y` along `v`,
+    /// The patch's coordinate system becomes the world's: `X` along `u`, `Y` along `v`,
     /// `Z` along the outward normal, and the centre at the origin.
     SetToOrigin,
     /// The scene tips about the patch's centre by the shortest rotation taking
@@ -85,8 +85,8 @@ impl PatchReframe {
     pub(crate) fn hint(self) -> &'static str {
         match self {
             Self::SetToOrigin => {
-                "Draw the scene in this patch's own frame: its centre at the origin, its normal \
-                 along +Z."
+                "Draw the scene in this patch's coordinate system: its centre at the origin, \
+                 its normal along +Z."
             }
             Self::AlignNormalToZ => {
                 "Tip the scene so this patch faces +Z, turning about the patch so it stays where \
@@ -123,7 +123,7 @@ impl PatchReframe {
     /// find the square the sentence is about.
     fn sentence(self, node: &str, patch: &str) -> String {
         match self {
-            Self::SetToOrigin => format!("Set {node} to the frame of patch {patch}"),
+            Self::SetToOrigin => format!("Set {node} to patch {patch}'s coordinate system"),
             Self::AlignNormalToZ => format!("Aligned {node}'s patch {patch} normal to +Z"),
             Self::TranslateToOrigin => format!("Translated {node}'s patch {patch} to the origin"),
             Self::TranslateToXyPlane => {
@@ -133,18 +133,22 @@ impl PatchReframe {
     }
 
     /// The map this entry applies, acting on **world** space, for a patch
-    /// whose world frame is `frame`.
+    /// whose coordinate system, in world coordinates, is `coordinate_system`.
     ///
     /// Set to Origin is `Mᵀ` and not `M`, with `M = [u v n]` as columns: a
     /// world point is `c + M·(a, b, d)`, so its coordinates on the patch's axes
     /// are `Mᵀ(p − c)`. Align Normal to Z turns about `c` rather than about the
     /// world origin, so the patch stays where it is and everything else tips
     /// around it.
-    pub(crate) fn map(self, frame: &PatchFrame) -> Se3Transform {
-        let c = frame.centre.coords;
+    pub(crate) fn map(self, coordinate_system: &PatchCoordinateSystem) -> Se3Transform {
+        let c = coordinate_system.centre.coords;
         match self {
             Self::SetToOrigin => {
-                let m = Matrix3::from_columns(&[frame.u, frame.v, frame.n]);
+                let m = Matrix3::from_columns(&[
+                    coordinate_system.u,
+                    coordinate_system.v,
+                    coordinate_system.n,
+                ]);
                 // Renormalised, so the quaternion is unit to the last bit and
                 // not merely to the matrix's own rounding.
                 let q = *RotQuaternion::from_rotation_matrix(m.transpose()).as_nalgebra();
@@ -158,10 +162,10 @@ impl PatchReframe {
                 // patch's own `u` is the axis taken there: it leaves `u` alone
                 // and sends `v` to `-v`, so the heading a person can see in the
                 // square survives.
-                let turn = UnitQuaternion::rotation_between(&frame.n, &Vector3::z())
+                let turn = UnitQuaternion::rotation_between(&coordinate_system.n, &Vector3::z())
                     .unwrap_or_else(|| {
                         UnitQuaternion::from_axis_angle(
-                            &nalgebra::Unit::new_normalize(frame.u),
+                            &nalgebra::Unit::new_normalize(coordinate_system.u),
                             std::f64::consts::PI,
                         )
                     });
@@ -177,10 +181,12 @@ impl PatchReframe {
     }
 }
 
-/// A patch as it is drawn: its centre and its orthonormal, right-handed axes in
-/// **world** coordinates.
+/// The patch coordinate system, as the patch is drawn: the patch's centre and its
+/// unit axes `u`, `v` and `n = u × v`, orthonormal and right-handed, in **world**
+/// coordinates, with no extent. It is the coordinate system Set to Origin and Align
+/// Normal to Z re-express the scene in.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PatchFrame {
+pub(crate) struct PatchCoordinateSystem {
     /// The centre, through the node's display transform.
     pub(crate) centre: Point3<f64>,
     /// The in-plane `u` axis, rotated and unit.
@@ -191,30 +197,30 @@ pub(crate) struct PatchFrame {
     pub(crate) n: Vector3<f64>,
 }
 
-impl PatchFrame {
-    /// `placement`, which is in the reconstruction's own coordinates, as the
-    /// node draws it under `transform`.
+impl PatchCoordinateSystem {
+    /// The coordinate system of `patch_frame`, which is in the reconstruction's own
+    /// coordinates, as the node draws it under `transform`.
     ///
     /// The transform's uniform scale is dropped from the axes: it stretches no
     /// direction relative to another, so the rotation alone carries them and
     /// they stay orthonormal and right-handed.
     ///
-    /// A stored frame is orthonormal only to the `f32` it was read from, and a
+    /// The stored axes are orthonormal only to the `f32` they were read from, and a
     /// matrix that is not quite a rotation makes a quaternion that is not quite
     /// unit, whose turn then disagrees with itself by far more than rounding.
     /// So the axes are squared up here, `u` kept and `v` rebuilt from the
     /// normal `OrientedPatch::normal` defines, which moves each by no more than
-    /// the stored frame was already off.
-    pub(crate) fn of(placement: &OrientedPatch, transform: &Se3Transform) -> Self {
+    /// the stored axes were already off.
+    pub(crate) fn of(patch_frame: &OrientedPatch, transform: &Se3Transform) -> Self {
         let u = transform
             .rotation
-            .rotate_vector(&placement.u_axis)
+            .rotate_vector(&patch_frame.u_axis)
             .normalize();
         let n = u
-            .cross(&transform.rotation.rotate_vector(&placement.v_axis))
+            .cross(&transform.rotation.rotate_vector(&patch_frame.v_axis))
             .normalize();
         Self {
-            centre: transform.apply_to_point(&placement.center),
+            centre: transform.apply_to_point(&patch_frame.center),
             u,
             v: n.cross(&u),
             n,
@@ -222,10 +228,10 @@ impl PatchFrame {
     }
 }
 
-/// The bench with every track-stage placement put through `transform`, which is
+/// The bench with every track-stage patch frame put through `transform`, which is
 /// what a bake does to the bench half of the version it pushes.
 ///
-/// The placement and the track's position are the bench's only world-space
+/// The patch frame and the track's position are the bench's only world-space
 /// geometry; everything else on an item is a pixel, an angle or a count. So the
 /// centre goes through the whole similarity, the axes are rotated, and the
 /// half-extent is scaled, which is what `apply_se3_transform` does to the point
@@ -264,7 +270,7 @@ fn bake_track(track: &EditableTrack, transform: &Se3Transform) -> Option<Editabl
     payload.position = payload
         .position
         .map(|position| place(&position, payload.at_infinity));
-    payload.placement = payload.placement.map(|patch| {
+    payload.patch_frame = payload.patch_frame.map(|patch| {
         let at_infinity = patch.w == 0.0;
         let scale = if at_infinity { 1.0 } else { transform.scale };
         OrientedPatch {
@@ -451,18 +457,18 @@ impl AppState {
                 )))
             }
         };
-        let placement = payload
-            .placement
+        let patch_frame = payload
+            .patch_frame
             .as_ref()
             .ok_or_else(|| refuse(format!("{item} has no patch frame yet.")))?;
-        if placement.w == 0.0 {
+        if patch_frame.w == 0.0 {
             return Err(refuse(format!(
                 "{item} is at infinity, a bearing with no place, so its patch has no centre to \
                  move."
             )));
         }
         let current = node.transform();
-        let map = mode.map(&PatchFrame::of(placement, current));
+        let map = mode.map(&PatchCoordinateSystem::of(patch_frame, current));
         Ok((current.compose(&map), mode.sentence(&node.label, item)))
     }
 
@@ -519,7 +525,7 @@ impl AppState {
     ///
     /// A **bulk edit** through `SfmrReconstruction::apply_se3_transform`, the
     /// one whole-reconstruction similarity `sfm xform` also reaches, with the
-    /// bench's placements put through the same transform. One version states
+    /// bench's patch frames put through the same transform. One version states
     /// all three halves, the transformed value, the transformed bench and the
     /// identity, so an undo puts back the value and the framing together and
     /// the picture does not move either way. The row map is the identity: the

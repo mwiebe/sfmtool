@@ -603,7 +603,7 @@ lock cleared the ghost is the outline alone. It keeps the ghost opacity either
 way.
 
 No ghost is drawn at the cluster stage, which has no shared geometry to
-project, nor at a track stage with no placement yet. Nor is one drawn where the
+project, nor at a track stage with no patch frame yet. Nor is one drawn where the
 camera cannot see the square: its back face turned to the camera
 (`OrientedPatch::is_front_facing`), its plane within 5 degrees of edge-on (the
 bar `bench::geometry::plane_is_edge_on` refuses the 3D viewport's plane handles
@@ -692,7 +692,7 @@ offset of that meeting on the patch's axes
 (`OrientedPatch::keypoint_plane_offset`). So an edge put under the pointer
 *reprojects onto the pointer*, through whatever distortion the lens has, and a
 turn is the angle swept on the patch's own surface rather than the foreshortened
-one swept on screen. The frame the pointer is read against is the one drawn: the
+one swept on screen. The patch frame the pointer is read against is the one drawn: the
 patch re-anchored on the observation whose outline it is, or for the ghost the
 patch itself, which is what `sfmtool_core::bench::Viewpoint` names to the two
 pixel steps (`Observation` and `Image`). The normal's two handles read the same

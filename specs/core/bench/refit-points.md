@@ -187,7 +187,7 @@ bench, *Fit* is pressed and *Commit* is pressed, and nothing else:
 
 1. **The track.** `bench::track_of_point` builds the point's track-stage
    `EditableTrack` the way `create_track` builds the one it puts on the bench:
-   its own frame, bitmap, colour, keypoints and stored readings, its stored
+   its own patch frame, bitmap, colour, keypoints and stored readings, its stored
    reference observation as the track's reference, and every observation `in`
    and **pinned**. Nothing is recomputed, and no bench or label is involved
    ([`editable-track.md`](editable-track.md) § "Putting a point on the bench").
@@ -215,8 +215,8 @@ bench, *Fit* is pressed and *Commit* is pressed, and nothing else:
      read, and it is scored against the new bitmap. The record's observation
      readings and `observation_confidence` are written from these.
 
-   The alignment is against the reference render at the frame the point
-   arrived with; the stored bitmap is then rendered once more through the frame
+   The alignment is against the reference render at the patch frame the point
+   arrived with; the stored bitmap is then rendered once more through the patch frame
    the re-triangulation placed, so the bitmap written describes the patch that
    is written.
 3. **The record.** `bench::commit::point_record` builds the `PointRecord` the
@@ -321,7 +321,7 @@ refit is the place that keeps the range.
 
 A point the fit refuses keeps every column it had, and its status names the
 refusal: fewer than two observations (`TooFewObservations`), no patch frame on
-this point (`NoFrame`, possible where the column exists but the row is empty),
+this point (`NoPatchFrame`, possible where the column exists but the row is empty),
 fewer than two usable rays (`TooFewRays`) or a linear solve that is not a number
 (`Triangulation`), or a round's tiles past `EvaluateOptions::max_cache_bytes`
 (`TooLarge`) or an allocation that failed (`OutOfMemory`).

@@ -104,14 +104,14 @@ fn three_points() -> Vec<Point3<f64>> {
 /// whose sighting sits where the far plane's own point projects: a bearing
 /// whose rays now have a baseline.
 fn far_bearing_with_baseline(scene: &Scene) -> SfmrReconstruction {
-    let frame = OrientedPatch::from_infinity_direction(
+    let patch_frame = OrientedPatch::from_infinity_direction(
         far_direction(),
         Vector3::new(0.0, 1.0, 0.0),
         [far_angular_half(), far_angular_half()],
     );
     let observing: Vec<u32> = (0..=FAR_OFFSET_IMAGE).collect();
     let mut recon = with_columns(
-        fixture_of(scene, far_direction(), 0.0, &observing, &frame),
+        fixture_of(scene, far_direction(), 0.0, &observing, &patch_frame),
         BITMAP_R,
     );
     let pixel = scene.project(FAR_OFFSET_IMAGE as usize, far_world());
@@ -658,7 +658,7 @@ fn a_point_ranged_from_an_image_with_no_pose_that_becomes_a_direction_is_release
 #[test]
 fn a_point_with_one_observation_is_left_as_it_was() {
     let scene = Scene::new();
-    let patch = placement_of_fixture(&scene);
+    let patch = patch_frame_of_fixture(&scene);
     let recon = with_columns(fixture_of(&scene, WORLD, 1.0, &[0], &patch), BITMAP_R);
     let (out, report) = refit_over(&scene, &recon);
     assert_eq!(
@@ -761,11 +761,11 @@ fn a_track_stored_out_of_image_order_is_written_back_at_its_own_rows() {
 }
 
 /// The patch the scene's fixture stands its point on.
-fn placement_of_fixture(scene: &Scene) -> OrientedPatch {
+fn patch_frame_of_fixture(scene: &Scene) -> OrientedPatch {
     EditedReconstruction::new(Arc::new(fixture_with_columns(scene, WORLD, BITMAP_R)))
         .point(0)
-        .and_then(|p| p.placement())
-        .expect("the fixture's frame")
+        .and_then(|p| p.patch_frame())
+        .expect("the fixture's patch frame")
 }
 
 // ---- The run -----------------------------------------------------------------
@@ -873,11 +873,11 @@ fn the_run_refuses_a_value_it_cannot_refit() {
     );
 
     // No patch frames.
-    let mut frameless = recon.clone();
-    frameless.point_set.patch_u_halfvec_xyz = None;
-    frameless.point_set.patch_v_halfvec_xyz = None;
+    let mut without_patch_frame = recon.clone();
+    without_patch_frame.point_set.patch_u_halfvec_xyz = None;
+    without_patch_frame.point_set.patch_v_halfvec_xyz = None;
     assert_eq!(
-        run(&frameless, &views, &refit_options()),
+        run(&without_patch_frame, &views, &refit_options()),
         RefitPointsError::NoPatchFrames
     );
 

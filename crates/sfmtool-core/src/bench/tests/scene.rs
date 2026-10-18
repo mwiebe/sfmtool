@@ -299,7 +299,7 @@ fn fixture(scene: &Scene, world: Point3<f64>) -> SfmrReconstruction {
 /// `observing` at its exact projections in each.
 ///
 /// `w` is `1.0` for a place and `0.0` for a bearing, in which case `coordinate`
-/// is the unit direction and `patch` the tangent frame the format states for
+/// is the unit direction and `patch` the tangent patch frame the format states for
 /// such a row. Everything else is the same fixture either way, which is the
 /// point: a test of the finite/infinity boundary needs the two sides built the
 /// same way apart from that one number.
@@ -427,7 +427,7 @@ pub(in crate::bench) fn fixture_with_columns(
         let Some(point) = edited.point(i as u32) else {
             continue;
         };
-        let Some(patch) = point.placement() else {
+        let Some(patch) = point.patch_frame() else {
             continue;
         };
         let view_set: Vec<u32> = point.observations().iter().map(|o| o.image_index).collect();

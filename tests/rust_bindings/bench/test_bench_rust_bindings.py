@@ -884,7 +884,7 @@ class TestEvaluating:
     def test_an_evaluation_moves_nothing(self, edited, images, long_track_point):
         """A reading writes measurements and no geometry.
 
-        The position, the frame's colour and confidence, and every keypoint come
+        The position, the patch frame, its colour and confidence, and every keypoint come
         back exactly as they went in: what a reading changes is what each row
         says about itself.
         """
@@ -1030,7 +1030,7 @@ class TestEvaluating:
             keypoint = before["track"]["keypoint"]
             seed = after["cluster"]["seed_position"]
             np.testing.assert_allclose(seed, keypoint, atol=1e-5)
-            # The shape is the frame projected into that image, so it spans an
+            # The shape is the patch frame projected into that image, so it spans an
             # area, and it is per keypoint-frame unit: read over the cluster's
             # radius it is the patch's own footprint in that photograph, which
             # fits inside it, rather than the radius times that, which would
@@ -1479,7 +1479,7 @@ class TestPlacingSizingAndTurningByHand:
     ):
         _, track = create_track(Bench(), edited, long_track_point)
         was = track.observation(0)["track"]["keypoint"]
-        before = track.placement
+        before = track.patch_frame
 
         moved, report = translate_patch_to_pixel(
             track, edited, 0, (was[0] + 6.0, was[1] - 4.0)
@@ -1489,7 +1489,7 @@ class TestPlacingSizingAndTurningByHand:
         assert report["placed"] == moved.observation_count
         assert report["moved"] > 0.0
         # In-plane only: the axes, the size and the normal are untouched.
-        after = moved.placement
+        after = moved.patch_frame
         for axis in ("u_halfvec", "v_halfvec"):
             np.testing.assert_allclose(after[axis], before[axis])
         offset = np.asarray(after["center"]) - np.asarray(before["center"])
@@ -1532,10 +1532,10 @@ class TestPlacingSizingAndTurningByHand:
         sized, report = resize_patch(track, edited, 0.4)
 
         assert report["changed"] and report["half"] == 0.4
-        frame = sized.placement
-        assert np.linalg.norm(frame["u_halfvec"]) == pytest.approx(0.4, rel=1e-12)
-        assert np.linalg.norm(frame["v_halfvec"]) == pytest.approx(0.4, rel=1e-12)
-        np.testing.assert_allclose(frame["center"], track.placement["center"])
+        patch_frame = sized.patch_frame
+        assert np.linalg.norm(patch_frame["u_halfvec"]) == pytest.approx(0.4, rel=1e-12)
+        assert np.linalg.norm(patch_frame["v_halfvec"]) == pytest.approx(0.4, rel=1e-12)
+        np.testing.assert_allclose(patch_frame["center"], track.patch_frame["center"])
         # Every number read over the old square goes; where each sighting sits
         # does not.
         for before, after in zip(track.observations, sized.observations):
@@ -1554,15 +1554,15 @@ class TestPlacingSizingAndTurningByHand:
         turned, report = spin_patch(track, np.pi / 3.0)
         assert report["degrees"] == pytest.approx(60.0)
 
-        before, after = track.placement, turned.placement
+        before, after = track.patch_frame, turned.patch_frame
         for axis in ("u_halfvec", "v_halfvec"):
             assert np.linalg.norm(after[axis]) == pytest.approx(
                 np.linalg.norm(before[axis]), rel=1e-12
             )
         np.testing.assert_allclose(after["center"], before["center"])
 
-        def normal(frame):
-            cross = np.cross(frame["u_halfvec"], frame["v_halfvec"])
+        def normal(patch_frame):
+            cross = np.cross(patch_frame["u_halfvec"], patch_frame["v_halfvec"])
             return cross / np.linalg.norm(cross)
 
         np.testing.assert_allclose(normal(after), normal(before), atol=1e-12)
@@ -1586,9 +1586,9 @@ class TestPlacingSizingAndTurningByHand:
         assert report["observation"] == 0
         assert report["image"] == track.observation(0)["image"]
         assert report["half"] > report["was"], "the edge was pulled outward"
-        frame = resized.placement
-        assert np.linalg.norm(frame["u_halfvec"]) == pytest.approx(
-            np.linalg.norm(frame["v_halfvec"]), rel=1e-12
+        patch_frame = resized.patch_frame
+        assert np.linalg.norm(patch_frame["u_halfvec"]) == pytest.approx(
+            np.linalg.norm(patch_frame["v_halfvec"]), rel=1e-12
         )
         # The patch grew toward the edge that was dragged, so its centre moved
         # with it and every dot follows.
@@ -1657,7 +1657,7 @@ class TestDuplicating:
         assert bench.track(label).origin is not None, "the original kept its origin"
         np.testing.assert_allclose(copy.position, track.position)
         np.testing.assert_allclose(
-            copy.placement["u_halfvec"], track.placement["u_halfvec"]
+            copy.patch_frame["u_halfvec"], track.patch_frame["u_halfvec"]
         )
         for index in range(copy.observation_count):
             was, now = track.observation(index), copy.observation(index)
@@ -1694,21 +1694,21 @@ class TestTheNormalHandSteps:
     """
 
     @staticmethod
-    def _normal(frame):
-        cross = np.cross(frame["u_halfvec"], frame["v_halfvec"])
+    def _normal(patch_frame):
+        cross = np.cross(patch_frame["u_halfvec"], patch_frame["v_halfvec"])
         return cross / np.linalg.norm(cross)
 
     def test_an_offset_along_the_normal_moves_the_centre_that_far(
         self, edited, long_track_point
     ):
         _, track = create_track(Bench(), edited, long_track_point)
-        before = track.placement
+        before = track.patch_frame
         moved, report = translate_patch(track, edited, (0.0, 0.0, 0.05))
 
         assert report["changed"]
         assert report["moved"] == pytest.approx(0.05, rel=1e-9)
         np.testing.assert_allclose(report["by"], [0.0, 0.0, 0.05])
-        after = moved.placement
+        after = moved.patch_frame
         np.testing.assert_allclose(
             np.asarray(after["center"]) - np.asarray(before["center"]),
             0.05 * self._normal(before),
@@ -1717,13 +1717,13 @@ class TestTheNormalHandSteps:
         for axis in ("u_halfvec", "v_halfvec"):
             np.testing.assert_allclose(after[axis], before[axis])
         # The value it was called on is untouched.
-        np.testing.assert_allclose(track.placement["center"], before["center"])
+        np.testing.assert_allclose(track.patch_frame["center"], before["center"])
 
     def test_a_tilt_turns_the_normal_and_keeps_the_centre_and_size(
         self, edited, long_track_point
     ):
         _, track = create_track(Bench(), edited, long_track_point)
-        before = track.placement
+        before = track.patch_frame
         n = self._normal(before)
         u = np.asarray(before["u_halfvec"]) / np.linalg.norm(before["u_halfvec"])
         asked = np.cos(np.radians(10.0)) * n + np.sin(np.radians(10.0)) * u
@@ -1733,7 +1733,7 @@ class TestTheNormalHandSteps:
         assert report["stopped"] is None
         assert report["degrees"] == pytest.approx(10.0, abs=1e-6)
         np.testing.assert_allclose(report["normal"], asked, atol=1e-9)
-        after = turned.placement
+        after = turned.patch_frame
         np.testing.assert_allclose(self._normal(after), asked, atol=1e-9)
         np.testing.assert_allclose(after["center"], before["center"])
         assert np.linalg.norm(after["u_halfvec"]) == pytest.approx(
@@ -1830,8 +1830,8 @@ class TestFinitePointsAndBearings:
         direction = np.asarray(track.direction)
         assert direction.shape == (3,)
         np.testing.assert_allclose(np.linalg.norm(direction), 1.0, atol=1e-9)
-        assert track.placement["w"] == 0.0
-        np.testing.assert_allclose(track.placement["center"], direction)
+        assert track.patch_frame["w"] == 0.0
+        np.testing.assert_allclose(track.patch_frame["center"], direction)
 
     def test_a_bearing_commits_back_as_a_bearing(
         self, bearing_edited, long_track_point
@@ -1898,7 +1898,7 @@ class TestFinitePointsAndBearings:
         assert "NaN" not in call["text"]
         np.testing.assert_allclose(np.linalg.norm(report["direction"]), 1.0)
         assert demoted.at_infinity
-        assert demoted.placement["w"] == 0.0
+        assert demoted.patch_frame["w"] == 0.0
 
     def test_the_classification_knobs_are_keyword_arguments(
         self, edited, images, long_track_point
