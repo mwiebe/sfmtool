@@ -25,8 +25,8 @@ use sfmtool_core::bench::{
     GridPlaneDetail, GridPlaneFitModel, GridPlaneIteration, GridPlaneNormalOptions,
     GridPlaneOutcome, GridPlaneRender, GridPlaneTile, GridPlaneView, GrownPlaneAttempt,
     GrownPlaneNormalOptions, GrownPlaneOutcome, GrownPlanePair, GrownPlanePick, GrownPlaneRefusal,
-    GrownPlaneSequence, GrownPlaneStart, GrownPlaneTryOutcome, GrownPlaneView, NormalEstimate,
-    NormalReport, PieceLayout,
+    GrownPlaneSequence, GrownPlaneStart, GrownPlaneTiltStart, GrownPlaneTryOutcome, GrownPlaneView,
+    NormalEstimate, NormalReport, PieceLayout,
 };
 use sfmtool_core::patch::cell_plane_normals::{CellPlaneStatus, NormalDeterminacy};
 use sfmtool_core::patch::cluster_refine::{CellStatus, LoopStop};
@@ -457,6 +457,14 @@ fn grown_outcome_name(outcome: GrownPlaneOutcome) -> &'static str {
     }
 }
 
+/// The word for which plane a grown-plane growth started from.
+fn tilt_start_name(from: GrownPlaneTiltStart) -> &'static str {
+    match from {
+        GrownPlaneTiltStart::Starting => "starting",
+        GrownPlaneTiltStart::Combined => "combined",
+    }
+}
+
 /// The word for how a grown-plane view's first window found its shift.
 fn start_name(start: GrownPlaneStart) -> &'static str {
     match start {
@@ -497,6 +505,7 @@ fn maybe_vector<'py, const N: usize>(
 fn attempt_dict<'py>(py: Python<'py>, attempt: &GrownPlaneAttempt) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("start", start_name(attempt.start))?;
+    d.set_item("tilt_start", tilt_start_name(attempt.tilt_start))?;
     d.set_item(
         "stage_zncc",
         PyArray1::from_vec(py, attempt.stage_zncc.clone()),
@@ -597,6 +606,7 @@ fn pick_dict<'py>(py: Python<'py>, pick: &GrownPlanePick) -> PyResult<Bound<'py,
     d.set_item("scale_px", pick.scale_px)?;
     d.set_item("predicted_weak", pick.predicted_weak)?;
     d.set_item("matched", pick.matched)?;
+    d.set_item("rung", pick.rung)?;
     d.set_item("sigma_after_deg", pick.sigma_after_deg)?;
     Ok(d)
 }
@@ -1088,11 +1098,18 @@ fn grid_plane_normal(
 /// and ``jacobian_shift_step_px``, default 0.05). Each growth gives the
 /// view's own plane and its information about the tilt.
 ///
-/// The views grown are a selection, picked one at a time by a prediction of
-/// their information from their geometry, until the combined weakest ``σ``
+/// The views grown are a selection, picked one at a time near to far by
+/// their angle from the reference, in rungs, until the combined weakest ``σ``
 /// is at most ``target_sigma_deg`` (default 0.5) or ``max_selected_views``
 /// (default 6) have passed the floor: a growth whose own score reaches
-/// ``min_held_zncc`` (default 0.5). Their planes are combined by a robust
+/// ``min_held_zncc`` (default 0.5). The first rung is the view nearest
+/// ``first_rung_deg`` (default 15.0) within ``first_rung_min_deg`` (default
+/// 10.0) to ``first_rung_max_deg`` (default 20.0), grown from the starting
+/// plane; each later rung aims at ``rung_ratio`` (default 1.6) times the
+/// widest angle kept, out to the widest views, and within a rung the pick is
+/// the view whose information, predicted from its geometry, most raises the
+/// weakest measured so far. Each later pick is grown from the combined plane
+/// so far and, where that is refused, from the starting plane. Their planes are combined by a robust
 /// information-weighted mean, never by fitting the views together, leaving
 /// out the furthest estimate past ``max_agreement_distance`` (default 3.0)
 /// by the Mahalanobis distance until none is, and then any view under
@@ -1165,14 +1182,16 @@ fn grid_plane_normal(
 /// selection), ``combined_sigma_deg`` (``NaN`` then) and ``attempts``, each
 /// with ``start``, ``stage_zncc`` (a float64 array, one score per stage),
 /// ``shift``, ``normal`` (the growth's own plane), ``grid_zncc``,
-/// ``sigma_deg`` (its own weakest ``σ``) and ``refusal`` (``None`` when it
-/// was taken, else ``"under_floor"``). ``picks`` has one dict per pick of
+/// ``sigma_deg`` (its own weakest ``σ``), ``refusal`` (``None`` when it
+/// was taken, else ``"under_floor"``) and ``tilt_start`` (``"starting"`` or
+/// ``"combined"``, the plane its windows started from). ``picks`` has one dict per pick of
 /// the selection: ``observation``, ``image``,
 /// ``angle_deg``, ``offset_direction`` (``(2,)``, in the starting patch frame),
 /// ``scale_px``, ``predicted_weak`` (the smallest eigenvalue of the
 /// information predicted with it added, ``NaN`` for a pick made by angle
-/// alone while no view had been matched), ``matched`` and
-/// ``sigma_after_deg`` (``NaN`` when it was not matched).
+/// alone, in the first rung), ``matched``, ``rung`` (the rung it was picked
+/// for, from 0) and ``sigma_after_deg`` (``NaN`` when it was not
+/// matched).
 /// ``pairs`` has one dict per pair: ``observations``, ``images``,
 /// ``angle_deg`` (between the two views), ``normal``, ``relative_shift``,
 /// ``zncc``, ``sigma_deg``, ``distance``, ``kept`` and ``refusal`` (a
@@ -1211,6 +1230,10 @@ fn grid_plane_normal(
     max_pairs = None,
     target_sigma_deg = None,
     max_selected_views = None,
+    first_rung_deg = None,
+    first_rung_min_deg = None,
+    first_rung_max_deg = None,
+    rung_ratio = None,
     min_coverage = None,
     max_iterations = None,
     initial_damping = None,
@@ -1245,6 +1268,10 @@ fn grown_plane_normal(
     max_pairs: Option<usize>,
     target_sigma_deg: Option<f64>,
     max_selected_views: Option<usize>,
+    first_rung_deg: Option<f64>,
+    first_rung_min_deg: Option<f64>,
+    first_rung_max_deg: Option<f64>,
+    rung_ratio: Option<f64>,
     min_coverage: Option<f64>,
     max_iterations: Option<u32>,
     initial_damping: Option<f64>,
@@ -1276,6 +1303,10 @@ fn grown_plane_normal(
         max_pairs: max_pairs.unwrap_or(defaults.max_pairs),
         target_sigma_deg: target_sigma_deg.unwrap_or(defaults.target_sigma_deg),
         max_selected_views: max_selected_views.unwrap_or(defaults.max_selected_views),
+        first_rung_deg: first_rung_deg.unwrap_or(defaults.first_rung_deg),
+        first_rung_min_deg: first_rung_min_deg.unwrap_or(defaults.first_rung_min_deg),
+        first_rung_max_deg: first_rung_max_deg.unwrap_or(defaults.first_rung_max_deg),
+        rung_ratio: rung_ratio.unwrap_or(defaults.rung_ratio),
         min_coverage: min_coverage.unwrap_or(defaults.min_coverage),
         max_iterations: max_iterations.unwrap_or(defaults.max_iterations),
         initial_damping: initial_damping.unwrap_or(defaults.initial_damping),

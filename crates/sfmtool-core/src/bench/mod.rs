@@ -98,8 +98,8 @@ pub use normal::{
     GridPlaneRay, GridPlaneRender, GridPlaneTile, GridPlaneView, GridPlaneViewCell,
     GridPlaneViewFit, GrownPlaneAttempt, GrownPlaneNormalOptions, GrownPlaneOutcome,
     GrownPlanePair, GrownPlanePick, GrownPlanePrecision, GrownPlaneRefusal, GrownPlaneSequence,
-    GrownPlaneStart, GrownPlaneTry, GrownPlaneTryOutcome, GrownPlaneView, NormalError,
-    NormalEstimate, NormalReport, PieceLayout, BENCH_MIN_CELL_ZNCC,
+    GrownPlaneStart, GrownPlaneTiltStart, GrownPlaneTry, GrownPlaneTryOutcome, GrownPlaneView,
+    NormalError, NormalEstimate, NormalReport, PieceLayout, BENCH_MIN_CELL_ZNCC,
 };
 pub use refit_points::{
     refit_points, RefitOutcome, RefitPoint, RefitPointsError, RefitPointsOptions,

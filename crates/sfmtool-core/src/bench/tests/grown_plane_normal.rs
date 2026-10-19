@@ -9,7 +9,9 @@
 //! content in views whose poses are further off, views on opposite sides of
 //! the reference whose pairs sharpen the plane, a selection that matches a
 //! few of many views, a flat wall, and large turns on weak and on strong
-//! evidence.
+//! evidence, and the ladder's selection near to far: its order, a refused
+//! rung retried from the starting plane, its end at the widest view that
+//! passes, and a view at the reference's centre.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,7 +19,7 @@ use super::scene::{fixture_of, Scene, PLANE_Z, WORLD};
 use super::*;
 use crate::bench::{
     GrownPlaneNormalOptions, GrownPlaneOutcome, GrownPlaneRefusal, GrownPlaneSequence,
-    GrownPlaneStart, GrownPlaneTryOutcome, GrownPlaneView,
+    GrownPlaneStart, GrownPlaneTiltStart, GrownPlaneTryOutcome, GrownPlaneView,
 };
 use crate::camera::CameraModel;
 
@@ -643,16 +645,27 @@ fn the_widened_search_is_centred_on_the_keypoint() {
     let (turned, report) = run(&scene, &edited, &track, &GrownPlaneNormalOptions::default());
     let sequence = sequence_of(&report);
     assert_eq!(sequence.joined(), 3, "{sequence:#?}");
-    // Grown from the keypoint-implied shift, 6 px off, a view is refused; the
-    // search that follows it is what joins.
-    for entry in &sequence.trace {
-        let starts: Vec<_> = entry.attempts.iter().map(|a| a.start).collect();
-        assert_eq!(
-            starts,
-            [GrownPlaneStart::NoSearch, GrownPlaneStart::Widened],
-            "{entry:#?}"
-        );
-        assert!(entry.attempts[0].refusal.is_some());
+    // Grown from the keypoint-implied shift, 6 px off, a view is refused,
+    // from the combined plane and from the starting plane alike; the search
+    // that follows from the starting plane is what joins.
+    for (k, entry) in sequence.trace.iter().enumerate() {
+        let starts: Vec<_> = entry
+            .attempts
+            .iter()
+            .map(|a| (a.tilt_start, a.start))
+            .collect();
+        let searched = (GrownPlaneTiltStart::Starting, GrownPlaneStart::Widened);
+        let unsearched = (GrownPlaneTiltStart::Starting, GrownPlaneStart::NoSearch);
+        let expected = if k == 0 {
+            vec![unsearched, searched]
+        } else {
+            let combined = (GrownPlaneTiltStart::Combined, GrownPlaneStart::NoSearch);
+            vec![combined, unsearched, searched]
+        };
+        assert_eq!(starts, expected, "{entry:#?}");
+        let (last, refused) = entry.attempts.split_last().expect("growths");
+        assert!(refused.iter().all(|a| a.refusal.is_some()));
+        assert!(last.refusal.is_none());
     }
     for (row, view) in sequence.views.iter().enumerate() {
         if let GrownPlaneView::Joined { start, .. } = view {
@@ -770,6 +783,43 @@ fn the_grown_plane_normal_refuses_a_bearing_bad_options_and_stops_when_cancelled
     };
     assert_eq!(zero.check(), Ok(()));
 
+    // The ladder's settings: a first rung of finite angles at least zero with
+    // its aim within its bounds, and a finite ratio above 1.
+    for (first_rung_min_deg, first_rung_max_deg) in [(f64::NAN, 20.0), (-1.0, 20.0), (15.0, 11.0)] {
+        let bad = GrownPlaneNormalOptions {
+            first_rung_min_deg,
+            first_rung_max_deg,
+            ..Default::default()
+        };
+        assert_eq!(
+            bad.check(),
+            Err(NormalError::BadGrownPlaneOption("first_rung_min_deg")),
+            "{first_rung_min_deg} {first_rung_max_deg}"
+        );
+    }
+    for first_rung_deg in [9.0, 21.0, f64::NAN] {
+        let bad = GrownPlaneNormalOptions {
+            first_rung_deg,
+            ..Default::default()
+        };
+        assert_eq!(
+            bad.check(),
+            Err(NormalError::BadGrownPlaneOption("first_rung_deg")),
+            "{first_rung_deg}"
+        );
+    }
+    for rung_ratio in [1.0, 0.5, f64::INFINITY, f64::NAN] {
+        let bad = GrownPlaneNormalOptions {
+            rung_ratio,
+            ..Default::default()
+        };
+        assert_eq!(
+            bad.check(),
+            Err(NormalError::BadGrownPlaneOption("rung_ratio")),
+            "{rung_ratio}"
+        );
+    }
+
     let cancel = AtomicBool::new(true);
     let cancelled = Progress::none().cancelled_by(&cancel);
     assert_eq!(
@@ -819,9 +869,9 @@ fn the_grown_plane_normals_detail_phases_change_nothing() {
     track.observations[row].track = None;
     let views = scene.views();
 
-    // Three picks, so that some views are fitted for their shift alone, and
+    // Four picks, so that a view is fitted for its shift alone, and
     // the default, under which every view is matched.
-    for max_selected_views in [3, 6] {
+    for max_selected_views in [4, 6] {
         let options = GrownPlaneNormalOptions {
             max_selected_views,
             ..Default::default()
@@ -1029,8 +1079,9 @@ fn wide_pairs_sharpen_the_plane_over_reference_matches_alone() {
 }
 
 /// Sixteen views around the point, in rings at 10 to 40 degrees: the
-/// selection matches the widest view first and then the view that most
-/// raises the weakest predicted information, and stops once the combined
+/// selection matches a view of its first rung and then, from the combined
+/// plane, the views of the widest ring that most raise the weakest predicted
+/// information, and stops once the combined
 /// plane's `σ` reaches the target, having matched far fewer views than there
 /// are. Every other view is fitted for its shift alone at the final plane and
 /// written at the point's projection.
@@ -1064,15 +1115,20 @@ fn the_selection_reaches_the_target_sigma_matching_few_views() {
     assert_eq!(sequence.picks.len(), sequence.matched());
     let last = sequence.picks.last().expect("a pick");
     assert!(last.sigma_after_deg <= target, "{:#?}", sequence.picks);
-    // The first pick is one of the widest ring.
-    assert!(
-        (sequence.picks[0].angle_deg - 40.0).abs() < 0.5,
-        "{:#?}",
-        sequence.picks
-    );
-    // A later pick is not along the first one's offset.
-    let d0 = sequence.picks[0].offset_direction;
-    let d1 = sequence.picks[1].offset_direction;
+    // The first pick is from the first rung, 10 to 20 degrees, and the
+    // later ones from the widest ring, the last rung, grown from the
+    // combined plane.
+    let first = sequence.picks[0].angle_deg;
+    assert!((10.0..=20.0).contains(&first), "{:#?}", sequence.picks);
+    for pick in &sequence.picks[1..] {
+        assert!((pick.angle_deg - 40.0).abs() < 0.5, "{:#?}", sequence.picks);
+    }
+    for entry in &sequence.trace[1..sequence.picks.len()] {
+        assert_eq!(entry.attempts[0].tilt_start, GrownPlaneTiltStart::Combined);
+    }
+    // The two wide picks are not along one offset.
+    let d0 = sequence.picks[1].offset_direction;
+    let d1 = sequence.picks[2].offset_direction;
     assert!(
         (d0[0] * d1[0] + d0[1] * d1[1]).abs() < 0.9,
         "{:#?}",
@@ -1098,4 +1154,201 @@ fn the_selection_reaches_the_target_sigma_matching_few_views() {
         }
     }
     assert_eq!(sequence.written, centres.len(), "{report}");
+}
+
+/// The selection's settings, with its first rung at 12 degrees and a target
+/// `σ` and a budget the scenes below never reach, so that it runs until no
+/// view is left.
+fn ladder() -> GrownPlaneNormalOptions {
+    GrownPlaneNormalOptions {
+        first_rung_deg: 12.0,
+        target_sigma_deg: 1e-3,
+        max_selected_views: 16,
+        ..Default::default()
+    }
+}
+
+/// A view at each `(angle, azimuth)` of `views`, degrees, about a reference
+/// facing the plane, seeing the plane's texture, except the views at the
+/// angles in `unrelated`, which see unrelated texture that no plane
+/// matches.
+fn ladder_scene(views: &[(f64, f64)], unrelated: &[f64]) -> Scene {
+    let mut centres = vec![centre(0.0, 0.0)];
+    centres.extend(views.iter().map(|&(a, z)| centre(a, z)));
+    let odd: Vec<[f64; 3]> = views
+        .iter()
+        .zip(&centres[1..])
+        .filter(|((a, _), _)| unrelated.contains(a))
+        .map(|(_, &c)| c)
+        .collect();
+    Scene::looking_at(&centres, WORLD, camera(), move |c, d| {
+        let (x, y) = hit(c, d, PLANE_Z);
+        if odd.contains(&c) {
+            noise(x, y, 0.06, 60.0, 7)
+        } else {
+            plane_texture(x, y)
+        }
+    })
+}
+
+/// A view at each of `angles` degrees, each at its own azimuth.
+fn spread(angles: &[f64]) -> Vec<(f64, f64)> {
+    angles
+        .iter()
+        .enumerate()
+        .map(|(k, &a)| (a, 30.0 + 100.0 * k as f64))
+        .collect()
+}
+
+/// The ladder on `scene`, from 20 degrees off, with view 0 the reference.
+fn run_ladder(scene: &Scene) -> (EditableTrack, EditableTrack, NormalReport) {
+    let edited = edited_of(scene);
+    let track = tilted_track(&edited, Vector3::new(1.0, 0.4, 0.0), 20.0);
+    let (track, _) = set_reference(&track, row_of(&track, 0)).expect("an in row");
+    let (turned, report) = run(scene, &edited, &track, &ladder());
+    (track, turned, report)
+}
+
+/// Views at 5 to 50 degrees: the ladder picks the view nearest 12 degrees
+/// first, grown from the starting plane, then one view a rung, each about
+/// 1.6 times wider than the widest before it and grown from the combined
+/// plane, out to the widest view, and last the view under its first rung.
+#[test]
+fn the_ladder_visits_views_near_to_far() {
+    let scene = ladder_scene(&spread(&[5.0, 12.0, 19.0, 31.0, 50.0]), &[]);
+    let (_, turned, report) = run_ladder(&scene);
+    let sequence = sequence_of(&report);
+    let angles: Vec<f64> = sequence.picks.iter().map(|p| p.angle_deg).collect();
+    let expected = [12.0, 19.0, 31.0, 50.0, 5.0];
+    assert_eq!(angles.len(), expected.len(), "{:#?}", sequence.picks);
+    for (a, e) in angles.iter().zip(expected) {
+        assert!((a - e).abs() < 0.5, "{angles:?}");
+    }
+    let rungs: Vec<u32> = sequence.picks.iter().map(|p| p.rung).collect();
+    assert_eq!(rungs, [0, 1, 2, 3, 4]);
+    assert!(sequence.picks.iter().all(|p| p.matched), "{report}");
+    // The first pick grows from the starting plane, every later one from
+    // the combined plane, and passes there.
+    let first: Vec<GrownPlaneTiltStart> = sequence
+        .trace
+        .iter()
+        .take(sequence.picks.len())
+        .map(|t| t.attempts[0].tilt_start)
+        .collect();
+    assert_eq!(first[0], GrownPlaneTiltStart::Starting);
+    assert!(
+        first[1..]
+            .iter()
+            .all(|&s| s == GrownPlaneTiltStart::Combined),
+        "{first:?}"
+    );
+    for entry in sequence.trace.iter().take(sequence.picks.len()) {
+        assert_eq!(entry.attempts.len(), 1, "{entry:#?}");
+    }
+    let after = degrees(patch_frame_of(&turned).normal(), truth());
+    assert!(after < 1.0, "{after:.3}: {report}");
+}
+
+/// A view in the second rung that sees unrelated texture is refused from
+/// the combined plane and grown again from the starting plane, where it is
+/// refused too; the rung waits, and its other view is picked next.
+#[test]
+fn a_refused_rung_is_retried_from_the_start() {
+    // The unrelated view is across the first pick's offset and the wider of
+    // the second rung's two, so the rung's prediction picks it first.
+    let views = [(12.0, 0.0), (17.0, 20.0), (22.0, 90.0), (35.0, 200.0)];
+    let scene = ladder_scene(&views, &[22.0]);
+    let (_, turned, report) = run_ladder(&scene);
+    let sequence = sequence_of(&report);
+    let angles: Vec<f64> = sequence.picks.iter().map(|p| p.angle_deg).collect();
+    let bad = sequence
+        .picks
+        .iter()
+        .position(|p| (p.angle_deg - 22.0).abs() < 0.5)
+        .expect("the unrelated view is picked");
+    let pick = &sequence.picks[bad];
+    assert!(!pick.matched, "{:#?}", sequence.picks);
+    assert_eq!(pick.rung, 1, "{:#?}", sequence.picks);
+    let entry = &sequence.trace[bad];
+    assert_eq!(entry.outcome, GrownPlaneTryOutcome::LeftOut);
+    assert_eq!(entry.attempts[0].tilt_start, GrownPlaneTiltStart::Combined);
+    assert!(entry.attempts.len() >= 2, "{entry:#?}");
+    assert!(
+        entry.attempts[1..]
+            .iter()
+            .all(|a| a.tilt_start == GrownPlaneTiltStart::Starting),
+        "{entry:#?}"
+    );
+    // The rung waits for its other view before the ladder moves out.
+    let next = &sequence.picks[bad + 1];
+    assert_eq!(next.rung, 1, "{angles:?}");
+    assert!((next.angle_deg - 17.0).abs() < 0.5, "{angles:?}");
+    assert!(next.matched);
+    assert!(
+        sequence.picks[bad + 2..].iter().all(|p| p.rung > 1),
+        "{:#?}",
+        sequence.picks
+    );
+    let after = degrees(patch_frame_of(&turned).normal(), truth());
+    assert!(after < 1.0, "{after:.3}: {report}");
+}
+
+/// The widest view sees unrelated texture: the ladder's last rung tries it
+/// and leaves it out, and ends at the widest view that passes, which joins.
+#[test]
+fn the_ladder_ends_at_the_widest_view_that_passes() {
+    let scene = ladder_scene(&spread(&[12.0, 20.0, 32.0, 48.0, 56.0]), &[56.0]);
+    let (track, turned, report) = run_ladder(&scene);
+    let sequence = sequence_of(&report);
+    let widest = sequence
+        .picks
+        .iter()
+        .position(|p| (p.angle_deg - 56.0).abs() < 0.5)
+        .expect("the widest view is picked");
+    assert!(!sequence.picks[widest].matched, "{:#?}", sequence.picks);
+    let joined: Vec<f64> = sequence
+        .picks
+        .iter()
+        .filter(|p| p.matched)
+        .map(|p| p.angle_deg)
+        .collect();
+    let widest_joined = joined.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!((widest_joined - 48.0).abs() < 0.5, "{joined:?}");
+    // The two widest views are the last rung's, picked after every
+    // narrower one.
+    let last = sequence.picks[widest].rung;
+    let at48 = sequence
+        .picks
+        .iter()
+        .find(|p| (p.angle_deg - 48.0).abs() < 0.5)
+        .expect("picked");
+    assert_eq!(at48.rung, last, "{:#?}", sequence.picks);
+    for p in &sequence.picks {
+        if p.angle_deg < 40.0 {
+            assert!(p.rung < last, "{:#?}", sequence.picks);
+        }
+    }
+    let row = row_of(&track, 4);
+    assert!(
+        matches!(sequence.views[row], GrownPlaneView::Joined { .. }),
+        "{:?}",
+        sequence.views[row]
+    );
+    let after = degrees(patch_frame_of(&turned).normal(), truth());
+    assert!(after < 1.0, "{after:.3}: {report}");
+}
+
+/// A view at the reference's own centre, 0 degrees from it, is the first
+/// rung's pick when the only other view is far wider; once it is kept the
+/// ladder's aim is zero, and the selection goes on to the wider view rather
+/// than aiming at zero again.
+#[test]
+fn a_view_at_the_references_centre_ends_the_ladder() {
+    let scene = ladder_scene(&[(0.0, 0.0), (35.0, 30.0)], &[]);
+    let (_, _, report) = run_ladder(&scene);
+    let sequence = sequence_of(&report);
+    let angles: Vec<f64> = sequence.picks.iter().map(|p| p.angle_deg).collect();
+    assert_eq!(angles.len(), 2, "{:#?}", sequence.picks);
+    assert!(angles[0].abs() < 0.5, "{angles:?}");
+    assert!((angles[1] - 35.0).abs() < 0.5, "{angles:?}");
 }
