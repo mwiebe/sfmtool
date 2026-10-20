@@ -780,31 +780,43 @@ pub struct AppState {
     /// GPU or window behind it. See [`crate::layout`].
     pub(crate) dock: DockState<Tab>,
 
-    /// The one long operation running off the GUI thread, or `None`.
+    /// The slow queue: the whole-reconstruction edits and Build index files, one
+    /// at a time.
     ///
     /// A field of the state rather than of `App`, so that the busy check is
     /// where every method that would need it already is: an edit, a cursor
-    /// move, a save and a close all ask [`AppState::busy_refusal`] first. One
-    /// at a time, viewer-wide. See [`crate::background`].
-    pub(crate) background_task: Option<crate::background::BackgroundTask>,
+    /// move, a save and a close all ask [`AppState::busy_refusal`] first. See
+    /// [`crate::background`].
+    pub(crate) slow_queue: crate::background::QueueState,
 
-    /// What became of the operation that ran most recently, and which one it
-    /// was.
+    /// The fast queue: opening files, the other bench steps and the quiet
+    /// tasks, one at a time, beside whatever the slow queue runs.
+    pub(crate) fast_queue: crate::background::QueueState,
+
+    /// What became of the tasks that finished most recently, oldest first, at
+    /// most [`crate::background::FINISHED_KEPT`] of them.
     ///
-    /// Kept after the process itself is gone because the answer to "is it
-    /// done, and what did it say" outlives the operation: a tool call that was
-    /// handed a handle comes back for it. One operation, not a history, since
-    /// only one can run at a time and the Action Log holds the rest.
-    pub(crate) last_background_task: Option<crate::background::FinishedTask>,
+    /// Kept after the task itself is gone because the answer to "is it done,
+    /// and what did it say" outlives the operation: a tool call that was handed
+    /// a handle comes back for it by id ([`AppState::task`]). A ring rather than
+    /// one slot, because two queues finish independently and a fast task could
+    /// otherwise push a slow task's record out before its reader polls. The
+    /// Action Log holds the rest.
+    pub(crate) finished_tasks: std::collections::VecDeque<crate::background::FinishedTask>,
 
-    /// The same "what is running" the field above answers, in a form a thread
+    /// The task whose phases the Background Tasks panel shows, when a person
+    /// has clicked one's name; `None` until then. See
+    /// [`crate::background::panel::chosen_task`] for what it falls back to.
+    pub(crate) background_phases_of: Option<u64>,
+
+    /// The same "what is running" the two queues answer, in a form a thread
     /// that is not this one can read.
     ///
     /// The MCP server composes its own timeout message, on its own thread, at
     /// the moment the GUI thread has failed to answer, so the one fact that
     /// message needs is the one fact it cannot ask [`AppState`] for. Written
-    /// where `background` is written and nowhere else, so the two cannot
-    /// disagree. See [`crate::background::Busy`].
+    /// where a queue's running task is set or taken and nowhere else, so the
+    /// two cannot disagree. See [`crate::background::Busy`].
     pub(crate) busy_notice: crate::background::BusyNotice,
 
     /// The id the next background operation takes.
@@ -813,6 +825,13 @@ pub struct AppState {
     /// than merely that one was running: a poll arriving after the operation
     /// has finished and been replaced can still tell the two apart.
     pub(crate) next_operation_id: u64,
+
+    /// The id the next quiet task takes ([`AppState::start_quiet_task`]).
+    ///
+    /// A count of its own rather than [`Self::next_operation_id`], because a
+    /// quiet task is never reported on the wire: sharing the count would leave
+    /// gaps in the ids an agent is handed, each naming a task no tool knows.
+    pub(crate) next_quiet_id: u64,
 
     /// How a worker tells the event loop there is something to look at.
     ///
@@ -824,11 +843,12 @@ pub struct AppState {
     pub(crate) wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 
     /// The live evaluation of the tracks on every node's bench: the one
-    /// running, and the inputs each track was last evaluated for. See
-    /// [`crate::bench::live`].
+    /// queued as a quiet task in the fast queue, and the inputs each track was
+    /// last evaluated for. See [`crate::bench::live`].
     pub(crate) bench_evaluations: crate::bench::live::Evaluations,
-    /// The camera model proposal's job that is running, if any. What it found
-    /// is kept on the proposal. See [`crate::camera_model_proposal::job`].
+    /// The camera model proposal's job, queued as a quiet task in the fast
+    /// queue, if one is. What it found is kept on the proposal. See
+    /// [`crate::camera_model_proposal::job`].
     pub(crate) proposal_jobs: crate::camera_model_proposal::job::ProposalJobs,
 
     /// Which observations of the focused bench track are selected: Track
@@ -1000,10 +1020,13 @@ impl AppState {
             window: None,
             window_normal_rect: None,
             dock: Layout::default().to_dock(),
-            background_task: None,
-            last_background_task: None,
+            slow_queue: Default::default(),
+            fast_queue: Default::default(),
+            finished_tasks: Default::default(),
+            background_phases_of: None,
             busy_notice: Default::default(),
             next_operation_id: 1,
+            next_quiet_id: 1,
             wake: None,
             bench_evaluations: Default::default(),
             proposal_jobs: Default::default(),
@@ -1090,14 +1113,12 @@ impl AppState {
     /// One entry, not one per node: `Close All` is a single action, and a
     /// twelve-node scene should not push twelve lines through the log for it.
     ///
-    /// Refused as a whole while a background operation is running on a node,
-    /// since that node is one of the ones this would close. An open locks no
-    /// node, and the files it lands are appended to the empty scene.
+    /// Refused as a whole while a background operation locks a node, since
+    /// that node is one of the ones this would close. An open locks no node,
+    /// and the files it lands are appended to the empty scene.
     pub fn close_all(&mut self) -> Result<(), String> {
-        if let Some(node) = self.background_task.as_ref().and_then(|task| task.node) {
-            if let Some(why) = self.busy_refusal(node) {
-                return Err(why);
-            }
+        if let Some((_, why)) = self.locked_nodes().into_iter().next() {
+            return Err(why);
         }
         let closed = self.scene.len();
         self.scene.clear();

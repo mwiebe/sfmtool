@@ -38,6 +38,7 @@ use crate::background::{Finished, Job, Operation};
 use crate::document::{CreatedPoints, PointMap};
 use crate::index_files::IndexFileState;
 use crate::scene::{ImageRef, PointRef};
+use crate::state::edits::DECODE_AND_STEP;
 use crate::state::AppState;
 
 #[cfg(test)]
@@ -193,12 +194,15 @@ impl AppState {
         pixel: [f64; 2],
         commit: bool,
         label: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u64>, String> {
+        let lead = format!("Cannot find nearby tracks in {}: ", self.image_name(image));
         let outcome = self
             .find_nearby_tracks_job(image, pixel, commit, label)
             .and_then(|job| {
                 self.start_background_task(Operation::FIND_NEARBY_TRACKS, image.recon, job)
-            });
+                    .map(Some)
+            })
+            .map_err(|why| super::led(&lead, "Cannot find nearby tracks", why));
         if let Err(message) = &outcome {
             self.action_log.fail(Kind::Bench, message.clone());
         }
@@ -282,7 +286,8 @@ impl AppState {
             if progress.is_cancelled() {
                 return Finished::Cancelled;
             }
-            let decoded = match views.decode(progress) {
+            let [p_decode, p_work] = progress.split(DECODE_AND_STEP);
+            let decoded = match views.decode(&p_decode) {
                 Ok(decoded) => decoded,
                 Err(_) if progress.is_cancelled() => return Finished::Cancelled,
                 Err(e) => {
@@ -295,7 +300,7 @@ impl AppState {
             if progress.is_cancelled() {
                 return Finished::Cancelled;
             }
-            run(plan, &edited, &decoded.views(), progress)
+            run(plan, &edited, &decoded.views(), &p_work)
         }))
     }
 

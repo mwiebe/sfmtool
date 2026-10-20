@@ -34,13 +34,9 @@ pub(super) fn show(
     egui::Panel::top("menu_bar").show(root_ui, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                // An open is a background task, and one runs at a time: greyed
-                // while another is running, with the refusal as its tooltip.
-                let running = app_state.running_refusal();
-                let open = ui
-                    .add_enabled(running.is_none(), egui::Button::new("Open..."))
-                    .on_disabled_hover_text(running.unwrap_or_default());
-                if open.clicked() {
+                // Never greyed: an open is a fast-queue task, and one started
+                // while that queue runs another waits behind it.
+                if ui.button("Open...").clicked() {
                     // Multi-select, and every chosen file *appends* a
                     // node, a path that is already open included: that
                     // opens it a second time, as a second node with a

@@ -89,17 +89,15 @@ impl From<Cancelled> for Stop {
 impl AppState {
     /// Start opening `paths`, in order, as one background task.
     ///
-    /// Refused without starting anything when an operation is already running
-    /// (one at a time, viewer-wide) or when a path is not a file, which is the
-    /// one failure knowable before the read. **Nothing is logged here**: the
+    /// Answers with the task's id. An open runs from the fast queue, and one
+    /// started while that queue runs another task waits behind it. Refused
+    /// without starting anything when a path is not a file, which is the one
+    /// failure knowable before the read. **Nothing is logged here**: the
     /// caller phrases a refusal in its own vocabulary, and the task's own row
     /// is written when it lands.
-    pub fn start_open(&mut self, paths: Vec<PathBuf>) -> Result<(), String> {
+    pub fn start_open(&mut self, paths: Vec<PathBuf>) -> Result<u64, String> {
         if paths.is_empty() {
             return Err("There is no file to open.".to_string());
-        }
-        if let Some(why) = self.running_refusal() {
-            return Err(why);
         }
         if let Some(missing) = paths.iter().find_map(|path| not_a_file(path)) {
             return Err(missing);
@@ -333,12 +331,9 @@ impl AppState {
     /// Open `path` and drive the task to its end, the way the frames would:
     /// the node it made, or the refusal it ended with.
     pub(crate) fn open_now(&mut self, path: &Path) -> Result<ReconId, String> {
-        self.start_open(vec![path.to_path_buf()])?;
-        self.finish_background_task();
-        let last = self
-            .last_background_task
-            .as_ref()
-            .expect("the open just finished");
+        let task = self.start_open(vec![path.to_path_buf()])?;
+        self.finish_background_task(task);
+        let last = self.finished_task(task).expect("the open just finished");
         match &last.outcome {
             Ok(_) => last
                 .opened

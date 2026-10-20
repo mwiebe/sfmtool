@@ -35,6 +35,7 @@ use crate::action_log::{version_step_text, Actor, Kind};
 use crate::background::{Finished, Job, Operation};
 use crate::index_files::IndexFileState;
 use crate::scene::{ImageRef, ReconId};
+use crate::state::edits::DECODE_AND_STEP;
 use crate::state::AppState;
 
 use super::Committed;
@@ -221,12 +222,15 @@ impl AppState {
         image: ImageRef,
         pixel: [f64; 2],
         label: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u64>, String> {
+        let lead = format!("Cannot create a track in {}: ", self.image_name(image));
         let outcome = self
             .create_track_at_pixel_job(image, pixel, label)
             .and_then(|job| {
                 self.start_background_task(Operation::CREATE_TRACK_AT_PIXEL, image.recon, job)
-            });
+                    .map(Some)
+            })
+            .map_err(|why| super::led(&lead, "Cannot create a track", why));
         if let Err(message) = &outcome {
             self.action_log.fail(Kind::Bench, message.clone());
         }
@@ -318,7 +322,8 @@ impl AppState {
             if progress.is_cancelled() {
                 return Finished::Cancelled;
             }
-            let decoded = match views.decode(progress) {
+            let [p_decode, p_work] = progress.split(DECODE_AND_STEP);
+            let decoded = match views.decode(&p_decode) {
                 Ok(decoded) => decoded,
                 Err(_) if progress.is_cancelled() => return Finished::Cancelled,
                 Err(e) => {
@@ -331,7 +336,7 @@ impl AppState {
             if progress.is_cancelled() {
                 return Finished::Cancelled;
             }
-            run(plan, &edited, &decoded.views(), progress)
+            run(plan, &edited, &decoded.views(), &p_work)
         }))
     }
 

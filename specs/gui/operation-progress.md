@@ -360,7 +360,8 @@ to what it can honestly claim:
   steps at every phase boundary, because something did finish.
 - **Smooth movement happens only where a call actually reports counts.** Nothing
   interpolates across a stage that is silent.
-- **If nothing underneath reports at all, there is no bar**, only a spinner and
+- **If nothing underneath reports at all, nothing is measured**, and there is only a band that
+  slides along the task's line in the Background Tasks panel and
   the name of the open phase.
 
 So the bar is a statement about how much of the work is behind you, never a
@@ -620,8 +621,35 @@ impl Collector {
     pub(crate) fn status(&self) -> Option<String>;
     pub(crate) fn count(&self) -> Option<Count>;
     pub(crate) fn fraction(&self) -> Option<f32>;
+    /// The newest count of each stage still open that reported one,
+    /// outermost first; the newest count alone where none is open. Each
+    /// with `under_way`, whether a stage is open inside the one that
+    /// reported it.
+    pub(crate) fn counts(&self) -> Vec<StageCount>;
 }
 ```
+
+**A count belongs to the stage that was innermost when it arrived**, and
+`counts` keeps one per such stage while it is open. A nested loop counts at each
+level: a bundle adjustment reports its rounds from the solve and its iterations
+from inside each round, so the newest count alone is the iteration and says
+nothing about the round. `counts` answers with both, `[round 4/9, iteration
+4/60]`, and drops a stage's count when the stage closes, so a finished round's
+iteration count does not stand beside the next round's. The stage is named by
+its run's transcript row, which no later run reuses, and `Event::Count` carries
+no depth of its own: the open phase stack the collector already keeps is what
+places it. Where no stage that counted is still open, `counts` is the newest
+count, which is what `count` returns and what the wire's `progress` carries.
+Nothing in the kernels changes for this: each loop already reports its own count
+through the `Progress` it was handed.
+
+The counts stay as reported, the units done. `under_way` is true while a stage
+opened after the counting stage's run is still open, which on the nested stack
+means one open inside it: during the fifth round the solve's `round 4/9` is
+under way, and between rounds it is not. The Background Tasks title line reads
+an outer count that is under way as the unit in progress, `round 5/9`, and the
+innermost as reported ([background-tasks.md](background-tasks.md) § "A line per
+queue, and one phase list"); the collector itself does not add the one.
 
 `live` differs from `take` in two ways, and both are about watching rather than
 reading afterwards.
@@ -644,7 +672,7 @@ itself. The two are one collector answering two questions, and the entry remains
 the summary of exactly what the panel showed: every run counted in the row it
 folds into, and the costs adding up.
 
-`status`, `count` and `fraction` are read by the Background panel
+`status`, `counts` and `fraction` are read by the Background panel
 ([background-tasks.md](background-tasks.md)),
 which is the reader they were collected for. They were collected before it
 existed: a status that only reached a panel would have had to be invented at the

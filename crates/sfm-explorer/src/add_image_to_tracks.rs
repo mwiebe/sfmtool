@@ -115,9 +115,14 @@ impl AppState {
     /// soon as the worker is running, and **nothing is logged here**: the entry
     /// is the outcome's, written on the frame the answer lands. An `Err` is a
     /// refusal to begin, logged the way the synchronous edits log theirs.
-    pub(crate) fn start_add_image_to_tracks(&mut self, image: ImageRef) -> Result<(), String> {
+    pub(crate) fn start_add_image_to_tracks(
+        &mut self,
+        image: ImageRef,
+    ) -> Result<Option<u64>, String> {
         let outcome = match self.add_image_to_tracks_job(image) {
-            Ok(job) => self.start_background_task(Operation::ADD_IMAGE_TO_TRACKS, image.recon, job),
+            Ok(job) => self
+                .start_background_task(Operation::ADD_IMAGE_TO_TRACKS, image.recon, job)
+                .map(Some),
             Err(message) => Err(message),
         };
         if let Err(message) = &outcome {
@@ -157,7 +162,7 @@ impl AppState {
         let index = image.index();
         Ok(Box::new(move |progress| {
             let refuse = |why: String| format!("Add {name} to tracks in {label} refused: {why}");
-            let [decode, work] = progress.split([1.0, 1.0]);
+            let [decode, work] = progress.split(crate::state::edits::DECODE_AND_STEP);
             let Ok(views) = sources.decode_available(&decode) else {
                 return Finished::Cancelled;
             };

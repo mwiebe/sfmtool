@@ -373,8 +373,9 @@ impl AppState {
     /// finishes; on one whose observations carry none it is the direct switch
     /// alone, on the GUI thread, with `retriangulate_points`' refusal sentence
     /// added to its row. Refused, with the proposal left open: no proposal, a
-    /// fit that was refused, a node or a viewer that is busy, and a switch the
-    /// core refuses on the GUI thread (a `.sift` file that cannot be read).
+    /// fit that was refused, a node that is busy, and a switch the core
+    /// refuses on the GUI thread (a `.sift` file that cannot be read). A start
+    /// while the slow queue runs another task waits behind it.
     pub(crate) fn apply_camera_model_proposal(
         &mut self,
         id: ReconId,
@@ -396,7 +397,7 @@ impl AppState {
         let refused = match &proposal.fit {
             Err(why) => Some(format!("Switch camera model of {label} refused: {why}")),
             Ok(_) if installs_answer => self.busy_refusal(id),
-            Ok(_) => self.busy_refusal(id).or_else(|| self.running_refusal()),
+            Ok(_) => self.start_refusal(Operation::SWITCH_CAMERA_MODEL, Some(id)),
         };
         if let Some(why) = refused {
             self.camera_model_proposal = Some(proposal);
@@ -419,9 +420,9 @@ impl AppState {
                     self.start_background_task(Operation::SWITCH_CAMERA_MODEL, id, job)
                 });
                 match started {
-                    Ok(()) => {
+                    Ok(task) => {
                         self.sync_proposal_field();
-                        Ok(ProposalApplied::Started)
+                        Ok(ProposalApplied::Started(task))
                     }
                     Err(why) => {
                         self.camera_model_proposal = Some(proposal);
@@ -635,9 +636,9 @@ pub(crate) struct ResolvedSwitch {
 /// How the proposal's Apply went, when it went.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ProposalApplied {
-    /// The `Switch camera model` background task started; its version lands
-    /// when it finishes.
-    Started,
+    /// The `Switch camera model` background task started, with this id; its
+    /// version lands when it finishes.
+    Started(u64),
     /// The switch alone pushed a version of this node on the GUI thread, with
     /// the switch's report for the camera.
     Pushed(ReconId, Box<CameraSwitch>),
@@ -648,7 +649,7 @@ impl ProposalApplied {
     /// the panel caches describing its geometry.
     pub(crate) fn pushed(&self) -> Option<ReconId> {
         match self {
-            ProposalApplied::Started => None,
+            ProposalApplied::Started(_) => None,
             ProposalApplied::Pushed(id, _) => Some(*id),
         }
     }

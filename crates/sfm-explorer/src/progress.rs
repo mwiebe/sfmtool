@@ -117,6 +117,18 @@ pub(crate) struct Count {
     pub unit: &'static str,
 }
 
+/// One stage's newest count, as [`Collector::counts`] lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StageCount {
+    /// The count as the stage reported it.
+    pub count: Count,
+    /// Whether a stage is open inside the one that reported it: a solve
+    /// that has counted four rounds done and has its fifth round open is
+    /// under way on the fifth. False between rounds, and for the newest count
+    /// standing in for a stage that has closed.
+    pub under_way: bool,
+}
+
 /// What an operation has reported so far, as a panel draws it mid-flight.
 ///
 /// Two things separate this from what [`Collector::take`] hands an Action Log
@@ -220,9 +232,26 @@ impl Collector {
         lock(&self.state).status.clone()
     }
 
-    /// The newest count the operation reported, if any.
+    /// The newest count the operation reported, if any: the wire's `progress`.
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub(crate) fn count(&self) -> Option<Count> {
         lock(&self.state).count
+    }
+
+    /// The newest count of each stage that reported one and is still open,
+    /// outermost first, or the newest count alone where none of those stages
+    /// is still open.
+    ///
+    /// A nested loop counts at each level: a bundle adjustment counts its
+    /// rounds in the solve and its iterations in each round, and the newest
+    /// count alone is the iteration, which says nothing about which round it
+    /// is in. A count belongs to the stage that was innermost when it arrived
+    /// and goes when that stage closes, so a finished round's iteration count
+    /// does not stay beside the next round's. Each says whether a stage is
+    /// open inside the one that reported it, which is how a reader of the
+    /// counts tells that work on the next unit has started.
+    pub(crate) fn counts(&self) -> Vec<StageCount> {
+        lock(&self.state).counts()
     }
 
     /// How far along the operation is, in `0.0..=1.0` of the whole, if it has
@@ -309,6 +338,10 @@ struct State {
     folds: HashMap<Fold, usize>,
     status: Option<String>,
     count: Option<Count>,
+    /// The newest count of each stage that reported one, keyed by the
+    /// transcript line of that stage's run, `None` for a count reported
+    /// outside every phase. Live state, like `count`.
+    staged: Vec<(Option<usize>, Count)>,
     fraction: Option<f32>,
 }
 
@@ -344,7 +377,22 @@ impl State {
             }
             Event::Status { text } => self.status = Some(text.to_string()),
             Event::Count { done, total, unit } => {
-                self.count = Some(Count { done, total, unit });
+                let count = Count { done, total, unit };
+                self.count = Some(count);
+                // The stage it belongs to is the innermost open one, named by
+                // its run's transcript line, which no later run reuses. Counts
+                // of stages that have closed go here rather than when they
+                // close, which keeps `leave` and `enter` about phases alone.
+                let owner = self.open.last().map(|open| open.line);
+                let open = &self.open;
+                self.staged.retain(|(stage, _)| {
+                    *stage != owner
+                        && stage.is_none_or(|line| open.iter().any(|open| open.line == line))
+                });
+                self.staged.push((owner, count));
+                // Lines grow with depth along the open stack, and the
+                // operation's own count, `None`, sorts first.
+                self.staged.sort_by_key(|(stage, _)| *stage);
             }
             Event::Fraction { of_whole } => {
                 // The kernels guarantee only that a call cannot report outside
@@ -450,6 +498,33 @@ impl State {
                 Some(said) if said == note => *last = None,
                 Some(_) => *last = Some(note.to_string()),
             }
+        }
+    }
+
+    /// See [`Collector::counts`].
+    fn counts(&self) -> Vec<StageCount> {
+        let open: Vec<StageCount> = self
+            .staged
+            .iter()
+            .filter(|(stage, _)| {
+                stage.is_none_or(|line| self.open.iter().any(|open| open.line == line))
+            })
+            .map(|&(stage, count)| StageCount {
+                count,
+                // A stage opened after this one's run and still open is inside
+                // it, since the open stack nests and lines grow along it.
+                under_way: self
+                    .open
+                    .iter()
+                    .any(|open| stage.is_none_or(|line| open.line > line)),
+            })
+            .collect();
+        match (open.is_empty(), self.count) {
+            (true, Some(newest)) => vec![StageCount {
+                count: newest,
+                under_way: false,
+            }],
+            _ => open,
         }
     }
 
