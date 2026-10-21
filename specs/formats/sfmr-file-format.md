@@ -1098,10 +1098,56 @@ Reprojection errors:
 
 - **Shape**: `(N,)` where N = point_count
 - **Data type**: `float32` (little-endian)
-- **Format**: RMS reprojection error in pixels. A `w = 0` point still projects
+- **Format**: RMS reprojection error in pixels: the square root of the mean of
+  the squared pixel distances between each observation's keypoint and the
+  point's projection into that image. A point with no observation that
+  projects stores `0.0`. A `w = 0` point still projects
   (rotation + intrinsics only), so its reprojection error stays well-defined —
   consumers (e.g. the reprojection-error point filter) score points at infinity
   by it like any finite point.
+
+Which writer stores which value:
+
+- **The RMS, computed from the observations.**
+  `SfmrReconstruction::recompute_point_errors`, which the Python
+  `SfmrReconstruction.from_data` runs, so every `sfm solve` and COLMAP import
+  stores the RMS, and `recompute_infinity_point_errors`; the points that
+  `classify_points_at_infinity` changes and the bearings `find_points_at_infinity`
+  adds; the bench's commit and Refit All Points; Switch Camera Model, for the
+  points its cameras see; Move Camera, for the points it re-triangulates when
+  the reconstruction carries inline keypoints; sfmtool's own bundle
+  adjustment, for the points it solves; and `sfm xform --bundle-adjust`
+  through pycolmap, which recomputes every point's error after the solve
+  rather than keeping COLMAP's, which is the mean.
+- **A value carried from elsewhere.** `sfm merge` stores the average of the
+  merged points' stored errors. An edit that moves a point or its keypoints
+  without scoring it again, such as Retriangulate or `--refine-keypoints`,
+  keeps the error the point had.
+
+Before sfmtool's writers stored the RMS, they stored the mean of the
+per-observation errors, so a file written by an earlier sfmtool holds the mean
+in this column until its errors are recomputed. A reader does not recompute
+them on open.
+
+The names this column goes by outside the file. The entry's name, and the
+keys that copy it field for field, stay `reprojection_errors`, because the
+format above already says which statistic the column holds. The names a caller
+reads one point's value by carry `rms_`, because nothing beside them does:
+
+- `reprojection_errors`: `SfmrData::reprojection_errors` in
+  `sfmtool-sfmr-format`, the key of the dict `read_sfmr` returns and
+  `write_sfmr` takes, and the key of the dict `SfmrReconstruction.from_data`
+  takes.
+- `Point3D::rms_reprojection_error`, one per entry of `PointSet::points` in
+  `sfmtool-core`.
+- In Python, `SfmrReconstruction.rms_reprojection_errors`, the
+  `clone_with_changes(rms_reprojection_errors=...)` keyword, and the
+  `rms_reprojection_error` key of an `EditedReconstruction` point record.
+- `rms_error_px` in the viewer's MCP `get_point` reply.
+
+`analysis::inspect_point` copies the value into `PointInspection::error`, and
+`SfmrReconstruction.inspect_point` returns it under the dict key `error`; those
+keep the bare name.
 
 #### `points3d/normals_xyz.{N}.3.float32.zst` (Optional)
 

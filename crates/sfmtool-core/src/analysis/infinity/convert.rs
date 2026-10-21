@@ -461,7 +461,8 @@ impl SfmrReconstruction {
                 }
             }
             point.normal = Vector3::zeros();
-            point.error = self.observed_error(p, &point.position, point.w == 0.0, &pixels);
+            point.rms_reprojection_error =
+                self.observed_error(p, &point.position, point.w == 0.0, &pixels);
         }
 
         // A changed point's normal was just zeroed, so its confidence drops to
@@ -529,7 +530,7 @@ impl SfmrReconstruction {
         median
     }
 
-    /// The mean reprojection error of point `p`'s observations against
+    /// The root-mean-square reprojection error of point `p`'s observations against
     /// `pixels` (rows as `tracks`), were the point at `position` (a direction
     /// when `at_infinity`). Observations with no pixel or no projection are
     /// left out, and with none left the error is 0, as `recompute_point_errors`
@@ -559,7 +560,7 @@ impl SfmrReconstruction {
                 pixel,
             ) {
                 if e.is_finite() {
-                    sum += e;
+                    sum += e * e;
                     count += 1;
                 }
             }
@@ -567,7 +568,7 @@ impl SfmrReconstruction {
         if count == 0 {
             0.0
         } else {
-            (sum / count as f64) as f32
+            (sum / count as f64).sqrt() as f32
         }
     }
 

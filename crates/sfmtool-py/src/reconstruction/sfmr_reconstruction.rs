@@ -552,15 +552,15 @@ impl PySfmrReconstruction {
         PyArray2::from_vec2(py, &vec2).unwrap()
     }
 
-    /// Reprojection errors for 3D points, shape `(M,)`.
+    /// Root-mean-square reprojection error of each 3D point in pixels, shape `(M,)`.
     #[getter]
-    fn errors<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+    fn rms_reprojection_errors<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
         let vec: Vec<f32> = self
             .inner
             .point_set
             .points
             .iter()
-            .map(|pt| pt.error)
+            .map(|pt| pt.rms_reprojection_error)
             .collect();
         PyArray1::from_vec(py, vec)
     }
@@ -878,12 +878,12 @@ impl PySfmrReconstruction {
         Ok(arr.into_pyarray(py))
     }
 
-    /// Recompute per-point mean reprojection errors from scratch.
+    /// Recompute per-point root-mean-square reprojection errors from scratch.
     ///
     /// For each image, loads feature positions from the `.sift` file and
     /// reprojects all observed 3D points through the camera model. Each
-    /// point's error is set to the mean pixel-space reprojection error
-    /// across all its observations.
+    /// point's error is set to the root mean square of the pixel-space
+    /// reprojection errors of all its observations.
     ///
     /// This replaces any errors read from COLMAP/GLOMAP binary files,
     /// ensuring errors are always in pixel coordinates.
@@ -893,7 +893,7 @@ impl PySfmrReconstruction {
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
-    /// Recompute mean reprojection errors for points at infinity only.
+    /// Recompute root-mean-square reprojection errors for points at infinity only.
     ///
     /// Finite points keep their existing errors. Reads `.sift` files only for
     /// images that observe a point at infinity. For a reconstruction whose
@@ -1078,7 +1078,7 @@ impl PySfmrReconstruction {
     /// conditioning and the noise-calibrated depth uncertainty. Points at
     /// infinity and points with fewer than two observations get ``NaN`` (their
     /// depth is undefined). Arrays are length ``M = point_count`` and align with
-    /// ``positions`` / ``errors`` for masking.
+    /// ``positions`` / ``rms_reprojection_errors`` for masking.
     ///
     /// Args:
     ///     noise_px: Per-ray pixel localisation noise; the per-point noise is
@@ -1136,7 +1136,7 @@ impl PySfmrReconstruction {
             if rays.len() < 2 {
                 continue;
             }
-            let noise = (pt.error as f64).max(noise_px);
+            let noise = (pt.rms_reprojection_error as f64).max(noise_px);
             for (img, r) in &rays {
                 dirs.push(*r);
                 ray_centers.push(centers[*img]);
@@ -1524,7 +1524,7 @@ impl PySfmrReconstruction {
     /// or ``(N, 4)`` homogeneous coordinates (``w = 0`` marks a point at
     /// infinity).
     ///
-    /// Supported fields: ``positions``, ``colors``, ``errors``,
+    /// Supported fields: ``positions``, ``colors``, ``rms_reprojection_errors``,
     /// ``quaternions_wxyz``, ``translations``, ``track_image_indexes``,
     /// ``track_feature_indexes``, ``track_point_indexes``, ``observation_counts``,
     /// ``normals``, ``normal_confidence`` (an ``(N,)`` uint8 array or ``None``
