@@ -169,7 +169,7 @@ pub(crate) struct PreviewDraw {
 pub(crate) struct CameraModelProposal {
     /// The node the camera belongs to.
     pub(crate) recon: ReconId,
-    /// The camera's index in the node's camera table.
+    /// The camera's index among the node's cameras.
     pub(crate) camera: usize,
     /// The node's label, for the sentences that name it.
     pub(crate) label: String,
@@ -505,7 +505,7 @@ pub(crate) fn targets_for(source: &CameraIntrinsics) -> Vec<&'static str> {
 /// The three greyed cases every entry carries: the node busy with a background
 /// task (`busy`, the sentence the busy node's other edits carry), a proposal
 /// already open on another camera of the node, and a node with no posed
-/// image; and a camera the table does not have.
+/// image; and a camera the image set does not have.
 pub(crate) fn open_refusal(
     node: &crate::scene::SceneNode,
     camera: usize,
@@ -522,13 +522,13 @@ pub(crate) fn open_refusal(
             node.label
         ));
     }
-    let cameras = node.recon().image_table.cameras.len();
+    let cameras = node.recon().image_set.cameras.len();
     if camera >= cameras {
         return Some(format!(
             "Camera {camera} does not exist; the reconstruction has {cameras} camera(s)."
         ));
     }
-    let posed = node.recon().image_table.images.iter().any(|image| {
+    let posed = node.recon().image_set.images.iter().any(|image| {
         image.quaternion_wxyz.coords.iter().all(|c| c.is_finite())
             && image.translation_xyz.iter().all(|c| c.is_finite())
     });
@@ -657,7 +657,7 @@ impl AppState {
             let (value, map) = edited.materialize();
             (Arc::new(value), Some(map))
         };
-        let source = node.recon().image_table.cameras[camera.index()].clone();
+        let source = node.recon().image_set.cameras[camera.index()].clone();
         // One read of each image's `.sift` file feeds both the outermost
         // extent, over the version's base as the switch reports it, and the
         // keypoints of the value the fits read.

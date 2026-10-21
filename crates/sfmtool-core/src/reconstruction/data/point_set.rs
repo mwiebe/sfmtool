@@ -94,7 +94,7 @@ pub struct PointSet {
     /// The per-image hash vectors this carries are the one thing on the point
     /// side that is measured per image; they travel with the variant that
     /// selects them rather than splitting a second discriminator off into the
-    /// image table.
+    /// image set.
     pub observations: ObservationSource,
     /// Optional per-point oriented-patch frame (parallel to `points`), persisted
     /// in `points3d/` (version 3+). `patch_u_halfvec_xyz` and
@@ -368,7 +368,7 @@ impl PointSet {
     /// `w`-values externally. The two per-image maps are sized from
     /// `image_count`, which is the one thing the point side cannot see for
     /// itself; [`SfmrReconstruction::rebuild_derived_fields`] supplies it from
-    /// the image table.
+    /// the image set.
     ///
     /// [`SfmrReconstruction::rebuild_derived_fields`]: super::SfmrReconstruction::rebuild_derived_fields
     pub fn rebuild_derived_fields(&mut self, image_count: usize) {
@@ -549,7 +549,7 @@ impl PointSet {
     /// [`Self::validate_observation_columns`] runs this first. It is separate
     /// so that a builder can run it before
     /// [`Self::rebuild_derived_fields`], which indexes the per-image maps by
-    /// each row's image and so panics on a row past the table.
+    /// each row's image and so panics on a row past the image set.
     pub fn validate_track_image_indexes(&self, image_count: usize) -> Result<(), String> {
         match self
             .tracks
@@ -564,7 +564,7 @@ impl PointSet {
         }
     }
 
-    /// Check that every track row names an image of the table and that the
+    /// Check that every track row names an image of the image set and that the
     /// observation-source columns are parallel to the structures they
     /// annotate: per-observation columns (`feature_indexes` / `keypoints_xy`)
     /// must match the track count, and per-image columns (the hashes) must match

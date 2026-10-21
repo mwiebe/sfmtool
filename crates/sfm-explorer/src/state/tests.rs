@@ -251,7 +251,7 @@ fn only_a_real_sift_read_records_a_stage() {
 
 /// The panels' accessor hands back the pyramid the cache holds for the image's
 /// path -- the same pixels, not a copy of them -- and an image with nothing
-/// cached, or past the table, is `None` without a read. What the panels do on
+/// cached, or past the image set, is `None` without a read. What the panels do on
 /// a miss is tested beside `display_photograph`.
 ///
 /// Pointer equality, because an accessor that handed back a second buffer
@@ -278,6 +278,6 @@ fn the_panels_read_the_pyramid_the_cache_holds_for_the_path() {
     // Image 1 has no file behind it, and nothing was inserted for it.
     assert!(peek_full_res_pyramid(&cache, &recon, 1).is_none());
     assert_eq!(cache.stats().misses, 0, "a peek read a file");
-    // An index past the image table.
+    // An index past the image set.
     assert!(peek_full_res_pyramid(&cache, &recon, recon.image_count()).is_none());
 }

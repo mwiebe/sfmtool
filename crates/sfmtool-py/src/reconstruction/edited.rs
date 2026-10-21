@@ -553,7 +553,7 @@ impl PyEditedReconstruction {
     /// points and left the pose alone.
     ///
     /// Args:
-    ///     image: The image's index in this version's image table.
+    ///     image: The image's index in this version's image set.
     ///     cluster_patches_path: Optional cluster-patches ``.matches`` file.
     ///         Without it the 2D-3D pairs are the tracks' alone; with it the
     ///         file's clusters are used beside them, each as a track of its
@@ -831,7 +831,7 @@ impl PyEditedReconstruction {
     ///         naming the camera, when ``opt_f`` is off or a camera's model has
     ///         no such distortion; pass ``releases`` to release some cameras
     ///         and hold the others.
-    ///     releases: One entry per camera in the camera table, in table order,
+    ///     releases: One entry per camera of the image set, in camera index order,
     ///         each a dict ``{"focal": bool, "distortion": bool}`` (a missing
     ///         key is ``False``). Overrides ``opt_f`` and ``opt_distortion``.
     ///         A camera with neither is held; an entry for a camera no posed
@@ -856,7 +856,7 @@ impl PyEditedReconstruction {
     ///     ``points``, ``observations``, ``points_deleted``,
     ///     ``median_residual_before``, ``median_residual_after`` and
     ///     ``cameras``, a list with one dict per camera in the solve, in
-    ///     camera-table order: ``camera`` (its table index), ``images`` (the
+    ///     camera index order: ``camera`` (its index), ``images`` (the
     ///     posed images taken through it), ``focal_before``, ``focal_after``,
     ///     ``focal_released``, ``distortion_released`` and
     ///     ``outermost_observed``, the camera's outermost
@@ -900,7 +900,7 @@ impl PyEditedReconstruction {
                     focal: opt_f,
                     distortion: opt_distortion,
                 };
-                value.image_table.cameras.len()
+                value.image_set.cameras.len()
             ],
         };
         let options = BundleAdjustOptions {

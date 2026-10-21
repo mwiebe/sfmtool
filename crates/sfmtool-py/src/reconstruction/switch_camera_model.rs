@@ -134,7 +134,7 @@ fn run(
         },
         ..SwitchCameraModelOptions::default()
     };
-    let cameras = cameras.unwrap_or_else(|| (0..value.image_table.cameras.len()).collect());
+    let cameras = cameras.unwrap_or_else(|| (0..value.image_set.cameras.len()).collect());
     let (next, report) = py
         .detach(|| core_switch(value, &cameras, &target, &options))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -158,7 +158,7 @@ impl PyEditedReconstruction {
     ///     camera_model: The model name, case-insensitive: ``SFMTOOL_FISHEYE``,
     ///         ``SFMTOOL_PINHOLE``, ``EQUIDISTANT_FISHEYE`` or a COLMAP lens
     ///         model.
-    ///     cameras: Camera-table indexes to switch (default: every camera).
+    ///     cameras: Camera indexes to switch (default: every camera).
     ///     coeff_count: Spline coefficients for the two spline models.
     ///         Default: the camera's own count when it already has this
     ///         model's spline, otherwise 8. Refused for any other model.
@@ -264,7 +264,7 @@ impl PySfmrReconstruction {
     /// the incidence angle this reconstruction's camera model gives its pixel.
     ///
     /// Args:
-    ///     cameras: Camera-table indexes (default: every camera).
+    ///     cameras: Camera indexes (default: every camera).
     ///     read_sift_files: Read the images' ``.sift`` files (default
     ///         ``True``). Without them a ``sift_files`` reconstruction has no
     ///         observed pixel either.
@@ -282,8 +282,7 @@ impl PySfmrReconstruction {
         cameras: Option<Vec<usize>>,
         read_sift_files: bool,
     ) -> PyResult<Bound<'py, PyList>> {
-        let cameras =
-            cameras.unwrap_or_else(|| (0..self.inner.image_table.cameras.len()).collect());
+        let cameras = cameras.unwrap_or_else(|| (0..self.inner.image_set.cameras.len()).collect());
         let reach = py.detach(|| core_outermost(&self.inner, &cameras, read_sift_files));
         let out = PyList::empty(py);
         for entry in &reach {

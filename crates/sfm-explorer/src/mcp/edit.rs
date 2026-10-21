@@ -383,9 +383,9 @@ pub(super) fn add_camera_image_to_tracks(
 /// the transport, which is what the call used to do for any reconstruction
 /// worth adjusting.
 ///
-/// `defaults` is the release every camera of the node's table takes, and each
+/// `defaults` is the release every camera of the node's image set takes, and each
 /// of `overrides` replaces it for one camera, field by field. An override
-/// naming a camera the table does not have, or naming one camera twice, is
+/// naming a camera the image set does not have, or naming one camera twice, is
 /// refused before anything starts. `options` carries the rest of the request;
 /// its release list is the one built here.
 pub(super) fn bundle_adjust(
@@ -401,7 +401,7 @@ pub(super) fn bundle_adjust(
     };
     let count = state
         .node(id)
-        .map_or(0, |node| node.edited().base.image_table.cameras.len());
+        .map_or(0, |node| node.edited().base.image_set.cameras.len());
     let mut releases = vec![defaults; count];
     let mut named = vec![false; count];
     for entry in overrides {
@@ -516,7 +516,7 @@ pub(super) fn propose_camera_model(
 
     let id = resolve_reconstruction(state, Some(label))?;
     let node = state.node(id).expect("just resolved");
-    let cameras = &node.recon().image_table.cameras;
+    let cameras = &node.recon().image_set.cameras;
     let source = cameras.get(request.camera).ok_or_else(|| {
         ToolError::new(format!(
             "camera_intrinsics_index {} does not exist; {} has {} camera(s).",

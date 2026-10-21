@@ -54,7 +54,7 @@ pub enum TrackTableColumn {
     /// The stored position's z. No value at infinity.
     Z,
     /// Distance from the posed cameras' centroid, as
-    /// [`ImageTable::placement_scale`](crate::reconstruction::ImageTable::placement_scale)
+    /// [`ImageSet::placement_scale`](crate::reconstruction::ImageSet::placement_scale)
     /// measures it. No value at infinity; absent with no posed image.
     CentroidDistance,
     /// The stored `normal_confidence` byte, 0 to 255; absent without the
@@ -165,7 +165,7 @@ impl TrackTableColumn {
         match self {
             TrackTableColumn::CentroidDistance => recon
                 .base
-                .image_table
+                .image_set
                 .images
                 .iter()
                 .any(|image| is_posed(&image.quaternion_wxyz, &image.translation_xyz)),
@@ -247,7 +247,7 @@ impl TrackTable {
         };
         let context = Context {
             recon,
-            centroid: recon.base.image_table.camera_centroid(),
+            centroid: recon.base.image_set.camera_centroid(),
         };
 
         // The computed columns cost a triangulation or a pass over every pair
@@ -358,7 +358,7 @@ fn point_values(
     view: &PointView<'_>,
     columns: &[TrackTableColumn],
 ) -> [f64; COLUMN_COUNT] {
-    let table = &context.recon.base.image_table;
+    let image_set = &context.recon.base.image_set;
     let point = view.point();
     let at_infinity = point.is_at_infinity();
     let finite = |v: f64| if at_infinity { f64::NAN } else { v };
@@ -386,7 +386,7 @@ fn point_values(
             TrackTableColumn::Y => finite(point.position.y),
             TrackTableColumn::Z => finite(point.position.z),
             TrackTableColumn::CentroidDistance => {
-                finite(crate::reconstruction::ImageTable::placement_scale_from(
+                finite(crate::reconstruction::ImageSet::placement_scale_from(
                     &context.centroid,
                     &point.position,
                 ))
@@ -398,15 +398,17 @@ fn point_values(
             TrackTableColumn::LargestZnccSelfSimilarityRadius => {
                 largest_self_similarity_radius(view)
             }
-            TrackTableColumn::MaxRayAngleDeg => f64::from(compute_max_ray_angle_deg(table, view)),
+            TrackTableColumn::MaxRayAngleDeg => {
+                f64::from(compute_max_ray_angle_deg(image_set, view))
+            }
             TrackTableColumn::ConditionNumber => f64::from(
                 diagnostics
-                    .get_or_insert_with(|| compute_point_diagnostics(table, view))
+                    .get_or_insert_with(|| compute_point_diagnostics(image_set, view))
                     .0,
             ),
             TrackTableColumn::InverseDepthZ => f64::from(
                 diagnostics
-                    .get_or_insert_with(|| compute_point_diagnostics(table, view))
+                    .get_or_insert_with(|| compute_point_diagnostics(image_set, view))
                     .1,
             ),
         };

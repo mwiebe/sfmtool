@@ -28,7 +28,7 @@ use crate::patch::normal_refine::ProjectedImage;
 use crate::progress::{Cancelled, Progress};
 use crate::reconstruction::bundle_adjust::is_posed;
 use crate::reconstruction::data::{
-    ImageTable, ObservationReading, ObservationReadings, ObservationSource, PointSet,
+    ImageSet, ObservationReading, ObservationReadings, ObservationSource, PointSet,
     SfmrReconstruction,
 };
 use crate::reconstruction::edited::{reprojection_noise_level, EditedReconstruction, PointRecord};
@@ -534,7 +534,7 @@ fn check_preconditions(
         return Err(RefitPointsError::NoPatchFrames);
     }
     if !recon
-        .image_table
+        .image_set
         .images
         .iter()
         .any(|image| is_posed(&image.quaternion_wxyz, &image.translation_xyz))
@@ -548,7 +548,7 @@ fn check_preconditions(
             expected,
         });
     }
-    // Every image a track names is in the table, so no step indexes past it:
+    // Every image a track names is in the image set, so no step indexes past it:
     // the fit's minimum point depth reads each observation's camera centre
     // and the record checks each `in` row's image. The value's builders
     // already refuse such a row; this holds for a caller that wrote the
@@ -593,7 +593,7 @@ fn point_ranges(recon: &SfmrReconstruction) -> Vec<PointRange> {
     let Some(columns) = recon.point_set.point_constraints.as_ref() else {
         return vec![PointRange::Free; recon.point_count()];
     };
-    let table: &ImageTable = &recon.image_table;
+    let image_set: &ImageSet = &recon.image_set;
     (0..recon.point_count())
         .map(|p| {
             let kind = columns.point_constraints[p];
@@ -608,7 +608,7 @@ fn point_ranges(recon: &SfmrReconstruction) -> Vec<PointRange> {
                     })
                 }
                 POINT_CONSTRAINT_RANGED if distance.is_finite() && distance > 0.0 => {
-                    match reference_camera_center(table, reference) {
+                    match reference_camera_center(image_set, reference) {
                         Some(origin) => PointRange::Applied(PointDistance { distance, origin }),
                         None => PointRange::Unresolved,
                     }

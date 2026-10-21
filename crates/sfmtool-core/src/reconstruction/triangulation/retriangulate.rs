@@ -28,7 +28,7 @@ use crate::numeric::median_in_place;
 use crate::progress::{Cancelled, Progress};
 use crate::progress_info;
 use crate::reconstruction::bundle_adjust::{is_posed, patch_frame_factor, rescale_patch_frame};
-use crate::reconstruction::data::{ImageTable, Point3D};
+use crate::reconstruction::data::{ImageSet, Point3D};
 use crate::reconstruction::edited::{EditError, EditedReconstruction, PointMap};
 
 /// Which points one retriangulation re-solves.
@@ -577,11 +577,11 @@ pub fn retriangulate_points(
     };
     progress.check_cancel()?;
 
-    let table = &work.base.image_table;
+    let image_set = &work.base.image_set;
     let estimates = {
         let _phase = p_solve.phase("retriangulate");
         triangulate_points_through_cameras(
-            &table.cameras,
+            &image_set.cameras,
             &gathered.image_camera,
             ObservationSet {
                 uv: &gathered.uv,
@@ -655,7 +655,7 @@ struct Gathered {
     /// The live indexes not in `targets` because the value holds their
     /// coordinate, ascending.
     held: Vec<u32>,
-    /// Per image, the camera-table index of the camera it was taken through.
+    /// Per image, the index of the camera it was taken through.
     image_camera: Vec<u32>,
     uv: Vec<f64>,
     obs_image: Vec<u32>,
@@ -675,8 +675,8 @@ fn check_preconditions(edited: &EditedReconstruction) -> Result<(), Retriangulat
     if !edited.has_keypoints() {
         return Err(RetriangulateError::NoKeypoints);
     }
-    let table = &edited.base.image_table;
-    if !table
+    let image_set = &edited.base.image_set;
+    if !image_set
         .images
         .iter()
         .any(|image| is_posed(&image.quaternion_wxyz, &image.translation_xyz))
@@ -695,26 +695,27 @@ fn gather(
     work: &EditedReconstruction,
     named: Option<Vec<u32>>,
 ) -> Result<Gathered, RetriangulateError> {
-    let table = &work.base.image_table;
+    let image_set = &work.base.image_set;
 
-    let posed: Vec<usize> = (0..table.images.len())
+    let posed: Vec<usize> = (0..image_set.images.len())
         .filter(|&i| {
             is_posed(
-                &table.images[i].quaternion_wxyz,
-                &table.images[i].translation_xyz,
+                &image_set.images[i].quaternion_wxyz,
+                &image_set.images[i].translation_xyz,
             )
         })
         .collect();
     // Each image names the camera that took it, and the solve casts an
     // observation's ray, and reads its reprojection, through that camera.
-    let image_camera: Vec<u32> = table.images.iter().map(|i| i.camera_index).collect();
+    let image_camera: Vec<u32> = image_set.images.iter().map(|i| i.camera_index).collect();
 
-    // Every image gets a row, so an observation indexes the table directly. An
-    // unposed image's row is not a pose, and the array form drops the rays it
-    // would have cast rather than casting them through a placeholder.
-    let mut quats_wxyz = Vec::with_capacity(table.images.len() * 4);
-    let mut translations = Vec::with_capacity(table.images.len() * 3);
-    for (i, image) in table.images.iter().enumerate() {
+    // Every image gets a row, so an observation's image index indexes these
+    // pose arrays directly. An unposed image's row is not a pose, and the array
+    // form drops the rays it would have cast rather than casting them through a
+    // placeholder.
+    let mut quats_wxyz = Vec::with_capacity(image_set.images.len() * 4);
+    let mut translations = Vec::with_capacity(image_set.images.len() * 3);
+    for (i, image) in image_set.images.iter().enumerate() {
         if posed.binary_search(&i).is_ok() {
             let q = image.quaternion_wxyz;
             quats_wxyz.extend_from_slice(&[q.w, q.i, q.j, q.k]);
@@ -755,7 +756,7 @@ fn gather(
     for (slot, &index) in targets.iter().enumerate() {
         let view = work.point(index).expect("a live index");
         marks.push(view.point().is_at_infinity());
-        distance.push(ranged_entry(table, view.constraint(), &mut any_ranged));
+        distance.push(ranged_entry(image_set, view.constraint(), &mut any_ranged));
         for (k, observation) in view.observations().iter().enumerate() {
             let Some([x, y]) = view.keypoint_xy(k) else {
                 continue;
@@ -787,7 +788,7 @@ fn gather(
 /// A point whose reference the value does not name carries no origin to measure
 /// from, so the rule says nothing about it and it is solved free.
 fn ranged_entry(
-    table: &ImageTable,
+    image_set: &ImageSet,
     constraint: Option<(u8, f64, u32)>,
     any_ranged: &mut bool,
 ) -> PointDistance {
@@ -797,23 +798,23 @@ fn ranged_entry(
     if kind != POINT_CONSTRAINT_RANGED || reference == NO_REFERENCE_IMAGE {
         return PointDistance::NONE;
     }
-    let Some(origin) = reference_camera_center(table, reference) else {
+    let Some(origin) = reference_camera_center(image_set, reference) else {
         return PointDistance::NONE;
     };
     *any_ranged = true;
     PointDistance { distance, origin }
 }
 
-/// The camera centre of image `reference` at `table`'s poses, the origin a
-/// ranged point's distance is measured from, or `None` where `table` holds no
+/// The camera centre of image `reference` at `image_set`'s poses, the origin a
+/// ranged point's distance is measured from, or `None` where `image_set` holds no
 /// such image or the image carries no pose.
 ///
 /// The one rule for that origin: [`ranged_entry`] reads it for the
 /// retriangulation, and
 /// [`refit_points`](crate::bench::refit_points::refit_points) for a ranged
 /// point at a finite distance.
-pub(crate) fn reference_camera_center(table: &ImageTable, reference: u32) -> Option<[f64; 3]> {
-    let image = table.images.get(reference as usize)?;
+pub(crate) fn reference_camera_center(image_set: &ImageSet, reference: u32) -> Option<[f64; 3]> {
+    let image = image_set.images.get(reference as usize)?;
     if !is_posed(&image.quaternion_wxyz, &image.translation_xyz) {
         return None;
     }
@@ -912,7 +913,7 @@ fn write_in_place(
     let mut out = work.base.clone_for_edit();
     // The poses do not move, so one centroid measures both sides of every
     // frame rescale.
-    let centroid = out.image_table.camera_centroid();
+    let centroid = out.image_set.camera_centroid();
     let pruned = pruned_per_slot(gathered, estimates);
     let mut points = Vec::with_capacity(gathered.targets.len() + gathered.held.len());
     for (slot, &index) in gathered.targets.iter().enumerate() {
@@ -941,7 +942,7 @@ fn write_in_place(
         };
         let before = &out.point_set.points[p];
         let before_scale = (!before.is_at_infinity())
-            .then(|| ImageTable::placement_scale_from(&centroid, &before.position));
+            .then(|| ImageSet::placement_scale_from(&centroid, &before.position));
         let after = (w != 0.0).then_some(&position);
         rescale_patch_frame(&mut out, p, &centroid, before_scale, after);
         let point = &mut out.point_set.points[p];
@@ -967,7 +968,7 @@ fn write_overlay(
     estimates: &TriangulatedPoints,
 ) -> Result<(EditedReconstruction, PointMap, Vec<RetriangulatedPoint>), RetriangulateError> {
     let mut next = edited.clone();
-    let centroid = edited.base.image_table.camera_centroid();
+    let centroid = edited.base.image_set.camera_centroid();
     let pruned = pruned_per_slot(gathered, estimates);
     let mut points = Vec::with_capacity(gathered.targets.len() + gathered.held.len());
     let mut moves = Vec::new();
@@ -992,7 +993,7 @@ fn write_overlay(
             record.constraint = Some((POINT_CONSTRAINT_FREE, f64::NAN, NO_REFERENCE_IMAGE));
         }
         let before_scale = (!record.point.is_at_infinity())
-            .then(|| ImageTable::placement_scale_from(&centroid, &record.point.position));
+            .then(|| ImageSet::placement_scale_from(&centroid, &record.point.position));
         let after = (w != 0.0).then_some(&position);
         if let Some(factor) = patch_frame_factor(&centroid, before_scale, after) {
             for half in [&mut record.patch_u_halfvec, &mut record.patch_v_halfvec] {
