@@ -6,13 +6,11 @@
 non-goal "Point colouring and filtering by quality") and
 [gui/panel-layout.md](../gui/panel-layout.md) (a tenth panel) and
 [gui/background-tasks.md](../gui/background-tasks.md) § "Two queues" and
-§ "Quiet tasks" (two quiet tasks and one asked-for fast-queue operation). It
-also makes `Point3D::error` the RMS its doc comment states and renames it
-`rms_reprojection_error`, and renames `analysis::inspect_point`'s angle field
-(Steps 0a and 0b). It will file as
-two standing specs: `core/analysis/point-columns.md` (Part 1) and
-`gui/track-table.md` (Parts 2 to 4, with the wire tools also described in
-`gui/mcp-server.md`).
+§ "Quiet tasks" (two quiet tasks and one asked-for fast-queue operation).
+Part 1, the point columns and the point query, is built and
+filed as [core/analysis/point-columns.md](../core/analysis/point-columns.md).
+Parts 2 to 4 will file as `gui/track-table.md`, with the wire tools also
+described in `gui/mcp-server.md`.
 
 Decided:
 
@@ -40,13 +38,11 @@ Decided:
 - A `find_points` call that needs a computed column the cache does not hold
   queues an asked-for fast-queue task of its own, *Find points*, rather than
   promoting the panel's quiet job (§ "`find_points`").
-- `Point3D::error` is made the root-mean-square reprojection error its doc
-  comment already states; `recompute_point_errors` computes the mean today
-  (Step 0a). The field becomes `Point3D::rms_reprojection_error`, and
-  `get_point` reports it as `rms_error_px`.
-- `max_ray_angle_deg` keeps the largest-pairwise-angle meaning the bench, the
-  viewer and this table use; `analysis::inspect_point`'s field of that name,
-  which is the largest angle from the mean direction, is renamed (Step 0b).
+- The error column is `rms_error_px`, the stored
+  `Point3D::rms_reprojection_error` (an RMS since #1000), which `get_point`
+  also reports as `rms_error_px`. `max_ray_angle_deg` is the largest pairwise
+  ray angle everywhere, since `inspect_point`'s angle from the mean direction
+  was renamed `max_angle_from_mean_deg` (#1001).
 
 Not decided: see § "Open questions".
 
@@ -86,216 +82,16 @@ The design has three layers, and each is useful without the ones above it:
 
 ## Part 1: point columns and the point query (core)
 
-### What a column is
-
-A **point column** is one value per live point of a reconstruction, under a
-fixed name. Every column is defined in one place, in `sfmtool-core`. The
-viewer's `metrics.rs` already exists so that Track View, the Image Detail
-overlay and `get_point` quote the same number. For the same reason, the
-definitions the table needs for every point move from it into core, and
-`metrics.rs` calls them:
-
-- `compute_max_pairwise_angle`, together with `observation_rays`, which
-  `compute_max_track_angle_deg` in `image_detail/mod.rs` copies when it builds
-  its rays before calling the same angle function. Core already has a pairwise
-  angle function, `ray_angle` in `bench/nearby/candidate.rs`, and the move
-  reuses it rather than adding a third copy;
-- `compute_point_diagnostics`.
-
-A column belongs to one of two **cost classes**:
-
-- **Stored** columns are read from data the reconstruction already holds,
-  in O(1) or O(track length) per point.
-- **Computed** columns cost a triangulation or a pass over every pair of
-  observations, per point.
-
-The class decides only where the work runs (Part 2, § "Computing the
-columns"). It makes no difference to what a column means.
-
-| Wire name | Heading | Class | Definition | Point at infinity | Absent when |
-|---|---|---|---|---|---|
-| `track_length` | Track | stored | number of observations in the track | defined | never |
-| `image_count` | Images | stored | number of distinct images among those observations. It is less than `track_length` when one image holds several observations of the point, which a GLOMAP solve produces (bug bash finding 12) | defined | never |
-| `error_px` | Error (px) | stored | `Point3D::rms_reprojection_error`, the root-mean-square reprojection error over the point's observations, in pixels, which `get_point` reports as `rms_error_px`. `recompute_point_errors` writes it (Step 0a); a file whose errors were never recomputed holds what its writer stored | defined | never |
-| `at_infinity` | ∞ | stored | 1 for a point at infinity (`w = 0`), 0 for a finite one | defined | never |
-| `x`, `y`, `z` | X, Y, Z | stored | the point's position in the stored frame, not the display frame, in the reconstruction's world-space unit (scene units where none is declared) | no value | never |
-| `centroid_distance` | Distance | stored | distance from the posed cameras' centroid, the same number `ImageTable::placement_scale` gives, in the stored frame and the same unit as `x` | no value | the reconstruction has no posed image |
-| `normal_confidence` | Normal conf. | stored | the stored `normal_confidence` byte, from 0 to 255 | defined | the file has no `normal_confidence` column |
-| `lowest_zncc` | Lowest ZNCC | stored | the lowest stored per-observation ZNCC in the track, read from `observation_confidence` as `byte / 255` over the non-zero bytes only. The byte is `round(255 · clamp(z, 0, 1))`, so the range is 0…1 with negative scores at 0, and a `0` byte means the observation was never measured, not that it scored 0 | no value when no observation of the track was measured | the file has no `observation_confidence` column |
-| `largest_zncc_self_similarity_radius` | Self-sim. (px) | stored | the largest ZNCC self-similarity radius (the semi-major axis of the stored ellipse, `ellipse_axes[0]`, in patch px) among the track's observation readings, skipping rows that are `NOT_MEASURED` | no value when every row is unmeasured | the file has no observation readings |
-| `max_ray_angle_deg` | Ray angle (°) | computed | the largest angle between two of the track's viewing rays, as `metrics::compute_max_pairwise_angle` defines it today and the Image Detail `max_track_angle` heat map shows it | 0 | never |
-| `condition_number` | Cond. | computed | condition number of the point's triangulation, as `metrics::compute_point_diagnostics` defines it | no value | never |
-| `inverse_depth_z` | Depth z | computed | inverse-depth z-score from the same diagnostics | no value | never |
-
-A column that is **absent** for a whole reconstruction is not offered for it:
-the panel leaves it out, and `find_points` refuses a query that names it,
-saying which columns that reconstruction does have. **No value** for a single
-point is a NaN in the store. A no-value row fails every bound set on its
-column, and it sorts after every row that has a value, whichever way the sort
-runs. That is Track View's rule for empty cells.
-
-The per-observation reprojection error (the largest error in a track, say) is
-left out of the first version. For a `sift_files` reconstruction without
-inline keypoints, it needs every image's `.sift` file read. It can be added as
-a computed column that is absent when `has_keypoints()` is false.
-
-### Rust API
-
-The columns and the query live in `crates/sfmtool-core/src/analysis/point_columns.rs`,
-bound as `sfmtool.analysis.point_columns`.
-
-```rust
-/// One named per-point value. The wire name is the stable identifier.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PointColumn {
-    TrackLength, ImageCount, ErrorPx, AtInfinity, X, Y, Z, CentroidDistance,
-    NormalConfidence, LowestZncc, LargestZnccSelfSimilarityRadius,
-    MaxRayAngleDeg, ConditionNumber, InverseDepthZ,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ColumnCost { Stored, Computed }
-
-impl PointColumn {
-    pub const ALL: [PointColumn; 14];
-    pub fn wire_name(self) -> &'static str;
-    pub fn from_wire_name(name: &str) -> Option<Self>;
-    pub fn cost(self) -> ColumnCost;
-    /// Whether `recon` can supply this column at all (§ "Absent when").
-    pub fn is_available(self, recon: &EditedReconstruction) -> bool;
-}
-
-/// Column values for every live point of one version, in `live_indexes()`
-/// order. Holds only the columns it was asked for.
-pub struct PointColumns { /* … */ }
-
-impl PointColumns {
-    /// Compute `columns` for every live point of `recon`. Columns the
-    /// reconstruction cannot supply are skipped, not an error; `has` says
-    /// which were filled.
-    pub fn compute(
-        recon: &EditedReconstruction,
-        columns: &[PointColumn],
-        progress: &Progress,
-    ) -> Result<PointColumns, Cancelled>;
-
-    pub fn point_indexes(&self) -> &[u32];
-    pub fn has(&self, column: PointColumn) -> bool;
-    /// `None` when the column was not computed. Position columns are read
-    /// through `values_f64`.
-    pub fn values(&self, column: PointColumn) -> Option<&[f32]>;
-    pub fn values_f64(&self, column: PointColumn) -> Option<&[f64]>;
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ColumnBounds {
-    pub column: PointColumn,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SortOrder { Ascending, Descending }
-
-/// What to match and in which order. Settings chosen by the caller, so
-/// `*Options` by the type-name rule. (The viewer's Go to Point dialog has an
-/// unrelated `goto_point::PointQuery`, the parse of what was typed; this type
-/// is named apart from it.)
-#[derive(Clone, Debug, Default)]
-pub struct PointQueryOptions {
-    pub bounds: Vec<ColumnBounds>,
-    /// Keep only points with an observation in this image.
-    pub seen_in_image: Option<u32>,
-    /// `None` keeps `live_indexes()` order.
-    pub order_by: Option<(PointColumn, SortOrder)>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PointQueryError {
-    /// A bound or the sort names a column `columns` does not hold.
-    ColumnNotComputed(PointColumn),
-    ImageOutOfRange { image: u32, image_count: usize },
-}
-
-/// The point indexes that match, in order. The full list, not a page: the
-/// panel scrolls it, `find_points` slices it, and a later "Remove matching
-/// points" passes it to `delete_points` unchanged.
-pub fn query_points(
-    recon: &EditedReconstruction,
-    columns: &PointColumns,
-    options: &PointQueryOptions,
-) -> Result<Vec<u32>, PointQueryError>;
-```
-
-**Why it is shaped this way:**
-
-- **Compute and query are separate calls.** The panel computes the columns
-  once per version and then runs a new query at every keystroke in a filter
-  box. A single `find_points(recon, options)` function would recompute the
-  maximum ray angle for every point each time a bound changed.
-- **Columns are computed by name.** The panel and the wire both ask for only
-  what they show or filter on, so the computed columns are not computed for
-  a person who never shows, sorts or bounds one.
-- **It works on `EditedReconstruction`.** That is what the viewer holds. A
-  caller with an `SfmrReconstruction` wraps it with
-  `EditedReconstruction::new(Arc::new(recon))`, as the bench does.
-- **The result is a `Vec<u32>` of point indexes, not row positions.** A point
-  index is what `select_point`, `get_point` and `delete_points` take, so the
-  result passes to any of them without a translation.
-- **It takes one `&Progress`.** `compute` can run for over a second on a
-  million points, so by the interface contract it takes a `&Progress` and
-  stops when it is cancelled. `query_points` is a filter and a sort over
-  arrays in memory, and it takes none.
-
-Example:
-
-```rust
-use sfmtool_core::analysis::point_columns::{
-    query_points, ColumnBounds, PointColumn, PointColumns, PointQueryOptions, SortOrder,
-};
-use sfmtool_core::progress::Progress;
-
-let columns = PointColumns::compute(
-    &edited,
-    &[PointColumn::TrackLength, PointColumn::ErrorPx],
-    &Progress::none(),
-)?;
-// The 20 worst-error points with a track of at least 3, seen in image 2.
-let worst = query_points(&edited, &columns, &PointQueryOptions {
-    bounds: vec![ColumnBounds { column: PointColumn::TrackLength, min: Some(3.0), max: None }],
-    seen_in_image: Some(2),
-    order_by: Some((PointColumn::ErrorPx, SortOrder::Descending)),
-})?;
-let page = &worst[..worst.len().min(20)];
-```
-
-### Determinism and precision
-
-Values are stored as `f32`, except the position columns, which are stored as
-`f64`. The table shows three or four significant digits and its filters
-compare against bounds a person typed, so `f32` is enough for every derived
-value. A position is not: a georeferenced reconstruction can sit 10⁶ m from
-the origin, where an `f32` resolves only about 6 cm. Eleven `f32` columns
-and three `f64` ones over 10⁶ points take 68 MB, and making every column `f64`
-would add another 44 MB for no gain.
-
-`compute` runs per point under rayon, and each point's values depend only on
-that point, so the output is the same for every thread count. Every column
-handles points at infinity as the table says: a value where one is defined
-(`max_ray_angle_deg` is 0, since a bearing's rays are parallel), and no value
-where it is not. `query_points`
-sorts stably and breaks ties by point index, so equal keys always come out in
-the same order. A test can compare whole results exactly.
-
-### Python bindings
-
-`sfmtool.analysis.point_columns(recon, columns=None)` returns a dict that maps
-each wire name to a NumPy array (`float32`, or `float64` for `x`, `y` and `z`),
-plus `"point_index"` (`uint32`). With `columns=None` it computes every column
-the reconstruction can supply. The query is not bound: a NumPy mask and an
-`argsort` over the arrays do the same work, so a Python query function would
-add nothing. The binding exists so that scripts and tests read exactly the
-numbers the viewer shows.
+Built. The columns, their definitions, `PointColumns::compute`, `query_points`
+and the `sfmtool.analysis.point_columns` binding are specified in
+[core/analysis/point-columns.md](../core/analysis/point-columns.md), and the
+column words are in [GLOSSARY.md](../GLOSSARY.md) § "Point columns". Parts 2
+and 3 below use its wire names (`track_length`, `rms_error_px`,
+`max_ray_angle_deg`, …), its "absent" and "no value" rules, and its sort rule
+that rows with no value go last in either order. The error column is
+`rms_error_px`, the same name the viewer's `get_point` reply gives the same
+number once #1000 renames that field from `error`, so the table, `find_points`
+and `get_point` use one name for it.
 
 ## Part 2: the Track Table panel
 
@@ -346,7 +142,7 @@ still being decoded.
   History do. The header names that reconstruction and counts matched rows
   against live points.
 - **The heading row** sorts by the column that is clicked. The first click
-  sorts the bad end first where the column has one (`error_px`,
+  sorts the bad end first where the column has one (`rms_error_px`,
   `condition_number`, `inverse_depth_z` and
   `largest_zncc_self_similarity_radius` descending; `track_length`,
   `image_count`, `max_ray_angle_deg`, `lowest_zncc` and `normal_confidence`
@@ -593,10 +389,10 @@ no bitmap to show. Both columns appear after Convert to Embedded Patches.
 {
   "reconstruction_label": "dino",            // optional: defaults to the selected one
   "bounds": [ { "column": "track_length", "min": 3 },
-              { "column": "error_px", "max": 1.5 } ],
+              { "column": "rms_error_px", "max": 1.5 } ],
   "seen_in_camera_image": 2,                 // optional: an index or a name, as camera_image takes
-  "order_by": { "column": "error_px", "descending": true },  // optional
-  "columns": ["track_length", "image_count", "error_px"],  // optional: the values to return
+  "order_by": { "column": "rms_error_px", "descending": true },  // optional
+  "columns": ["track_length", "image_count", "rms_error_px"],  // optional: the values to return
   "offset": 0, "limit": 50                   // as list_camera_images: default 50, at most 500
 }
 // reply
@@ -607,7 +403,7 @@ no bitmap to show. Both columns appear after Convert to Embedded Patches.
   "offset": 0,
   "points": [
     { "id": "pt3d_2db7e1f4_9873", "index": 9873,
-      "track_length": 57, "image_count": 45, "error_px": 0.82 },
+      "track_length": 57, "image_count": 45, "rms_error_px": 0.82 },
     …
   ]
 }
@@ -616,7 +412,7 @@ no bitmap to show. Both columns appear after Convert to Embedded Patches.
 - **It runs `query_points`** over the same column cache the panel uses, so a
   `find_points` call and the panel with the same bounds agree. The returned
   value columns default to the bound and sorted columns plus `track_length`
-  and `error_px`.
+  and `rms_error_px`.
 - **Columns the cache does not hold are computed by a task of the call's
   own.** When every column the call names (in `bounds`, `order_by` and
   `columns`) is in the cache for the version at the cursor, `find_points`
@@ -679,25 +475,6 @@ panel at its default size checked before the step is done. In the background
 queue work, those captures found nine problems that the tests had passed:
 layout, contrast, a wrong progress fraction and a missing title line.
 
-0a. **`Point3D::error` as an RMS.** `recompute_point_errors` (both its
-   `.sift` path and `inline_point_reprojection_errors`) computes the
-   root-mean-square of the point's observation errors in pixels, as the field's
-   doc comment says, rather than the mean. Every place that describes the value
-   as a mean is corrected (`sfm inspect` labels, specs, Python docstrings), and
-   the tests that pin error values are updated. The field is renamed
-   `Point3D::rms_reprojection_error`, the Python getter
-   `rms_reprojection_errors`, and `get_point`'s field `rms_error_px`. A file
-   written before this holds the mean until its errors are recomputed; the
-   format spec says which writer stores which.
-0b. **Rename `inspect_point`'s angle.** `analysis::inspect_point`'s
-   `max_ray_angle_deg`, the largest angle from the mean direction, becomes
-   `max_angle_from_mean_deg`, in core, the Python binding and the `sfm inspect`
-   output, with a glossary entry that names both angles. `max_ray_angle_deg`
-   then has one meaning across the tree.
-1. **Core point columns and query.** This step adds `point_columns.rs`, moves
-   the max-angle and diagnostics definitions from `metrics.rs` into core (with
-   `metrics.rs` calling them), adds the Python binding and tests, and files
-   `core/analysis/point-columns.md`.
 2. **`find_points`**, which brings the column cache and the *Find points*
    operation into the viewer, for the stored and the computed columns. Only
    the wire uses them at this step, and the mcp-server.md stance is revised.
@@ -719,11 +496,7 @@ layout, contrast, a wrong progress fraction and a missing title line.
 
 - **The quiet order.** Whether the Track Table's columns should go ahead of
   the focused item's evaluation when the table is the panel in view.
-- **The error column's name on the wire.** The column is `error_px`, and
-  `get_point` reports the same number as `rms_error_px`. They can stay
-  different names for one value, or the column can take the `rms_` prefix
-  too.
-- **Errors in files written before Step 0a** hold the mean (or, for a file
+- **Errors in files written before #1000** hold the mean (or, for a file
   converted from COLMAP and never recomputed, COLMAP's value). Whether the
   open should recompute them, or the table should say when a file's errors
   predate the change, is undecided.
@@ -737,7 +510,3 @@ layout, contrast, a wrong progress fraction and a missing title line.
 - **`lowest_zncc`'s source.** The column reads `observation_confidence`. The
   observation readings carry `blur_matched_bitmap_zncc` too, which may be the
   better reading where both exist.
-- **Column names.** `lowest_zncc` and `largest_zncc_self_similarity_radius`
-  avoid `min_zncc` and `max_zncc_self_similarity_radius`, which are bench bars
-  on the wire. Settle the column words in a glossary entry when Step 1 is
-  filed.
