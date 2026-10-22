@@ -8,8 +8,9 @@
 //! reference, in rungs, until the combined plane is precise enough, picking
 //! within a rung by each view's information about the tilt predicted from its
 //! geometry. The first rung grows from the starting plane, and every later
-//! pick from the combined plane of the views kept so far and, where that
-//! growth is under the floor, from the starting plane again; from the
+//! pick from the combined plane of the views kept so far, from its
+//! keypoint-implied shift; a pick of the second rung refused there is grown
+//! again from the starting plane, and a pick of a later rung is not. From the
 //! starting plane a view grows from its keypoint-implied shift first and from
 //! the stage-1 search where that growth is under the floor. A pick counts
 //! when a growth passes the floor on its own.
@@ -21,19 +22,29 @@
 //! The pairs are the widest among the kept views, each view in one pair at
 //! most; each is fitted from the combined plane with the two views' shifts
 //! held, and its plane joins the combination. When the step turns the patch,
-//! every view not picked has its shift alone fitted at the final plane.
+//! every view not picked has its shift alone fitted at the final plane, over
+//! a mid-size window and then for two iterations over the whole grid.
 
 use nalgebra::{Matrix2, Vector2};
 
 use super::combine::{sigmas_deg, Combined, Estimate, PairEstimate};
-use super::solve::{maximise, tilt_information, PairFit};
+use super::solve::{maximise, tilt_information, Iteration, PairFit, Reading, ViewFit};
 use super::{
     same_shift, start_word, verdict_words, Fate, GrownPlaneAttempt, GrownPlanePair, GrownPlanePick,
     GrownPlaneRefusal, GrownPlaneStart, GrownPlaneTiltStart, GrownPlaneTry, GrownPlaneTryOutcome,
-    Judged, NormalError, Outcome, Sequence,
+    Judged, NormalError, Outcome, Sequence, SHIFT_ONLY_GRID_ITERATIONS, SHIFT_ONLY_WINDOW,
 };
 use crate::progress::Progress;
 use crate::progress_note;
+
+/// The rungs of the selection, counted from the first at 0, whose picks
+/// refused from the combined plane are grown again from the starting plane:
+/// the first, grown from the starting plane anyway, and the second. A wrong
+/// first pick makes a wrong combined plane, which refuses the second rung's
+/// picks; grown from the starting plane, they can pass and pull the plane
+/// back. Most picks refused from the combined plane are on later rungs, where
+/// the second growth costs more than it finds.
+const STARTING_PLANE_RETRY_RUNGS: u32 = 2;
 
 /// A view grown against the reference: its estimate when a growth passed the
 /// floor, else its last growth.
@@ -65,7 +76,9 @@ impl Sequence<'_, '_, '_> {
             if verdict.refusal.is_none() || e.attempt.start != GrownPlaneStart::NoSearch {
                 continue;
             }
-            if let Some(Ok(found)) = self.match_view(e.index, false, None, progress, &mut trace)? {
+            if let Some(Ok(found)) =
+                self.match_view(e.index, false, None, false, progress, &mut trace)?
+            {
                 *e = found;
                 retried = true;
             }
@@ -143,18 +156,19 @@ impl Sequence<'_, '_, '_> {
     /// Grow candidate `i` against the reference alone, in a `grown plane
     /// view` phase, and record the try. Where `combined` gives a plane, the
     /// view is grown from it first, from its keypoint-implied shift (from the
-    /// search at that plane, with no keypoint); then, where that is under the
-    /// floor or `combined` is `None`, from the starting plane: from its
-    /// keypoint-implied shift first where `unsearched`, then from the search
-    /// where that is under the floor. Its estimate when a growth passes the
-    /// floor, else its last growth; `None` where no growth was made, which
-    /// only a search landing on the implied shift with `unsearched` off
-    /// leaves.
+    /// search at that plane, with no keypoint). Where `combined` is `None`,
+    /// or that growth is refused and `retry` is set, it is grown from the
+    /// starting plane: from its keypoint-implied shift first where
+    /// `unsearched`, then from the search where that is under the floor. Its
+    /// estimate when a growth passes the floor, else its last growth; `None`
+    /// where no growth was made, which only a search landing on the implied
+    /// shift with `unsearched` off leaves.
     fn match_view(
         &self,
         i: usize,
         unsearched: bool,
         combined: Option<[f64; 2]>,
+        retry: bool,
         progress: &Progress<'_>,
         trace: &mut Vec<GrownPlaneTry>,
     ) -> Result<Option<Matched>, NormalError> {
@@ -166,7 +180,7 @@ impl Sequence<'_, '_, '_> {
         if let Some(tilt) = combined {
             judged = self.growths(i, true, (GrownPlaneTiltStart::Combined, tilt), true, &phase)?;
         }
-        if !passes(&judged) {
+        if combined.is_none() || (retry && !passes(&judged)) {
             judged.extend(self.growths(
                 i,
                 unsearched,
@@ -357,8 +371,9 @@ impl Sequence<'_, '_, '_> {
     ///
     /// Every pick of a later rung is grown from the combined plane of the
     /// views kept so far, from its keypoint-implied shift (or the search at
-    /// that plane, with no keypoint), and where that is refused, from the
-    /// starting plane as the first rung grows it. A rung stays until one of
+    /// that plane, with no keypoint), and, on the second rung, where that is
+    /// refused, from the starting plane as the first rung grows it
+    /// ([`STARTING_PLANE_RETRY_RUNGS`]). A rung stays until one of
     /// its views is kept, so a refused pick is followed by another view in
     /// the same range. A candidate whose angle is not finite is never
     /// picked.
@@ -493,7 +508,8 @@ impl Sequence<'_, '_, '_> {
     /// Match pick `i`, of rung `rung`, against the reference, in a
     /// `selection` phase, and record it: from the combined plane of the views
     /// kept so far first where a view has been kept, from the starting plane
-    /// otherwise or where that is refused. A pick that passes the floor is
+    /// otherwise or, on a rung under [`STARTING_PLANE_RETRY_RUNGS`], where
+    /// that is refused. A pick that passes the floor is
     /// combined with the picks before it. Whether the combined plane's
     /// weakest `σ` has reached `target_sigma_deg`.
     #[allow(clippy::too_many_arguments)]
@@ -520,7 +536,9 @@ impl Sequence<'_, '_, '_> {
             candidate.scale_px
         );
         drop(phase);
-        let Some(result) = self.match_view(i, true, state.kept_tilt, progress, trace)? else {
+        let retry = rung < STARTING_PLANE_RETRY_RUNGS;
+        let Some(result) = self.match_view(i, true, state.kept_tilt, retry, progress, trace)?
+        else {
             return Ok(false);
         };
         let ok = result.is_ok();
@@ -564,31 +582,54 @@ impl Sequence<'_, '_, '_> {
         Ok(sigma_after <= options.target_sigma_deg)
     }
 
+    /// Fit candidate `i`'s shift alone at the plane `tilt` from `shift`: over
+    /// the window of [`SHIFT_ONLY_WINDOW`] first, then for
+    /// [`SHIFT_ONLY_GRID_ITERATIONS`] iterations over the whole grid on the
+    /// robust cell score. The shift reached and its whole-grid score.
+    fn fit_shift(&self, i: usize, tilt: [f64; 2], shift: [f64; 2]) -> ([f64; 2], f64) {
+        let half = self.radii[SHIFT_ONLY_WINDOW.min(self.radii.len() - 1)];
+        let window = ViewFit {
+            render: &self.renders[i],
+            reference: self.reference,
+            live: self.live,
+            reading: Reading::Window(self.grid.window(half)),
+            held: Some(tilt),
+            min_coverage: self.options.min_coverage,
+        };
+        let (q, _, _) = maximise(&window, &shift, &self.iteration);
+        let brief = Iteration {
+            max_iterations: SHIFT_ONLY_GRID_ITERATIONS,
+            ..self.iteration
+        };
+        let (q, z, _) = maximise(&self.grid_fit(i, Some(tilt)), &q, &brief);
+        ([q[0], q[1]], z)
+    }
+
     /// Candidate `i`'s shift alone at the final plane `tilt`, in a
     /// `shift-only fit` phase: from its keypoint-implied shift, the first
-    /// window's ZNCC read and the whole grid fitted with the tilt held; where
-    /// that is under the floor, or the view has no keypoint, from the stage-1
-    /// search at `tilt` the same way, unless it lands on the implied shift.
+    /// window's ZNCC read and the shift fitted with the tilt held
+    /// ([`Self::fit_shift`]); where that is under the floor, or the view has
+    /// no keypoint, from the stage-1 search at `tilt` the same way, unless it
+    /// lands on the implied shift.
     fn shift_only(&self, i: usize, tilt: [f64; 2], progress: &Progress<'_>) -> Fate {
         let options = self.options;
         let candidate = &self.candidates[i];
         let mut phase = progress.detail_phase("shift-only fit");
         let renders_before = self.renders[i].renders();
         let rows = self.grid.window(self.radii[0]);
-        let fit = self.grid_fit(i, Some(tilt));
         let mut best: Option<(GrownPlaneStart, [f64; 2], f64, f64)> = None;
         if let Some(shift) = candidate.kp_shift {
             let z1 = self.spot_zncc(i, tilt, &rows, shift);
-            let (q, z, _) = maximise(&fit, &shift, &self.iteration);
-            best = Some((GrownPlaneStart::NoSearch, [q[0], q[1]], z, z1));
+            let (q, z) = self.fit_shift(i, tilt, shift);
+            best = Some((GrownPlaneStart::NoSearch, q, z, z1));
         }
         let under = best.is_none_or(|(_, _, z, _)| z.is_nan() || z < options.min_held_zncc);
         if under {
             let (z1, shift, start) = self.search_first_window(i, tilt, &rows, &phase);
             if !candidate.kp_shift.is_some_and(|s| same_shift(s, shift)) {
-                let (q, z, _) = maximise(&fit, &shift, &self.iteration);
+                let (q, z) = self.fit_shift(i, tilt, shift);
                 if best.is_none_or(|(_, _, b, _)| b.is_nan() || z > b) {
-                    best = Some((start, [q[0], q[1]], z, z1));
+                    best = Some((start, q, z, z1));
                 }
             }
         }

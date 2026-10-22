@@ -482,6 +482,7 @@ fn refusal_name(refusal: GrownPlaneRefusal) -> &'static str {
         GrownPlaneRefusal::TooFar => "too_far",
         GrownPlaneRefusal::HeldUnderFloor => "held_under_floor",
         GrownPlaneRefusal::ViewLeftOut => "view_left_out",
+        GrownPlaneRefusal::StoppedEarly => "stopped_early",
     }
 }
 
@@ -1109,7 +1110,8 @@ fn grid_plane_normal(
 /// widest angle kept, out to the widest views, and within a rung the pick is
 /// the view whose information, predicted from its geometry, most raises the
 /// weakest measured so far. Each later pick is grown from the combined plane
-/// so far and, where that is refused, from the starting plane. Their planes are combined by a robust
+/// so far; a pick of the second rung refused there is grown again from the
+/// starting plane, and a pick of a later rung is not. Their planes are combined by a robust
 /// information-weighted mean, never by fitting the views together, leaving
 /// out the furthest estimate past ``max_agreement_distance`` (default 3.0)
 /// by the Mahalanobis distance until none is, and then any view under
@@ -1172,18 +1174,20 @@ fn grid_plane_normal(
 /// or ``None``) and ``keypoint`` (the one written, or ``None`` off the
 /// photograph); ``"shift_only"`` with ``start``, ``shift``, ``grid_zncc``,
 /// ``was`` and ``keypoint`` (``None`` under the floor or off the photograph);
-/// ``"left_out"`` with ``reason`` (``"under_floor"``, ``"too_far"`` or
-/// ``"held_under_floor"``), ``distance`` and ``held_zncc``; or
+/// ``"left_out"`` with ``reason`` (``"under_floor"``, ``"stopped_early"``,
+/// ``"too_far"`` or ``"held_under_floor"``), ``distance`` and ``held_zncc``; or
 /// ``"not_attempted"``. ``trace`` has one dict per try in the order made:
 /// ``observation``, ``image``, ``angle_deg`` (from the reference, seen from
 /// the patch centre), ``outcome`` (``"matched"`` or ``"left_out"``),
 /// ``combined_normal`` (the plane of the views picked so far, this one among
 /// them, or ``None`` for a try that left the view out or came after the
 /// selection), ``combined_sigma_deg`` (``NaN`` then) and ``attempts``, each
-/// with ``start``, ``stage_zncc`` (a float64 array, one score per stage),
-/// ``shift``, ``normal`` (the growth's own plane), ``grid_zncc``,
-/// ``sigma_deg`` (its own weakest ``σ``), ``refusal`` (``None`` when it
-/// was taken, else ``"under_floor"``) and ``tilt_start`` (``"starting"`` or
+/// with ``start``, ``stage_zncc`` (a float64 array, one score per stage,
+/// ending at the window stage a growth stopped early at), ``shift``,
+/// ``normal`` (the growth's own plane), ``grid_zncc`` and ``sigma_deg`` (its
+/// own weakest ``σ``), both ``NaN`` for a growth that stopped early,
+/// ``refusal`` (``None`` when it was taken, else ``"under_floor"`` or
+/// ``"stopped_early"``) and ``tilt_start`` (``"starting"`` or
 /// ``"combined"``, the plane its windows started from). ``picks`` has one dict per pick of
 /// the selection: ``observation``, ``image``,
 /// ``angle_deg``, ``offset_direction`` (``(2,)``, in the starting patch frame),
