@@ -18,6 +18,10 @@
 //! at the cursor when it was queued, and when it lands the GUI thread merges
 //! that table into the cache, runs the query and writes the row. A table for a
 //! serial the node has since left is dropped with a failed row.
+//!
+//! The Track Table panel reads the same cache, and its quiet table job
+//! (`crate::track_table_panel::job`) fills it with the stored columns the same
+//! way, so the panel and `find_points` share every column either computed.
 
 use sfmtool_core::analysis::track_table::{
     query_points, TrackTable, TrackTableColumn, TrackTableMergeError, TrackTableQueryError,
@@ -51,11 +55,25 @@ pub(crate) struct TrackTableCache {
 impl TrackTableCache {
     /// The table held for `node` at `document`, or `None` when the node has
     /// none or holds one for another serial.
-    fn get(&self, node: ReconId, document: VersionSerial) -> Option<&TrackTable> {
+    pub(crate) fn get(&self, node: ReconId, document: VersionSerial) -> Option<&TrackTable> {
         self.entries
             .iter()
             .find(|entry| entry.node == node && entry.document == document)
             .map(|entry| &entry.table)
+    }
+
+    /// The table held for `node` whatever serial it is for, with that serial.
+    ///
+    /// After an edit this is the table of a version the node has left until
+    /// the new version's table replaces it. Only the Track Table panel reads
+    /// it, to keep showing its last rows, marked out of date, while the new
+    /// table is computed; a query for the version at the cursor reads
+    /// [`Self::get`].
+    pub(crate) fn latest(&self, node: ReconId) -> Option<(VersionSerial, &TrackTable)> {
+        self.entries
+            .iter()
+            .find(|entry| entry.node == node)
+            .map(|entry| (entry.document, &entry.table))
     }
 
     /// Merge `table`, computed for `node` at `document`, into the cache.
@@ -70,7 +88,7 @@ impl TrackTableCache {
     ///
     /// [`TrackTableMergeError`] when `table`'s rows are not those of the entry
     /// already held for that serial, which leaves the entry as it was.
-    fn merge(
+    pub(crate) fn merge(
         &mut self,
         node: ReconId,
         document: VersionSerial,
@@ -134,7 +152,6 @@ fn found_sentence(matched: usize, live: usize, label: &str) -> String {
 impl AppState {
     /// The track table cached for `node` at its cursor, or `None` when there
     /// is none for that version.
-    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     pub(crate) fn track_table(&self, node: ReconId) -> Option<&TrackTable> {
         let document = self.node(node)?.history.current_version().document_serial;
         self.track_tables.get(node, document)
