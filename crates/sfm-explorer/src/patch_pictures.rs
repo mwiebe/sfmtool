@@ -3,17 +3,31 @@
 
 //! The pictures the viewer draws of a point's patch, for the panels that show
 //! them: Track View's header slot and recent items strip, and the Track
-//! Table's *Patch* column.
+//! Table's *Patch* and *Crop* columns.
 //!
 //! [`stored_patch_image`] turns a patch bitmap into an opaque picture, and
 //! [`STORED_PATCH_HOVER`] is what both panels say over a point's stored patch,
-//! so the same bitmap is drawn and described the same way in each.
+//! so the same bitmap is drawn and described the same way in each. [`crop`]
+//! cuts a photograph around a patch's outline: Track View's crop beside each
+//! row's tile, and the Track Table's *Crop* cell. [`marks`] is what their
+//! hover views draw over the picture.
+
+pub(crate) mod crop;
+pub(crate) mod marks;
 
 /// The hover text over a point's stored patch: Track View's header slot for a
 /// viewed point, and a Track Table *Patch* cell.
 pub(crate) const STORED_PATCH_HOVER: &str =
     "The point's stored patch: the render of its reference \
      observation, or, where an older file stores none, a mean of its views";
+
+/// The hover text over a Track Table *Patch* cell whose point stores no
+/// reference observation: its stored bitmap need not be the render of the
+/// photograph the *Crop* cell shows, which is the reference-view rule's pick.
+pub(crate) const UNREFERENCED_PATCH_HOVER: &str =
+    "The point's stored patch. The point stores no reference observation, so this \
+     bitmap is not the render of the photograph in the Crop cell, which is the \
+     reference-view rule's pick";
 
 /// The hover text where a point stores no patch: an all-zero bitmap row.
 pub(crate) const NO_STORED_PATCH_HOVER: &str = "The point has no stored patch";
