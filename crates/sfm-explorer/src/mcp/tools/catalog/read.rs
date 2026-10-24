@@ -138,15 +138,31 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           track table's columns, optionally only those one camera image sees, \
                           sorted by a column, a page at a time, each with its point id, its \
                           index and the values asked for. The columns are track_length, \
-                          repeat_observations, rms_error_px, x, y, z, centroid_distance, \
-                          normal_confidence, lowest_zncc, largest_zncc_self_similarity_radius, \
-                          max_ray_angle_deg, condition_number and inverse_depth_z. \
+                          repeat_observations, back_facing_observations, rms_error_px, \
+                          max_error_px, x, y, z, centroid_distance, normal_confidence, \
+                          min_zncc, min_blur_matched_bitmap_zncc, \
+                          max_zncc_self_similarity_radius, \
+                          reference_zncc_self_similarity_radius, \
+                          reference_zncc_self_similarity_elongation, max_ray_angle_deg, \
+                          max_viewing_angle_deg, condition_number and inverse_depth_z. \
                           repeat_observations is the track's observations beyond one per \
-                          image; anything but 0 is a defect. A bound keeps the points whose \
+                          image, and back_facing_observations the observations that see the \
+                          point's patch at a viewing angle of 90 degrees or more; anything but \
+                          0 in either is a defect. max_error_px is the worst observation's \
+                          reprojection error, where rms_error_px is the track's RMS. \
+                          min_blur_matched_bitmap_zncc is the lowest stored blur-matched \
+                          score against the point's patch bitmap (Track View's ZNCC column), \
+                          and min_zncc reads observation_confidence instead. A min_ or max_ \
+                          column is the minimum or maximum over the track's observations, not \
+                          a bench bar of the same name. The two \
+                          reference_ columns are the self-similarity of the point's patch as \
+                          its reference view sees it, in patch px and as the ellipse's long \
+                          axis over its short one (large for an edge). A bound keeps the points whose \
                           value is at least min and at most max, both inclusive; a point with \
                           no value in a column fails any bound on it and sorts last whichever \
                           way the sort runs. A value is null where the point has none: x, y, z, \
-                          condition_number and inverse_depth_z at infinity, for one. A point at \
+                          condition_number and inverse_depth_z at infinity, for one, and the \
+                          viewing-angle columns for a point with no patch frame. A point at \
                           infinity's centroid_distance is +infinity, sent as the string \"inf\": \
                           it sorts above every finite distance, a finite max drops it, and the \
                           bound {\"column\": \"centroid_distance\", \"min\": \"inf\"} keeps \
