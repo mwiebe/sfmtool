@@ -311,11 +311,10 @@ fn the_patch_tools_slide_resize_and_turn_and_each_is_one_version() {
     assert_eq!(version_count(&state), before + 1);
 
     // The tool moved the patch, not the one observation it was aimed through:
-    // every sighting moved, and each kept its own offset from where the centre
-    // projects, which is what the tiles are cut on. The fixture's keypoints are
-    // each point's exact projection, so every offset is zero and stays zero --
-    // what is asserted is that the carry preserved them rather than that they
-    // were reset.
+    // every sighting moved, and each kept its own gap from where the centre
+    // projects. The fixture's keypoints are each point's exact projection, so
+    // every gap is zero and stays zero -- what is asserted is that the move
+    // preserved them rather than that they were reset.
     let sightings = call(
         &mut state,
         &mut viewer,
@@ -373,18 +372,22 @@ fn the_patch_tools_slide_resize_and_turn_and_each_is_one_version() {
             .track()
             .and_then(|payload| payload.patch_frame.clone())
             .expect("a track from a point carries the stored patch");
-        let anchored =
-            crate::bench::geometry::anchored_patch_frame(&patch_frame, &camera, &pose, sighting);
-        (anchored, camera, pose)
+        let square = crate::bench::geometry::SeenSquare::of_observation(
+            &patch_frame,
+            &camera,
+            &pose,
+            sighting,
+        );
+        (square, camera, pose)
     };
-    let corner = |patch: &sfmtool_core::patch::cloud::OrientedPatch,
+    let corner = |square: &crate::bench::geometry::SeenSquare,
                   camera: &sfmtool_core::camera::CameraIntrinsics,
                   pose: &sfmtool_core::geometry::RigidTransform,
                   s: f64,
                   t: f64| {
-        let (xyz, w) = patch.corner_homogeneous(s, t);
-        camera
-            .project_homogeneous(pose, xyz, w)
+        let (xyz, w) = square.patch.corner_homogeneous(s, t);
+        square
+            .project(camera, pose, xyz, w)
             .expect("in front of the camera")
     };
 
@@ -412,8 +415,9 @@ fn the_patch_tools_slide_resize_and_turn_and_each_is_one_version() {
     );
     assert_eq!(version_count(&state), before + 2);
 
-    // The claim, on the outline as it is **redrawn** -- the patch re-anchored
-    // on the sighting whose edge was dragged, which is what a person sees:
+    // The claim, on the outline as it is **redrawn** -- the patch's projection
+    // shifted by the gap of the sighting whose edge was dragged, which is what
+    // a person sees:
     // that edge lands on the pixel the call named, the far edge has not moved,
     // and the patch frame is still square. A thousandth of a pixel, because the
     // redrawing goes through an `f32` keypoint slot.

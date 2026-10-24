@@ -12,9 +12,9 @@
 //! design. A [`fit`] moves the patch's centre and leaves its
 //! normal as it was; these do the opposite. Each estimates a normal, turns
 //! the patch to it with [`tilt_patch`] -- so the turn
-//! stops where that step's cap stops it, and every sighting keeps its in-plane
-//! offset -- and ends as a fit does, by reading the result back and rendering
-//! the patch bitmap over the turned square. The centre does not move.
+//! stops where that step's cap stops it, and no keypoint moves -- and ends as
+//! a fit does, by reading the result back and rendering the patch bitmap over
+//! the turned square. The centre does not move.
 
 use nalgebra::{Point3, SymmetricEigen, Vector3};
 
@@ -860,8 +860,8 @@ fn turn_and_read(
 }
 
 /// [`turn_and_read`] with `write` run on the turned track before it is read
-/// back: for a step that writes keypoints of its own, which the turn would
-/// otherwise carry off the pixels the step found.
+/// back: for a step that writes keypoints of its own, found by its own search
+/// rather than kept where the turn leaves them.
 #[allow(clippy::too_many_arguments)]
 fn read_back(
     track: &EditableTrack,

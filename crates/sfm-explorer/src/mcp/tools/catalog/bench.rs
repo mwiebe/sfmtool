@@ -276,9 +276,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           viewer. A \
                           track-stage track has one patch and every observation is a view of it, \
                           so this moves the patch and not a sighting: the centre moves, the axes \
-                          and the size are kept, and every observation's keypoint is carried by \
-                          that same displacement, keeping its own offset from the centre's \
-                          projection, which is what the tiles are cut on. Name where it goes in \
+                          and the size are kept, and every observation's keypoint moves by its \
+                          own photograph's displacement of the centre's projection: a keypoint \
+                          marks where its photograph sees the patch's centre, so its gap from the \
+                          centre's projection is kept. Name where it goes in \
                           exactly one of two ways. `by` is [u, v, n] on the patch's OWN \
                           orthonormal axes, in the reconstruction's scene units: u and v slide it \
                           across its own plane, n moves it along its outward normal, and both \
@@ -288,8 +289,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           and the sightings then move by DIFFERENT amounts in their photographs, \
                           that spread being the parallax the old depth was wrong by. Or name a \
                           `pixel` and the photograph it is in, as exactly one of `observation` \
-                          (the outline there is the patch re-anchored on that sighting, and the \
-                          sighting lands under the pixel) or `camera_image` (an index or an \
+                          (the outline there is the patch's projection shifted by that \
+                          sighting's gap from the centre's projection, and the sighting lands \
+                          under the pixel) or `camera_image` (an index or an \
                           .sfmr relative path; the outline there is the patch as it stands, and \
                           its own centre lands under the pixel; it is the only form that reaches \
                           an image the track has no sighting in). Nothing is pinned: where the \
@@ -384,14 +386,17 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           ways. `half_length` is a world half-length in the reconstruction's own \
                           units, and `moved_edge` says what becomes of the sightings: named \
                           (\"+u\", \"-u\", \"+v\", \"-v\"), that edge moves and the opposite one \
-                          is held, so the centre shifts and every sighting is carried with it; \
-                          omitted, both edges move about a held centre and no sighting is touched \
-                          at all. Or name an `edge`, a `pixel` and the photograph it is in, which \
+                          is held, so the centre shifts and every keypoint moves with the \
+                          centre's projection in its own photograph; omitted, both edges move \
+                          about a held centre and no keypoint moves at all. Either way a \
+                          sighting never localized takes the new centre's projection. Or name an \
+                          `edge`, a `pixel` and the photograph it is in, which \
                           is the edge drag on the Image Detail panel's bench layer: the pixel is \
                           unprojected onto the patch's own plane, so the edge lands there exactly \
                           through whatever distortion the lens has. The photograph is exactly \
-                          one of `observation`, whose outline is the patch re-anchored on that \
-                          sighting, or `camera_image`, whose outline is the patch as it stands \
+                          one of `observation`, whose outline is the patch's projection shifted \
+                          by that sighting's gap from the centre's projection, or \
+                          `camera_image`, whose outline is the patch as it stands \
                           (the ghost outline of an image the track has no sighting in). \
                           A patch is square, so a resize is one scale and not two. Nothing \
                           is pinned. A cluster-stage track is refused: use resize_bench_shape.",
@@ -453,10 +458,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                           orientation of a patch is settled. The turn is the least rotation onto \
                           the normal named, about the axis square to the old normal and the new \
                           one, so no spin about the normal comes with it -- that is \
-                          spin_bench_patch's. The centre and the half-length do not move, and \
-                          every observation keeps its own in-plane offset, its keypoint becoming \
-                          the projection of that offset rebuilt on the turned axes; a sighting \
-                          the turned patch no longer projects into is left with no keypoint. \
+                          spin_bench_patch's. The centre and the half-length do not move, so no \
+                          keypoint moves: a keypoint marks where its photograph sees the centre. \
                           The turn stops 80 degrees from any observation's camera, which is \
                           where that photograph would be looking along the surface rather than \
                           at it, and the reply's sentence names the observation that stopped it; \
@@ -493,8 +496,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             description: "Turn a bench track's patch about its own outward normal -- the corner \
                           drag on the Image Detail panel's bench layer at the track stage. The \
                           square turns in place, keeping its centre, its size and the face it \
-                          shows, so what changes is only which way up it sits and no sighting \
-                          moves at all. That is what makes it a different step from a tilt, \
+                          shows, so what changes is only which way up it sits and no keypoint \
+                          moves; a sighting never localized takes the centre's projection. \
+                          That is what makes it a different step from a tilt, \
                           which turns the normal itself. A cluster-stage track is refused: it \
                           has no patch to turn, only one affine shape per sighting, so use \
                           spin_bench_shape.",

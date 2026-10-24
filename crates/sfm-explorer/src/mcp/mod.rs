@@ -504,8 +504,8 @@ pub(crate) enum Command {
         /// How far, positive from `+x` toward `+y` of the image raster.
         angle_deg: f64,
     },
-    /// Turn the track-stage patch to face a new outward normal. Every
-    /// sighting is rebuilt on the turned axes.
+    /// Turn the track-stage patch to face a new outward normal. The centre
+    /// does not move, so no keypoint does.
     TiltBenchPatch {
         reconstruction_label: String,
         track: Option<String>,
@@ -924,8 +924,9 @@ pub(crate) enum PinRows {
 /// Which photograph a pixel form names its pixel in: the wire's spelling of
 /// `sfmtool_core::bench::Viewpoint`.
 ///
-/// Either an observation, whose image shows the patch re-anchored on its
-/// keypoint, or a camera image in either of its two spellings, which shows the
+/// Either an observation, whose image shows the patch's projection shifted by
+/// its keypoint's gap from the centre's projection, or a camera image in either
+/// of its two spellings, which shows the
 /// patch as it stands: the ghost outline's square in an image the track has no
 /// sighting in. The camera image is resolved against the node when the call
 /// runs, as every other `camera_image` is.

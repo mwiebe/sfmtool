@@ -1551,7 +1551,7 @@ class TestPlacingSizingAndTurningByHand:
         self, edited, long_track_point
     ):
         _, track = create_track(Bench(), edited, long_track_point)
-        turned, report = spin_patch(track, np.pi / 3.0)
+        turned, report = spin_patch(track, edited, np.pi / 3.0)
         assert report["degrees"] == pytest.approx(60.0)
 
         before, after = track.patch_frame, turned.patch_frame
@@ -1632,7 +1632,7 @@ class TestPlacingSizingAndTurningByHand:
         with pytest.raises(ValueError, match="cluster-stage step"):
             shape_observation(at_track, 0, turn)
         with pytest.raises(ValueError, match="track-stage step"):
-            spin_patch(track, 0.5)
+            spin_patch(track, edited, 0.5)
 
 
 class TestDuplicating:
@@ -1688,7 +1688,7 @@ class TestDuplicating:
 class TestTheNormalHandSteps:
     """``translate_patch`` and ``tilt_patch``: the two moves no pixel can name.
 
-    The arithmetic -- the least rotation, the offsets kept, the cap -- is proved
+    The arithmetic -- the least rotation, the keypoints kept, the cap -- is proved
     in Rust; what is checked here is that the bindings carry each step's numbers
     and hand back a new value.
     """
@@ -1957,7 +1957,7 @@ class TestNoEffectAndTheClamp:
         )
 
         # A turn under a nanoradian is no turn.
-        _, turn = spin_patch(track, 1e-12)
+        _, turn = spin_patch(track, edited, 1e-12)
         assert not turn["changed"]
 
         # A sighting put back within a thousandth of a pixel of where it sits.
