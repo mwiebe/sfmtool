@@ -20,8 +20,8 @@ landed. The twenty operations are `Open`, which reads files and
 makes them nodes (§ "Opening a file"); the six whole-value edits, `Bundle
 adjust`, `Convert to embedded patches`, `Retriangulate all points`, `Refit all
 points`, `Switch camera model` and `Prune covered observations`; `Add image to
-tracks`; the ten the bench runs, `Fit track`, `Set track stage`, `Fit normal`, `Finite
-difference normal`, `Grid plane normal`, `Search descriptors`, `Geometry
+tracks`; the ten the bench runs, `Fit track`, `Set track stage`, `Finite
+difference normal`, `Grid plane normal`, `Grown plane normal`, `Search descriptors`, `Geometry
 search`, `Build index files`, `Create track at pixel` and `Find nearby tracks`
 ([bench.md](bench.md)); `Build SIFT files`, which builds the `.sift` files the
 index files are read from ([index-files.md](index-files.md) § "Building the
@@ -165,13 +165,14 @@ pub(crate) struct Operation {
 | Convert to embedded patches | slow | yes | no |
 | Retriangulate all points | slow | yes | no |
 | Refit all points | slow | yes | no |
+| Refine all normals | slow | yes | no |
 | Switch camera model | slow | yes | no |
 | Prune covered observations | slow | yes | no |
 | Add image to tracks | slow | yes | no |
 | Build SIFT files | slow | yes | no |
 | Build index files | slow | yes | no |
 | Open | fast | no (it makes a new node) | no |
-| Fit track, Set track stage, Fit normal, Finite difference normal, Grid plane normal, Search descriptors, Geometry search, Create track at pixel, Find nearby tracks | fast | yes | no |
+| Fit track, Set track stage, Finite difference normal, Grid plane normal, Grown plane normal, Search descriptors, Geometry search, Create track at pixel, Find nearby tracks | fast | yes | no |
 | Find points | fast | no; it pushes no version (it fills the track table cache) | no |
 | Live evaluation | fast | no; it does not start on a locked node (§ "Quiet tasks") | yes |
 | Camera model proposal | fast | no; it pushes no version (Apply installs its answer), and an open proposal refuses every task on its node | yes |
@@ -961,6 +962,16 @@ on either side of the decode, between the photographs, and, inside
 fit, and turns `RefitPointsError::Cancelled` into `Finished::Cancelled`. A
 photograph that cannot be read fails it in its `decode images` phase.
 
+`Refine all normals` reports the same `decode images` and `materialise`, then
+the core refinement's `refine normals` (which counts the points and sets its
+fraction) and `write back`
+([edits/refine-all-normals.md](edits/refine-all-normals.md)). It polls the
+flag in the same places, the core polling inside
+`sfmtool_core::bench::refine_normals` in front of each stage and of each
+point's step, and turns `RefineNormalsError::Cancelled` into
+`Finished::Cancelled`. A photograph that cannot be read fails it in its
+`decode images` phase.
+
 The bench's photometric steps fill in the phases and poll the same flag. A
 cancelled one ends as a cancellation rather than a failure of the kernel --
 `FitError::Cancelled`, `StageError::Fit(FitError::Cancelled)`, `SearchError::Cancelled`,
@@ -995,8 +1006,9 @@ rest are placeholders the selection never samples.
 the end of the range it is handed, and the collector never lets the fraction go
 back, so a step that handed it the whole range would show a full bar from the
 moment the photographs were read until the step ended. Each step splits its
-range first and hands the decode one part: `Refit all points` gives it 1 part in
-10 and the fit the other 9, since fitting every point is most of the run; the
+range first and hands the decode one part: `Refit all points` and `Refine all
+normals` give it 1 part in 10 and the run over the points the other 9, since
+that is most of the run; the
 bench's photometric steps, the geometry search, `Create track at pixel`, `Find
 nearby tracks` and `Add image to tracks` split it evenly (`DECODE_AND_STEP` in
 [state/edits.rs](../../crates/sfm-explorer/src/state/edits.rs)), because a

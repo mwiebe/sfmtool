@@ -1,7 +1,7 @@
 # Piece-Gated Grid Normal
 
 **Status:** Draft. Decided:
-- the bench's *Grid Plane Normal* is the baseline this draft improves on, because the photometric normal search is known to be the weaker estimator, which is why Surface Tiling Mode runs the Grid Plane Normal and not *Fit Normal*;
+- the bench's *Grid Plane Normal* is the baseline this draft improves on, because the photometric normal search is known to be the weaker estimator, which is why Surface Tiling Mode runs the Grid Plane Normal and not the photometric search;
 - each part of the patch is measured by registering one cell of the three-by-three ZNCC grid split, by a shift search on one render per view, the measurement the piecewise refinement of cluster patches makes, instead of by a full bench fit per piece;
 - each cell is gated in each view before any geometry, by the piecewise refinement's rules (peak curvature, cell ZNCC, search bound, and a robust affine fit per view), and those rules are shared code with the piecewise refinement, not a copy;
 - the surviving cells are triangulated and a plane fitted through them with the weighting, residual floors, Tukey loop and three-way determinacy verdict of the [cell plane normal kernel](../core/patch/cell-plane-normals.md), with that math factored out so it takes per-view pixels from a track as well as a cluster file's columns;
@@ -160,7 +160,7 @@ A patch on one textured plane passes everywhere, and the gates change nothing. T
 
 ### Retiring the photometric search
 
-The photometric normal search has three production callers: the embed-patches rounds, `sfm xform --refine-normals`, and the bench's *Fit Normal*. When each has moved to this estimator, the search and its two support modules, the fronto-parallel cache and the D-optimal view subset, have no caller and are deleted. The fronto-parallel prior goes with them; a sweep over that prior found it degraded normals everywhere it was applied.
+The photometric normal search has two production callers: the embed-patches rounds and `sfm xform --refine-normals`. The bench's *Fit Normal* was the third; Track View and the wire now offer *Grown Plane Normal* ([grown-plane-normal.md](grown-plane-normal.md)) in its place, and `sfmtool_core::bench::fit_normal` and its Python binding remain, with no viewer caller. When each production caller has moved to this estimator, the search and its two support modules, the fronto-parallel cache and the D-optimal view subset, have no caller and are deleted. The fronto-parallel prior goes with them; a sweep over that prior found it degraded normals everywhere it was applied.
 
 The order is: build the shared kernels and the bench step and measure the step against today's Grid Plane Normal; move Surface Tiling Mode and the Track View button; move embed-patches; move `xform --refine-normals`; delete.
 

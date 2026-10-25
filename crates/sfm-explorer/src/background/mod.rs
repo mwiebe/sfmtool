@@ -412,6 +412,24 @@ impl Operation {
         quiet: false,
     };
 
+    /// Every finite point of one node turned to its grown-plane normal, as
+    /// Track View's *Grown Plane Normal* and *Commit* do for one track
+    /// (`specs/gui/edits/refine-all-normals.md`).
+    ///
+    /// Cancellable because the photographs are decoded with the flag polled
+    /// between them, and `sfmtool_core::bench::refine_normals` polls it in
+    /// front of each stage and of each point's step and hands back
+    /// `RefineNormalsError::Cancelled` rather than a value some of whose
+    /// points were turned.
+    pub(crate) const REFINE_ALL_NORMALS: Operation = Operation {
+        name: "Refine all normals",
+        cancellable: true,
+        kind: Kind::Edit,
+        queue: Queue::Slow,
+        locks: true,
+        quiet: false,
+    };
+
     /// One camera of one node switched to the camera model its proposal was
     /// fitted to, and the tracks its images observe retriangulated through the
     /// new model, as one version: the camera model proposal's Apply
@@ -495,15 +513,15 @@ impl Operation {
         quiet: false,
     };
 
-    /// One bench track's patch turned to the normal the photographs agree on
-    /// most (`sfmtool_core::bench::fit_normal`).
+    /// One bench track's patch turned to the one plane its views agree on,
+    /// fitted to the photographs (`sfmtool_core::bench::grown_plane_normal`).
     ///
-    /// Cancellable on either side of the decode, in front of the search and
-    /// of the turn, and inside the reading it ends with. The search itself is
-    /// one kernel call over a handful of views and runs to its end once
-    /// entered.
-    pub(crate) const BENCH_FIT_NORMAL: Operation = Operation {
-        name: "Fit normal",
+    /// Cancellable on either side of the decode, inside the step, which polls
+    /// the flag in front of every pick, every window stage of a view's growth
+    /// and every shift-only fit, and inside the reading it ends with. A cancel
+    /// leaves the track as it was.
+    pub(crate) const BENCH_GROWN_PLANE_NORMAL: Operation = Operation {
+        name: "Grown plane normal",
         cancellable: true,
         kind: Kind::Bench,
         queue: Queue::Fast,
@@ -783,18 +801,19 @@ impl Operation {
     /// declaration nothing checks is a declaration that rots.
     // Read by those tests alone, which is what it is for.
     #[cfg(test)]
-    pub(crate) const ALL: [Operation; 24] = [
+    pub(crate) const ALL: [Operation; 25] = [
         Operation::OPEN,
         Operation::BUNDLE_ADJUST,
         Operation::TO_EMBEDDED_PATCHES,
         Operation::RETRIANGULATE_ALL_POINTS,
         Operation::REFIT_ALL_POINTS,
+        Operation::REFINE_ALL_NORMALS,
         Operation::SWITCH_CAMERA_MODEL,
         Operation::PRUNE_COVERED_OBSERVATIONS,
         Operation::ADD_IMAGE_TO_TRACKS,
         Operation::BENCH_FIT,
         Operation::BENCH_SET_STAGE,
-        Operation::BENCH_FIT_NORMAL,
+        Operation::BENCH_GROWN_PLANE_NORMAL,
         Operation::BENCH_FINITE_DIFFERENCE_NORMAL,
         Operation::BENCH_GRID_PLANE_NORMAL,
         Operation::BENCH_SEARCH,

@@ -113,8 +113,8 @@ place.
 
 ## The tool surface
 
-One hundred and one tools. Nineteen read -- eighteen that answer with JSON, and
-`screenshot`, which closes the loop by handing back a picture -- seventy-five
+One hundred and two tools. Nineteen read -- eighteen that answer with JSON, and
+`screenshot`, which closes the loop by handing back a picture -- seventy-six
 write, six send input, and one writes a file. `get_widgets` and the six input
 tools, `click`, `hover`, `drag`, `scroll`, `press_key` and `type_text`, read
 and press the viewer's widgets the way a person's eyes, mouse and keyboard do
@@ -166,6 +166,7 @@ and press the viewer's widgets the way a person's eyes, mouse and keyboard do
 | `retriangulate_point` | write | Re-solve one 3D point from its own observations at the poses and lenses the reconstruction holds |
 | `retriangulate_all_points` | write | Re-solve every 3D point the same way, on a worker thread |
 | `refit_all_points` | write | Fit every 3D point to the render of its reference observation and commit it, as Track View's Fit and Commit do for one track, on a worker thread |
+| `refine_all_normals` | write | Turn every finite 3D point's patch to its grown-plane normal and commit it, as Track View's Grown Plane Normal and Commit do for one track, on a worker thread |
 | `prune_covered_observations` | write | Retire every observation a finer tracked one covers, and drop the points left with fewer than two, on a worker thread |
 | `delete_camera_image` | write | Delete one camera image, its observations, and any track left with none |
 | `move_camera_image` | write | Put one camera image at a pose, as one version of its reconstruction |
@@ -206,7 +207,7 @@ and press the viewer's widgets the way a person's eyes, mouse and keyboard do
 | `select_bench_observations` | write | Replace the selected observations of the focused item: Track View's highlighted rows |
 | `commit_bench_track` | write | Write a bench track into the reconstruction |
 | `fit_bench_track` | write | Localize, re-triangulate and re-render the bitmap of a bench track, then read it back, on a worker thread |
-| `fit_bench_track_normal` | write | Turn a track-stage bench track's patch to a normal estimated photometrically, from a row of fitted pieces along each axis, or from the plane through a grid of fitted pieces, keeping its centre, then read it back, on a worker thread |
+| `fit_bench_track_normal` | write | Turn a track-stage bench track's patch to a normal estimated from a row of fitted pieces along each axis, from the plane through a grid of fitted pieces, or from one plane grown and fitted to the photographs, keeping its centre, then read it back, on a worker thread |
 | `set_bench_track_stage` | write | Move a track between its cluster and track representations, on a worker thread |
 | `search_bench_track_descriptors` | write | Find the photographs holding the patch around one observation, and add each, unpinned and `out`, on a worker thread |
 | `search_bench_track_geometry` | write | Project a track's surfel into every camera, and add each photograph that matches it, unpinned and `out`, on a worker thread |
@@ -225,7 +226,7 @@ and press the viewer's widgets the way a person's eyes, mouse and keyboard do
 | `type_text` | input | Type a string into the focused text input or number box, or into one named by its widget id |
 
 Every tool is annotated: the eighteen reads and `screenshot` carry
-`readOnlyHint: true`, the seventy-five writes `destructiveHint: false` (none of
+`readOnlyHint: true`, the seventy-six writes `destructiveHint: false` (none of
 them deletes or overwrites a file the person made: `close_reconstruction`
 unloads, it does not delete; `set_window_layout` changes the window and the
 dock, not the layout file the menu saves; an **edit** makes a new version of a
@@ -3674,7 +3675,8 @@ to the base slot it replaced, and a point new to the base follows the last
 surviving base point ([document-model.md](document-model.md) § "Two kinds of
 edit"). The fold moves no image index. So `move_camera_image`, `switch_camera_model`,
 `add_camera_image_to_tracks`, `retriangulate_all_points`, `refit_all_points`,
-`convert_to_embedded_patches` and `bake_reconstruction_transform`, which move no
+`refine_all_normals`, `convert_to_embedded_patches` and
+`bake_reconstruction_transform`, which move no
 index of their own, renumber points whenever a point edit is pending, and
 renumber nothing otherwise. `move_camera_image` and `switch_camera_model` are
 with the renumbering edits in what the drain forgets afterwards either way: the
@@ -4084,7 +4086,8 @@ got.
 **The tools that run on a worker** are the rows of § "The tool surface"'s
 table that say so: this one, `open_reconstruction`,
 `add_camera_image_to_tracks`, `prune_covered_observations`,
-`retriangulate_all_points`, `refit_all_points`, `convert_to_embedded_patches`,
+`retriangulate_all_points`, `refit_all_points`, `refine_all_normals`,
+`convert_to_embedded_patches`,
 `create_track_at_pixel`, `find_nearby_tracks`, `build_index_files`, and the
 bench's `fit_bench_track`, `fit_bench_track_normal`, `set_bench_track_stage`,
 `search_bench_track_descriptors` and `search_bench_track_geometry`. Each starts
@@ -4493,6 +4496,47 @@ Embedded Patches`), one whose points carry no patch frame, and one with no posed
 image. A reconstruction whose reprojection noise cannot be measured is refused
 on the worker, as a failed entry.
 
+### `refine_all_normals`
+
+Track View's *Grown Plane Normal* followed by *Commit*, for every finite point
+at once: one plane is fitted to the photographs each point is seen in, the
+patch is turned to it whenever a view joined unless the turn is large on weak
+evidence, the keypoints of the views that joined the plane or had their shift
+fitted to it are written, the stored bitmap is rendered again and each
+observation's readings are taken again. No point's centre, no camera and no
+lens moves, and points at infinity are skipped
+([edits/refine-all-normals.md](edits/refine-all-normals.md)).
+
+```jsonc
+// refine_all_normals { "reconstruction_label": "seoul_bull" }
+```
+
+It is a **bulk edit** that runs on a worker thread and answers the two ways
+`bundle_adjust` does, with `"operation": "Refine all normals"`. It deletes no
+point and creates none, so every index still means what it meant, unless a
+point edit was pending, whose deleted slots close up first (§ "The editing
+family"). It reads every photograph some point observes through the photograph
+cache, and a photograph that cannot be read fails the run with *"Cannot read
+<image>."* and pushes no version. It polls the cancel flag between the
+photographs, in front of each stage and in front of each point's step, so
+`cancel_background_tasks` stops it and a cancelled refinement pushes no
+version. The step trusts the keypoints it is given, so where they may be off,
+`refit_all_points` comes first.
+
+Its `report` is the Action Log sentence, which counts the per-point statuses:
+the points turned out of the finite points, how many of them agree with what
+was stored and how many were turned to a plane found with low confidence, the
+keypoints written, the points whose normal the step kept with why (no view
+joined, or a large turn on weak evidence), the points left as they were with
+the reason for each, the points at infinity skipped, and the median turn.
+
+It refuses in `AppState`'s own words, which are the words the greyed `Refine
+All Normals` entry in the Scene tree carries, for the reasons `refit_all_points`
+refuses for and in its order: a reconstruction whose observations are `.sift`
+feature indexes with no inline keypoint (the sentence names `Convert to
+Embedded Patches`), one whose points carry no patch frame, and one with no
+posed image.
+
 ### `prune_covered_observations`
 
 The structure's coarse evidence handed over to the finer features that supersede
@@ -4809,17 +4853,24 @@ reprojection noise; a reconstruction holding no finite point measures none, and
 a fit or upgrade there without it fails, saying so.
 
 **`fit_bench_track_normal` turns the patch and keeps its centre.** It is Track
-View's *Fit Normal*, *Finite Diff Normal* and *Grid Plane Normal*, chosen by the
-required `method`: `photometric`, `finite_difference` or `grid_plane`. The two
-piece methods take `pieces` (default 2) and `overlap_percent` (default 0), and
-`photometric` refuses either. It is refused in the call, before a photograph is
+View's *Finite Diff Normal*, *Grid Plane Normal* and *Grown Plane Normal*,
+chosen by the required `method`: `finite_difference`, `grid_plane` or
+`grown_plane`. The two piece methods take `pieces` (default 2) and
+`overlap_percent` (default 0), and `grown_plane` refuses either. `grown_plane`
+runs `grown_plane_normal` at its default options; it writes the keypoints of
+the views that joined its plane and of those whose shift alone it fitted, and
+its `report` gives the plane's σ along its weakest and strongest directions
+and says *low confidence* when that precision is low, as Track View's Action
+Log row does ([track-view.md](track-view.md) § "The toolbar"). It is refused in
+the call, before a photograph is
 read, at the cluster stage, with no patch yet, at infinity and with fewer than
-two `in` observations, in a sentence that starts *"Cannot fit the normal of
-…"*, *"Cannot take the finite-difference normal of …"* or *"Cannot take the
-grid-plane normal of …"*. It runs on a worker and answers in the two levels `fit_bench_track`
+two `in` observations, in a sentence that starts *"Cannot take the
+finite-difference normal of …"*, *"Cannot take the grid-plane normal of …"* or
+*"Cannot take the grown-plane normal of …"*. It runs on a worker and answers in the two levels `fit_bench_track`
 does: inside the reply window, an edit's reply (`serial`, `cursor`, `label`,
 `dirty`, `report`, `changed`), and after it a `running: true` handle whose
-`operation` is `Fit normal`, `Finite difference normal` or `Grid plane normal`.
+`operation` is `Finite difference normal`, `Grid plane normal` or `Grown plane
+normal`.
 Like the other bench steps that run on a worker, the reply carries no `item`.
 
 **A fit's sentence names the representation the rays earned.** Finite or at
@@ -6315,7 +6366,7 @@ where a test hands no host over.
   and the panel list in the prose above are asserted against `catalog()` and
   `Tab::ALL`, because a number written out in words is the first thing to go
   stale.
-- **The catalog is one hundred and one tools**, nineteen of them reads, six of the
+- **The catalog is one hundred and two tools**, nineteen of them reads, six of the
   `Input` kind and one of the `Save` kind, those seven carrying
   `destructiveHint: true`;
   `set_window_layout`'s schema advertises `sfm_explorer_layout`, `window` and
