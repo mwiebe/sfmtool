@@ -32,14 +32,25 @@ pixi run sfm …                      # Run the CLI
 
 ### Task completion checks
 
-When finishing a task, run the checks for what you changed:
+When finishing a task, run the checks for what you changed. Choose them by
+what the change touches, not by which test files you edited, and before a push
+run them in full on the last commit:
 
-- Python changes → `pixi run fmt && pixi run check`
-- Rust changes → `pixi run cargo fmt && pixi run cargo clippy --workspace &&
-  pixi run doc`
-- Rust edits that touch anything re-exported through `sfmtool-py` → rerun
-  `pixi run maturin develop --release` before Python tests (the `.so` does
-  **not** rebuild automatically despite the editable Python install).
+- Python changes → `pixi run fmt && pixi run check` and the relevant tests
+- Rust changes → `pixi run cargo fmt`, `pixi run cargo clippy --workspace
+  --all-targets --features sfm-explorer/ui-tests -- -D warnings`,
+  `pixi run cargo test --workspace` and `pixi run doc`
+- Changes under `crates/sfmtool-py/` or to anything re-exported through it →
+  `pixi run maturin develop --release` (the `.so` does **not** rebuild
+  automatically despite the editable Python install), then the full
+  `pixi run test`: `tests/test_module_layout.py` and the
+  `test_*_registration.py` modules check invariants across files
+- Changes to `sfm-explorer` (anything the viewer draws, any MCP tool) →
+  `pixi run -e ui ui-test` too, since `ui_basic` lists every entry of some
+  menus. On Windows its real-mouse test fails with "could not aim at the
+  viewer's own window" when the desktop is locked; report that test as not
+  run, not as a pass. That failure alone does not block a push or a PR, since
+  CI's `ui-test-windows` job runs it, but the rest of `ui_basic` must pass.
 
 ### Rust visibility in the viewer
 

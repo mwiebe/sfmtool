@@ -42,9 +42,9 @@ can screenshot a single panel.
 ## Checklist
 
 - [ ] Python changes: `pixi run fmt && pixi run check`
-- [ ] Rust changes: `pixi run cargo fmt && pixi run cargo clippy --workspace`
+- [ ] Rust changes: `pixi run cargo fmt && pixi run cargo clippy --workspace --all-targets --features sfm-explorer/ui-tests -- -D warnings && pixi run doc`
 - [ ] Rust changes touching `sfmtool-py` re-exports: ran `pixi run maturin develop --release`
-- [ ] Tests pass locally (`pixi run test`, `pixi run cargo test --workspace` as applicable)
+- [ ] Tests pass locally: the full suites that apply (`pixi run test`, `pixi run cargo test --workspace`, `pixi run -e ui ui-test`), not a subset; if one did not run, say which and why. The one allowed failure is the Windows real-mouse `ui_basic` test failing with "could not aim at the viewer's own window" on a locked desktop, when the rest of `ui_basic` passes (see `AGENTS.md` § "Task completion checks")
 - [ ] Updated the relevant spec under `specs/` if behavior changed, or added a new spec if this introduces new behavior
 
 ## License
