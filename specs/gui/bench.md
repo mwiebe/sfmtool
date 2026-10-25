@@ -544,9 +544,9 @@ alone: a row that has to be undone for nothing is worse than no row.
 **A size is reported in the pixels of the sighting it was named at.** A world
 half-length says nothing to someone looking at a photograph, so the resize's
 sentence states the patch's half-width in that observation's own image -- the
-outline drawn there, the patch's projection shifted by the sighting's gap, whose
-size is the projection's -- and falls back to the world number only when the
-patch does not project there.
+outline drawn there, the patch slid onto the sighting's keypoint's ray and
+projected -- and falls back to the world number only when the patch does not
+project there.
 
 **A fit's sentence says which representation the rays earned, and why.** The
 finite-versus-bearing decision is the step's real outcome on a distant track
@@ -1673,13 +1673,13 @@ ways** to say what they want. A translation takes `by`, a displacement
 `pixel` with the photograph it is in, which its centre lands under. A resize
 takes a world `half_length` with an optional `moved_edge`, or an `edge` and a
 `pixel` with the photograph it is in. The pixel forms are the gestures, and they
-are what make the answer exact: the pixel is unprojected onto the patch's own
-plane, so the edge lands there through whatever distortion the lens has and the
+are what make the answer exact: the pixel is unprojected onto the plane of the
+square drawn in that photograph, parallel to the patch's, so the edge lands there through whatever distortion the lens has and the
 opposite edge is left where it was. **The photograph is exactly one of
 `observation` and `camera_image`**, and the two name different squares, which
 is why a call carrying both is refused. An `observation` names that sighting's
-outline, the patch's projection shifted by its keypoint's gap from the centre's
-projection. A `camera_image`, by index or by
+outline, the patch slid across its line of sight onto its keypoint's ray. A
+`camera_image`, by index or by
 name, names the patch as it stands seen in that image, which is Image Detail's
 ghost outline, and it is the only form that reaches an image the track has no
 sighting in. The reply carries whichever it was. `spin_bench_patch` turns the

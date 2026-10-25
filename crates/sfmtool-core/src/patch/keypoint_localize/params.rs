@@ -52,6 +52,9 @@ pub struct KeypointLocalizeParams {
     /// The reach of each view's search around its starting keypoint, in
     /// patch-grid px: the context tile is rendered this much larger than the
     /// scored core on every side, and the shift is searched over `±search`.
+    /// The search made again at a found keypoint past 1 grid px (rendered
+    /// through the patch slid onto it, over `±2` grid px) takes its peak only
+    /// within the same `±search` of the start, so no view reaches further.
     pub search: f64,
     /// Drop a view whose keypoint sits more than this many *source-image*
     /// pixels from the point's projection `project_i(X_p)` (an absolute
@@ -162,12 +165,12 @@ impl Default for KeypointLocalizeParams {
 /// be a single view, for the caller's `min_views` cull to remove.
 ///
 /// Where there is nothing to align to (the reference's tile leaves the frame,
-/// is flat or its keypoint does not map onto the patch plane, or there is no
+/// is flat or the slide refuses its keypoint, or there is no
 /// reference and the reference-view rule finds no eligible view),
 /// [`reference`](Self::reference) is
 /// `None` and no view is searched: every view, the given reference included, is
 /// kept at its starting keypoint, exactly as given (the projection where it was
-/// given none or it does not map onto the patch plane), with a `NaN` ZNCC, and
+/// given none or the slide refuses it), with a `NaN` ZNCC, and
 /// still faces the `max_shift_px` gate.
 #[derive(Debug, Clone, Default)]
 pub struct KeypointLocalization {

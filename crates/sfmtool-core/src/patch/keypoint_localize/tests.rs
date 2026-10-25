@@ -639,12 +639,13 @@ fn seed_keypoint_offset_round_trips() {
 }
 
 #[test]
-fn seed_offset_unprojection_round_trips() {
-    // A non-projection seed exercises `seed_offset`'s unprojection (rotation
-    // transpose, ray∩plane, /wpp): re-anchoring the patch at the offset it
-    // returns and projecting gives the seed back, so `seed_offset` is the exact
-    // inverse of the keypoint the localizer reports for an offset.
-    // `keypoint_grid_offset` asks the same question at a params' resolution.
+fn a_seed_frame_is_the_patch_slid_onto_the_seed() {
+    // A non-projection seed exercises the slide's unprojection (rotation
+    // transpose, the ray's meeting with the plane facing the camera): the frame
+    // the localizer renders a view through is centred on the seed's ray, so
+    // projecting its centre gives the seed back, and `seed_offset` measures how
+    // far that centre moved, in grid px. `keypoint_grid_offset` asks the same
+    // question at a params' resolution.
     let centers = [[0.4, 0.2, 0.0]];
     let offs = [[0.0; 2]];
     let texs = vec![texture as fn(f64, f64) -> f64];
@@ -654,14 +655,21 @@ fn seed_offset_unprojection_round_trips() {
 
     let proj = project(&views[0], &patch.center, patch.w).unwrap();
     let seed = [proj.0 + 5.0, proj.1 - 3.0]; // a few px off the projection
-    let off = seed_offset(&patch, &views[0], seed, wpp(), wpp()).expect("the seed hits the plane");
-    // A few source px is a couple of grid px.
-    assert!(off[0].hypot(off[1]) > 1.0, "{off:?}");
-    let center = shifted_center(&patch, off[0], off[1], wpp(), wpp());
-    let back = project(&views[0], &center, patch.w).unwrap();
+    let (frame, followed) = seed_frame(&patch, &views[0], Some(seed));
+    assert!(followed, "the seed's ray is followed");
+    let back = project(&views[0], &frame.center, patch.w).unwrap();
     assert!(
         (back.0 - seed[0]).abs() < 1e-6 && (back.1 - seed[1]).abs() < 1e-6,
-        "seed {seed:?} should round-trip through seed_offset, got {back:?}"
+        "the frame for seed {seed:?} is centred at {back:?}"
+    );
+    assert_eq!((frame.u_axis, frame.v_axis), (patch.u_axis, patch.v_axis));
+    let off = seed_offset(&patch, &views[0], seed, wpp(), wpp()).expect("the seed is followed");
+    // A few source px is a couple of grid px.
+    assert!(off[0].hypot(off[1]) > 1.0, "{off:?}");
+    let moved = (frame.center - patch.center).norm() / wpp();
+    assert!(
+        (off[0].hypot(off[1]) - moved).abs() < 1e-9,
+        "{off:?} against a move of {moved} grid px"
     );
     let grid = keypoint_grid_offset(&patch, &views[0], seed, &params()).unwrap();
     assert_eq!(grid, off, "the same offset at the params' resolution");
@@ -2173,12 +2181,13 @@ fn project_unclipped_reaches_past_ninety_degrees_on_a_ray_path_model() {
     );
 }
 
-/// `seed_offset` intersects the observed bearing with the patch plane. Past 90°
-/// a bearing can meet the plane *behind* the camera centre — a mirrored hit
-/// that is not an observation of the patch — so the ray-path arm rejects a
-/// backward intersection instead of returning a plausible-looking offset.
+/// `seed_offset` follows the observed bearing to the plane through the patch
+/// centre facing the camera. Under a ray-path model a bearing can point more
+/// than 90° from the line of sight to the centre, where it never meets that
+/// plane in front of the camera, so it is refused instead of returning a
+/// plausible-looking offset, and a bearing toward the patch is followed.
 #[test]
-fn seed_offset_rejects_a_backward_plane_hit_on_a_ray_path_model() {
+fn seed_offset_refuses_a_bearing_past_a_right_angle_on_a_ray_path_model() {
     let equi = CameraIntrinsics {
         model: CameraModel::EquidistantFisheye {
             focal_length: FOCAL,
@@ -2953,7 +2962,9 @@ fn a_reference_out_of_frame_leaves_every_view_at_its_start() {
     // The reference's keypoint is far outside its frame, so its tile cannot be
     // rendered there and there is no template. There is then no reference:
     // every view is kept at its start with an unscored ZNCC, and still faces
-    // the shift gate, which drops the reference's own 5000 px start.
+    // the shift gate, which drops the reference's own 1000 px start. (A seed
+    // much further out, past a right angle to the line of sight, is one the
+    // slide refuses, and that view starts at its projection instead.)
     let scene = four_view_scene([[0.0; 2]; 4], [texture; 4]);
     let views = scene.views();
     let patch = plane_patch();
@@ -2964,7 +2975,7 @@ fn a_reference_out_of_frame_leaves_every_view_at_its_start() {
         })
         .collect();
     let p0 = projection(&views, 0);
-    seeds[0] = Some([p0[0] + 5000.0, p0[1]]);
+    seeds[0] = Some([p0[0] + 1000.0, p0[1]]);
     for strategy in STRATEGIES {
         let res = localize_patch_keypoints(
             &patch,
@@ -3167,4 +3178,112 @@ fn search_shift_plus_descent_takes_a_diagonal_step() {
         "the descent stopped at {plus:?}"
     );
     assert!(plus.peak > start);
+}
+
+/// One reading of a shift against the `±margin` window: the total sub-pixel
+/// shift, a second search's added to the first's, is inside or past the
+/// window on either axis, and on its edge where it rounds to `margin`.
+#[test]
+fn a_total_shift_is_read_against_the_window_one_way() {
+    // A first search's 5.4 plus a second's 0.8 is past a window of 6, though
+    // the integer peaks (5 and 1) sum to 6.
+    assert_eq!(window_reading([5.4 + 0.8, 0.0], 6), None);
+    assert_eq!(window_reading([5.4, 0.0], 6), Some(false));
+    assert_eq!(window_reading([0.2, -5.6], 6), Some(true));
+    assert_eq!(window_reading([-6.0, 0.0], 6), Some(true));
+    assert_eq!(window_reading([6.01, 0.0], 6), None);
+    assert_eq!(window_reading([0.0, 0.0], 6), Some(false));
+}
+
+/// A view whose content sits 5.6 grid px off, near the edge of a window of 6,
+/// is searched, rendered again at the keypoint found and searched again by the
+/// localizer and by `TrackReferences::search` under the one window rule: both
+/// reach the same keypoint, on the content, and the reference search reports
+/// it on the window's edge.
+#[test]
+fn the_localizer_and_a_reference_search_read_a_shift_near_the_edge_alike() {
+    let planted = [5.6, 0.0];
+    let scene = four_view_scene([[0.0; 2], [0.0; 2], [0.0; 2], planted], [texture; 4]);
+    let views = scene.views();
+    let patch = plane_patch();
+    let p = KeypointLocalizeParams {
+        max_shift_px: f64::MAX,
+        ..params()
+    };
+    let seeds: Vec<Option<[f64; 2]>> = (0..4).map(|k| Some(projection(&views, k))).collect();
+    let localized =
+        localize_patch_keypoints(&patch, &views, &[0, 1, 2, 3], Some(&seeds), Some(0), &p);
+    let k = localized
+        .views
+        .iter()
+        .position(|&v| v == 3)
+        .expect("view 3 kept");
+    let by_localizer = localized.keypoints[k];
+
+    let references = TrackReferences::build(
+        &patch,
+        &views,
+        &[0, 1],
+        &[projection(&views, 0), projection(&views, 1)],
+        Some(0),
+        None,
+        &p,
+    )
+    .expect("two textured references");
+    let found = references
+        .search(&patch, &views[3], Some(projection(&views, 3)), false, &p)
+        .expect("a search");
+    let by_reference = found.keypoint.expect("a keypoint");
+
+    // Within the quadratic step's accuracy of the content, and of each other.
+    let truth = true_keypoint(&views, 3, planted);
+    assert!(
+        dist(by_localizer, truth) < 0.25,
+        "{by_localizer:?} vs {truth:?}"
+    );
+    assert!(
+        dist(by_reference, truth) < 0.25,
+        "{by_reference:?} vs {truth:?}"
+    );
+    // A peak taken past the window would part the two by the second search's
+    // shift.
+    assert!(
+        dist(by_localizer, by_reference) < 0.25,
+        "{by_localizer:?} vs {by_reference:?}"
+    );
+    assert!(
+        found.at_edge,
+        "5.6 grid px rounds to the edge of a window of 6"
+    );
+}
+
+/// A single search's peak is on the edge only where its integer peak is at
+/// `±margin`: a peak one cell inside whose sub-pixel step reaches 0.5 or more
+/// toward the edge is not, as the ascent reads it. After a second search the
+/// total shift is read against the window, and a peak the ascent placed is
+/// never read at the edge: a second peak there is not taken.
+#[test]
+fn a_peak_one_cell_inside_is_not_on_the_edge_and_an_ascended_peak_stays_off_it() {
+    let at = |dx: f64, ix: i64| ShiftResult {
+        dx,
+        dy: 0.0,
+        ix,
+        iy: 0,
+        peak: 0.9,
+    };
+    // Margin 6: integer peak 5, sub-pixel step +0.7.
+    let inside = at(5.7, 5);
+    assert!(!inside.on_edge(6));
+    assert!(at(6.0, 6).on_edge(6));
+    assert!(at(-5.6, -6).on_edge(6));
+    // A second search's small step from there rounds to the edge.
+    let again = at(0.1, 0);
+    assert_eq!(second_search_reading(&inside, &again, 6, false), Some(true));
+    assert_eq!(second_search_reading(&inside, &again, 6, true), None);
+    // Off the edge, an ascended peak's second search is taken.
+    let near = at(4.2, 4);
+    assert_eq!(second_search_reading(&near, &again, 6, true), Some(false));
+    // Past the window, never.
+    let far = at(0.9, 1);
+    assert_eq!(second_search_reading(&inside, &far, 6, false), None);
 }

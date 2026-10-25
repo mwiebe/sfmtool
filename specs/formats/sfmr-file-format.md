@@ -1845,10 +1845,11 @@ sorts), present or absent together, flagged by `has_observation_readings`:
   reading of another render. A consumer that needs the current render's
   reading and has the photographs compares the row's angle, tilt and zoom
   with the current geometry and reads again where they differ.
-- **The fallback render.** Where the keypoint's ray cannot meet the patch's
-  plane in front of the camera, the render uses the stored patch without
-  re-anchoring, and `d̂` is the ray to the patch's centre. Such a view is at or
-  past grazing, so its cosine is near zero or negative either way.
+- **The fallback render.** Where the observation has no anchor (its
+  keypoint's ray is at or past a right angle to the line of sight to the
+  point, [The embedded-patch feature relationship](#the-embedded-patch-feature-relationship)),
+  the render uses the stored patch without re-anchoring, and `d̂` is the ray
+  to the patch's centre.
 - **Not measured.** `NaN` in the axes means the observation was not measured:
   its angles and zoom are then `NaN` and its flags `0`. `NaN` in a score means
   the score was not read, as where the point has no stored bitmap: such a row
@@ -1966,8 +1967,8 @@ pipeline today, a learned detector later — does not change its meaning.
 Because the observed point also carries an oriented patch (the version-3 `(u, v)`
 frame, [Per-point patch frame](#per-point-patch-frame-optional-version-3)), the
 keypoint additionally fixes that observation's patch geometrically: the patch is
-the point's surfel re-anchored within its own plane so that its centre projects
-to the keypoint in this view. An `embedded_patches` file therefore requires the
+the point's surfel moved across the line of sight from this view's camera so that
+its centre projects to the keypoint in this view. An `embedded_patches` file therefore requires the
 patch frame (`has_uv_frames = true`). A writer refuses to write an
 `embedded_patches` file without it, and a reader and a verifier refuse one whose
 `has_uv_frames` is `false` or absent.
@@ -1978,26 +1979,46 @@ For observation `j` with `i = image_indexes[j]`, `p = point_indexes[j]`,
 intrinsics + world→camera pose `(R_i, t_i)`:
 
 1. The surfel lies in the **patch plane** `Π_p` through `X_p` with normal `n`.
-2. The keypoint selects the per-view **anchor** `A_j` — the point on `Π_p` that
-   projects to `k`. Unproject `k` to a world ray (camera centre
-   `o = −R_iᵀ t_i`, direction `d = R_iᵀ · pixel_to_ray(k)`, which inverts
-   distortion for all camera models), then intersect with `Π_p`:
-   `λ = ((X_p − o) · n) / (d · n)`, `A_j = o + λd`.
+2. The keypoint selects the per-view **anchor** `A_j` — the point that projects
+   to `k` on the plane through `X_p` perpendicular to the line of sight
+   `X_p − o`. Unproject `k` to a world ray (camera centre `o = −R_iᵀ t_i`,
+   direction `d = R_iᵀ · pixel_to_ray(k)`, which inverts distortion for all
+   camera models), then intersect with that plane:
+   `λ = |X_p − o|² / (d · (X_p − o))`, `A_j = o + λd`.
 3. The observation's patch is the surfel centred at `A_j` carrying the point's
    frame, `{ A_j + s·u + t·v : (s, t) ∈ [−1, 1]² }`, rendered into image `i` by
    projecting each grid sample through the camera model.
 
 Setting `k = project_i(X_p)` gives `A_j = X_p` — the patch centred on the point,
 the implicit `sift_files`/v3 behaviour — so a keypoint is exactly a per-view
-in-plane shift of the surfel centre, `δ_j = k − project_i(X_p)`. The patch
+shift of the surfel centre across the line of sight, `δ_j = k − project_i(X_p)`,
+and the observation's patch is the surfel translated by `A_j − X_p`, parallel to
+`Π_p`. The patch
 **bitmaps** (`patch_bitmaps_y_x_rgba`, if present) live in the surfel's own
 `(s, t)` frame and are unaffected by the anchor.
 
-Edge cases: the anchor is ill-conditioned for **grazing views** (`|d · n|` near
-zero) — a consumer needing the anchor MAY fall back to `A_j = X_p`; the keypoint
-itself stays a valid 2D observation. For a **point at infinity** (`w = 0`) the
+Edge cases: there is no anchor when `d · (X_p − o) <= 0`, a ray at or past a
+right angle to the line of sight, which only a field of view wider than a right
+angle or a point behind camera `i` can produce — a
+consumer needing the anchor MAY fall back to `A_j = X_p`; the keypoint itself
+stays a valid 2D observation. For a **point at infinity** (`w = 0`) the
 patch is a region of the direction sphere rather than a plane (see the patch-frame
 section), and the anchor is defined analogously on that frame.
+
+**Files anchored on the patch plane.** A file's writer may have derived each
+observation's square from the anchor where the keypoint's ray meets the patch
+plane `Π_p` (`λ = ((X_p − o) · n) / (d · n)`). Such a file's keypoints mean the
+same thing, the pixel where the photograph sees the point, and its patch frames
+and bitmaps are stored the same way; only the square a reader derives at an
+observation (its anchor, the affine shape below, and any render through it,
+such as the reference observation's render the bitmap was taken from) can
+differ. The two anchors lie on the same ray and coincide where the keypoint is
+the point's projection, and the two squares part further as the keypoint's
+distance from that projection and the angle between `Π_p` and the plane facing
+the camera grow. No field and no stored value records which anchor a writer
+used, and none changes meaning: a reader reads every file by the anchor
+defined above, and the version is unchanged. A consumer that needs the
+patch-plane anchor computes it from the same stored values.
 
 ##### Deriving keypoint shape, scale, and orientation
 
@@ -2027,8 +2048,9 @@ the semi-axes and rotation) can therefore treat an `embedded_patches`
 observation exactly like a `sift_files` one.
 
 This is an approximation valid over the patch footprint: for wide-baseline or
-strongly distorted views the true footprint is not an exact ellipse. For a
-**grazing view** the anchor falls back to `A_j = X_p`, so the shape degrades to
+strongly distorted views the true footprint is not an exact ellipse. Where
+there is **no anchor** (a ray at or past a right angle to the line of sight)
+the anchor falls back to `A_j = X_p`, so the shape degrades to
 the frame projected at the point centre. For a **point at infinity** (`w = 0`)
 there is no anchor plane: the frame is tangent to the direction sphere, so `A_j`
 and the two half-axis tips are projected as *directions* (`w = 0` folds out the

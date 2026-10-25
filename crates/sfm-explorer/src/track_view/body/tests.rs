@@ -1156,9 +1156,14 @@ fn a_tile_appears_when_its_photograph_arrives_after_the_first_frame() {
 
 /// A candidate a descriptor search has just added sits where the index's warp
 /// put it -- its keypoint and its seed are that pixel, and nothing has read it
-/// -- and its tile is cut around **that**, which is the whole of what says
-/// whether the search found the right surface, rather than wherever the bare
-/// projection of the point happens to land in the photograph.
+/// -- and its tile is cut through the patch as that keypoint says the
+/// photograph sees it, the same patch whatever placed the keypoint.
+///
+/// In this fixture the seed's ray meets the patch's plane behind the camera,
+/// which a descriptor search can do under a perspective lens as under any
+/// other. The slide does not need that plane: it follows the ray to the plane
+/// through the centre facing the camera, so the tile is the patch slid onto the
+/// seed, a whole picture, and the hover view marks the seed at its middle.
 #[test]
 fn a_search_candidate_draws_its_tile_where_the_seed_put_it() {
     use sfmtool_core::bench::Stage;
@@ -1226,11 +1231,36 @@ fn a_search_candidate_draws_its_tile_where_the_seed_put_it() {
     );
     assert_eq!(drawn, at_the_seed, "the tile is not cut around the seed");
 
-    let at_the_projection =
-        super::patch::patch_color_image(&patch_frame, camera, &cam_from_world, None, &src, sampler);
-    assert_ne!(
-        drawn, at_the_projection,
-        "the tile is the point's own projection rather than the sighting's place"
+    // The seed's ray meets the plane behind a perspective camera.
+    assert!(!camera.model.needs_ray_path(), "a perspective camera");
+    let ray = camera.pixel_to_ray(site[0], site[1]);
+    let dir = cam_from_world.to_rotation_matrix().transpose()
+        * nalgebra::Vector3::new(ray[0], ray[1], ray[2]);
+    let eye = cam_from_world.inverse_translation_origin();
+    let n = patch_frame.normal();
+    assert!(
+        (patch_frame.center - eye).dot(&n) / dir.dot(&n) < 0.0,
+        "the seed's ray meets the plane in front of the camera, so this proves nothing"
+    );
+    let slid = patch_frame
+        .anchored_at_keypoint(camera, &cam_from_world, site)
+        .expect("the slide follows the seed's ray");
+
+    // So the tile is the slid patch, and a whole one.
+    let map = sfmtool_core::camera::WarpMap::from_patch(
+        &slid,
+        camera,
+        &cam_from_world,
+        super::patch::PATCH_RES,
+    );
+    assert!(
+        (0..map.height()).all(|r| (0..map.width()).all(|c| map.is_valid(c, r))),
+        "the slid patch has blank texels in this photograph"
+    );
+    let context = super::tile::context(recon, &track, candidate, &src).expect("a hover view");
+    assert!(
+        context.keypoint.is_some(),
+        "the seed names the middle of the slid patch"
     );
 }
 

@@ -7,7 +7,7 @@
 //! in.
 //!
 //! Each `in` view is rendered once at the track's current patch frame as a context
-//! tile: the patch re-anchored in its plane on the view's keypoint and drawn
+//! tile: the patch slid onto the view's keypoint and drawn
 //! through that plane ([`WarpMap::from_patch`]) on the working grid plus a
 //! margin of the cell search bound, the render the keypoint localizer makes
 //! for its context tiles. The reference view's render, without the margin,
@@ -700,11 +700,11 @@ impl<'a, 'v> Cells<'a, 'v> {
                 let jacobian = reference.and_then(|r| {
                     let observation = &track.observations[r];
                     let view = &images[observation.image as usize];
-                    let anchored_patch_frame = seed_of(observation)
-                        .and_then(|kp| {
-                            patch_frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp)
-                        })
-                        .unwrap_or_else(|| patch_frame.clone());
+                    let anchored_patch_frame = patch_frame.seen_at_keypoint(
+                        view.camera,
+                        view.cam_from_world,
+                        seed_of(observation),
+                    );
                     patch_grid_jacobian(
                         &anchored_patch_frame,
                         view.camera,
@@ -953,8 +953,8 @@ impl<'a, 'v> Cells<'a, 'v> {
     }
 
     /// One view's context tile at `patch_frame`: the patch re-anchored on
-    /// `keypoint` (on the patch frame itself where there is none or its ray misses
-    /// the plane), widened by `margin` grid px on every side, and drawn
+    /// `keypoint` (on the patch frame itself where there is none or the slide
+    /// refuses it), widened by `margin` grid px on every side, and drawn
     /// through its plane with the sampler the fit's bitmap render picks from
     /// the view's Jacobian. `None` when no sample lands on the photograph.
     fn render(
@@ -965,9 +965,8 @@ impl<'a, 'v> Cells<'a, 'v> {
         margin: usize,
     ) -> Option<Render> {
         let r = self.layout.resolution;
-        let anchored_patch_frame = keypoint
-            .and_then(|kp| patch_frame.anchored_at_keypoint(view.camera, view.cam_from_world, kp))
-            .unwrap_or_else(|| patch_frame.clone());
+        let anchored_patch_frame =
+            patch_frame.seen_at_keypoint(view.camera, view.cam_from_world, keypoint);
         let jacobian =
             patch_grid_jacobian(&anchored_patch_frame, view.camera, view.cam_from_world, r);
         let sampler = self.options.fit.refine.sampler.for_jacobian(jacobian);

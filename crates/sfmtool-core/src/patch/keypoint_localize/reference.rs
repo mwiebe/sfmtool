@@ -24,11 +24,13 @@
 //! the template blur-matched, as the bench reads a row against the stored
 //! bitmap, and keeps only the pairwise ZNCCs from here for its pair rule.
 
-use super::align::Template;
-use super::search::{search_shift, search_shift_plus_descent, SearchScratch};
+use super::align::{Template, REANCHOR_MARGIN, REANCHOR_MIN_SHIFT};
+use super::search::{
+    search_shift, search_shift_plus_descent, window_reading, SearchScratch, ShiftResult,
+};
 use super::{
     extract_core, member_self_similarity_radius, project, render_context, resolve_reference,
-    seed_offset, shifted_center, KeypointLocalizeParams, LocalizeError,
+    seed_frame, shifted_center, KeypointLocalizeParams, LocalizeError,
 };
 use crate::patch::cloud::OrientedPatch;
 use crate::patch::keypoint_subpixel::ReferenceTemplate;
@@ -126,7 +128,8 @@ pub struct ViewSearch {
     /// peak.
     pub peak_zncc: f64,
     /// Whether the peak sits on the edge of the searched window, where the true
-    /// maximum may lie outside it.
+    /// maximum may lie outside it: the final peak, after the search made again
+    /// at a found keypoint, placed in the window the first search covered.
     pub at_edge: bool,
     /// Whether the window's highest peak was on its edge and the keypoint is
     /// instead the local maximum an ascent from the start reached (see
@@ -204,14 +207,15 @@ impl TrackReferences {
         let mut raws: Vec<(usize, Vec<f32>)> = Vec::with_capacity(references.len());
         for (k, (&image, &kp)) in references.iter().zip(keypoints).enumerate() {
             let view = &views[image as usize];
-            let Some(off) = seed_offset(patch, view, kp, wpp[0], wpp[1]) else {
+            let (patch_frame, followed) = seed_frame(patch, view, Some(kp));
+            if !followed {
                 continue;
-            };
+            }
             let Ok(tile) = render_context(
-                patch,
+                &patch_frame,
                 view,
-                off[0],
-                off[1],
+                0.0,
+                0.0,
                 wpp[0],
                 wpp[1],
                 resolution,
@@ -394,14 +398,12 @@ impl TrackReferences {
         out.projection = [proj.0, proj.1];
         let r = self.resolution as usize;
         let margin = params.search.ceil().max(1.0) as i64;
-        let start = seed
-            .and_then(|kp| seed_offset(patch, view, kp, self.wpp[0], self.wpp[1]))
-            .unwrap_or([0.0, 0.0]);
+        let (patch_frame, _) = seed_frame(patch, view, seed);
         let tile = render_context(
-            patch,
+            &patch_frame,
             view,
-            start[0],
-            start[1],
+            0.0,
+            0.0,
             self.wpp[0],
             self.wpp[1],
             self.resolution,
@@ -443,8 +445,7 @@ impl TrackReferences {
         ) else {
             return Ok(out);
         };
-        let on_edge = |ix: i64, iy: i64| ix.abs() == margin || iy.abs() == margin;
-        if ascend_on_edge && on_edge(sh.ix, sh.iy) {
+        if ascend_on_edge && sh.on_edge(margin) {
             if let Some(local) = search_shift_plus_descent(
                 &tile,
                 &mut scratch,
@@ -456,22 +457,68 @@ impl TrackReferences {
                 c0,
                 c0,
             ) {
-                if !on_edge(local.ix, local.iy) {
+                if !local.on_edge(margin) {
                     sh = local;
                     out.ascended = true;
                 }
             }
         }
         out.peak_zncc = sh.peak;
-        out.at_edge = on_edge(sh.ix, sh.iy);
-        let center = shifted_center(
-            patch,
-            start[0] + sh.dx,
-            start[1] + sh.dy,
-            self.wpp[0],
-            self.wpp[1],
-        );
+        out.at_edge = sh.on_edge(margin);
+        let center = shifted_center(&patch_frame, sh.dx, sh.dy, self.wpp[0], self.wpp[1]);
         out.keypoint = project(view, &center, patch.w).map(|(x, y)| [x, y]);
+        // As the localizer does: past `REANCHOR_MIN_SHIFT` the shift was read
+        // as a sub-window of a render about the seed, so the view is rendered
+        // again through the patch slid onto the keypoint found and searched
+        // within `REANCHOR_MARGIN` of it. The second peak is taken where
+        // `second_search_reading` takes it, and `at_edge` is its reading.
+        if let Some(found) = out
+            .keypoint
+            .filter(|_| sh.dx.hypot(sh.dy) > REANCHOR_MIN_SHIFT)
+        {
+            let (frame, followed) = seed_frame(patch, view, Some(found));
+            if followed {
+                let tile = render_context(
+                    &frame,
+                    view,
+                    0.0,
+                    0.0,
+                    self.wpp[0],
+                    self.wpp[1],
+                    self.resolution,
+                    self.resolution + 2 * REANCHOR_MARGIN as u32,
+                    params.sampler.for_observation(
+                        patch,
+                        view.camera,
+                        view.cam_from_world,
+                        Some(found),
+                        self.resolution,
+                    ),
+                    &Progress::none(),
+                )?;
+                let c = REANCHOR_MARGIN as usize;
+                if let Some(again) = search_shift(
+                    &tile,
+                    &mut scratch,
+                    &self.support,
+                    mask,
+                    kept,
+                    r,
+                    REANCHOR_MARGIN,
+                    c,
+                    c,
+                ) {
+                    if let Some(at_edge) = second_search_reading(&sh, &again, margin, out.ascended)
+                    {
+                        out.peak_zncc = again.peak;
+                        out.at_edge = at_edge;
+                        let center =
+                            shifted_center(&frame, again.dx, again.dy, self.wpp[0], self.wpp[1]);
+                        out.keypoint = project(view, &center, patch.w).map(|(x, y)| [x, y]);
+                    }
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -480,7 +527,7 @@ impl TrackReferences {
     ///
     /// The same measurement [`Self::build`] took of each reference, so the
     /// numbers are comparable with [`Self::zncc`] and [`Self::pair_zncc`].
-    /// `None` when the keypoint does not unproject onto the patch or the core
+    /// `None` when the slide refuses the keypoint (`seed_frame`) or the core
     /// leaves the frame.
     pub fn score(
         &self,
@@ -491,12 +538,15 @@ impl TrackReferences {
     ) -> Option<ViewScore> {
         let r = self.resolution as usize;
         let n = self.support.pixels.len();
-        let off = seed_offset(patch, view, keypoint, self.wpp[0], self.wpp[1])?;
+        let (patch_frame, followed) = seed_frame(patch, view, Some(keypoint));
+        if !followed {
+            return None;
+        }
         let tile = render_context(
-            patch,
+            &patch_frame,
             view,
-            off[0],
-            off[1],
+            0.0,
+            0.0,
             self.wpp[0],
             self.wpp[1],
             self.resolution,
@@ -594,4 +644,23 @@ fn dot(a: &[f32], b: &[f32]) -> f64 {
         .zip(b)
         .map(|(&x, &y)| f64::from(x) * f64::from(y))
         .sum()
+}
+
+/// Whether `TrackReferences::search` takes a second search's peak `again`,
+/// made at the keypoint the first search's peak `first` found, and if so
+/// whether it lies on the edge of the `±margin` window the first covered.
+///
+/// `None` where the total shift is past that window ([`window_reading`]), and
+/// where the first peak came from the ascent (`ascended`) and the second lies
+/// on the window's edge: the ascent is taken only off the edge, so a view it
+/// placed is never reported at the edge, which would refuse a peak the ascent
+/// accepted. Otherwise `Some(at_edge)`, the total read by [`window_reading`].
+pub(super) fn second_search_reading(
+    first: &ShiftResult,
+    again: &ShiftResult,
+    margin: i64,
+    ascended: bool,
+) -> Option<bool> {
+    let at_edge = window_reading([first.dx + again.dx, first.dy + again.dy], margin)?;
+    (!(ascended && at_edge)).then_some(at_edge)
 }

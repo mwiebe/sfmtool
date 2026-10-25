@@ -218,8 +218,8 @@ pub(super) struct TileContext {
     pub(super) patch_box: egui::Rect,
     /// Where the observation sits: the patch's centre, which is the
     /// picture's. `None` only at the track stage, where the keypoint's ray
-    /// does not meet the patch's plane and the tile falls back to the patch as
-    /// it stands.
+    /// does not meet the patch's plane in front of the camera and the tile falls
+    /// back to the patch as it stands.
     pub(super) keypoint: Option<egui::Pos2>,
     /// Where the track's point projects, read onto the patch's plane as the
     /// picture shows it. It can lie outside the picture. `None` at the cluster
@@ -248,10 +248,10 @@ pub(super) struct TileContext {
 ///
 /// What is projected is what the row's *Proj. err* column measures to: the
 /// track's triangulated point, or before there is one the patch's own centre.
-/// The projected pixel is read onto the widened patch frame's plane through
-/// `OrientedPatch::keypoint_plane_offset`, the reading the tile's own anchoring
-/// uses, so the marker sits on the part of the photograph the picture shows at
-/// that pixel.
+/// The projected pixel is read onto the widened patch frame's own plane, the
+/// plane the picture is rendered on, through
+/// `OrientedPatch::keypoint_plane_offset`, so the marker sits on the part of the
+/// photograph the picture shows at that pixel.
 pub(super) fn context(
     recon: &SfmrReconstruction,
     track: &EditableTrack,
