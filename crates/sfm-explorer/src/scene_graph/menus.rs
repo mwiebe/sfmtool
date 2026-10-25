@@ -7,7 +7,8 @@
 //! One menu per row kind. The reconstruction row's ([`node_context_menu`])
 //! carries the whole-node actions (select, zoom to fit, align, reset and bake
 //! transform, tint, bundle adjust, retriangulate, refit, prune covered
-//! observations, build the index files, convert to embedded patches, close),
+//! observations, build the .sift files and the index files, convert to embedded
+//! patches, close),
 //! the three
 //! Index Files rows' ([`index_files_menu`], [`sift_index_menu`],
 //! [`cluster_patches_menu`]) carry the ways to give a node its index files or
@@ -58,7 +59,7 @@ pub(super) fn node_context_menu(ui: &mut egui::Ui, node: &mut SceneNode, out: &m
     // reconstruction row is the row they have in hand when they find a search
     // greyed, and the Index Files rows below it offer the same entry.
     if let Some(rows) = out.index_files.get(&node.id) {
-        show_build_index_files_entry(ui, node.id, rows, out);
+        show_build_entries(ui, node.id, rows, out);
     }
     show_convert_entry(ui, node, out);
     ui.separator();
@@ -280,6 +281,42 @@ fn show_convert_entry(ui: &mut egui::Ui, node: &SceneNode, out: &mut TreeOutput)
     }
 }
 
+/// The two builds, in the order they have to run: the `.sift` files, then the
+/// index files read from them.
+///
+/// Together on every Scene tree menu that offers the index-files build, and
+/// drawn as the same pair in Track View's row menu
+/// (`track_view::body::table`), because a build greyed for want of `.sift`
+/// files has its remedy directly above it.
+fn show_build_entries(ui: &mut egui::Ui, id: ReconId, rows: &IndexFilesRows, out: &mut TreeOutput) {
+    show_build_sift_files_entry(ui, id, rows, out);
+    show_build_index_files_entry(ui, id, rows, out);
+}
+
+/// `Build SIFT Files`, or `Switch SIFT Extraction to sfmtool and Build SIFT
+/// Files` on a node whose workspace definition names another feature tool:
+/// every image's `.sift` file, built in the workspace.
+///
+/// Greyed rather than hidden on its own sentence. Live when every file is
+/// already there too, since a build skips the files that are up to date.
+fn show_build_sift_files_entry(
+    ui: &mut egui::Ui,
+    id: ReconId,
+    rows: &IndexFilesRows,
+    out: &mut TreeOutput,
+) {
+    let refusal = rows.sift_build_refusal.clone();
+    let hover = crate::sift_files::build_sift_files_hover(rows.sift_switch_from.as_deref());
+    let entry = ui
+        .add_enabled(refusal.is_none(), egui::Button::new(rows.sift_build_label))
+        .on_disabled_hover_text(refusal.unwrap_or_default())
+        .on_hover_text(hover);
+    if out.hit(row_id(id, "build_sift_files"), entry).clicked() {
+        out.response.build_sift_files = Some(id);
+        ui.close();
+    }
+}
+
 /// `Build Index Files` / `Rebuild Index Files`: the node's SIFT index and
 /// its cluster patches, built beside its `.sfmr`.
 ///
@@ -359,7 +396,7 @@ pub(super) fn index_files_menu(
     rows: &IndexFilesRows,
     out: &mut TreeOutput,
 ) {
-    show_build_index_files_entry(ui, id, rows, out);
+    show_build_entries(ui, id, rows, out);
     show_close_index_files_entry(ui, id, rows, out);
 }
 
@@ -371,7 +408,7 @@ pub(super) fn sift_index_menu(
     rows: &IndexFilesRows,
     out: &mut TreeOutput,
 ) {
-    show_build_index_files_entry(ui, id, rows, out);
+    show_build_entries(ui, id, rows, out);
     let hover = "Search a .kdf of your own choosing. One that is not over this reconstruction's \
                  images opens all the same, and the row says why it will not do.";
     if show_open_entry(ui, id, "open_sift_index", hover, out) {
@@ -388,7 +425,7 @@ pub(super) fn cluster_patches_menu(
     rows: &IndexFilesRows,
     out: &mut TreeOutput,
 ) {
-    show_build_index_files_entry(ui, id, rows, out);
+    show_build_entries(ui, id, rows, out);
     let hover = "Open a cluster-patches .matches of your own choosing. One that is not over this \
                  reconstruction's images, or not made from its SIFT index, opens all the same, \
                  and the row says why it will not do.";
