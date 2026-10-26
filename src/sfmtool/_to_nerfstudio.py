@@ -127,29 +127,38 @@ def build_transforms_json(
 ) -> dict:
     """Assemble the transforms.json dict for the given reconstruction.
 
-    Single-camera reconstructions hoist intrinsics to the top level; multi-
-    camera reconstructions emit per-frame intrinsics. `applied_transform` and
-    `ply_file_path` are always present at the top level.
+    Each frame is written with its image's intrinsics, its camera's with its
+    intrinsic adjustment applied. A reconstruction whose images are all taken
+    through one camera with no adjustment hoists the intrinsics to the top
+    level; any other emits them per frame, for every frame, since Nerfstudio
+    reads each intrinsic either from the top level or from every frame.
+    `applied_transform` and `ply_file_path` are always present at the top level.
     """
     if len(frame_basenames) != recon.image_count:
         raise ValueError(
             f"frame_basenames count {len(frame_basenames)} != image count {recon.image_count}"
         )
 
-    cameras = recon.cameras
+    from .camera.cameras import _adjusted_image_mask
+
     camera_indexes = np.asarray(recon.camera_indexes)
     quaternions = np.asarray(recon.quaternions_wxyz)
     translations = np.asarray(recon.translations)
 
-    single_camera = len(cameras) == 1 or len(np.unique(camera_indexes)) == 1
+    intrinsics = [
+        _camera_intrinsics_dict(recon.image_intrinsics(i))
+        for i in range(recon.image_count)
+    ]
+    single_camera = (
+        recon.camera_count == 1 or len(np.unique(camera_indexes)) == 1
+    ) and not _adjusted_image_mask(recon).any()
 
     transforms: dict = {}
     if single_camera:
-        transforms.update(_camera_intrinsics_dict(cameras[int(camera_indexes[0])]))
+        transforms.update(intrinsics[0])
 
     frames = []
     for i in range(recon.image_count):
-        cam_idx = int(camera_indexes[i])
         matrix = frame_transform_matrix(quaternions[i], translations[i])
         entry: dict = {
             "file_path": f"images/{frame_basenames[i]}",
@@ -157,7 +166,7 @@ def build_transforms_json(
             "colmap_im_id": i + 1,
         }
         if not single_camera:
-            entry.update(_camera_intrinsics_dict(cameras[cam_idx]))
+            entry.update(intrinsics[i])
         frames.append(entry)
     transforms["frames"] = frames
 
@@ -216,6 +225,12 @@ def export_to_nerfstudio(
                 f"Camera {i} ({cam.model}) has nonzero distortion. "
                 "Run `sfm undistort` first to produce a pinhole reconstruction."
             )
+    if include_colmap:
+        from .colmap.io import _colmap_cameras, _colmap_rig_frame_data
+
+        # Refuse a rig sensor camera the COLMAP export would split before any
+        # file is written, rather than after the images are placed.
+        _colmap_rig_frame_data(recon.rig_frame_data, _colmap_cameras(recon)[2])
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

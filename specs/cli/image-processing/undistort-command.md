@@ -118,6 +118,26 @@ Output images keep the source resolution. The cameras in the output
 and `camera_indexes` and `rig_frame_data.sensor_camera_indexes` are remapped
 accordingly.
 
+An image with an intrinsic adjustment
+([sfmr-file-format.md](../../formats/sfmr-file-format.md#per-image-intrinsic-adjustments-optional-version-13))
+is read through its own intrinsics, its camera's with the adjustment applied,
+and written through its camera's pinhole, which has no adjustment. An
+adjustment describes how one photograph departs from its camera's lens, so
+undistortion removes it along with the distortion: every image of a camera
+comes out through the same pinhole. The output has no adjustments: it stores
+no adjustment columns and no camera lists a parameter in
+`per_image_adjustments`, so it reads like any unadjusted file.
+
+The pinhole is fitted once per camera, to the camera's shared intrinsics, not
+to each image's. An image whose principal point is offset therefore loses a
+sliver along one side under `--fit inside`, or shows a slightly wider black
+border there under `--fit outside`, about as wide as the offset. Fitting each
+camera's pinhole over all of its images' intrinsics would avoid that, but would
+make the pinhole depend on which images a reconstruction holds and would widen
+or shrink every image of the camera for the sake of one.
+The images without an adjustment share their camera's warp map; an adjusted
+image's is built for it alone, since its source intrinsics are its own.
+
 ### Image poses
 
 Image quaternions and translations are unchanged. Undistortion affects only
@@ -137,7 +157,9 @@ refer to rows of those files, so the lookup still finds them after the
 workspace has been re-extracted with another tool or other options.
 
 **Positions.** Each keypoint `(x, y)` in the distorted image is mapped to the
-pinhole frame via `pinhole.project(distorted.unproject(x, y))`. Keypoints that
+pinhole frame via `pinhole.project(distorted.unproject(x, y))`, where
+`distorted` is the image's own intrinsics and `pinhole` its camera's shared
+pinhole (see [Cameras](#cameras)). Keypoints that
 land outside `[0, pinhole.width) × [0, pinhole.height)` are dropped.
 
 **Affine shapes.** Each keypoint's 2×2 affine shape `A` (the matrix that maps

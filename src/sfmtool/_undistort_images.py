@@ -10,6 +10,12 @@ For each image in a reconstruction, this module:
 3. Remaps tracks (dropping features outside the pinhole frame)
 4. Assembles a new .sfmr reconstruction with pinhole cameras
 5. Writes a workspace config (.sfm-workspace.json)
+
+Each image is read through its own intrinsics, its camera's with its intrinsic
+adjustment applied, and written through its camera's pinhole, which has no
+adjustment. Undistortion removes the adjustment along with the distortion, so
+the undistorted reconstruction has no adjustments and no camera lists any in
+``per_image_adjustments``.
 """
 
 import json
@@ -297,7 +303,9 @@ def undistort_reconstruction_images(
         "feature_options": undistort_feature_options,
     }
 
-    # Build pinhole cameras and warp maps per unique camera (not per image).
+    # Build pinhole cameras and warp maps per camera (not per image). An image
+    # with an intrinsic adjustment is warped from a source of its own into its
+    # camera's pinhole, so its warp map is built for it and not kept.
     pinhole_cameras = {}
     warp_maps = {}
 
@@ -324,9 +332,11 @@ def undistort_reconstruction_images(
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
 
-        # Get camera for this image
+        # The image's camera, and the intrinsics the image was taken with: the
+        # camera's with the image's intrinsic adjustment applied.
         cam_idx = camera_indexes[i]
-        cam_meta = cameras_meta[cam_idx]
+        shared_cam = cameras_meta[cam_idx]
+        cam_meta = recon.image_intrinsics(i)
 
         # Load the image as RGB, or as RGBA when the file has an alpha channel
         # so that the undistorted image keeps it.
@@ -335,21 +345,31 @@ def undistort_reconstruction_images(
 
         height, width = image.shape[:2]
 
-        # Build (or reuse) the pinhole camera and warp map for this camera index.
+        # Build (or reuse) the pinhole camera for this camera index, fitted to
+        # the shared camera. It is not fitted to each image's intrinsics: an
+        # image with a principal-point offset loses a sliver on one side
+        # (--fit inside) or shows a slightly wider border there (--fit outside).
         if cam_idx not in pinhole_cameras:
             if fit == "outside":
-                pinhole = cam_meta.best_fit_outside_pinhole(width, height)
+                pinhole = shared_cam.best_fit_outside_pinhole(width, height)
             else:
-                pinhole = cam_meta.best_fit_inside_pinhole(width, height)
+                pinhole = shared_cam.best_fit_inside_pinhole(width, height)
             pinhole_cameras[cam_idx] = pinhole
-            warp_maps[cam_idx] = WarpMap.from_cameras(src=cam_meta, dst=pinhole)
 
             print(f"\nCamera {cam_idx}:")
-            _print_camera_params("Original", cam_meta)
+            _print_camera_params("Original", shared_cam)
             _print_camera_params("Undistorted", pinhole)
 
+        # Every image of the camera is written through its pinhole, with no
+        # adjustment: the warp from the image's own intrinsics removes the
+        # adjustment along with the distortion.
         pinhole = pinhole_cameras[cam_idx]
-        warp = warp_maps[cam_idx]
+        if cam_meta == shared_cam:
+            if cam_idx not in warp_maps:
+                warp_maps[cam_idx] = WarpMap.from_cameras(src=cam_meta, dst=pinhole)
+            warp = warp_maps[cam_idx]
+        else:
+            warp = WarpMap.from_cameras(src=cam_meta, dst=pinhole)
 
         # Step 1: Warp the image
         if resampling_filter == "aniso":
@@ -577,6 +597,9 @@ def undistort_reconstruction_images(
         metadata=metadata,
         rig_frame_data=rig_frame_data,
     )
+    # The images were warped into their cameras' pinholes, so no image has an
+    # adjustment: the dict carries no adjustment columns and no camera's
+    # per_image_adjustments, and the output reads like an unadjusted file.
 
     sfmr_out_dir = output_dir / "sfmr"
     sfmr_out_dir.mkdir(parents=True, exist_ok=True)
