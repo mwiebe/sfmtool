@@ -139,6 +139,7 @@ fn run(s: &mut Scene, opt_f: bool, schedule: &[BaSchedule]) -> BundleAdjustment 
         opt_f,
         false,
         false,
+        false,
         schedule,
         60,
         2,
@@ -193,6 +194,7 @@ fn run_masked_with(
         opt_f,
         false,
         false,
+        false,
         schedule,
         60,
         2,
@@ -222,6 +224,7 @@ fn run_protected(
         Some(protected),
         DEFAULT_PROTECTED_LOSS_SCALE,
         opt_f,
+        false,
         false,
         false,
         schedule,
@@ -1081,6 +1084,7 @@ fn directions_lock_rotations_for_focal_release() {
         true,
         false,
         false,
+        false,
         &schedule,
         150,
         2,
@@ -1112,6 +1116,7 @@ fn directions_lock_rotations_for_focal_release() {
         None,
         DEFAULT_PROTECTED_LOSS_SCALE,
         true,
+        false,
         false,
         false,
         &schedule,
@@ -1148,6 +1153,7 @@ fn directions_lock_rotations_for_focal_release() {
         None,
         DEFAULT_PROTECTED_LOSS_SCALE,
         true,
+        false,
         false,
         false,
         &schedule,
@@ -1249,6 +1255,7 @@ fn protected_all_false_with_infinity_mask_matches_bit_for_bit() {
         FreePointPolicy::default(),
         Some(&vec![false; prot.uv.len()]),
         DEFAULT_PROTECTED_LOSS_SCALE,
+        false,
         false,
         false,
         false,
@@ -1521,6 +1528,7 @@ fn protected_direction_observation_composes_with_infinity_mask() {
         false,
         false,
         false,
+        false,
         &schedule,
         60,
         2,
@@ -1717,6 +1725,7 @@ fn protected_long_range_observations_correct_a_drifted_gauge() {
             FreePointPolicy::default(),
             prot,
             DEFAULT_PROTECTED_LOSS_SCALE,
+            false,
             false,
             false,
             false,
@@ -2417,6 +2426,7 @@ fn run_k1(s: &mut Scene, opt_f: bool, opt_k1: bool, schedule: &[BaSchedule]) -> 
         opt_f,
         opt_k1,
         false,
+        false,
         schedule,
         60,
         2,
@@ -2448,6 +2458,7 @@ fn run_k1_masked(
         DEFAULT_PROTECTED_LOSS_SCALE,
         opt_f,
         opt_k1,
+        false,
         false,
         schedule,
         60,
@@ -2862,6 +2873,7 @@ fn run_bspline(
         opt_f,
         false,
         opt_bspline,
+        false,
         schedule,
         60,
         2,
@@ -2894,6 +2906,7 @@ fn run_bspline_masked(
         opt_f,
         false,
         opt_bspline,
+        false,
         schedule,
         60,
         2,
@@ -4165,6 +4178,7 @@ fn run_constrained(
         opt_f,
         false,
         false,
+        false,
         schedule,
         60,
         2,
@@ -4282,7 +4296,7 @@ fn fd_poses() -> (Vec<UnitQuaternion<f64>>, Vec<Vector3<f64>>) {
 /// observation, assembled into a dense Jacobian, against a central difference
 /// of the residual vector they claim to differentiate.
 ///
-/// The parameter vector is the reduced camera system's own, `[f, k1, six per
+/// The parameter vector is the reduced camera system's own, `[f, k1, cx, cy, six per
 /// image]` with the point's three slots appended, and the perturbations are
 /// applied exactly as an accepted step applies them: `exp(δθ)·R`, `t + δt`, and
 /// `normalize(d + B(d)·δ)` for the direction the distance carries.
@@ -4290,7 +4304,7 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
     let cam = simple_pinhole(500.0);
     let (quats, trans) = fd_poses();
     let n_im = quats.len();
-    let d_sys = 2 + 6 * n_im;
+    let d_sys = 4 + 6 * n_im;
     let mean_centre = |q: &[UnitQuaternion<f64>], t: &[Vector3<f64>]| {
         let mut o = Vector3::zeros();
         for &k in refs {
@@ -4320,7 +4334,7 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
         let mut qq = quats.clone();
         let mut tt = trans.clone();
         for i in 0..n_im {
-            let o = 2 + 6 * i;
+            let o = 4 + 6 * i;
             let dth = Vector3::new(delta[o], delta[o + 1], delta[o + 2]);
             qq[i] = UnitQuaternion::from_scaled_axis(dth) * quats[i];
             tt[i] = trans[i] + Vector3::new(delta[o + 3], delta[o + 4], delta[o + 5]);
@@ -4358,6 +4372,7 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
         opt_f: false,
         opt_k1: false,
         opt_bspline: false,
+        opt_pp: false,
         n_coeffs: 0,
         d_max: 0.0,
         radial: SplineRadial::IncidenceAngle,
@@ -4376,7 +4391,7 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
         cp_inverse: &[],
         inv_depth: &[],
         uv: &uv,
-        n_shared: 2,
+        n_shared: 4,
     };
     let mut jac = vec![vec![0.0f64; d_sys + 3]; 2 * n_obs];
     for (n, &i) in observers.iter().enumerate() {
@@ -4394,10 +4409,10 @@ fn check_ranged_jacobian(refs: &[usize], observers: &[usize], what: &str) {
         }
     }
 
-    // Every column against a central difference. The two shared slots carry no
+    // Every column against a central difference. The four lens slots carry no
     // released parameter here and are exactly zero.
     let h = 1e-6;
-    for col in 2..d_sys + 3 {
+    for col in 4..d_sys + 3 {
         let mut plus = vec![0.0; d_sys + 3];
         let mut minus = vec![0.0; d_sys + 3];
         plus[col] = h;
@@ -4630,6 +4645,7 @@ fn the_storage_decision_measures_its_noise_and_decides_on_the_test() {
         CROSS,
         None,
         DEFAULT_PROTECTED_LOSS_SCALE,
+        false,
         false,
         false,
         false,
@@ -4943,6 +4959,7 @@ fn a_rough_start_settles_and_reports_whether_it_converged() {
             false,
             false,
             false,
+            false,
             &schedule,
             max_iters,
             2,
@@ -5036,7 +5053,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
     let cam = simple_pinhole(500.0);
     let (quats, trans) = fd_poses();
     let n_im = quats.len();
-    let d_sys = 2 + 6 * n_im;
+    let d_sys = 4 + 6 * n_im;
     let mut anchor = Vector3::zeros();
     for i in 0..n_im {
         anchor += camera_centre(&quats[i], &trans[i]);
@@ -5070,7 +5087,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
             let mut qq = quats.clone();
             let mut tt = trans.clone();
             for i in 0..n_im {
-                let o = 2 + 6 * i;
+                let o = 4 + 6 * i;
                 let dth = Vector3::new(delta[o], delta[o + 1], delta[o + 2]);
                 qq[i] = UnitQuaternion::from_scaled_axis(dth) * quats[i];
                 tt[i] = trans[i] + Vector3::new(delta[o + 3], delta[o + 4], delta[o + 5]);
@@ -5093,6 +5110,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
             opt_f: false,
             opt_k1: false,
             opt_bspline: false,
+            opt_pp: false,
             n_coeffs: 0,
             d_max: 0.0,
             radial: SplineRadial::IncidenceAngle,
@@ -5111,7 +5129,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
             cp_inverse: &[Some(anchor)],
             inv_depth: &[rho0],
             uv: &uv,
-            n_shared: 2,
+            n_shared: 4,
         };
         let mut jac = vec![vec![0.0f64; d_sys + 3]; 2 * n_im];
         for i in 0..n_im {
@@ -5126,7 +5144,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
             }
         }
         let h = 1e-6;
-        for col in 2..d_sys + 3 {
+        for col in 4..d_sys + 3 {
             let mut plus = vec![0.0; d_sys + 3];
             let mut minus = vec![0.0; d_sys + 3];
             plus[col] = h;
@@ -5147,7 +5165,7 @@ fn inverse_depth_jacobian_matches_a_difference_of_the_residual() {
             for (row, r) in jac.iter().enumerate() {
                 let i = row / 2;
                 for c in 0..3 {
-                    assert_eq!(r[2 + 6 * i + 3 + c], 0.0, "translation column at ρ = 0");
+                    assert_eq!(r[4 + 6 * i + 3 + c], 0.0, "translation column at ρ = 0");
                 }
             }
         }
@@ -5185,7 +5203,7 @@ fn an_inverse_depth_stops_at_zero() {
         }
         let cons = Constraints::all_free(p + 1);
         let anchors = free_point_anchors(&s.quats, &s.trans, &s.obs_img, &s.obs_pt, &cons, p + 1);
-        let mut lenses = vec![Lens::new(&cam, false, false, false)];
+        let mut lenses = vec![Lens::new(&cam, false, false, false, false)];
         let kept: Vec<usize> = (0..s.uv.len()).collect();
         solve_lm::<BASE_CAM_COLS>(
             &mut lenses,
@@ -5666,6 +5684,7 @@ fn run_cameras(
         opt_f,
         opt_k1,
         opt_bspline,
+        false,
         schedule,
         60,
         2,
@@ -6214,6 +6233,7 @@ fn an_unconverged_round_keeps_points_with_depth() {
             CROSS,
             None,
             DEFAULT_PROTECTED_LOSS_SCALE,
+            false,
             false,
             false,
             false,
@@ -6888,6 +6908,7 @@ fn the_progress_line_counts_the_unscored_points() {
             false,
             false,
             false,
+            false,
             &[BaSchedule {
                 trim_px: 25.0,
                 loss_scale: 1.0,
@@ -7046,6 +7067,7 @@ fn run_at_the_guard(
         true,
         true,
         true,
+        false,
         &[BaSchedule {
             trim_px: 1e6,
             loss_scale: 1e4,
@@ -7317,6 +7339,7 @@ fn a_coefficient_that_gains_support_within_a_round_stays_bounded() {
         true,
         false,
         true,
+        false,
         &DEFAULT_SCHEDULE[..1],
         2,
         2,
@@ -7401,4 +7424,697 @@ fn a_released_spline_tail_with_little_support_stays_bounded() {
         // coefficient kept its starting value.
         assert!(end_slope < 4.0, "{case}: end slope {end_slope:.4}");
     }
+}
+
+// ── The principal-point release ─────────────────────────────────────────────
+
+/// [`run`] with the principal-point release stated, from a camera `start`
+/// other than the one the scene's observations were made through.
+fn run_pp(
+    s: &mut Scene,
+    start: &CameraIntrinsics,
+    opt_f: bool,
+    opt_pp: bool,
+    schedule: &[BaSchedule],
+) -> BundleAdjustment {
+    bundle_adjust(
+        &BaCameras::shared(start, s.quats.len()),
+        &mut s.quats,
+        &mut s.trans,
+        &mut s.points,
+        &s.uv,
+        &s.obs_img,
+        &s.obs_pt,
+        None,
+        None,
+        FreePointPolicy::default(),
+        None,
+        DEFAULT_PROTECTED_LOSS_SCALE,
+        opt_f,
+        false,
+        false,
+        opt_pp,
+        schedule,
+        60,
+        2,
+        12,
+        &Progress::none(),
+    )
+}
+
+/// A `SIMPLE_PINHOLE` of 640×480 whose horizontal field is `field_deg`, with
+/// its principal point at `(cx, cy)`.
+fn pinhole_with_field(field_deg: f64, cx: f64, cy: f64) -> CameraIntrinsics {
+    CameraIntrinsics {
+        model: CameraModel::SimplePinhole {
+            focal_length: 320.0 / (field_deg.to_radians() / 2.0).tan(),
+            principal_point_x: cx,
+            principal_point_y: cy,
+        },
+        width: 640,
+        height: 480,
+    }
+}
+
+/// A scene whose points fill `cam`'s field from the arc of images
+/// [`make_scene_cam`] uses: the points spread across the field the camera's
+/// focal gives at the arc's radius, so the observations reach the image's
+/// edges, where a principal-point shift and a rotation differ most.
+fn scene_filling_field(cam: CameraIntrinsics, n_img: usize, n_pt: usize) -> Scene {
+    let f = cam.focal_lengths().0;
+    let (half_w, half_h) = (
+        8.0 * f64::from(cam.width) / 2.0 / f,
+        8.0 * f64::from(cam.height) / 2.0 / f,
+    );
+    // The arc of poses, taken from the default scene.
+    let mut s = make_scene(n_img, 60);
+    s.cam = cam.clone();
+    s.points = (0..n_pt)
+        .map(|p| {
+            [
+                0.9 * half_w * jitter(p, 1),
+                0.9 * half_h * jitter(p, 2),
+                0.15 * half_w * jitter(p, 3),
+            ]
+        })
+        .collect();
+    s.uv.clear();
+    s.obs_img.clear();
+    s.obs_pt.clear();
+    for (p, x) in s.points.iter().enumerate() {
+        for i in 0..n_img {
+            let c = s.quats[i] * Vector3::new(x[0], x[1], x[2]) + s.trans[i];
+            let Some((u, v)) = cam.ray_to_pixel([c.x, c.y, c.z]) else {
+                continue;
+            };
+            if !(0.0..f64::from(cam.width)).contains(&u)
+                || !(0.0..f64::from(cam.height)).contains(&v)
+            {
+                continue;
+            }
+            s.uv.push([u, v]);
+            s.obs_img.push(i as u32);
+            s.obs_pt.push(p as u32);
+        }
+    }
+    assert!(
+        s.uv.len() >= n_img * n_pt / 2,
+        "degenerate synthetic scene: only {} observations",
+        s.uv.len()
+    );
+    s
+}
+
+/// Make every observation of `s` again, through the camera `camera_of` names
+/// for its image, at the scene's own poses and points, keeping each wherever
+/// it lands.
+fn reproject<'a>(s: &mut Scene, camera_of: impl Fn(usize) -> &'a CameraIntrinsics) {
+    for k in 0..s.uv.len() {
+        let (i, p) = (s.obs_img[k] as usize, s.obs_pt[k] as usize);
+        let x = s.points[p];
+        let c = s.quats[i] * Vector3::new(x[0], x[1], x[2]) + s.trans[i];
+        let (u, v) = camera_of(i)
+            .ray_to_pixel([c.x, c.y, c.z])
+            .expect("in front");
+        s.uv[k] = [u, v];
+    }
+}
+
+/// The median of the finite entries of `values`.
+fn median_of(values: &[f64]) -> f64 {
+    let mut v: Vec<f64> = values.iter().copied().filter(|r| r.is_finite()).collect();
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+#[test]
+fn principal_point_columns_match_a_central_difference_on_every_model() {
+    // One image at the identity pose and one point in front of it, off the
+    // axis, projected through every model with the release on.
+    let point = Vector3::new(0.3, -0.2, -5.0);
+    let h = 1e-4;
+    for cam in crate::camera::intrinsics::tests::all_cameras() {
+        let name = cam.model_name();
+        let (cx, cy) = cam.principal_point();
+        let (u0, v0) = cam
+            .ray_to_pixel([point.x, point.y, point.z])
+            .expect("in domain");
+        let lens = LinLens {
+            cam: &cam,
+            analytic: cam.model.supports_pixel_jacobian(),
+            cx,
+            cy,
+            f: cam.focal_lengths().0,
+            opt_f: false,
+            opt_k1: false,
+            opt_bspline: false,
+            opt_pp: true,
+            n_coeffs: 0,
+            d_max: 0.0,
+            radial: SplineRadial::IncidenceAngle,
+            slot0: 0,
+        };
+        let st = LinState {
+            lenses: std::slice::from_ref(&lens),
+            ci_cam: &[0],
+            q: &[UnitQuaternion::identity()],
+            t: &[Vector3::zeros()],
+            xp: &[point],
+            bases: &[(Vector3::zeros(), Vector3::zeros())],
+            cp_dir: &[false],
+            cp_held: &[false],
+            cp_origin: &[None],
+            cp_inverse: &[],
+            inv_depth: &[],
+            uv: &[[u0 + 0.5, v0 - 0.5]],
+            n_shared: lens_block_width(0),
+        };
+        // A loss scale wide enough that the robust weighting is the identity.
+        let b = observation_blocks::<BASE_PP_CAM_COLS>(&st, 0, 0, 0, 1e18);
+        let pp_c = BASE_PP_CAM_COLS - 8;
+        assert_eq!(b.idx[pp_c], pp_slot(0), "{name}: the cx column's slot");
+        assert_eq!(
+            b.idx[pp_c + 1],
+            pp_slot(0) + 1,
+            "{name}: the cy column's slot"
+        );
+        for (axis, col) in [(0usize, pp_c), (1, pp_c + 1)] {
+            let shifted = |d: f64| {
+                let (sx, sy) = if axis == 0 { (d, 0.0) } else { (0.0, d) };
+                cam.with_principal_point(cx + sx, cy + sy)
+                    .ray_to_pixel([point.x, point.y, point.z])
+                    .expect("in domain")
+            };
+            let (up, vp) = shifted(h);
+            let (um, vm) = shifted(-h);
+            let fd = [(up - um) / (2.0 * h), (vp - vm) / (2.0 * h)];
+            for (row, want) in fd.iter().enumerate() {
+                let got = b.cam_j[(row, col)];
+                assert!(
+                    (got - want).abs() <= 1e-6,
+                    "{name}: column {col}, row {row} is {got}, the difference {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_planted_principal_point_is_recovered_on_a_wide_field() {
+    // A 60° field with no distortion. The observations are made through a
+    // principal point 2% of the width right of centre, noise-free, and the
+    // solve starts from the centre with the focal held at its true value.
+    let truth = pinhole_with_field(60.0, 320.0 + 0.02 * 640.0, 240.0);
+    let start = pinhole_with_field(60.0, 320.0, 240.0);
+    let mut s = scene_filling_field(truth, 8, 120);
+    let out = run_pp(&mut s, &start, false, true, &DEFAULT_SCHEDULE);
+    let (cx, cy) = out.cameras[0].principal_point();
+    assert!(
+        (cx - 332.8).abs() < 0.05 && (cy - 240.0).abs() < 0.05,
+        "principal point ({cx}, {cy}), planted at (332.8, 240)"
+    );
+    let worst = out.residual_norms.iter().copied().fold(0.0f64, f64::max);
+    assert!(worst < 1e-3, "largest residual {worst} px");
+    // The focal was not released, and comes back as it went in.
+    assert_eq!(out.cameras[0].focal_lengths(), start.focal_lengths());
+}
+
+#[test]
+fn a_narrow_field_keeps_the_principal_point_on_the_image() {
+    // A 5° field: a principal-point shift and a rotation of every camera move
+    // the image almost alike, so the data barely determine the principal
+    // point. The solve still converges, keeps the principal point on the
+    // image, and fits no worse than with the principal point held. It asserts
+    // no recovery, which the data cannot support.
+    let truth = pinhole_with_field(5.0, 320.0 + 0.02 * 640.0, 240.0);
+    let start = pinhole_with_field(5.0, 320.0, 240.0);
+    let scene = scene_filling_field(truth, 8, 120);
+    let held = run_pp(&mut scene.clone(), &start, false, false, &DEFAULT_SCHEDULE);
+    let released = run_pp(&mut scene.clone(), &start, false, true, &DEFAULT_SCHEDULE);
+    let decision = released.free_point_decision.expect("crossing on");
+    assert!(decision.converged, "the final round did not converge");
+    let (cx, cy) = released.cameras[0].principal_point();
+    assert!(
+        (0.0..=640.0).contains(&cx) && (0.0..=480.0).contains(&cy),
+        "principal point ({cx}, {cy}) off the image"
+    );
+    let (m_held, m_released) = (
+        median_of(&held.residual_norms),
+        median_of(&released.residual_norms),
+    );
+    assert!(
+        m_released <= m_held,
+        "median {m_released} px released, {m_held} px held"
+    );
+}
+
+#[test]
+fn a_principal_point_step_off_the_sensor_is_rejected() {
+    // The guard itself: finite and on the image, its edges included.
+    assert!(pp_step_admissible(0.0, 0.0, 640, 480));
+    assert!(pp_step_admissible(640.0, 480.0, 640, 480));
+    assert!(!pp_step_admissible(-0.001, 240.0, 640, 480));
+    assert!(!pp_step_admissible(320.0, 480.001, 640, 480));
+    assert!(!pp_step_admissible(f64::NAN, 240.0, 640, 480));
+    assert!(!pp_step_admissible(320.0, f64::INFINITY, 640, 480));
+    // And in a solve: observations made through a principal point left of the
+    // image pull the solve toward it, every step that would cross the edge is
+    // rejected, and the solve ends with the principal point still on the
+    // image.
+    let truth = pinhole_with_field(60.0, -40.0, 240.0);
+    let start = pinhole_with_field(60.0, 10.0, 240.0);
+    // The scene is laid out through a centred camera, so that it fills the
+    // field, and observed through the truth.
+    let mut s = scene_filling_field(pinhole_with_field(60.0, 320.0, 240.0), 8, 120);
+    reproject(&mut s, |_| &truth);
+    let out = run_pp(&mut s, &start, false, true, &DEFAULT_SCHEDULE);
+    let (cx, cy) = out.cameras[0].principal_point();
+    assert!(
+        (0.0..10.0).contains(&cx) && (0.0..=480.0).contains(&cy),
+        "principal point ({cx}, {cy})"
+    );
+}
+
+#[test]
+fn releasing_the_principal_point_needs_no_focal_and_narrows_per_camera() {
+    // Two cameras, alternate images each, both starting at the centre:
+    // camera 0's images are observed through the centre, camera 1's through a
+    // principal point 2% of the width right of it. Every flag is on, and only
+    // camera 1's release has the principal point.
+    let start = pinhole_with_field(60.0, 320.0, 240.0);
+    let shifted = pinhole_with_field(60.0, 332.8, 240.0);
+    let mut s = scene_filling_field(start.clone(), 8, 120);
+    reproject(&mut s, |i| if i % 2 == 1 { &shifted } else { &start });
+    let cameras = [start.clone(), start.clone()];
+    let image_camera: Vec<u32> = (0..s.quats.len()).map(|i| (i % 2) as u32).collect();
+    let releases = [
+        CameraRelease::HELD,
+        CameraRelease {
+            principal_point: true,
+            ..CameraRelease::HELD
+        },
+    ];
+    let out = bundle_adjust(
+        &BaCameras {
+            cameras: &cameras,
+            image_camera: image_camera.as_slice().into(),
+            releases: Some(&releases),
+        },
+        &mut s.quats,
+        &mut s.trans,
+        &mut s.points,
+        &s.uv,
+        &s.obs_img,
+        &s.obs_pt,
+        None,
+        None,
+        FreePointPolicy::default(),
+        None,
+        DEFAULT_PROTECTED_LOSS_SCALE,
+        true,
+        true,
+        true,
+        true,
+        &DEFAULT_SCHEDULE,
+        60,
+        2,
+        12,
+        &Progress::none(),
+    );
+    assert_eq!(out.cameras[0], start, "camera 0 is held");
+    let (cx, _) = out.cameras[1].principal_point();
+    assert!(
+        (cx - 332.8).abs() < 1.0,
+        "camera 1's principal point is at {cx}, planted at 332.8"
+    );
+    assert_eq!(
+        out.cameras[1].focal_lengths(),
+        start.focal_lengths(),
+        "camera 1's focal is not released"
+    );
+}
+
+// ── The principal point released beside a k1 or a spline ───────────────────
+
+/// [`run`] with every release stated, from a camera `start` other than the
+/// one the scene's observations were made through.
+fn run_released(
+    s: &mut Scene,
+    start: &CameraIntrinsics,
+    opt_f: bool,
+    opt_k1: bool,
+    opt_bspline: bool,
+    opt_pp: bool,
+) -> BundleAdjustment {
+    bundle_adjust(
+        &BaCameras::shared(start, s.quats.len()),
+        &mut s.quats,
+        &mut s.trans,
+        &mut s.points,
+        &s.uv,
+        &s.obs_img,
+        &s.obs_pt,
+        None,
+        None,
+        FreePointPolicy::default(),
+        None,
+        DEFAULT_PROTECTED_LOSS_SCALE,
+        opt_f,
+        opt_k1,
+        opt_bspline,
+        opt_pp,
+        &DEFAULT_SCHEDULE,
+        60,
+        2,
+        12,
+        &Progress::none(),
+    )
+}
+
+/// Scale a scene's points and translations by `k`, which leaves every
+/// observation where it is. The tests below scale by the start focal's ratio
+/// to the true one, as the focal-and-spline tests above do.
+fn scale_structure(s: &mut Scene, k: f64) {
+    for x in s.points.iter_mut() {
+        for v in x.iter_mut() {
+            *v *= k;
+        }
+    }
+    for t in s.trans.iter_mut() {
+        *t *= k;
+    }
+}
+
+/// The principal point the scenes below are observed through: 6 px right of
+/// and 4 px above the centre of their 480×480 image.
+const PLANTED_PP: (f64, f64) = (246.0, 236.0);
+
+/// Assert that `out`'s one camera has its principal point at [`PLANTED_PP`]
+/// within `tol` pixels.
+fn assert_planted_pp(out: &BundleAdjustment, tol: f64, what: &str) {
+    let (cx, cy) = out.cameras[0].principal_point();
+    assert!(
+        (cx - PLANTED_PP.0).abs() < tol && (cy - PLANTED_PP.1).abs() < tol,
+        "{what}: principal point ({cx}, {cy}), planted at {PLANTED_PP:?}"
+    );
+}
+
+#[test]
+fn opt_f_opt_k1_and_opt_pp_recover_together() {
+    // SIMPLE_RADIAL_FISHEYE observed through a curved lens and an off-centre
+    // principal point, noise-free; the solve starts from a focal 5% short,
+    // no curvature and the centre.
+    let (f_true, k1_true) = (130.0, 0.025);
+    let truth = radial_fisheye(f_true, k1_true).with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let (mut s, n_behind) = make_fisheye_scene_for(truth, 8, 140);
+    assert!(n_behind >= 50, "scene is not wide enough: {n_behind}");
+    let f_start = 124.0;
+    scale_structure(&mut s, f_start / f_true);
+    let start = radial_fisheye(f_start, 0.0);
+    let out = run_released(&mut s, &start, true, true, false, true);
+    assert_planted_pp(&out, 0.01, "f + k1 + pp");
+    let f_err = (ba_focal(&out) - f_true).abs() / f_true;
+    let k_err = (ba_k1(&out) - k1_true).abs() / k1_true;
+    assert!(
+        f_err < 1e-3 && k_err < 1e-2,
+        "co-released (f, k1) = ({}, {}), want ({f_true}, {k1_true})",
+        ba_focal(&out),
+        ba_k1(&out)
+    );
+    let worst = out.residual_norms.iter().copied().fold(0.0f64, f64::max);
+    assert!(worst < 1e-3, "largest residual {worst} px");
+}
+
+#[test]
+fn opt_f_opt_bspline_and_opt_pp_recover_together_on_a_pinhole() {
+    // SFMTOOL_PINHOLE observed through an expanding spline and an off-centre
+    // principal point, noise-free; the solve starts from a focal 5% short, a
+    // zero spline and the centre.
+    let f_true = 250.0;
+    let truth = sfmtool_pinhole(f_true, &PLANTED_PINHOLE_BSPLINE)
+        .with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let (mut s, n_wide) = make_pinhole_scene_for(truth, 10, 500);
+    assert!(n_wide >= 100, "scene is not wide enough: {n_wide}");
+    let f_start = 238.0;
+    scale_structure(&mut s, f_start / f_true);
+    let start = sfmtool_pinhole(f_start, &[0.0; 6]);
+    let out = run_released(&mut s, &start, true, false, true, true);
+    assert_planted_pp(&out, 0.01, "f + spline + pp");
+    let f_err = (ba_focal(&out) - f_true).abs() / f_true;
+    let map_err = pinhole_map_err_px(
+        f_true,
+        &ba_bspline(&out),
+        &PLANTED_PINHOLE_BSPLINE,
+        0.05,
+        0.8,
+    );
+    assert!(
+        f_err < 1e-3 && map_err < 0.05,
+        "co-released f = {} (want {f_true}), composite map off by {map_err} px ({:?})",
+        ba_focal(&out),
+        ba_bspline(&out)
+    );
+    let worst = out.residual_norms.iter().copied().fold(0.0f64, f64::max);
+    assert!(worst < 1e-3, "largest residual {worst} px");
+}
+
+#[test]
+fn opt_f_opt_bspline_and_opt_pp_recover_together_on_a_fisheye() {
+    // The same on SFMTOOL_FISHEYE, past 90° included.
+    let f_true = 130.0;
+    let truth =
+        sfmtool_fisheye(f_true, &PLANTED_BSPLINE).with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let (mut s, n_behind) = make_fisheye_scene_for(truth, 8, 140);
+    assert!(n_behind >= 50, "scene is not wide enough: {n_behind}");
+    let f_start = 124.0;
+    scale_structure(&mut s, f_start / f_true);
+    let start = sfmtool_fisheye(f_start, &[0.0; 8]);
+    let out = run_released(&mut s, &start, true, false, true, true);
+    assert_planted_pp(&out, 0.01, "f + spline + pp");
+    let f_err = (ba_focal(&out) - f_true).abs() / f_true;
+    let map_err = worst_map_err_px(f_true, &ba_bspline(&out), &PLANTED_BSPLINE, 0.05, 1.85);
+    assert!(
+        f_err < 1e-3 && map_err < 0.05,
+        "co-released f = {} (want {f_true}), composite map off by {map_err} px ({:?})",
+        ba_focal(&out),
+        ba_bspline(&out)
+    );
+    let worst = out.residual_norms.iter().copied().fold(0.0f64, f64::max);
+    assert!(worst < 1e-3, "largest residual {worst} px");
+}
+
+/// One lens parameter a release can free.
+#[derive(Clone, Copy, Debug)]
+enum LensParam {
+    F,
+    K1,
+    Coef(usize),
+    Cx,
+    Cy,
+}
+
+/// `cam` with the parameter `p` moved by `d`.
+fn nudged(cam: &CameraIntrinsics, p: LensParam, d: f64) -> CameraIntrinsics {
+    let (cx, cy) = cam.principal_point();
+    let mut c = cam.clone();
+    match (&mut c.model, p) {
+        (_, LensParam::Cx) => return cam.with_principal_point(cx + d, cy),
+        (_, LensParam::Cy) => return cam.with_principal_point(cx, cy + d),
+        (
+            CameraModel::SimpleRadialFisheye { focal_length, .. }
+            | CameraModel::SfmtoolPinhole { focal_length, .. }
+            | CameraModel::SfmtoolFisheye { focal_length, .. },
+            LensParam::F,
+        ) => *focal_length += d,
+        (
+            CameraModel::SimpleRadialFisheye {
+                radial_distortion_k1,
+                ..
+            },
+            LensParam::K1,
+        ) => *radial_distortion_k1 += d,
+        (
+            CameraModel::SfmtoolPinhole { bspline, .. }
+            | CameraModel::SfmtoolFisheye { bspline, .. },
+            LensParam::Coef(i),
+        ) => bspline[i] += d,
+        (model, p) => panic!("{p:?} is not a parameter of {model:?}"),
+    }
+    c
+}
+
+/// Every lens column of the `CAM_COLS`-wide observation blocks, scattered
+/// into the reduced system's lens slots through the block's own `idx`, against
+/// a central difference of the projection in the parameter each slot carries.
+///
+/// Each of `cams` is its own camera with every release its model admits on,
+/// the principal point's included, so the lens blocks are laid out
+/// `[f, k1, c0..cN-1, cx, cy]` one after another. Camera `j` observes one
+/// point at each incidence angle (degrees) in `thetas_deg[j]`, from one image
+/// at the identity pose. A slot outside the observation's own camera's block,
+/// and a slot of that block no release of its model fills, must carry exactly
+/// nothing.
+fn check_released_lens_columns<const CAM_COLS: usize>(
+    cams: &[CameraIntrinsics],
+    thetas_deg: &[&[f64]],
+) {
+    let lin: Vec<LinLens> = {
+        let mut slot0 = 0;
+        cams.iter()
+            .map(|cam| {
+                let (cx, cy) = cam.principal_point();
+                let spline = cam.model.radial_spline();
+                let (n_coeffs, d_max, radial) = match spline {
+                    Some((c, d_max, radial)) => (c.len(), d_max, radial),
+                    None => (0, 0.0, SplineRadial::IncidenceAngle),
+                };
+                let lens = LinLens {
+                    cam,
+                    analytic: cam.model.supports_pixel_jacobian(),
+                    cx,
+                    cy,
+                    f: cam.focal_lengths().0,
+                    opt_f: true,
+                    opt_k1: matches!(cam.model, CameraModel::SimpleRadialFisheye { .. }),
+                    opt_bspline: spline.is_some(),
+                    opt_pp: true,
+                    n_coeffs,
+                    d_max,
+                    radial,
+                    slot0,
+                };
+                slot0 += lens_block_width(n_coeffs);
+                lens
+            })
+            .collect()
+    };
+    let n_shared: usize = lin.iter().map(|l| lens_block_width(l.n_coeffs)).sum();
+    // One observation per point, of camera `j` from image `j`.
+    let mut xp = Vec::new();
+    let mut obs_ci = Vec::new();
+    for (j, thetas) in thetas_deg.iter().enumerate() {
+        for (n, &deg) in thetas.iter().enumerate() {
+            let (theta, az) = (deg.to_radians(), 0.7 + 1.3 * n as f64);
+            // Optical frame to canonical via S = diag(1, −1, −1).
+            let opt = Vector3::new(theta.sin() * az.cos(), theta.sin() * az.sin(), theta.cos());
+            xp.push(5.0 * Vector3::new(opt.x, -opt.y, -opt.z));
+            obs_ci.push(j);
+        }
+    }
+    let n_obs = xp.len();
+    let uv: Vec<[f64; 2]> = (0..n_obs)
+        .map(|k| {
+            let (u, v) = cams[obs_ci[k]]
+                .ray_to_pixel([xp[k].x, xp[k].y, xp[k].z])
+                .expect("in domain");
+            [u + 0.5, v - 0.5]
+        })
+        .collect();
+    let ci_cam: Vec<usize> = (0..cams.len()).collect();
+    let st = LinState {
+        lenses: &lin,
+        ci_cam: &ci_cam,
+        q: &vec![UnitQuaternion::identity(); cams.len()],
+        t: &vec![Vector3::zeros(); cams.len()],
+        xp: &xp,
+        bases: &vec![(Vector3::zeros(), Vector3::zeros()); n_obs],
+        cp_dir: &vec![false; n_obs],
+        cp_held: &vec![false; n_obs],
+        cp_origin: &(0..n_obs).map(|_| None).collect::<Vec<_>>(),
+        cp_inverse: &[],
+        inv_depth: &[],
+        uv: &uv,
+        n_shared,
+    };
+    let h = 1e-3;
+    for k in 0..n_obs {
+        let j = obs_ci[k];
+        let (cam, lens) = (&cams[j], &lin[j]);
+        let name = cam.model_name();
+        // A loss scale wide enough that the robust weighting is the identity.
+        let b = observation_blocks::<CAM_COLS>(&st, k, j, k, 1e18);
+        let pose_c = CAM_COLS - 6;
+        for c in 0..6 {
+            assert_eq!(b.idx[pose_c + c], n_shared + 6 * j + c, "{name}: pose slot");
+        }
+        let block = lens.slot0..lens.slot0 + lens_block_width(lens.n_coeffs);
+        let mut dense = vec![[0.0f64; 2]; n_shared];
+        for c in 0..pose_c {
+            assert!(
+                block.contains(&b.idx[c]),
+                "{name}: column {c} points at slot {}, outside {block:?}",
+                b.idx[c]
+            );
+            for (row, d) in dense[b.idx[c]].iter_mut().enumerate() {
+                *d += b.cam_j[(row, c)];
+            }
+        }
+        let pp0 = pp_slot(lens.n_coeffs);
+        for (slot, got) in dense.iter().enumerate() {
+            let param = if block.contains(&slot) {
+                match slot - lens.slot0 {
+                    F_SLOT => Some(LensParam::F),
+                    K1_SLOT if lens.opt_k1 => Some(LensParam::K1),
+                    K1_SLOT => None,
+                    l if l == pp0 => Some(LensParam::Cx),
+                    l if l == pp0 + 1 => Some(LensParam::Cy),
+                    l => Some(LensParam::Coef(l - BSPLINE_SLOT0)),
+                }
+            } else {
+                None
+            };
+            let want = match param {
+                Some(p) => {
+                    let r = [xp[k].x, xp[k].y, xp[k].z];
+                    let (up, vp) = nudged(cam, p, h).ray_to_pixel(r).expect("in domain");
+                    let (um, vm) = nudged(cam, p, -h).ray_to_pixel(r).expect("in domain");
+                    [(up - um) / (2.0 * h), (vp - vm) / (2.0 * h)]
+                }
+                None => [0.0, 0.0],
+            };
+            for row in 0..2 {
+                // Every parameter enters the projection linearly, so the
+                // difference reproduces its column to rounding; an empty slot
+                // carries exactly zero.
+                let tol = if param.is_some() {
+                    1e-7 * want[row].abs().max(1.0)
+                } else {
+                    0.0
+                };
+                assert!(
+                    (got[row] - want[row]).abs() <= tol,
+                    "{name}, observation {k}: slot {slot} ({param:?}), row {row} is {}, \
+                     the difference {}",
+                    got[row],
+                    want[row]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn released_lens_columns_beside_the_principal_point_match_a_central_difference() {
+    let radial = radial_fisheye(130.0, 0.025).with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let fisheye_thetas: &[f64] = &[8.0, 35.0, 62.0, 88.0, 104.0];
+    // k1 beside the principal point in the base-width block.
+    check_released_lens_columns::<BASE_PP_CAM_COLS>(
+        std::slice::from_ref(&radial),
+        &[fisheye_thetas],
+    );
+    // Then in the spline-width block, which the second and third cameras'
+    // splines call for, with the pinhole's and the fisheye's spline and
+    // principal-point slots behind the k1 camera's block.
+    let pinhole = sfmtool_pinhole(250.0, &PLANTED_PINHOLE_BSPLINE)
+        .with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let fisheye =
+        sfmtool_fisheye(130.0, &PLANTED_BSPLINE).with_principal_point(PLANTED_PP.0, PLANTED_PP.1);
+    let pinhole_thetas: Vec<f64> = [0.05f64, 0.2, 0.37, 0.52, 0.66, 0.81]
+        .iter()
+        .map(|rho| rho.atan().to_degrees())
+        .collect();
+    check_released_lens_columns::<BSPLINE_PP_CAM_COLS>(
+        &[radial, pinhole, fisheye],
+        &[fisheye_thetas, &pinhole_thetas, fisheye_thetas],
+    );
 }
