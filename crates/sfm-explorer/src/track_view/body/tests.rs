@@ -5275,6 +5275,7 @@ fn pinhole_at_origin() -> (
         },
         width: 640,
         height: 480,
+        rolling_shutter: None,
     };
     let pose = sfmtool_core::geometry::RigidTransform::from_wxyz_translation(
         [1.0, 0.0, 0.0, 0.0],

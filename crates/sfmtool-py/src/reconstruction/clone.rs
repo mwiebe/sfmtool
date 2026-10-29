@@ -497,7 +497,7 @@ fn apply_image_field(
             let flags = &mut recon.image_set.per_image_adjustments;
             if !flags.is_empty() {
                 flags.resize(count, Default::default());
-                if !flags.iter().any(|f| f.any()) {
+                if !flags.iter().any(|f| f.is_set()) {
                     flags.clear();
                 }
             }
@@ -579,13 +579,24 @@ fn apply_image_field(
                 .iter()
                 .enumerate()
                 .map(|(c, names)| {
-                    sfmtool_core::reconstruction::PerImageAdjustments::from_names(names).map_err(
-                        |e| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "clone_with_changes(): 'per_image_adjustments' camera {c}: {e}"
-                            ))
-                        },
-                    )
+                    let refuse = |e: String| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "clone_with_changes(): 'per_image_adjustments' camera {c}: {e}"
+                        ))
+                    };
+                    let flags =
+                        sfmtool_core::reconstruction::PerImageAdjustments::from_names(names)
+                            .map_err(refuse)?;
+                    // There is no key for the values of these two yet, nor
+                    // for the scanlines setting the rates are read on.
+                    if flags.radial_bspline || flags.rolling_shutter {
+                        return Err(refuse(
+                            "clone_with_changes() does not yet set \"radial_bspline\" or \
+                             \"rolling_shutter\""
+                                .to_string(),
+                        ));
+                    }
+                    Ok(flags)
                 })
                 .collect::<PyResult<Vec<_>>>()?;
             deferred.per_image_adjustments = Some(flags);
@@ -780,6 +791,13 @@ fn finalize(
         principal_point_adjustments_xy,
         per_image_adjustments,
     )?;
+    // The cameras, the camera column, the adjustments and the flags have all
+    // been applied, any of which can pair an image with a camera that cannot
+    // take its adjustment, so every image is checked before anything reads
+    // one through its intrinsics.
+    recon.image_set.check_image_intrinsics().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("clone_with_changes(): {e}"))
+    })?;
 
     // Recombine the observation-source columns into the enum once the image
     // count is settled. Any column not supplied falls back to the current value.
@@ -955,7 +973,25 @@ fn apply_intrinsic_adjustments(
                 flags.len()
             )));
         }
-        recon.image_set.per_image_adjustments = if flags.iter().any(|f| f.any()) {
+        // Each camera keeps its scanlines setting, which the names do not
+        // carry, an empty list (no camera varies anything) included.
+        let flags = if flags.is_empty() {
+            vec![Default::default(); camera_count]
+        } else {
+            flags
+        };
+        let flags: Vec<_> = flags
+            .into_iter()
+            .enumerate()
+            .map(|(c, f)| sfmtool_core::reconstruction::PerImageAdjustments {
+                rolling_shutter_scanlines: recon
+                    .image_set
+                    .camera_per_image_adjustments(c)
+                    .rolling_shutter_scanlines,
+                ..f
+            })
+            .collect();
+        recon.image_set.per_image_adjustments = if flags.iter().any(|f| f.is_set()) {
             flags
         } else {
             Vec::new()

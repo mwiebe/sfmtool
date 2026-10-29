@@ -565,6 +565,12 @@ pub(crate) fn image_intrinsics(
 /// `camera` with `adjustment` applied, borrowed when the adjustment is zero:
 /// what [`image_intrinsics`] gives for a camera the image set does not hold,
 /// such as a camera model proposal's proposed camera.
+///
+/// No scanlines setting is passed, so an adjustment with rolling-shutter rates
+/// panics here, as does a radial correction on a camera that is not
+/// `SFMTOOL_PINHOLE`. The viewer cannot hold either yet: it reads a file
+/// through `read_sfmr`, which refuses both per-image corrections, and no edit
+/// it offers solves them.
 pub(crate) fn adjusted_intrinsics<'a>(
     camera: &'a sfmtool_core::CameraIntrinsics,
     adjustment: &sfmtool_core::IntrinsicAdjustment,
@@ -572,7 +578,7 @@ pub(crate) fn adjusted_intrinsics<'a>(
     if adjustment.is_zero() {
         std::borrow::Cow::Borrowed(camera)
     } else {
-        std::borrow::Cow::Owned(camera.with_adjustment(adjustment))
+        std::borrow::Cow::Owned(camera.with_adjustment(adjustment, None))
     }
 }
 
