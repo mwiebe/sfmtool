@@ -240,7 +240,7 @@ fn the_image_detail_toolbar_and_its_gear_popup_name_their_controls() {
         &mut draw,
     );
 
-    let gear = the_role(&toolbar, "button", "⚙").clone();
+    let gear = the_role(&toolbar, "button", "⚙ Intrinsics settings").clone();
     let popup = drawn.click(&gear, &mut draw);
     assert_eq!(popup["menus"].as_array().unwrap().len(), 1, "{popup:#}");
     let scale = the_role(&popup, "combo_box", "Distortion field scale");
@@ -251,6 +251,62 @@ fn the_image_detail_toolbar_and_its_gear_popup_name_their_controls() {
     );
     the_role(&popup, "combo_box", "Grid density");
     assert_all_named(&popup);
+}
+
+// ── Scene tree ──────────────────────────────────────────────────────────
+
+/// The Scene tree's glyph buttons are named by the glyph each shows and then
+/// what it controls, so the name starts with what a person sees and still
+/// says what the button is for. No button is named by its glyph alone. The
+/// node carries patches and a point at infinity, so every glyph button the
+/// tree draws is on screen.
+#[test]
+fn the_scene_trees_glyph_buttons_are_named_by_glyph_and_purpose() {
+    use crate::scene_graph::SceneGraphPanel;
+
+    // Patches, and one point at infinity, so the Patches eye and the
+    // Points row's infinity toggle are drawn too.
+    let mut recon = crate::state::edits::tests::projected_embedded_demo(12);
+    let point = &mut recon.point_set.points[0];
+    point.position = nalgebra::Point3::from(point.position.coords.normalize());
+    point.w = 0.0;
+    let points = recon.point_set.points.len();
+    recon.point_set.patch_bitmaps_y_x_rgba = Some(std::sync::Arc::new(ndarray::Array4::zeros((
+        points, 8, 8, 4,
+    ))));
+    recon.rebuild_derived_fields();
+    let mut state = AppState::new();
+    state.append_node(SceneNode::from_path(
+        std::path::Path::new("/runs/demo.sfmr"),
+        recon,
+    ));
+    assert!(state.scene[0].has_patch_data());
+    let mut panel = SceneGraphPanel::new();
+    let drawn = Drawn::new();
+    let tree = drawn.listing(|_, ui| {
+        panel.show(ui, &mut state);
+    });
+    for name in [
+        "\u{1f441} Show reconstruction",
+        "S Solo",
+        "\u{1f5b1} Interactive",
+        "\u{1f441} Show camera images",
+        "\u{1f441} Show points",
+        "\u{221e} Show points at infinity",
+        "\u{1f441} Show patches",
+    ] {
+        the_role(&tree, "button", name);
+    }
+    let bare: Vec<&Value> = entries(&tree)
+        .into_iter()
+        .filter(|entry| {
+            entry["role"] == json!("button")
+                && ["\u{1f441}", "\u{1f5b1}", "\u{221e}", "S"]
+                    .iter()
+                    .any(|glyph| entry["name"] == json!(glyph))
+        })
+        .collect();
+    assert!(bare.is_empty(), "named by a glyph alone: {bare:?}");
 }
 
 // ── Track View ──────────────────────────────────────────────────────────
