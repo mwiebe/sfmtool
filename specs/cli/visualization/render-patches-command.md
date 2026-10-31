@@ -26,7 +26,7 @@ rendering. Produce a suitable input with:
 ```bash
 sfm xform in.sfmr out.sfmr --to-embedded-patches
 # for --mode texture, build the bitmaps too:
-sfm xform in.sfmr out.sfmr --to-embedded-patches --refine-normals bitmaps=true
+sfm xform in.sfmr out.sfmr --to-embedded-patches --add-patch-bitmaps
 ```
 
 ## Options
@@ -49,7 +49,7 @@ sfm xform in.sfmr out.sfmr --to-embedded-patches --refine-normals bitmaps=true
 
 | Mode | What it draws | Best for evaluating |
 |------|---------------|---------------------|
-| `texture` | Warps the per-point RGBA patch bitmap onto the projected quad | Photometric/patch quality — texture should continue the image. **Requires patch bitmaps** (`bitmaps=true`). |
+| `texture` | Warps the per-point RGBA patch bitmap onto the projected quad | Photometric/patch quality — texture should continue the image. **Requires patch bitmaps** (`sfm xform --add-patch-bitmaps`). |
 | `normal` | Flat-shades each quad by its world normal, `(n + 1) / 2` | The normal field's smoothness/sanity |
 | `flat` | Flat-shades each quad by the point's reconstruction colour | Coverage / point colours |
 | `wire` | Outline only, no fill | Geometry and coverage without occluding the image |
