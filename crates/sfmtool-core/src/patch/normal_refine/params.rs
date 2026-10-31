@@ -68,7 +68,8 @@ pub enum CacheMode {
     /// Render one supersampled fronto-parallel base per view up front and
     /// affine-resample each candidate from it. **The default** (with
     /// `cache_supersample = 2`): faster at Φ-equivalent *median* accuracy, by
-    /// the measured factor in the spec's "Results" section; the affine
+    /// the measured factor in "Results" of
+    /// `specs/core/patch/fronto-parallel-patch-cache.md`; the affine
     /// approximation costs a little in the tail on flat-`Φ` data. Note
     /// the returned `photoconsistency` is always source-scored in the final pass,
     /// and `≥ init_photoconsistency` by construction, regardless of the cache.

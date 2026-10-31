@@ -54,8 +54,9 @@ sight onto the keypoint's ray (`view_render_patch`, through
 computes each view's slide offset once and stores it in `FrontoBase`
 (`center_offset`), renders the fronto base about the patch centre `X` plus that
 offset, and `eval_phi` moves every candidate patch by that offset before
-projecting its corners, so base and candidate are registered on the same point. A view with no keypoint,
-or whose slide is refused, has a zero offset and uses the patch centre.
+projecting its corners, so base and candidate are registered on the same
+point. A view with no keypoint, or whose slide is refused, has a zero offset
+and uses the patch centre.
 
 Holding the offset is **not an approximation**. The slid centre is where the
 keypoint's ray meets the plane through `X` facing the camera, which depends on
@@ -177,7 +178,10 @@ sampler, `init_steps = 7`, `refine_levels = 3`) with `resolution = 32`, the
 cache makes `PatchCloud.refine_normals` about **9× faster** than `cache="off"`.
 Measured 2026-10-31 on every finite point of the two checked-in ground truths,
 with mean-viewing starting normals, `extent="pixel_radius"` at 8 px and the
-stored keypoints, as the minimum of two runs: 266 points of
+stored keypoints, as the minimum of two runs less the time of a call that
+refines no point (the `Workload` timing of
+[`scripts/bench_normal_refine.py`](../../../scripts/bench_normal_refine.py),
+under 0.05 s here): 266 points of
 `seoul_bull_sculpture_ground_truth_v01.sfmr` in 3.56 s off and 0.40 s on
 (8.8×), and 382 points of `kerry_park_ground_truth_v01.sfmr` in 9.87 s and
 1.10 s (8.9×). Mean final `Φ` moved from 0.815 to 0.814 and from 0.787 to 0.777.
@@ -186,10 +190,10 @@ The factor depends on how much the source path pays per render: with
 `CacheMode` doc comment refers to.
 
 **Development comparison of variants (dino, 85 img, 3000 pts, R=32, ss2).** The
-table below compares the variants considered while the cache was designed,
-against the code of that time. Its accuracy columns are what chose the
-fronto-parallel variant; its speedups are relative to the source path of that
-time and are superseded by the figure above.
+table below compares the variants considered when the cache was designed; only
+the fronto-parallel variant is in the code. Its accuracy columns are what chose
+that variant. Its speedups were measured against an earlier source path and do
+not describe the current code; the figure above does.
 
 | variant | speedup | median Δnormal | p90 Δ | hi-conf median | Φ vs baseline |
 |---|---|---|---|---|---|
