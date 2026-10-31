@@ -25,21 +25,45 @@ the cost; everything that removes redundant rendering compounds.
 ## Idea
 
 Within a refinement the patch **center, size, and the 3D point are fixed** — only
-the normal's 2 DOF move. So the texture seen by each view is fixed up to a planar
-re-warp. **Render one base patch per view, once, and warp it for every candidate**
-instead of re-rendering from the source.
+the normal's 2 DOF move. Each view renders the patch about its own
+keypoint-anchored centre (see "Keypoint anchoring" below), which does not move
+with the normal either. So the texture seen by each view is fixed up to a
+planar re-warp. **Render one base patch per view, once, and warp it for every
+candidate** instead of re-rendering from the source.
 
 The fronto-parallel variant makes two specific choices:
 
 1. **Render the base fronto-parallel to each camera, once, up front.** For view
-   `v`, build a patch whose plane normal points from the 3D point at the camera
-   centre `Cᵥ`, render it (supersampled) from the source pyramid, and keep it for
-   the whole refinement. The source image is touched **exactly once per view**.
+   `v`, build a patch whose plane normal points from the view's centre (the 3D
+   point, or its keypoint-anchored slide) at the camera centre `Cᵥ`, render it
+   (supersampled) from the source pyramid, and keep it for the whole
+   refinement. The source image is touched **exactly once per view**.
 2. **Warp every candidate from that base by an affine map.** Treating the small
    patch as a differential, the patch→patch correspondence is an affine
    (orthographic) map, not a full homography. Every candidate at every level is
    an affine resample of the cached base — **the source image is never read
    again**.
+
+### Keypoint anchoring
+
+When the refinement is given a stored keypoint for a view (`view_keypoints`),
+the exact path renders every candidate in that view slid across the line of
+sight onto the keypoint's ray (`view_render_patch`, through
+`OrientedPatch::keypoint_slide_offset`; see
+[patch-cloud.md](patch-cloud.md)). The cache does the same: `prerender`
+computes each view's slide offset once and stores it in `FrontoBase`
+(`center_offset`), renders the fronto base about the patch centre `X` plus that
+offset, and `eval_phi` moves every candidate patch by that offset before
+projecting its corners, so base and candidate are registered on the same point. A view with no keypoint,
+or whose slide is refused, has a zero offset and uses the patch centre.
+
+Holding the offset is **not an approximation**. The slid centre is where the
+keypoint's ray meets the plane through `X` facing the camera, which depends on
+`X`, the camera and the keypoint but not on the patch normal, so the offset
+computed at the search seed is the one the exact path computes for every
+candidate. Refinement skips points at infinity, the one case whose slide
+(`keypoint_plane_offset`, read in the patch's own tangent plane) would depend
+on the normal.
 
 ## Geometry and the maps
 
@@ -50,11 +74,18 @@ For each view we fit a **grid → image** map from the projected grid corners, i
 whatever image parameterization that view's camera model supports.
 
 - **Perspective family** — the **undistorted-normalized** coordinates: the
-  pinhole part of the corner's projection, before distortion (for a canonical
-  camera-space corner, `(x/−z, −y/−z)`; see the coordinate conventions in
-  [`sfmr-file-format.md`](../../formats/sfmr-file-format.md)). The lens distortion
-  is *omitted* deliberately: it is the same fixed image warp applied to base and
-  candidate, so it **cancels** in the base↔candidate correspondence.
+  pinhole part of the corner's projection, before distortion. For a canonical
+  camera-space corner `(x, y, z)` (see the coordinate conventions in
+  [`sfmr-file-format.md`](../../formats/sfmr-file-format.md)) the code uses
+  `(x/z, y/z)`, which is the true undistorted-normalized `(x/−z, −y/−z)`
+  mirrored in its first coordinate. The mirror is harmless, by the rule that
+  makes the whole construction work: **any fixed invertible affine map `M` of
+  the image coordinates cancels**, because the base and candidate halves of a
+  view go through the same function, and `(M·A₀)⁻¹ · (M·A') = A₀⁻¹ · A'`.
+  The lens distortion is *omitted* deliberately: it is the same fixed image
+  warp applied to base and candidate, so it **cancels** in the base↔candidate
+  correspondence as well (to the accuracy of the affine fit, since a
+  distortion is not affine; see the design choice below).
 - **`needs_ray_path` models** (fisheye, equirectangular) — the model's own
   `ray_to_pixel` pixels. There is no distortion-free variant to strip: `θ = r/f`
   *is* the map, and `x/z` is its gnomonic tangent plane, which blows up at
@@ -94,8 +125,8 @@ curvature that the three-corner fit does not see.
 
 - **One render up front, not per level.** This is the speed win. The
   fronto base is candidate-*and* level-independent (it depends only on geometry),
-  so the three per-level renders of the homography cache collapse to one. Measured
-  end-to-end this is the difference between ~1.9× and ~2.25×.
+  so the three per-level renders of the homography cache collapse to one, which
+  is why the fronto row of the development comparison below is the faster one.
 
 - **Affine (differential) map instead of homography.** Two payoffs: a cheap
   3-corner affine fit (no DLT) and a divide-free kernel. The cost is accuracy in
@@ -139,13 +170,32 @@ curvature that the three-corner fit does not see.
   resample is a slice of the un-cacheable work), so it is a clean simplification,
   not an e2e mover.
 
-## Results (dino, 85 img, 3000 pts, R=32, ss2)
+## Results
+
+**Speed.** At the binding's defaults (`cache_supersample = 2`, the `per_view`
+sampler, `init_steps = 7`, `refine_levels = 3`) with `resolution = 32`, the
+cache makes `PatchCloud.refine_normals` about **9× faster** than `cache="off"`.
+Measured 2026-10-31 on every finite point of the two checked-in ground truths,
+with mean-viewing starting normals, `extent="pixel_radius"` at 8 px and the
+stored keypoints, as the minimum of two runs: 266 points of
+`seoul_bull_sculpture_ground_truth_v01.sfmr` in 3.56 s off and 0.40 s on
+(8.8×), and 382 points of `kerry_park_ground_truth_v01.sfmr` in 9.87 s and
+1.10 s (8.9×). Mean final `Φ` moved from 0.815 to 0.814 and from 0.787 to 0.777.
+The factor depends on how much the source path pays per render: with
+`sampler="bilinear"` on the first dataset it is 6.3×. This is the figure the
+`CacheMode` doc comment refers to.
+
+**Development comparison of variants (dino, 85 img, 3000 pts, R=32, ss2).** The
+table below compares the variants considered while the cache was designed,
+against the code of that time. Its accuracy columns are what chose the
+fronto-parallel variant; its speedups are relative to the source path of that
+time and are superseded by the figure above.
 
 | variant | speedup | median Δnormal | p90 Δ | hi-conf median | Φ vs baseline |
 |---|---|---|---|---|---|
 | baseline (re-render every candidate) | 1.0× | — | — | — | 0.7671 |
 | per-level homography cache, min0 | 1.9× | 2.07° | 14.9° | 2.07° | −0.0074 |
-| **fronto-parallel single render** | **~2.25×** | **2.07°** | 18.0° | **2.07°** | −0.0101 |
+| **fronto-parallel single render** | **2.25×** | **2.07°** | 18.0° | **2.07°** | −0.0101 |
 
 The fronto normals are **as good** (Φ-equivalent) on the median and the
 high-confidence subset; the angular disagreement concentrates on low-confidence /
@@ -223,13 +273,14 @@ masked-support *layout* is the data-movement win and is independent of SIMD —
 the scalar kernel keeps it too.
 
 **What it costs and buys.** The AVX2 kernel is **3.5×** the scalar reference at
-the microbench (`resample_bench`, an `#[ignore]`d test run on demand). End to
-end the cache is ~2.3–2.5× off vs on at unchanged accuracy, well short of the
-kernel's own factor: the resample is only a slice of the work, and the
-un-cacheable remainder — the one base render per view, the consensus, the final
-source-scored pass, the confidence stencil — plus the per-candidate affine
-inverse set the Amdahl ceiling. Attacking that remainder is the next lever, not
-a faster kernel.
+the microbench (`resample_bench`, an `#[ignore]`d test run on demand). That
+factor applies only to the resample, which is a slice of the cached path's
+time; the end-to-end gain over `cache="off"` (see "Results") comes from not
+re-rendering candidates from the source images. The rest of the cached path's
+time — the one base render per view, the per-candidate corner projection and
+affine composition, the consensus, the final source-scored pass, the
+confidence stencil — is not cached, so further speedup has to come from that
+work rather than from a faster kernel.
 
 **Tests.** `fronto_cache/tests.rs` covers the affine fit against a known affine,
 the replicate padding, the AVX2/scalar agreement, and that a ray-path camera's
