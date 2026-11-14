@@ -4,7 +4,7 @@
 
 Runs Structure from Motion to produce a 3D reconstruction (`.sfmr` file) from images or
 pre-computed matches. Uses pycolmap to run either COLMAP's incremental mapper
-or GLOMAP's global mapper.
+or its global mapper.
 
 The command is implemented in
 [`_commands/solve.py`](../../../src/sfmtool/_commands/solve.py), a Click wrapper

@@ -157,7 +157,7 @@ def test_inspect_sfmr_below_version_15_has_no_readings(seoul_bull_ground_truth_s
 
 
 def test_inspect_sfmr_verbose_says_mean_or_median_per_point(
-    seoul_bull_ground_truth_sfmr, tmp_path: Path
+    seoul_bull_ground_truth_sfmr,
 ):
     """Each observations-per-point line names its statistic, mean or median,
     and the median of an even count is the mean of the middle two."""
