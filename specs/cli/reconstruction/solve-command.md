@@ -21,6 +21,12 @@ features if needed, set up cameras and rigs, and run matching or load the
 `_incremental_sfm.py`, which applies the rules in
 [Outputs and Multiple Models](#outputs-and-multiple-models).
 
+Both record `tool` `colmap` and `tool_version` the pycolmap version in the
+`.sfmr` metadata: the global mapper, once the separate GLOMAP project, is part
+of COLMAP and runs through pycolmap. A global solve also records `algorithm`
+`global` in `tool_options`. A file written before sfmtool recorded it this way
+holds `tool` `glomap` and `tool_version` `unknown` for a global solve.
+
 ## Coordinate Convention
 
 The solvers work in COLMAP's +Z-forward, Y-down convention; the `.sfmr`
