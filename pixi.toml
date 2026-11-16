@@ -158,6 +158,8 @@ bench-sift = "python scripts/benchmark_sift.py"
 [feature.dev.dependencies]
 scipy = ">=1.14"
 matplotlib-base = ">=3.9"
+# conda-forge ships python-dateutil 4, which botocore (via deadline) refuses.
+python-dateutil = "<3"
 
 [feature.dev.tasks]
 ipython = "ipython"
