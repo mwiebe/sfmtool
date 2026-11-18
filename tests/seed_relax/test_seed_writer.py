@@ -14,8 +14,9 @@ import numpy as np
 import pytest
 
 from sfmtool import init_workspace, xxh128_of_file
-from sfmtool.fileio import read_sfmr
+from sfmtool.fileio import SiftFile, read_sfmr
 from sfmtool.sift.extract import image_files_to_sift_files
+from sfmtool.sift.file import get_sift_path_for_image
 
 SEOUL_BULL_DIR = (
     Path(__file__).resolve().parents[2]
@@ -106,6 +107,20 @@ def test_seed_file_has_inline_keypoints_and_posed_images_only(
     # Observations are grouped by point, already the order they were given in.
     np.testing.assert_array_equal(written["keypoints_xy"], obs_uv.astype(np.float32))
     np.testing.assert_array_equal(written["image_indexes"], np.tile([0, 1], n_points))
+    # Each image's thumbnail, and in a `sift_files` file its `.sift` hashes,
+    # come from that image's own `.sift` file.
+    for k, name in enumerate(written["image_names"]):
+        with SiftFile(get_sift_path_for_image(workspace / name)) as sift:
+            np.testing.assert_array_equal(
+                written["thumbnails_y_x_rgb"][k], sift.read_thumbnail()
+            )
+            if release_grade:
+                assert written["feature_tool_hashes"][k] == bytes.fromhex(
+                    sift.content_hash["feature_tool_xxh128"]
+                )
+                assert written["sift_content_hashes"][k] == bytes.fromhex(
+                    sift.content_hash["content_xxh128"]
+                )
     if release_grade:
         assert written["metadata"]["feature_source"] == "sift_files"
         assert written["patch_u_halfvec_xyz"] is None
