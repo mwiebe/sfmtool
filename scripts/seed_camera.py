@@ -965,6 +965,9 @@ def save_sfmr(
     ).as_quat()[:, [3, 0, 1, 2]]
     t_can = tvec
     p_can = world_rotate_w(positions)
+    # The seed triangulates finite points only, so every row is w = 1; the
+    # file's positions and the patch centres below are this one array.
+    positions_xyzw = finite_positions_xyzw(p_can)
 
     image_dir = WS.resolve()
     workspace_dir = find_workspace_for_path(image_dir)
@@ -1027,7 +1030,7 @@ def save_sfmr(
         "camera_indexes": np.zeros(len(names), dtype=np.uint32),
         "quaternions_wxyz": np.asarray(q_can, dtype=np.float64),
         "translations_xyz": np.asarray(t_can, dtype=np.float64),
-        "positions_xyzw": finite_positions_xyzw(p_can),
+        "positions_xyzw": positions_xyzw,
         "colors_rgb": colors,
         "reprojection_errors": per_point_err,
         "image_indexes": np.asarray(track_img, dtype=np.uint32),
@@ -1292,7 +1295,7 @@ def save_sfmr(
     half_v = np.asarray(world_rotate_w(half_v), dtype=np.float32)
     normals = np.asarray(world_rotate_w(normals), dtype=np.float32)
 
-    cloud = PatchCloud.from_halfvec_arrays(half_u, half_v, np.asarray(p_can))
+    cloud = PatchCloud.from_halfvec_arrays(half_u, half_v, positions_xyzw)
     recon = recon.clone_with_changes(
         feature_source="embedded_patches",
         keypoints_xy=keypoints_xy,

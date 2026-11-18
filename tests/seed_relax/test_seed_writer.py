@@ -1,7 +1,7 @@
 # Copyright The SfM Tool Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""`seed_camera.save_sfmr`'s release-grade file, written into a small workspace.
+"""`seed_camera.save_sfmr`'s two files, written into a small workspace.
 
 Needs the native extension and a workspace with `.sift` files, which this
 module makes for three of the seoul_bull images.
@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sfmtool import init_workspace
+from sfmtool import init_workspace, xxh128_of_file
 from sfmtool.fileio import read_sfmr
 from sfmtool.sift.extract import image_files_to_sift_files
 
@@ -44,8 +44,9 @@ def workspace(tmp_path_factory):
     return workspace_dir
 
 
-def test_release_grade_file_has_inline_keypoints_and_posed_images_only(
-    workspace, tmp_path, monkeypatch
+@pytest.mark.parametrize("release_grade", [True, False])
+def test_seed_file_has_inline_keypoints_and_posed_images_only(
+    workspace, tmp_path, monkeypatch, release_grade
 ):
     import seed_camera
 
@@ -70,6 +71,12 @@ def test_release_grade_file_has_inline_keypoints_and_posed_images_only(
         "obs_i": obs_i,
         "obs_f": np.arange(len(obs_c)),
         "obs_uv": obs_uv,
+        # What the patch-bearing file is built from: each observation's 2x2
+        # warp, which member is its cluster's reference (image 0 here), and the
+        # refinement radius in keypoint frames.
+        "obs_warp": np.broadcast_to(np.eye(2), (len(obs_c), 2, 2)),
+        "obs_ref": obs_i == 0,
+        "refine_radius": 3.0,
     }
     pts = np.column_stack(
         [
@@ -89,7 +96,7 @@ def test_release_grade_file_has_inline_keypoints_and_posed_images_only(
         np.full(len(obs_c), 0.5),
         out,
         quiet=True,
-        release_grade=True,
+        release_grade=release_grade,
         operation="seed_writer_test",
     )
 
@@ -99,3 +106,23 @@ def test_release_grade_file_has_inline_keypoints_and_posed_images_only(
     # Observations are grouped by point, already the order they were given in.
     np.testing.assert_array_equal(written["keypoints_xy"], obs_uv.astype(np.float32))
     np.testing.assert_array_equal(written["image_indexes"], np.tile([0, 1], n_points))
+    if release_grade:
+        assert written["metadata"]["feature_source"] == "sift_files"
+        assert written["patch_u_halfvec_xyz"] is None
+        return
+
+    # The patch-bearing file: embedded patches, each image's file hash, and a
+    # square patch frame on every point, perpendicular to its normal.
+    assert written["metadata"]["feature_source"] == "embedded_patches"
+    assert written["image_file_hashes"] == [
+        bytes.fromhex(xxh128_of_file(workspace / name))
+        for name in written["image_names"]
+    ]
+    u = written["patch_u_halfvec_xyz"].astype(np.float64)
+    v = written["patch_v_halfvec_xyz"].astype(np.float64)
+    n = written["normals_xyz"].astype(np.float64)
+    assert u.shape == v.shape == n.shape == (n_points, 3)
+    assert np.all(np.linalg.norm(u, axis=1) > 0)
+    np.testing.assert_allclose(np.linalg.norm(u, axis=1), np.linalg.norm(v, axis=1))
+    np.testing.assert_allclose(np.einsum("ij,ij->i", u, n), 0, atol=1e-5)
+    np.testing.assert_allclose(np.einsum("ij,ij->i", v, n), 0, atol=1e-5)
