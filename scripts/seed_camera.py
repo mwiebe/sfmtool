@@ -907,15 +907,12 @@ def save_sfmr(
     what an inspectable side artifact needs and is far cheaper: the surfel
     solve below opens every posed image's `.sift` affine array.
     """
-    from sfmtool.reconstruction import SfmrReconstruction
-    from sfmtool._workspace import load_workspace_config
+    from sfmtool import load_workspace_config
     from sfmtool.colmap.convention import world_rotate_w
-    from sfmtool.colmap.io import (
-        _build_sfmr_data_dict,
-        _resolve_workspace_and_sift,
-        build_metadata,
-        finite_positions_xyzw,
-    )
+    from sfmtool.colmap.io import build_metadata, finite_positions_xyzw
+    from sfmtool.fileio import SiftFile
+    from sfmtool.reconstruction import SfmrReconstruction
+    from sfmtool.workspace import find_workspace_for_path
 
     out_path = Path(out_path).resolve()
     names, dims = data["names"], data["dims"]
@@ -969,14 +966,42 @@ def save_sfmr(
     t_can = tvec
     p_can = world_rotate_w(positions)
 
-    (
-        workspace_dir,
-        _contents,
-        resolved_names,
-        ft_hashes,
-        sc_hashes,
-        thumbnails,
-    ) = _resolve_workspace_and_sift(names, WS.resolve())
+    image_dir = WS.resolve()
+    workspace_dir = find_workspace_for_path(image_dir)
+    if workspace_dir is None:
+        raise RuntimeError(f"no workspace holds the image directory {image_dir}")
+    opts = {"camera_model": _CAM_CONTEXT["model"], "focal_grid": F_GRID}
+    opts.update(tool_options or {})
+    metadata = build_metadata(
+        workspace_dir=workspace_dir,
+        output_path=out_path,
+        workspace_config=load_workspace_config(workspace_dir),
+        operation=operation,
+        tool_name="sfmtool",
+        tool_options=opts,
+        image_count=len(names),
+        point_count=len(alive),
+        observation_count=int(obs_counts.sum()),
+        camera_count=1,
+    )
+
+    # Each image's workspace-relative name, and its `.sift` file's hashes and
+    # thumbnail, from the feature folder the metadata records.
+    prefix_dir = metadata["workspace"]["contents"]["feature_prefix_dir"]
+    resolved_names, ft_hashes, sc_hashes, thumbnails = [], [], [], []
+    for name in names:
+        img_path = Path(name)
+        if not img_path.is_absolute():
+            img_path = (
+                image_dir / name
+                if (image_dir / name).exists()
+                else workspace_dir / name
+            )
+        resolved_names.append(img_path.relative_to(workspace_dir).as_posix())
+        with SiftFile(img_path.parent / prefix_dir / f"{img_path.name}.sift") as sift:
+            ft_hashes.append(bytes.fromhex(sift.content_hash["feature_tool_xxh128"]))
+            sc_hashes.append(bytes.fromhex(sift.content_hash["content_xxh128"]))
+            thumbnails.append(sift.read_thumbnail())
 
     # Colors from the .sift thumbnails at the (scaled) observation position.
     colors = np.zeros((len(alive), 3), dtype=np.uint8)
@@ -995,45 +1020,31 @@ def save_sfmr(
     # observations.
     camera = make_cam(float(f))
 
-    opts = {"camera_model": _CAM_CONTEXT["model"], "focal_grid": F_GRID}
-    opts.update(tool_options or {})
-    metadata = build_metadata(
-        workspace_dir=workspace_dir,
-        output_path=out_path,
-        workspace_config=load_workspace_config(workspace_dir),
-        operation=operation,
-        tool_name="sfmtool",
-        tool_options=opts,
-        image_count=len(names),
-        point_count=len(alive),
-        observation_count=int(obs_counts.sum()),
-        camera_count=1,
-    )
-
-    sfmr_dict = _build_sfmr_data_dict(
-        cameras=[camera],
-        image_names=resolved_names,
-        camera_indexes=np.zeros(len(names), dtype=np.uint32),
-        quaternions_wxyz=q_can,
-        translations_xyz=t_can,
-        positions_xyzw=finite_positions_xyzw(p_can),
-        colors_rgb=colors,
-        reprojection_errors=per_point_err,
-        track_image_indexes=track_img,
-        track_feature_indexes=track_feat,
+    sfmr_dict = {
+        "metadata": metadata,
+        "cameras": [camera],
+        "image_names": resolved_names,
+        "camera_indexes": np.zeros(len(names), dtype=np.uint32),
+        "quaternions_wxyz": np.asarray(q_can, dtype=np.float64),
+        "translations_xyz": np.asarray(t_can, dtype=np.float64),
+        "positions_xyzw": finite_positions_xyzw(p_can),
+        "colors_rgb": colors,
+        "reprojection_errors": per_point_err,
+        "image_indexes": np.asarray(track_img, dtype=np.uint32),
+        "feature_indexes": np.asarray(track_feat, dtype=np.uint32),
+        "point_indexes": np.asarray(point_idx, dtype=np.uint32),
+        "observation_counts": np.asarray(obs_counts, dtype=np.uint32),
+        "feature_tool_hashes": ft_hashes,
+        "sift_content_hashes": sc_hashes,
+        "thumbnails_y_x_rgb": np.stack(thumbnails).astype(np.uint8),
+    }
+    if release_grade:
         # A release-grade file is read on its own, often against a workspace
         # whose `.sift` files were never written (the observations came from the
         # cluster patches). Carry the refined positions inline so its
         # observations stay readable; the patch-bearing path below states them
         # as an `embedded_patches` file instead.
-        keypoints_xy=keypoints_xy if release_grade else None,
-        point_indexes=point_idx,
-        observation_counts=obs_counts,
-        feature_tool_hashes=ft_hashes,
-        sift_content_hashes=sc_hashes,
-        thumbnails=thumbnails,
-        metadata=metadata,
-    )
+        sfmr_dict["keypoints_xy"] = keypoints_xy
 
     recon = SfmrReconstruction.from_data(workspace_dir, sfmr_dict)
 
